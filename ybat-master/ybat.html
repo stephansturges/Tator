@@ -3,13 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <title>Ybat - YOLO BBox Annotation Tool</title>
-
     <link href="ybat.css" rel="stylesheet">
 
+    <!-- 1) Keep scripts in an order that ensures ybat.js is available  
+         before we call listenImageCrop().
+    -->
     <script src="canvas.min.js"></script>
     <script src="jszip.min.js"></script>
     <script src="filesaver.min.js"></script>
-
     <script src="ybat.js"></script>
 </head>
 <body>
@@ -18,36 +19,36 @@
             <form action="">
                 <label for="images">Images:</label>
                 <input type="file" id="images" name="images[]" accept="image/jpeg, image/png" multiple />
+                <!-- This is the button that triggers the cropping. -->
                 <input type="button" name="cropImages" id="cropImages" value="Crop&Save" />
-
                 <br />
-
                 <label for="imageSearch">Search:</label>
                 <input type="text" id="imageSearch" name="imageSearch" />
-
                 <label for="imageList"></label>
                 <select name="imageList" id="imageList" size="10" multiple></select>
-
                 <div id="imageInformation"></div>
                 <hr />
-
                 <label for="classes">Classes:</label>
                 <input type="file" id="classes" name="classes" accept="text/plain" />
                 <label for="classList"></label>
                 <select name="classList" id="classList" size="10" multiple></select>
-
                 <div id="bboxInformation"></div>
                 <!-- Add a small toggle for "Auto Mode" -->
                 <label for="autoMode">Auto Mode:</label>
                 <input type="checkbox" id="autoMode" name="autoMode" />
                 <br />
+                <!-- Add a small toggle for "SAM Mode" -->
+                <label for="samMode">SAM Mode:</label>
+                <input type="checkbox" id="samMode" name="samMode" />
+                <br />
+                <label for="pointMode">Point Mode:</label> 
+                <input type="checkbox" id="pointMode" name="pointMode" />
+                <br />
                 <hr />
-
                 <label for="bboxes">Bboxes:</label>
                 <input type="file" id="bboxes" name="bboxes[]" accept="text/plain, application/zip" disabled multiple />
                 <input type="button" name="restoreBboxes" id="restoreBboxes" value="Restore" disabled />
                 <input type="button" name="saveBboxes" id="saveBboxes" value="Save YOLO" />
-
                 <div id="voc">
                     <label for="vocFolder">Voc folder:</label>
                     <input type="text" id="vocFolder" name="vocFolder" value="data" />
@@ -57,22 +58,19 @@
                 <div id="coco">
                 </div>
                 <hr />
-
                 <div id="description">
                     SHORTCUTS:
                     <ul>
                         <li>Mouse WHEEL - zoom in/out image</li>
                         <li>Mouse RIGHT BUTTON - pan image</li>
                         <li>Arrows LEFT and RIGHT - cycle images</li>
-                        <li>Arrows Up and DOWN - cycle classes</li>
+                        <li>Arrows UP and DOWN - cycle classes</li>
                         <li>Key DELETE - remove selected Bbox</li>
                     </ul>
-
                     <p>Version: 0.2.5 | Copyright © 2018-2019 Draining Sun.</p>
                 </div>
             </form>
         </div>
-
         <div class="right" id="right">
             <canvas id="canvas"></canvas>
             <canvas id="hiddenCanvas"></canvas>
@@ -81,30 +79,28 @@
 
     <!-- Add this script block to sort images alphabetically -->
     <script>
-    document.addEventListener("DOMContentLoaded", function() {
-      const imagesInput = document.getElementById("images");
-      const imageListSelect = document.getElementById("imageList");
-
-      imagesInput.addEventListener("change", function() {
-        // Convert FileList to an array
-        const fileList = Array.from(imagesInput.files);
-        
-        // Sort files alphabetically by name
-        fileList.sort((a, b) => a.name.localeCompare(b.name));
-
-        // Clear the current list
-        imageListSelect.innerHTML = "";
-
-        // Populate select with sorted files
-        fileList.forEach(file => {
-          const option = document.createElement("option");
-          option.value = file.name;
-          option.textContent = file.name;
-          imageListSelect.appendChild(option);
+        document.addEventListener("DOMContentLoaded", function() {
+          const imagesInput = document.getElementById("images");
+          const imageListSelect = document.getElementById("imageList");
+    
+          // Existing code for sorting images
+          imagesInput.addEventListener("change", function() {
+            const fileList = Array.from(imagesInput.files);
+            fileList.sort((a, b) => a.name.localeCompare(b.name));
+            imageListSelect.innerHTML = "";
+            fileList.forEach(file => {
+              const option = document.createElement("option");
+              option.value = file.name;
+              option.textContent = file.name;
+              imageListSelect.appendChild(option);
+            });
+          });
+    
+          // NEW: Set up the crop button if it's defined in ybat.js
+          if (typeof listenImageCrop === "function") {
+            listenImageCrop();
+          }
         });
-      });
-    });
-    </script>
-
-</body>
+        </script>
+    </body>
 </html>

@@ -1,3 +1,5 @@
+🥔
+
 ## my little YOLO annotator
 
 Most of this code is taken from YBAT, which can be found here:

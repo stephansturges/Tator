@@ -1,13 +1,31 @@
 (() => {
     "use strict";
 
+    // -----------------------------------------
+    // NEW CODE: Add a global dictionary for pending bboxes, and a UUID generator.
+    // -----------------------------------------
+    let pendingApiBboxes = {};
+
+    function generateUUID() {
+        // Modern browsers: use crypto.randomUUID().
+        // Fallback if unavailable.
+        if (window.crypto && window.crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
+        // Fallback: timestamp + random
+        return (
+            Date.now().toString(36) +
+            Math.random().toString(36).substring(2, 12)
+        );
+    }
+
     // 1) Define a palette of 100 colors spread around the hue wheel
     //    (First ~20 are roughly 0°, 18°, 36°, ..., 342°, then continuing).
     //    We'll dynamically reduce alpha for fills. Also random offset.
     const colorPalette = [];
     for (let i = 0; i < 100; i++) {
         const baseHue = i * 20; // increment by 20° each time
-        const randomOffset = Math.random() * 20 * 0.3;  // up to ~6°
+        const randomOffset = Math.random() * 0.3;  // up to ~6°
         const hue = (baseHue + randomOffset) % 360;
         colorPalette.push(`hsla(${hue}, 100%, 45%, 1)`);
     }
@@ -25,120 +43,133 @@
     function withAlpha(color, alpha) {
         return color.replace(/(\d?\.?\d+)\)$/, `${alpha})`);
     }
-
-        // Add a global flag for "auto mode", default off
+    // Global flags for “auto mode”, “SAM mode”, “point mode”
+    // plus computed “samAutoMode” (sam + auto) and “samPointAutoMode” (point + auto).
     let autoMode = false;
-    // Also define a new 'samMode' for single-point SAM approach
     let samMode = false;
-    // And a combined 'samAutoMode' for the future endpoint
-    let samAutoMode = false;
-
-    // point mode for SAM single-point input
     let pointMode = false;
+    let samAutoMode = false;
+    let samPointAutoMode = false;
 
-
-    // Once the DOM is ready, we can listen to a new checkbox #autoMode
     document.addEventListener("DOMContentLoaded", () => {
-        const autoModeCheckbox = document.getElementById("autoMode");
-        if (autoModeCheckbox) {
-            autoModeCheckbox.addEventListener("change", () => {
-                autoMode = autoModeCheckbox.checked;
-            });
-        }
+    const autoModeCheckbox = document.getElementById("autoMode");
+    if (autoModeCheckbox) {
+        autoModeCheckbox.addEventListener("change", () => {
+        autoMode = autoModeCheckbox.checked;
+        // update derived flags
+        samAutoMode = samMode && autoMode;
+        samPointAutoMode = pointMode && autoMode;
+        console.log("autoMode =>", autoMode, 
+                    "samAutoMode =>", samAutoMode, 
+                    "samPointAutoMode =>", samPointAutoMode);
+        });
+    }
 
-         // If you have two new checkboxes in HTML for "samMode" and "samAutoMode":
-        const samModeCheckbox = document.getElementById("samMode");
-        if (samModeCheckbox) {
-            samModeCheckbox.addEventListener("change", () => {
-                samMode = samModeCheckbox.checked;
-                console.log("SAM mode toggled:", samMode);
-            });
-        }
-        const samAutoCheckbox = document.getElementById("samAutoMode");
-        if (samAutoCheckbox) {
-            samAutoCheckbox.addEventListener("change", () => {
-                samAutoMode = samAutoCheckbox.checked;
-                console.log("SAM + Autoclass mode toggled:", samAutoMode);
-            });
+    const samModeCheckbox = document.getElementById("samMode");
+    if (samModeCheckbox) {
+        samModeCheckbox.addEventListener("change", () => {
+        samMode = samModeCheckbox.checked;
+        samAutoMode = samMode && autoMode;
+        console.log("SAM mode =>", samMode, 
+                    "samAutoMode =>", samAutoMode);
+        });
+    }
 
-        }
-        const pointModeCheckbox = document.getElementById("pointMode");
-        if (pointModeCheckbox) {
-            pointModeCheckbox.addEventListener("change", () => {
-                pointMode = pointModeCheckbox.checked;
-                console.log("Point mode toggled:", pointMode);
-            });
-        }
-
+    const pointModeCheckbox = document.getElementById("pointMode");
+    if (pointModeCheckbox) {
+        pointModeCheckbox.addEventListener("change", () => {
+        pointMode = pointModeCheckbox.checked;
+        samPointAutoMode = pointMode && autoMode;
+        console.log("pointMode =>", pointMode, 
+                    "samPointAutoMode =>", samPointAutoMode);
+        });
+    }
     });
 
+    // Helper that extracts base64 from currentImage
     async function extractBase64Image() {
-                const offCan = document.createElement("canvas");
-                offCan.width = currentImage.width;
-                offCan.height = currentImage.height;
-                const ctx = offCan.getContext("2d");
-                ctx.drawImage(currentImage.object, 0, 0);
-                const dataUrl = offCan.toDataURL("image/jpeg");
-                return dataUrl.split(",")[1]; // base64 only
-            }
+        const offCan = document.createElement("canvas");
+        offCan.width = currentImage.width;
+        offCan.height = currentImage.height;
+        const ctx = offCan.getContext("2d");
+        ctx.drawImage(currentImage.object, 0, 0);
+        const dataUrl = offCan.toDataURL("image/jpeg");
+        return dataUrl.split(",")[1]; // base64 only
+    }
 
     // ----------------------------------------------------------------------------
     // 4) We'll add a helper function to create a local crop (base64) from the canvas
     //    for the newly drawn bbox, then call the Python API for a predicted class
     // ----------------------------------------------------------------------------
     async function autoPredictNewCrop(bbox) {
-        // We assume you have a global "canvas" and "currentImage"
-        // We'll create an offscreen canvas to draw just that sub-region
         const offCanvas = document.createElement("canvas");
         offCanvas.width = bbox.width;
         offCanvas.height = bbox.height;
         const ctx = offCanvas.getContext("2d");
-
-        // We must read from the displayed image. Because we have transforms (zoom, pan),
-        // we need the *actual* image data. So let's directly draw from currentImage.object.
-        // We'll just draw the region from the original image (x, y, w, h).
-        // Bbox coords are in real image coordinates, so we can directly do:
         ctx.drawImage(
             currentImage.object,
             bbox.x, bbox.y, bbox.width, bbox.height,
             0, 0, bbox.width, bbox.height
         );
-
-        // Now get base64 from offCanvas
         const base64String = offCanvas.toDataURL("image/jpeg");
-        // remove the "data:image/jpeg;base64," prefix:
         const base64Data = base64String.split(',')[1];
-
         try {
-            // call your inference endpoint, e.g. http://localhost:8000/predict_base64
+            // -----------------------------------------
+            // UPDATED CODE: Include bbox.uuid in request body
+            // -----------------------------------------
             const resp = await fetch("http://localhost:8000/predict_base64", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image_base64: base64Data }),
+                body: JSON.stringify({
+                    image_base64: base64Data,
+                    uuid: bbox.uuid
+                }),
             });
             const data = await resp.json();
             const predictedClass = data.prediction;
-            // Show a popup with the predicted class
-            //alert("Predicted class: " + predictedClass);
-            // 1) Immediately call autoPredict for the newly created bbox
-            // 2) Remove this bbox from its old class array
-             const oldClass = bbox.class;
-             const oldArr = bboxes[currentImage.name][oldClass];
-             const idx = oldArr.indexOf(bbox);
-             if (idx !== -1) {
-                 oldArr.splice(idx, 1);
-             }
-     
-             // 3) Add bbox to the new predicted class array
-             if (!bboxes[currentImage.name][predictedClass]) {
-                 bboxes[currentImage.name][predictedClass] = [];
-             }
-             bbox.class = predictedClass;
-             bboxes[currentImage.name][predictedClass].push(bbox);
-     
-             console.log("Auto-assigned class:", predictedClass,
-                         "→ numeric index:", classes[predictedClass]);
-            // TODO: If you want to auto-assign to the newly created bbox, you can do so here
+
+            // -----------------------------------------
+            // UPDATED CODE: Get the returned UUID and find the correct bbox
+            // -----------------------------------------
+            const returnedUUID = data.uuid;
+            const targetBbox = pendingApiBboxes[returnedUUID];
+            if (!targetBbox) {
+                console.warn("No pending bbox found for uuid:", returnedUUID);
+                return;
+            }
+            // Make that bbox “currentBbox”
+            currentBbox = {
+                bbox: targetBbox,
+                index: -1, // re-compute index below if needed
+                originalX: targetBbox.x,
+                originalY: targetBbox.y,
+                originalWidth: targetBbox.width,
+                originalHeight: targetBbox.height,
+                moving: false,
+                resizing: null
+            };
+
+            // Same logic as before: remove from old class array
+            const oldClass = targetBbox.class;
+            const oldArr = bboxes[currentImage.name][oldClass];
+            const idx = oldArr.indexOf(targetBbox);
+            if (idx !== -1) {
+                oldArr.splice(idx, 1);
+            }
+
+            // Add to new predicted class
+            if (!bboxes[currentImage.name][predictedClass]) {
+                bboxes[currentImage.name][predictedClass] = [];
+            }
+            targetBbox.class = predictedClass;
+            bboxes[currentImage.name][predictedClass].push(targetBbox);
+
+            console.log("Auto-assigned class:", predictedClass,
+                        "→ numeric index:", classes[predictedClass]);
+
+            // Once updated, remove from pending queue
+            delete pendingApiBboxes[returnedUUID];
+
         } catch (e) {
             console.error("Error calling API: ", e);
             alert("Error calling prediction API");
@@ -146,60 +177,68 @@
     }
 
     async function sam2BboxPrompt(bbox) {
-        // 1) Convert entire currentImage to base64. 
-        //    Make sure you define or already have extractBase64Image() 
-        //    that returns a base64 “image/jpeg” string (excluding the data: prefix).
         const base64Img = await extractBase64Image();
-    
-        // 2) Build the request body in line with “BboxPrompt”:
         const bodyData = {
             image_base64: base64Img,
             bbox_left: bbox.x,
             bbox_top: bbox.y,
             bbox_width: bbox.width,
-            bbox_height: bbox.height
+            bbox_height: bbox.height,
+            // -----------------------------------------
+            // Include the UUID
+            // -----------------------------------------
+            uuid: bbox.uuid
         };
-    
-        // 3) Post to /sam2_bbox
         try {
             const resp = await fetch("http://localhost:8000/sam2_bbox", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(bodyData)
             });
-    
             if (!resp.ok) {
                 throw new Error("Response not OK: " + resp.statusText);
             }
-    
-            // 4) YoloBboxOutput => { class_id: "0", bbox: [cx, cy, w, h] }
             const result = await resp.json();
-            
-            // 5) For now, just show an alert
+            // Response should include "uuid"
+            const returnedUUID = result.uuid;
+            const targetBbox = pendingApiBboxes[returnedUUID];
+            if (!targetBbox) {
+                console.warn("No pending bbox found for uuid:", returnedUUID);
+                return;
+            }
+            currentBbox = {
+                bbox: targetBbox,
+                index: -1,
+                originalX: targetBbox.x,
+                originalY: targetBbox.y,
+                originalWidth: targetBbox.width,
+                originalHeight: targetBbox.height,
+                moving: false,
+                resizing: null
+            };
+
             if (result.bbox) {
-                // "result.bbox" is YOLO (cx, cy, w, h) in normalized [0..1] coordinates
                 const [cx, cy, ww, hh] = result.bbox;
-            
-                // Convert YOLO → absolute pixel coords
                 const absW = ww * currentImage.width;
                 const absH = hh * currentImage.height;
                 const absX = cx * currentImage.width - (absW / 2);
                 const absY = cy * currentImage.height - (absH / 2);
-            
-                // Update the bounding box in your data structure
-                currentBbox.bbox.x = absX;
-                currentBbox.bbox.y = absY;
-                currentBbox.bbox.width = absW;
-                currentBbox.bbox.height = absH;
-            
-                // Optional: finalize or redraw
+
+                // Update geometry in the targetBbox
+                targetBbox.x = absX;
+                targetBbox.y = absY;
+                targetBbox.width = absW;
+                targetBbox.height = absH;
+
                 updateBboxAfterTransform();
                 console.log("Updated SAM bounding box:", absX, absY, absW, absH);
-            
             } else {
                 console.warn("No 'bbox' field returned from sam2_bbox. Full response:", result);
             }
-    
+
+            // Done => remove from pending
+            delete pendingApiBboxes[returnedUUID];
+
         } catch (err) {
             console.error("sam2_bbox error:", err);
             alert("sam2_bbox call failed: " + err);
@@ -207,107 +246,101 @@
     }
 
     async function sam2BboxAutoPrompt(bbox) {
-        // 1) Create a sub-image of the bounding box area (like autoPredictNewCrop)
-        const offCanvas = document.createElement("canvas");
-        offCanvas.width = bbox.width;
-        offCanvas.height = bbox.height;
-        const ctx = offCanvas.getContext("2d");
-        // Because we have "currentImage.object" fully loaded, we can directly draw from (bbox.x, bbox.y)
-        ctx.drawImage(
-            currentImage.object,
-            bbox.x, bbox.y, bbox.width, bbox.height,
-            0, 0, bbox.width, bbox.height
-        );
-    
-        // 2) Convert that sub-image to base64
-        const base64SubImage = offCanvas.toDataURL("image/jpeg").split(",")[1];
-    
-        // 3) Build the request body for "sam2_bbox_auto"
-        //    We assume the new endpoint wants both the entire bounding-box coordinates
-        //    as well as the sub-image for logistic regression.
-        //    If your backend only needs one or the other, adjust accordingly.
+        // 1) Extract entire image as base64
+        const base64Img = await extractBase64Image();
+      
+        // 2) Build request with the bounding box coords + uuid
         const bodyData = {
-            image_base64: base64SubImage, // small crop
-            bbox_left: bbox.x,
-            bbox_top: bbox.y,
-            bbox_width: bbox.width,
-            bbox_height: bbox.height
+          image_base64: base64Img,
+          bbox_left: bbox.x,
+          bbox_top: bbox.y,
+          bbox_width: bbox.width,
+          bbox_height: bbox.height,
+          uuid: bbox.uuid
         };
-    
+      
         try {
-            // 4) POST to "/sam2_bbox_auto"
-            const resp = await fetch("http://localhost:8000/sam2_bbox_auto", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(bodyData)
-            });
-    
-            if (!resp.ok) {
-                throw new Error("sam2_bbox_auto response not OK: " + resp.statusText);
+          // 3) POST to /sam2_bbox_auto => { "prediction": <string>, "bbox": [...], "uuid": ... }
+          const resp = await fetch("http://localhost:8000/sam2_bbox_auto", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bodyData)
+          });
+          if (!resp.ok) {
+            throw new Error("sam2_bbox_auto error: " + resp.statusText);
+          }
+          const result = await resp.json();
+          console.log("sam2_bbox_auto returned:", result);
+      
+          // 4) Connect the returned uuid => the pendingApiBboxes
+          const returnedUUID = result.uuid;
+          const targetBbox = pendingApiBboxes[returnedUUID];
+          if (!targetBbox) {
+            console.warn("No pending bbox found for uuid:", returnedUUID);
+            return;
+          }
+      
+          currentBbox = {
+            bbox: targetBbox,
+            index: -1,
+            originalX: targetBbox.x,
+            originalY: targetBbox.y,
+            originalWidth: targetBbox.width,
+            originalHeight: targetBbox.height,
+            moving: false,
+            resizing: null
+          };
+      
+          // 5) If we got a bounding box => update geometry & class
+          if (result.bbox) {
+            const [cx, cy, wNorm, hNorm] = result.bbox;
+            const absW = wNorm * currentImage.width;
+            const absH = hNorm * currentImage.height;
+            const absX = cx * currentImage.width - absW / 2;
+            const absY = cy * currentImage.height - absH / 2;
+      
+            // Remove from old class
+            const oldClass = targetBbox.class;
+            const oldArr = bboxes[currentImage.name][oldClass];
+            const idx = oldArr.indexOf(targetBbox);
+            if (idx !== -1) {
+              oldArr.splice(idx, 1);
             }
-    
-            // 5) Suppose we get { class_id: <int>, bbox: [cx, cy, w, h] }
-            //    in YOLO format (center_x, center_y, width, height).
-            const result = await resp.json();
-            console.log("sam2_bbox_auto returned:", result);
-    
-            if (result.bbox) {
-                const [cx, cy, wNorm, hNorm] = result.bbox;
-                // Convert YOLO -> absolute coords
-                const absW = wNorm * currentImage.width;
-                const absH = hNorm * currentImage.height;
-                const absX = cx * currentImage.width - (absW / 2);
-                const absY = cy * currentImage.height - (absH / 2);
-    
-                // 6) Update bounding box in the data structure
-                //    First remove old reference in the old class array
-                const oldClass = bbox.class;
-                const oldArr = bboxes[currentImage.name][oldClass];
-                const idx = oldArr.indexOf(bbox);
-                if (idx !== -1) {
-                    oldArr.splice(idx, 1);
-                }
-    
-                // 7) Reassign the bounding box’s class to the returned class_id
-                //    If your “class_id” is an integer label, you might need a reverse-mapping 
-                //    from ID → string label. Or if you store numeric classes, do that here.
-                //    Below we do a naive approach: the new class is "result.class_id" as string
-                const newClass = String(result.class_id);
-                if (!bboxes[currentImage.name][newClass]) {
-                    bboxes[currentImage.name][newClass] = [];
-                }
-                bbox.class = newClass;
-                bboxes[currentImage.name][newClass].push(bbox);
-    
-                // 8) Adjust the bounding box geometry
-                bbox.x = absX;
-                bbox.y = absY;
-                bbox.width = absW;
-                bbox.height = absH;
-    
-                // 9) Optional: finalize
-                updateBboxAfterTransform();
-                console.log("sam2_bbox_auto updated bbox to:", absX, absY, absW, absH, "and class:", newClass);
-    
-            } else {
-                console.warn("sam2_bbox_auto returned no 'bbox'?", result);
+      
+            // 6) Reassign to new class => 'result.prediction'
+            const newClass = result.prediction;  // same as autoPredictNewCrop
+            if (!bboxes[currentImage.name][newClass]) {
+              bboxes[currentImage.name][newClass] = [];
             }
+            targetBbox.class = newClass;
+            bboxes[currentImage.name][newClass].push(targetBbox);
+      
+            // Overwrite geometry
+            targetBbox.x = absX;
+            targetBbox.y = absY;
+            targetBbox.width = absW;
+            targetBbox.height = absH;
+      
+            updateBboxAfterTransform();
+            console.log("sam2_bbox_auto => updated box:", absX, absY, absW, absH, "class:", newClass);
+          } else {
+            console.warn("sam2_bbox_auto => no 'bbox' returned?", result);
+          }
+      
+          // 7) Remove from pending
+          delete pendingApiBboxes[returnedUUID];
+      
         } catch (err) {
-            console.error("sam2_bbox_auto error:", err);
-            alert("sam2_bbox_auto call failed: " + err);
+          console.error("sam2BboxAutoPrompt error:", err);
+          alert("sam2BboxAutoPrompt call failed: " + err);
         }
-    }
+      }
 
-    // ----------------------------------------------------------------------------------
-    // All existing code below, now with a small change: after we create a new bbox,
-    // we call autoPredictNewCrop(bbox).
-    // ----------------------------------------------------------------------------------
-
-    // Parameters
-    const saveInterval = 60; // Bbox recovery save in seconds
-    const fontBaseSize = 6; // Text size in pixels
-    const fontColor = "#001f3f"; // Base font color (unused in box text now)
-    const borderColor = "#001f3f"; 
+    // A few standard parameters
+    const saveInterval = 60;
+    const fontBaseSize = 6;
+    const fontColor = "#001f3f";
+    const borderColor = "#001f3f";
     const backgroundColor = "rgba(0, 116, 217, 0.2)";
     const markedFontColor = "#FF4136";
     const markedBorderColor = "#FF4136";
@@ -323,7 +356,6 @@
     const drawCenterX = true;
     const drawGuidelines = true;
     const fittedZoom = true;
-
     let canvas = null;
     let images = {};
     let classes = {};
@@ -334,13 +366,11 @@
     let currentBbox = null;
     let imageListIndex = 0;
     let classListIndex = 0;
-
     let scale = defaultScale;
     let canvasX = 0;
     let canvasY = 0;
     let screenX = 0;
     let screenY = 0;
-
     const mouse = {
         x: 0,
         y: 0,
@@ -431,19 +461,15 @@
         context.fillText("2: Check out README.md for more info.", zoomX(20), zoomY(400));
     };
 
-    // Draw new bbox with color
     const drawNewBbox = (context) => {
         if (mouse.buttonL === true && currentClass !== null && currentBbox === null) {
             const width = (mouse.realX - mouse.startRealX);
             const height = (mouse.realY - mouse.startRealY);
-
             const strokeColor = getColorFromClass(currentClass);
             const fillColor = withAlpha(strokeColor, 0.2);
-
             context.setLineDash([]);
             context.strokeStyle = strokeColor;
             context.fillStyle = fillColor;
-
             context.strokeRect(
                 zoomX(mouse.startRealX),
                 zoomY(mouse.startRealY),
@@ -467,11 +493,9 @@
             currentBboxes[className].forEach(bbox => {
                 const strokeColor = getColorFromClass(className);
                 const fillColor = withAlpha(strokeColor, 0.2);
-
                 context.font = context.font.replace(/\d+px/, `${zoom(fontBaseSize)}px`);
                 context.fillStyle = strokeColor;
                 context.fillText(className, zoomX(bbox.x), zoomY(bbox.y - 2));
-
                 context.setLineDash([]);
                 context.strokeStyle = strokeColor;
                 context.fillStyle = fillColor;
@@ -487,9 +511,7 @@
                     zoom(bbox.width),
                     zoom(bbox.height)
                 );
-
                 drawX(context, bbox.x, bbox.y, bbox.width, bbox.height);
-
                 if (bbox.marked === true) {
                     setBboxCoordinates(bbox.x, bbox.y, bbox.width, bbox.height);
                 }
@@ -571,13 +593,11 @@
             event.preventDefault();
             return;
         }
-
         if (event.deltaY < 0) {
             scale = Math.min(maxZoom, scale * scrollSpeed);
         } else {
             scale = Math.max(minZoom, scale * (1 / scrollSpeed));
         }
-
         canvasX = mouse.realX;
         canvasY = mouse.realY;
         screenX = mouse.x;
@@ -588,115 +608,138 @@
     };
 
     async function trackPointer(event) {
-        // 1) Update x/y in both screen coords and “real” coords.
+        // 1) Standard pointer tracking
         mouse.bounds = canvas.element.getBoundingClientRect();
         mouse.x = event.clientX - mouse.bounds.left;
         mouse.y = event.clientY - mouse.bounds.top;
-      
         const oldRealX = mouse.realX;
         const oldRealY = mouse.realY;
-      
         mouse.realX = zoomXInv(mouse.x);
         mouse.realY = zoomYInv(mouse.y);
-      
+    
+        // 2) Check for mousedown/mouseup
         if (event.type === "mousedown") {
-          mouse.startRealX = mouse.realX;
-          mouse.startRealY = mouse.realY;
-          if (event.which === 3) {
-            mouse.buttonR = true;
-          } else if (event.which === 1) {
-            mouse.buttonL = true;
-          }
+            mouse.startRealX = mouse.realX;
+            mouse.startRealY = mouse.realY;
+            if (event.which === 3) {
+                mouse.buttonR = true;
+            } else if (event.which === 1) {
+                mouse.buttonL = true;
+            }
         }
         else if (event.type === "mouseup" || event.type === "mouseout") {
-          // If left button was down, we have an image + class
-          if (mouse.buttonL && currentImage !== null && currentClass !== null) {
-      
-            // (A) POINT MODE => forcibly create a 10×10 box around click
-            if (pointMode) {
-              // Reset currentBbox if needed
-              currentBbox = null;
-      
-              const dotSize = 10;
-              const half = dotSize / 2;
-      
-              // Shift the initial coords so storeNewBbox(...) yields a 10×10 box
-              mouse.startRealX = mouse.realX - half;
-              mouse.startRealY = mouse.realY - half;
-      
-              // Create the 10×10 bounding box normally
-              storeNewBbox(dotSize, dotSize);
-      
-              // Release the button so we don’t keep dragging
-              mouse.buttonL = false;
-              mouse.buttonR = false;
-      
-              // Call sam2PointPrompt => pass the click coords,
-              // which will update the same bounding box in place
-              await sam2PointPrompt(mouse.realX, mouse.realY);
-            }
-            else {
-              // (B) NORMAL BOUNDING-BOX MODE
-              const movedWidth  = Math.abs(mouse.realX - mouse.startRealX);
-              const movedHeight = Math.abs(mouse.realY - mouse.startRealY);
-      
-              if (movedWidth > minBBoxWidth && movedHeight > minBBoxHeight) {
-                if (currentBbox === null) {
-                  storeNewBbox(movedWidth, movedHeight);
-      
-                  if (autoMode) {
+            // if left button was down, we have an image + class
+            if (mouse.buttonL && currentImage !== null && currentClass !== null) {
+    
+                // POINT MODE => forcibly create a 10×10 box
+                // Point-mode logic with optional “samPointAutoMode”
+                if (pointMode) {
+                    // Clear any existing bbox
+                    currentBbox = null;
+                    const dotSize = 10;
+                    const half = dotSize / 2;
+
+                    // Shift the start coords so storeNewBbox yields a 10×10 box
+                    mouse.startRealX = mouse.realX - half;
+                    mouse.startRealY = mouse.realY - half;
+                    storeNewBbox(dotSize, dotSize);
+
+                    // Release the mouse so we don't keep dragging
                     mouse.buttonL = false;
                     mouse.buttonR = false;
-                    await autoPredictNewCrop(currentBbox.bbox);
-                  }
-                  if (samAutoMode) {
-                    mouse.buttonL = false;
-                    mouse.buttonR = false;
-                    await sam2AutoBboxPrompt(currentBbox.bbox);
-                  }
-                  else if (samMode) {
-                    mouse.buttonL = false;
-                    mouse.buttonR = false;
-                    await sam2BboxPrompt(currentBbox.bbox);
-                  }
-                  else {
+
+                    // If both “pointMode” and “autoMode” => samPointAutoPrompt
+                    // else just do sam2PointPrompt
+                    if (samPointAutoMode) {
+                        await sam2PointAutoPrompt(mouse.realX, mouse.realY);
+                    } else {
+                        await sam2PointPrompt(mouse.realX, mouse.realY);
+                    }
+
+                    // Re-mark & transform to keep the bounding box visible
                     setBboxMarkedState();
                     if (currentBbox) {
-                      updateBboxAfterTransform();
+                        updateBboxAfterTransform();
                     }
-                  }
-                } else {
-                  updateBboxAfterTransform();
-                }
-              }
-              else {
-                // small => single click logic
-                if (currentBbox === null) {
-                  setBboxMarkedState();
-                  if (currentBbox !== null) {
-                    updateBboxAfterTransform();
-                  }
                 }
                 else {
-                  setBboxMarkedState();
-                  if (currentBbox !== null) {
-                    updateBboxAfterTransform();
-                  }
+                    // Normal bounding-box mode
+                    const movedWidth  = Math.abs(mouse.realX - mouse.startRealX);
+                    const movedHeight = Math.abs(mouse.realY - mouse.startRealY);
+    
+                    if (movedWidth > minBBoxWidth && movedHeight > minBBoxHeight) {
+                        // If we're making a new bbox
+                        if (currentBbox === null) {
+                            storeNewBbox(movedWidth, movedHeight);
+    
+                            // Release mouse
+                            mouse.buttonL = false;
+                            mouse.buttonR = false;
+    
+                            // 5) Combined logic: if (samMode && autoMode) => "sam2BboxAutoPrompt"
+                            if (samMode && autoMode) {
+                                await sam2BboxAutoPrompt(currentBbox.bbox);
+                            }
+                            // else if only auto => autoPredict
+                            else if (autoMode) {
+                                await autoPredictNewCrop(currentBbox.bbox);
+                            }
+                            // else if only SAM => sam2BboxPrompt
+                            else if (samMode) {
+                                await sam2BboxPrompt(currentBbox.bbox);
+                            }
+                            else {
+                                // neither => finalize
+                                setBboxMarkedState();
+                                if (currentBbox) {
+                                    updateBboxAfterTransform();
+                                }
+                            }
+    
+                            // Re-mark & transform again to keep the bbox visible
+                            setBboxMarkedState();
+                            if (currentBbox) {
+                                updateBboxAfterTransform();
+                            }
+                        }
+                        else {
+                            // Already had a bbox => finalize geometry
+                            updateBboxAfterTransform();
+                        }
+                    }
+                    else {
+                        // small => single click logic
+                        if (currentBbox === null) {
+                            setBboxMarkedState();
+                            if (currentBbox !== null) {
+                                updateBboxAfterTransform();
+                            }
+                        }
+                        else {
+                            setBboxMarkedState();
+                            if (currentBbox !== null) {
+                                updateBboxAfterTransform();
+                            }
+                        }
+                    }
                 }
-              }
             }
-          }
-          mouse.buttonR = false;
-          mouse.buttonL = false;
+    
+            // 6) Reset mouse
+            mouse.buttonR = false;
+            mouse.buttonL = false;
         }
-        
-        // 3) Pointer updates
+    
+        // 7) Standard movement, resizing, etc.
         moveBbox();
         resizeBbox();
         changeCursorByLocation();
         panImage(oldRealX, oldRealY);
-      }
+    }
 
+    // -----------------------------------------
+    // UPDATED storeNewBbox => each new bbox gets a UUID and goes into pendingApiBboxes
+    // -----------------------------------------
     const storeNewBbox = (movedWidth, movedHeight) => {
         const bbox = {
             x: Math.min(mouse.startRealX, mouse.realX),
@@ -704,8 +747,10 @@
             width: movedWidth,
             height: movedHeight,
             marked: true,
-            class: currentClass
+            class: currentClass,
+            uuid: generateUUID() // NEW
         };
+
         if (typeof bboxes[currentImage.name] === "undefined") {
             bboxes[currentImage.name] = {};
         }
@@ -713,6 +758,8 @@
             bboxes[currentImage.name][currentClass] = [];
         }
         bboxes[currentImage.name][currentClass].push(bbox);
+
+        // Mark it as the current bounding box
         currentBbox = {
             bbox: bbox,
             index: bboxes[currentImage.name][currentClass].length - 1,
@@ -723,6 +770,9 @@
             moving: false,
             resizing: null
         };
+
+        // Also add to the pending queue for when an API call updates it
+        pendingApiBboxes[bbox.uuid] = bbox;
     };
 
     const updateBboxAfterTransform = () => {
@@ -907,15 +957,19 @@
     const zoom = (number) => {
         return Math.floor(number * scale);
     };
+
     const zoomX = (number) => {
         return Math.floor((number - canvasX) * scale + screenX);
     };
+
     const zoomY = (number) => {
         return Math.floor((number - canvasY) * scale + screenY);
     };
+
     const zoomXInv = (number) => {
         return Math.floor((number - screenX) * (1 / scale) + canvasX);
     };
+
     const zoomYInv = (number) => {
         return Math.floor((number - screenY) * (1 / scale) + canvasY);
     };
@@ -927,8 +981,6 @@
             if (files.length > 0) {
                 resetImageList();
                 document.body.style.cursor = "wait";
-    
-                // 1) Store each file in "images" if it has a valid extension
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
                     const nameParts = file.name.split(".");
@@ -937,7 +989,6 @@
                             meta: file,
                             index: i
                         };
-                        // Add to <select> (imageList)
                         const option = document.createElement("option");
                         option.value = file.name;
                         option.innerHTML = file.name;
@@ -947,39 +998,27 @@
                         imageList.appendChild(option);
                     }
                 }
-    
-                // 2) For each image in "images," load it as a dataURL and store as HTMLImageElement
                 const imageArray = Object.keys(images);
                 let async = imageArray.length;
-    
                 for (let imageName in images) {
                     const reader = new FileReader();
                     reader.addEventListener("load", () => {
                         const imageObject = new Image();
                         imageObject.addEventListener("load", (ev) => {
-                            // Store width/height
                             images[imageName].width = ev.target.width;
                             images[imageName].height = ev.target.height;
-    
-                            // IMPORTANT: store the <Image> so we can draw later
                             images[imageName].object = imageObject;
-    
-                            // Once all images have loaded
                             if (--async === 0) {
                                 document.body.style.cursor = "default";
-                                // Set the initial current image to the first one
                                 setCurrentImage(images[imageArray[0]]);
-                                // Enable bboxes if classes are loaded
                                 if (Object.keys(classes).length > 0) {
                                     document.getElementById("bboxes").disabled = false;
                                     document.getElementById("restoreBboxes").disabled = false;
                                 }
                             }
                         });
-                        // Convert to <img> src
                         imageObject.src = reader.result;
                     });
-                    // Start reading “meta” file => dataURL
                     reader.readAsDataURL(images[imageName].meta);
                 }
             }
@@ -1183,7 +1222,6 @@
                                     if (typeof bbox[className] === "undefined") {
                                         bbox[className] = [];
                                     }
-                                    // Reverse engineer actual position and dimensions from yolo format
                                     const width = cols[3] * image.width;
                                     const x = cols[1] * image.width - width * 0.5;
                                     const height = cols[4] * image.height;
@@ -1290,7 +1328,6 @@
                 for (let className in bboxes[imageName]) {
                     for (let i = 0; i < bboxes[imageName][className].length; i++) {
                         const bbox = bboxes[imageName][className][i];
-                        // Prepare data for yolo format
                         const x = (bbox.x + bbox.width / 2) / image.width;
                         const y = (bbox.y + bbox.height / 2) / image.height;
                         const width = bbox.width / image.width;
@@ -1432,7 +1469,7 @@
         const classList = document.getElementById("classList");
         document.addEventListener("keydown", (event) => {
             const key = event.keyCode || event.charCode;
-            if (key === 8 || (key === 46 && event.metaKey === true)) { // Backspace or Delete + Meta (Command)
+            if (key === 8 || (key === 46 && event.metaKey === true)) {
                 if (currentBbox !== null) {
                     bboxes[currentImage.name][currentBbox.bbox.class].splice(currentBbox.index, 1);
                     currentBbox = null;
@@ -1440,25 +1477,25 @@
                 }
                 event.preventDefault();
             }
-            // 'a' key => toggle autoMode
+            // 'a' => toggle autoMode
             if (key === 65) {
-                    const autoModeCheckbox = document.getElementById("autoMode");
-                    if (autoModeCheckbox) {
-                        autoModeCheckbox.checked = !autoModeCheckbox.checked;
-                        autoMode = autoModeCheckbox.checked;
-                        console.log("Auto mode toggled via 'W':", autoMode);
-                    }
-                event.preventDefault();
+                const autoModeCheckbox = document.getElementById("autoMode");
+                if (autoModeCheckbox) {
+                    autoModeCheckbox.checked = !autoModeCheckbox.checked;
+                    autoMode = autoModeCheckbox.checked;
+                    console.log("Auto mode toggled via 'A':", autoMode);
                 }
-            // 's' key => toggle SAM
+                event.preventDefault();
+            }
+            // 's' => toggle SAM
             if (key === 83) {
                 const samModeCheckbox = document.getElementById("samMode");
                 if (samModeCheckbox) {
                     samModeCheckbox.checked = !samModeCheckbox.checked;
                     samMode = samModeCheckbox.checked;
-                    console.log("SAM mode toggled via 'W':", samMode);
+                    console.log("SAM mode toggled via 'S':", samMode);
                 }
-            event.preventDefault();
+                event.preventDefault();
             }
             if (key === 37) {
                 if (imageList.length > 1) {
@@ -1550,8 +1587,6 @@
         });
     };
 
-    
-    
     function yieldToDom(delayMs = 50) {
         return new Promise((resolve) => {
             requestAnimationFrame(() => {
@@ -1560,128 +1595,100 @@
         });
     }
 
-        // A helper to get base64 (minus the "data:image/jpeg;base64," prefix) for a given image
     async function extractBase64ForImage(imgObj) {
-        // Create an offscreen canvas and draw the image
         const offCanvas = document.createElement("canvas");
         offCanvas.width = imgObj.width;
         offCanvas.height = imgObj.height;
         const ctx = offCanvas.getContext("2d");
         ctx.drawImage(imgObj.object, 0, 0, imgObj.width, imgObj.height);
-        // Convert to base64
-        const dataUrl = offCanvas.toDataURL("image/jpeg"); // or "image/png"
-        // Return just the base64 chunk, e.g. skipping "data:image/jpeg;base64,"
+        const dataUrl = offCanvas.toDataURL("image/jpeg");
         return dataUrl.split(",")[1];
     }
-    
+
     async function listenImageCrop() {
         const btn = document.getElementById("cropImages");
         btn.addEventListener("click", async () => {
-          // 1) Gather bounding-box images (same as before)
-          const payloadImages = [];
-          for (const imgName in bboxes) {
-            const imgData = images[imgName];
-            if (!imgData) continue;
-      
-            // Convert entire image to base64
-            const base64Img = await extractBase64ForImage(imgData);
-      
-            // Gather bounding boxes
-            const bbs = [];
-            for (const className in bboxes[imgName]) {
-              bboxes[imgName][className].forEach(bb => {
-                bbs.push({
-                  className,
-                  x: bb.x,
-                  y: bb.y,
-                  width: bb.width,
-                  height: bb.height
+            const payloadImages = [];
+            for (const imgName in bboxes) {
+                const imgData = images[imgName];
+                if (!imgData) continue;
+                const base64Img = await extractBase64ForImage(imgData);
+                const bbs = [];
+                for (const className in bboxes[imgName]) {
+                    bboxes[imgName][className].forEach(bb => {
+                        bbs.push({
+                            className,
+                            x: bb.x,
+                            y: bb.y,
+                            width: bb.width,
+                            height: bb.height
+                        });
+                    });
+                }
+                if (bbs.length === 0) continue;
+                payloadImages.push({
+                    image_base64: base64Img,
+                    originalName: imgName,
+                    bboxes: bbs
                 });
-              });
             }
-            if (bbs.length === 0) continue;
-      
-            payloadImages.push({
-              image_base64: base64Img,
-              originalName: imgName,
-              bboxes: bbs
-            });
-          }
-      
-          if (payloadImages.length === 0) {
-            alert("No bounding boxes to crop.");
-            return;
-          }
-      
-          // 2) Show a progress modal
-          const progressModal = showProgressModal("Preparing chunked job...");
-          document.body.style.cursor = "wait";
-      
-          try {
-            // 3) Initialize the job
-            let resp = await fetch("http://localhost:8000/crop_zip_init", {
-              method: "POST"
-            });
-            if (!resp.ok) {
-              throw new Error("crop_zip_init failed: " + resp.status);
+            if (payloadImages.length === 0) {
+                alert("No bounding boxes to crop.");
+                return;
             }
-            const { jobId } = await resp.json();
-            console.log("Got jobId:", jobId);
-      
-            // 4) Chunk the images in small batches
-            const chunkSize = 5;
-            const chunks = chunkArray(payloadImages, chunkSize);
-            let count = 0;
-      
-            for (const batch of chunks) {
-              count++;
-              console.log(`Sending batch ${count}/${chunks.length} to /crop_zip_chunk...`);
-      
-              resp = await fetch("http://localhost:8000/crop_zip_chunk?jobId=" + jobId, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ images: batch })
-              });
-              if (!resp.ok) {
-                throw new Error("crop_zip_chunk failed: " + resp.status);
-              }
+            const progressModal = showProgressModal("Preparing chunked job...");
+            document.body.style.cursor = "wait";
+            try {
+                let resp = await fetch("http://localhost:8000/crop_zip_init", {
+                    method: "POST"
+                });
+                if (!resp.ok) {
+                    throw new Error("crop_zip_init failed: " + resp.status);
+                }
+                const { jobId } = await resp.json();
+                console.log("Got jobId:", jobId);
+                const chunkSize = 5;
+                const chunks = chunkArray(payloadImages, chunkSize);
+                let count = 0;
+                for (const batch of chunks) {
+                    count++;
+                    console.log(`Sending batch ${count}/${chunks.length} to /crop_zip_chunk...`);
+                    resp = await fetch("http://localhost:8000/crop_zip_chunk?jobId=" + jobId, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ images: batch })
+                    });
+                    if (!resp.ok) {
+                        throw new Error("crop_zip_chunk failed: " + resp.status);
+                    }
+                }
+                console.log("All chunks sent. Now finalizing /crop_zip_finalize...");
+                resp = await fetch("http://localhost:8000/crop_zip_finalize?jobId=" + jobId);
+                if (!resp.ok) {
+                    throw new Error("crop_zip_finalize failed: " + resp.status);
+                }
+                const blob = await resp.blob();
+                saveAs(blob, "crops.zip");
+                alert("Done! Single crops.zip downloaded.");
+            } catch (err) {
+                console.error(err);
+                alert("Crop & Save failed: " + err);
+            } finally {
+                progressModal.close();
+                document.body.style.cursor = "default";
             }
-      
-            // 5) Finalize: get the single ZIP
-            console.log("All chunks sent. Now finalizing /crop_zip_finalize...");
-            resp = await fetch("http://localhost:8000/crop_zip_finalize?jobId=" + jobId);
-            if (!resp.ok) {
-              throw new Error("crop_zip_finalize failed: " + resp.status);
-            }
-      
-            // 6) Download the single final ZIP
-            const blob = await resp.blob();
-            saveAs(blob, "crops.zip");
-            alert("Done! Single crops.zip downloaded.");
-      
-          } catch (err) {
-            console.error(err);
-            alert("Crop & Save failed: " + err);
-      
-          } finally {
-            // 7) Cleanup
-            progressModal.close();
-            document.body.style.cursor = "default";
-          }
         });
-      }
-      
-      // Helper: chunk an array
-      function chunkArray(array, size) {
+    }
+
+    function chunkArray(array, size) {
         const result = [];
         for (let i = 0; i < array.length; i += size) {
-          result.push(array.slice(i, i + size));
+            result.push(array.slice(i, i + size));
         }
         return result;
-      }
-      
-      // Helper: a progress overlay
-      function showProgressModal(initialText = "") {
+    }
+
+    function showProgressModal(initialText = "") {
         const overlay = document.createElement("div");
         overlay.style.position = "fixed";
         overlay.style.top = "0";
@@ -1694,83 +1701,183 @@
         overlay.style.alignItems = "center";
         overlay.style.justifyContent = "center";
         overlay.style.flexDirection = "column";
-      
         const textDiv = document.createElement("div");
         textDiv.style.color = "#fff";
         textDiv.style.fontSize = "20px";
         textDiv.style.marginBottom = "10px";
         textDiv.textContent = initialText;
         overlay.appendChild(textDiv);
-      
         document.body.appendChild(overlay);
-      
         return {
-          close() {
-            document.body.removeChild(overlay);
-          }
+            close() {
+                document.body.removeChild(overlay);
+            }
         };
-      }
+    }
 
-
-      async function sam2PointPrompt(px, py) {
+    // -----------------------------------------
+    // UPDATED sam2PointPrompt => include UUID in request
+    // -----------------------------------------
+    async function sam2PointPrompt(px, py) {
         try {
-          // 1) Convert entire currentImage to base64
-          const base64Img = await extractBase64Image();
-      
-          // 2) Build the request body
-          const bodyData = {
-            image_base64: base64Img,
-            point_x: px,
-            point_y: py
-          };
-      
-          // 3) POST to /sam2_point
-          const resp = await fetch("http://localhost:8000/sam2_point", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(bodyData)
-          });
-          if (!resp.ok) {
-            throw new Error("sam2_point failed: " + resp.statusText);
-          }
-      
-          // 4) Response => { class_id: "0", bbox: [cx, cy, w, h] }
-          const result = await resp.json();
-          if (!result.bbox) {
-            console.warn("No 'bbox' field in sam2_point response:", result);
-            return;
-          }
-      
-          // 5) Convert YOLO => absolute coords
-          const [cx, cy, wNorm, hNorm] = result.bbox;
-          const absW = wNorm * currentImage.width;
-          const absH = hNorm * currentImage.height;
-          const absX = cx * currentImage.width - absW / 2;
-          const absY = cy * currentImage.height - absH / 2;
-      
-          console.log(
-            "sam2_point => YOLO box:", cx, cy, wNorm, hNorm,
-            "→", absX, absY, absW, absH
-          );
-      
-          // 6) Overwrite the existing bounding box geometry
-          if (currentBbox && currentBbox.bbox) {
-            currentBbox.bbox.x = absX;
-            currentBbox.bbox.y = absY;
-            currentBbox.bbox.width = absW;
-            currentBbox.bbox.height = absH;
-      
-            // 7) Finalize
+            const base64Img = await extractBase64Image();
+            const bodyData = {
+                image_base64: base64Img,
+                point_x: px,
+                point_y: py,
+                uuid: currentBbox ? currentBbox.bbox.uuid : null
+            };
+            const resp = await fetch("http://localhost:8000/sam2_point", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(bodyData)
+            });
+            if (!resp.ok) {
+                throw new Error("sam2_point failed: " + resp.statusText);
+            }
+            const result = await resp.json();
+            const returnedUUID = result.uuid;
+            const targetBbox = pendingApiBboxes[returnedUUID];
+            if (!targetBbox) {
+                console.warn("No pending bbox found for uuid:", returnedUUID);
+                return;
+            }
+            // Mark that bbox as current
+            currentBbox = {
+                bbox: targetBbox,
+                index: -1,
+                originalX: targetBbox.x,
+                originalY: targetBbox.y,
+                originalWidth: targetBbox.width,
+                originalHeight: targetBbox.height,
+                moving: false,
+                resizing: null
+            };
+
+            if (!result.bbox) {
+                console.warn("No 'bbox' field in sam2_point response:", result);
+                return;
+            }
+            const [cx, cy, wNorm, hNorm] = result.bbox;
+            const absW = wNorm * currentImage.width;
+            const absH = hNorm * currentImage.height;
+            const absX = cx * currentImage.width - absW / 2;
+            const absY = cy * currentImage.height - absH / 2;
+
+            // Overwrite geometry
+            targetBbox.x = absX;
+            targetBbox.y = absY;
+            targetBbox.width = absW;
+            targetBbox.height = absH;
+
             updateBboxAfterTransform();
             console.log("Updated existing bbox from point mode:", absX, absY, absW, absH);
-      
-          } else {
-            console.warn("No currentBbox to update in point mode!");
-          }
-      
+
+            // Done => remove from pending
+            delete pendingApiBboxes[returnedUUID];
+
         } catch (err) {
-          console.error("sam2PointPrompt error:", err);
-          alert("sam2PointPrompt call failed: " + err);
+            console.error("sam2PointPrompt error:", err);
+            alert("sam2PointPrompt call failed: " + err);
         }
+    }
+
+    //-----------------------------------------------
+// 1) New Frontend Function: sam2PointAutoPrompt
+//-----------------------------------------------
+async function sam2PointAutoPrompt(px, py) {
+    try {
+      // 1) Convert entire currentImage to base64
+      const base64Img = await extractBase64Image();
+  
+      // 2) Build request body
+      const bodyData = {
+        image_base64: base64Img,
+        point_x: px,
+        point_y: py,
+        uuid: currentBbox ? currentBbox.bbox.uuid : null
+      };
+  
+      // 3) Call the new /sam2_point_auto endpoint
+      const resp = await fetch("http://localhost:8000/sam2_point_auto", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyData)
+      });
+      if (!resp.ok) {
+        throw new Error("sam2_point_auto failed: " + resp.statusText);
       }
+  
+      // 4) Response => { "prediction": <string>, "bbox": [cx,cy,w,h], "uuid": ... }
+      const result = await resp.json();
+      console.log("sam2_point_auto =>", result);
+  
+      // 5) Match uuid => pending bbox
+      const returnedUUID = result.uuid;
+      const targetBbox = pendingApiBboxes[returnedUUID];
+      if (!targetBbox) {
+        console.warn("No pending bbox found for uuid:", returnedUUID);
+        return;
+      }
+  
+      // Mark it as currentBbox
+      currentBbox = {
+        bbox: targetBbox,
+        index: -1,
+        originalX: targetBbox.x,
+        originalY: targetBbox.y,
+        originalWidth: targetBbox.width,
+        originalHeight: targetBbox.height,
+        moving: false,
+        resizing: null
+      };
+  
+      // 6) Use result.bbox => update geometry
+      if (!result.bbox) {
+        console.warn("No 'bbox' field returned from sam2_point_auto?");
+        return;
+      }
+      const [cx, cy, wNorm, hNorm] = result.bbox;
+      const absW = wNorm * currentImage.width;
+      const absH = hNorm * currentImage.height;
+      const absX = cx * currentImage.width - absW / 2;
+      const absY = cy * currentImage.height - absH / 2;
+  
+      // Remove from old class array
+      const oldClass = targetBbox.class;
+      const oldArr = bboxes[currentImage.name][oldClass];
+      const idx = oldArr.indexOf(targetBbox);
+      if (idx !== -1) {
+        oldArr.splice(idx, 1);
+      }
+  
+      // 7) Reassign the new class => result.prediction
+      const newClass = result.prediction;
+      if (!bboxes[currentImage.name][newClass]) {
+        bboxes[currentImage.name][newClass] = [];
+      }
+      targetBbox.class = newClass;
+      bboxes[currentImage.name][newClass].push(targetBbox);
+  
+      // Overwrite geometry
+      targetBbox.x = absX;
+      targetBbox.y = absY;
+      targetBbox.width = absW;
+      targetBbox.height = absH;
+  
+      // 8) Finalize geometry
+      updateBboxAfterTransform();
+      console.log("sam2_point_auto updated =>", absX, absY, absW, absH, "class:", newClass);
+  
+      // Remove from pending
+      delete pendingApiBboxes[returnedUUID];
+  
+    } catch (err) {
+      console.error("sam2PointAutoPrompt error:", err);
+      alert("sam2PointAutoPrompt call failed: " + err);
+    }
+  }
+  
+
+
 })();

@@ -2,12 +2,16 @@
 
 ## my little YOLO annotator
 
-Most of this code is taken from YBAT, which can be found here:
+This is my little Yolo annotation tool. It's super light and simple and runs locally but uses some nice bits like CLIP and SAM on the backend to auto-annotate and make things super easy to use. I rarely label stuff manually but when I do I get *super frustrated* because offline tools are slooooow and clunky and online tools are laggy and expensive and want to force you into contorted workflows and upsell stuff... which is probably great for a big enterprise, but when I'm doing manual annotation it's usually because I'm just messing around with a new dataset or want to benchmark some stuff and I don't need a 1-year 5-seat license with 20 credits to train models.
+
+
+Most of the frontend code is taken from YBAT, which can be found here:
 https://github.com/drainingsun/ybat
 
 See the original YBAT license here:
 https://github.com/drainingsun/ybat/blob/master/LICENSE
 
+The backend usese CLIP from OpenAI (https://github.com/openai/CLIP) and SAM from Meta (https://github.com/facebookresearch/segment-anything) to automate annotation in a super-responsive and FAST way. 
 
 ## How does it work?
 

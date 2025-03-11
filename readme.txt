@@ -34,7 +34,7 @@ Save the .zip in your root file of this tool (next to clip_kmeans_and_regress.py
 
 Now run python3 clip_kmeans_and_regress.py, which will take a while depending on your machine. This will train a logistic regression on top of the CLIP vectors extracted from all the little images that are now in your ./crops/ folder, and save it as a .pkl file in the root of this project.
 
-Once it's done you will have 2 files called my_label_list.pkl and my_logreg_model.pkl, and it will display some accuracy starts on your label-based clustering.
+Once it's done you will have 2 files called my_label_list.pkl and my_logreg_model.pkl, and it will display some accuracy statistics on your label-based clustering.
 
 Now you're ready to fire up the backend which will serve your CLIP-based label-automation and SAM. You can do this by going to the terminal and running: 
 

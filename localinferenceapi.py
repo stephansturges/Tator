@@ -264,46 +264,61 @@ def sam2_point_auto(prompt: PointPrompt):
     pred_cls = clf.predict(feats_np)[0]
     return SamPointAutoResponse(prediction=str(pred_cls), bbox=yolo_box, uuid=prompt.uuid)
 
+
 @app.post("/sam2_bbox", response_model=YoloBboxOutput)
 def sam2_bbox(prompt: BboxPrompt):
     data = base64.b64decode(prompt.image_base64)
     pil_img = Image.open(BytesIO(data)).convert("RGB")
     np_img = np.array(pil_img)
-    set_image_if_needed(np_img)
-    left = prompt.bbox_left
-    top = prompt.bbox_top
-    w_box = prompt.bbox_width
-    h_box = prompt.bbox_height
-    right = left + w_box
-    bottom = top + h_box
-    cx = (left+right)/2
-    cy = (top+bottom)/2
-    new_w = w_box*2
-    new_h = h_box*2
-    exp_left = max(0, cx - new_w/2)
-    exp_top = max(0, cy - new_h/2)
-    exp_right = min(pil_img.width, exp_left+new_w)
-    exp_bottom = min(pil_img.height, exp_top+new_h)
-    if exp_right<=exp_left or exp_bottom<=exp_top:
-        return YoloBboxOutput(class_id="0", bbox=[0,0,0,0], uuid=prompt.uuid)
-    sli = int(exp_left)
-    sri = int(exp_right)
-    sti = int(exp_top)
-    sbi = int(exp_bottom)
-    subarr = np_img[sti:sbi, sli:sri, :]
-    sub_left = left - exp_left
-    sub_top = top - exp_top
-    sub_box = np.array([sub_left, sub_top, sub_left+w_box, sub_top+h_box])
-    masks, scores, logits = predictor.predict(box=sub_box, multimask_output=False)
-    mask = masks[0]
-    x_sub, y_sub, xx_sub, yy_sub = mask_to_bounding_box(mask)
-    gx_min = exp_left + x_sub
-    gy_min = exp_top + y_sub
-    gx_max = exp_left + xx_sub
-    gy_max = exp_top + yy_sub
-    yolo_box = to_yolo(pil_img.width, pil_img.height, gx_min, gy_min, gx_max, gy_max)
-    return YoloBboxOutput(class_id="0", bbox=yolo_box, uuid=prompt.uuid)
 
+    # Make sure SAM is using this image if needed
+    set_image_if_needed(np_img)
+
+    full_h, full_w = pil_img.height, pil_img.width
+
+    # Match the same bounding-box logic as "sam2_bbox_auto"
+    left = max(0, prompt.bbox_left)
+    top = max(0, prompt.bbox_top)
+    right = min(full_w, left + prompt.bbox_width)
+    bottom = min(full_h, top + prompt.bbox_height)
+
+    # Reject invalid bounding-box requests
+    if right <= left or bottom <= top:
+        return YoloBboxOutput(
+            class_id="0",
+            bbox=[0, 0, 0, 0],
+            uuid=prompt.uuid
+        )
+
+    # Use the bounding box to get a mask from the SAM predictor
+    sub_box = np.array([left, top, right, bottom], dtype=np.float32)
+    masks, _, _ = predictor.predict(box=sub_box, multimask_output=False)
+
+    # Convert SAM's mask to a bounding box, then to YOLO
+    mask = masks[0]
+    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+    yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
+
+    # Check that the resulting bounding box is valid
+    gx_min_i = max(0, int(x_min))
+    gy_min_i = max(0, int(y_min))
+    gx_max_i = min(full_w, int(x_max))
+    gy_max_i = min(full_h, int(y_max))
+
+    # If the bounding box from the mask is invalid, return zeros
+    if gx_max_i <= gx_min_i or gy_max_i <= gy_min_i:
+        return YoloBboxOutput(
+            class_id="0",
+            bbox=yolo_box,
+            uuid=prompt.uuid
+        )
+
+    # Return the YOLO-formatted bounding box; no CLIP classification here
+    return YoloBboxOutput(
+        class_id="0",
+        bbox=yolo_box,
+        uuid=prompt.uuid
+    )
 
 
 @app.post("/sam2_bbox_auto", response_model=YoloBboxClassOutput)

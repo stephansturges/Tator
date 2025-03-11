@@ -51,11 +51,11 @@ Thanks to @drainingsun for a nice clean tool with YBAT!
 
 ## Licenses
 
-License for all third-party packages including Clip (OpenAI) are the users' own responsibility.
+License for all third-party packages including Clip (OpenAI) and SAM (Meta) are the users' own responsibility.
 
-YBAT code license can be found above.
+YBAT code license can be found above, and you can find the original repository here: https://github.com/drainingsun/ybat
 
-Anything added to the YBAT code is also MIT license with the license below:
+All the novel code is MIT license:
 
 Copyright (c) 2025 Aircortex.com
 

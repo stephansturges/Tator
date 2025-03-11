@@ -57,8 +57,8 @@ If the guess is wrong, remove "auto mode" and make the bbox manually.
 
 Messing around a bit on some of my local datasets I can get >95% confidence in the CLIP suggestions, which makes manual annotation a LOT easier. 
 
-You can also use SAM mode (which needs remaning) to create a bounding box with SAM: just drag a bounding box and wait a second, and SAM will refine it for you.
-You can also use Point mode, which uses SAM with a single "spot" annotation to suggest a bounding box.
+You can also use "SAM mode" (which needs renaning to something like "SAM bbox mode") to create a bounding box with SAM: just drag a bounding box and wait a second, and SAM will refine it for you.
+You can also use "Point mode", which uses SAM with a single "spot" annotation to suggest a bounding box.
 
 Each one of these SAM-based bbox-suggestion-modes can ALSO be combined with "auto mode", in which case you get the bbox from SAM and the class label from CLIP, for lighting-fast new-data annotation!
 

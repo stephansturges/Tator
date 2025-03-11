@@ -80,6 +80,7 @@ Make requirements.txt + add install explanations (especially CLIP)
 
 Thanks to @drainingsun for a nice clean tool with YBAT!
 Thanks to OpenAI and Meta for the amazing free tools :) 
+Thanks to Dimitri Shteizel for the example image from Pexels https://www.pexels.com/photo/cars-on-car-park-13431628/
 
 
 ## Licenses

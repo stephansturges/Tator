@@ -232,6 +232,38 @@ def sam2_bbox_auto(prompt: BboxPrompt):
         uuid=prompt.uuid
     )
 
+@app.post("/sam2_point_auto", response_model=SamPointAutoResponse)
+def sam2_point_auto(prompt: PointPrompt):
+    data = base64.b64decode(prompt.image_base64)
+    pil_img = Image.open(BytesIO(data)).convert("RGB")
+    np_img = np.array(pil_img)
+    set_image_if_needed(np_img)
+    coords = np.array([[prompt.point_x, prompt.point_y]])
+    labels = np.array([1])
+    masks,_,_ = predictor.predict(
+        point_coords=coords,
+        point_labels=labels,
+        multimask_output=False
+    )
+    mask = masks[0]
+    left, top, right, bottom = mask_to_bounding_box(mask)
+    yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+    li = max(0,int(left))
+    ti = max(0,int(top))
+    ri = min(pil_img.width,int(right))
+    bi = min(pil_img.height,int(bottom))
+    if ri<=li or bi<=ti:
+        return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid)
+    subarr = np_img[ti:bi, li:ri, :]
+    final_pil = Image.fromarray(subarr)
+    inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
+    with torch.no_grad():
+        feats = clip_model.encode_image(inp)
+    feats = feats / feats.norm(dim=-1, keepdim=True)
+    feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
+    pred_cls = clf.predict(feats_np)[0]
+    return SamPointAutoResponse(prediction=str(pred_cls), bbox=yolo_box, uuid=prompt.uuid)
+
 @app.post("/sam2_bbox", response_model=YoloBboxOutput)
 def sam2_bbox(prompt: BboxPrompt):
     data = base64.b64decode(prompt.image_base64)

@@ -28,7 +28,11 @@ OK so let's train the CLIP logistic regression.
 
 For this you will need a set of data in YOLO format, and you'll need to open the ybat.html file in ./ybat-master/ in your browser.
 
-Next, load a set of labeled images, their labelmap and their bounding boxes in the main tool, then click "crop&save", then wait for the .zip to be exported. 
+Then fire up the backend by running this from the main folder:
+
+uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
+
+Next, load a set of labeled images, their labelmap and their bounding boxes in the main tool, then click "crop&save", then wait for the .zip to be exported. This can take some time depending on the size of the dataset and it might look like it's frozen, just wait a bit!
 
 Save the .zip in your root file of this tool (next to clip_kmeans_and_regress.py) and unzip it so that the contents are in ./crops/
 

@@ -1,4 +1,4 @@
-import base64, hashlib, io, zipfile, math, uuid
+import base64, hashlib, io, zipfile, math, uuid, os
 import numpy as np
 from typing import Optional, List, Dict
 import torch, clip, joblib
@@ -9,38 +9,61 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from segment_anything import sam_model_registry, SamPredictor
-
-# 1) Add threading for the lock
 import threading
 
-job_store: Dict[str, List["CropImage"]] = {}
+# ----------------------------------------------------------------
+# 1) Define a global error message and a global load-flag for CLIP
+ERROR_MESSAGE = 0 # messy hack, making this an int because of the way we parse it later... the message has actually just been moved to the JS and appears when bbox uuid is None
+clip_initialized = True
+# ----------------------------------------------------------------
+
+# 2) Attempt to load the logistic regression model (.pkl)
 MODEL_PATH = "./my_logreg_model.pkl"
+clf = None
+if os.path.exists(MODEL_PATH):
+    try:
+        print("Loading logistic regression...")
+        clf = joblib.load(MODEL_PATH)
+    except Exception as e:
+        print(f"Failed to load logistic regression model: {e}")
+        clip_initialized = False
+else:
+    print(f"File {MODEL_PATH} not found.")
+    clip_initialized = False
+
+# 3) Attempt to load the CLIP model
 device = "cuda" if torch.cuda.is_available() else "cpu"
+clip_model = None
+clip_preprocess = None
+try:
+    print("Loading CLIP model...")
+    clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+except Exception as e:
+    print(f"Failed to load CLIP model: {e}")
+    clip_initialized = False
 
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-print("Loading CLIP model...")
-clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
-print("Loading logistic regression...")
-clf = joblib.load(MODEL_PATH)
-
+# 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = "vit_h"
 CHECKPOINT_PATH = "./sam_vit_h_4b8939.pth"
 sam_model = sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH)
 predictor = SamPredictor(sam_model)
 
+# 5) Threading lock for SAM usage:
+sam_lock = threading.Lock()
+
+job_store: Dict[str, List["CropImage"]] = {}
+
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
 # Cache for repeated calls
 last_image_hash = None
 last_image_np = None
 
-# 2) Create a lock for synchronizing set_image calls
-sam_lock = threading.Lock()
-
 def set_image_if_needed(np_img: np.ndarray):
     global last_image_hash, last_image_np
     new_hash = hashlib.md5(np_img.tobytes()).hexdigest()
-    with sam_lock:  # 3) Acquire lock before changing global state
+    with sam_lock:
         if new_hash != last_image_hash:
             predictor.set_image(np_img)
             last_image_np = np_img
@@ -115,6 +138,10 @@ def to_yolo(w: int, h: int, left: int, top: int, right: int, bottom: int) -> Lis
 
 @app.post("/predict_base64", response_model=PredictResponse)
 def predict_base64(payload: Base64Payload):
+    # If CLIP/logreg not loaded, return error message in "prediction"
+    if not clip_initialized:
+        return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None) # messy ... returning the error message int as str. Crap logic needs cleanup
+
     data = base64.b64decode(payload.image_base64)
     pil_img = Image.open(BytesIO(data)).convert("RGB")
     inp = clip_preprocess(pil_img).unsqueeze(0).to(device)
@@ -126,10 +153,19 @@ def predict_base64(payload: Base64Payload):
     return PredictResponse(prediction=pred_cls, uuid=payload.uuid)
 
 
-
+# note this one is actually not used. For a while I thought it would be cool to send a smaller crop to SAM but I'm not sure it makes sense since
+# now I'm caching / checking the file that is currently loaded in the predictor and not updating on every call so it's actually waaaay faster and we have the whole image
 @app.post("/predict_crop", response_model=PredictResponse)
-def predict_crop(file: UploadFile = File(...), x: int = Form(...), y: int = Form(...),
-                 w: int = Form(...), h: int = Form(...)):
+def predict_crop(file: UploadFile = File(...),
+                 x: int = Form(...),
+                 y: int = Form(...),
+                 w: int = Form(...),
+                 h: int = Form(...)):
+
+    if not clip_initialized:
+        # Return the error message in the "prediction"
+        return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None) # messy ... returning the error message int as str. Crap logic needs cleanup
+
     image_bytes = file.file.read()
     pil_img = Image.open(BytesIO(image_bytes)).convert("RGB")
     cropped = pil_img.crop((x, y, x+w, y+h))
@@ -143,6 +179,8 @@ def predict_crop(file: UploadFile = File(...), x: int = Form(...), y: int = Form
 
 @app.post("/sam2_point", response_model=YoloBboxOutput)
 def sam2_point(prompt: PointPrompt):
+    
+
     data = base64.b64decode(prompt.image_base64)
     pil_img = Image.open(BytesIO(data)).convert("RGB")
     np_img = np.array(pil_img)
@@ -163,69 +201,51 @@ class SamPointAutoResponse(BaseModel):
     prediction: str
     bbox: List[float]
     uuid: Optional[str] = None
+
 @app.post("/sam2_bbox_auto", response_model=SamPointAutoResponse)
 def sam2_bbox_auto(prompt: BboxPrompt):
+
+    if not clip_initialized:
+        return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
+
     data = base64.b64decode(prompt.image_base64)
     pil_img = Image.open(BytesIO(data)).convert("RGB")
     np_img = np.array(pil_img)
-
-    # Ensure the SAM predictor has the correct image
     set_image_if_needed(np_img)
-
     full_h, full_w = pil_img.height, pil_img.width
-
-    # Build the bounding box from the prompt
     left = max(0, prompt.bbox_left)
     top = max(0, prompt.bbox_top)
     right = min(full_w, left + prompt.bbox_width)
     bottom = min(full_h, top + prompt.bbox_height)
-
-    # If it's clearly invalid, return "unknown"
     if right <= left or bottom <= top:
         return SamPointAutoResponse(
             prediction="unknown",
             bbox=[0, 0, 0, 0],
             uuid=prompt.uuid
         )
-
-    # Use the bounding box to get a mask from the SAM predictor
     sub_box = np.array([left, top, right, bottom], dtype=np.float32)
     masks, _, _ = predictor.predict(box=sub_box, multimask_output=False)
-
-    # Convert the mask to a bounding box, then to YOLO format
     mask = masks[0]
     x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
-
-    # Clamp and check
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
     gx_max_i = min(full_w, int(x_max))
     gy_max_i = min(full_h, int(y_max))
-
-    # If the mask bounding box is invalid, label as "unknown"
     if gx_max_i <= gx_min_i or gy_max_i <= gy_min_i:
         return SamPointAutoResponse(
             prediction="unknown",
             bbox=yolo_box,
             uuid=prompt.uuid
         )
-
-    # Crop for CLIP classification
     subarr = np_img[gy_min_i:gy_max_i, gx_min_i:gx_max_i, :]
     final_pil = Image.fromarray(subarr)
-
-    # Same CLIP logic as sam2_point_auto
     inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
     with torch.no_grad():
         feats = clip_model.encode_image(inp)
     feats = feats / feats.norm(dim=-1, keepdim=True)
     feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-
-    # Classify
     pred_cls = clf.predict(feats_np)[0]
-
-    # Return as string, just like in sam2_point_auto
     return SamPointAutoResponse(
         prediction=str(pred_cls),
         bbox=yolo_box,
@@ -234,6 +254,9 @@ def sam2_bbox_auto(prompt: BboxPrompt):
 
 @app.post("/sam2_point_auto", response_model=SamPointAutoResponse)
 def sam2_point_auto(prompt: PointPrompt):
+    if not clip_initialized:
+        return YoloBboxClassOutput(class_id=ERROR_MESSAGE, bbox=[], uuid=None)
+
     data = base64.b64decode(prompt.image_base64)
     pil_img = Image.open(BytesIO(data)).convert("RGB")
     np_img = np.array(pil_img)
@@ -264,125 +287,97 @@ def sam2_point_auto(prompt: PointPrompt):
     pred_cls = clf.predict(feats_np)[0]
     return SamPointAutoResponse(prediction=str(pred_cls), bbox=yolo_box, uuid=prompt.uuid)
 
-
 @app.post("/sam2_bbox", response_model=YoloBboxOutput)
 def sam2_bbox(prompt: BboxPrompt):
+    
     data = base64.b64decode(prompt.image_base64)
     pil_img = Image.open(BytesIO(data)).convert("RGB")
     np_img = np.array(pil_img)
-
-    # Make sure SAM is using this image if needed
     set_image_if_needed(np_img)
-
     full_h, full_w = pil_img.height, pil_img.width
-
-    # Match the same bounding-box logic as "sam2_bbox_auto"
     left = max(0, prompt.bbox_left)
     top = max(0, prompt.bbox_top)
     right = min(full_w, left + prompt.bbox_width)
     bottom = min(full_h, top + prompt.bbox_height)
-
-    # Reject invalid bounding-box requests
     if right <= left or bottom <= top:
         return YoloBboxOutput(
             class_id="0",
             bbox=[0, 0, 0, 0],
             uuid=prompt.uuid
         )
-
-    # Use the bounding box to get a mask from the SAM predictor
     sub_box = np.array([left, top, right, bottom], dtype=np.float32)
     masks, _, _ = predictor.predict(box=sub_box, multimask_output=False)
-
-    # Convert SAM's mask to a bounding box, then to YOLO
     mask = masks[0]
     x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
-
-    # Check that the resulting bounding box is valid
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
     gx_max_i = min(full_w, int(x_max))
     gy_max_i = min(full_h, int(y_max))
-
-    # If the bounding box from the mask is invalid, return zeros
     if gx_max_i <= gx_min_i or gy_max_i <= gy_min_i:
         return YoloBboxOutput(
             class_id="0",
             bbox=yolo_box,
             uuid=prompt.uuid
         )
-
-    # Return the YOLO-formatted bounding box; no CLIP classification here
     return YoloBboxOutput(
         class_id="0",
         bbox=yolo_box,
         uuid=prompt.uuid
     )
 
-
 @app.post("/sam2_bbox_auto", response_model=YoloBboxClassOutput)
 def sam2_bbox_auto(prompt: BboxPrompt):
+    if not clip_initialized:
+        return YoloBboxClassOutput(class_id=ERROR_MESSAGE, bbox=[], uuid=None)
+
+
+    # For classification mapping
+    class_map = {"unknown": 0}
+
     data = base64.b64decode(prompt.image_base64)
     pil_img = Image.open(BytesIO(data)).convert("RGB")
     np_img = np.array(pil_img)
     set_image_if_needed(np_img)
 
-    # ----- BBOX LOGIC (unchanged) -----
     full_h, full_w = pil_img.height, pil_img.width
     left = max(0, prompt.bbox_left)
     top = max(0, prompt.bbox_top)
     right = min(full_w, left + prompt.bbox_width)
     bottom = min(full_h, top + prompt.bbox_height)
-
     if right <= left or bottom <= top:
         return YoloBboxClassOutput(
             class_id=class_map.get("unknown", 0),
             bbox=[0, 0, 0, 0],
             uuid=prompt.uuid
         )
-
     sub_box = np.array([left, top, right, bottom], dtype=np.float32)
     masks, _, _ = predictor.predict(
         box=sub_box,
         multimask_output=False
     )
-
-    # Convert mask to a bounding box, then to YOLO format
     mask = masks[0]
     x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
-
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
     gx_max_i = min(full_w, int(x_max))
     gy_max_i = min(full_h, int(y_max))
-
     if gx_max_i <= gx_min_i or gy_max_i <= gy_min_i:
         return YoloBboxClassOutput(
             class_id=class_map.get("unknown", 0),
             bbox=yolo_box,
             uuid=prompt.uuid
         )
-    # -----------------------------------
-
-    # ----- CLIP CLASSIFICATION -----
     subarr = np_img[gy_min_i:gy_max_i, gx_min_i:gx_max_i, :]
     final_pil = Image.fromarray(subarr)
     inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
-
     with torch.no_grad():
         feats = clip_model.encode_image(inp)
     feats = feats / feats.norm(dim=-1, keepdim=True)
     feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-    
-    # predict() returns a string like "Building"
     pred_label = clf.predict(feats_np)[0]
-
-    # Convert string label to integer ID
     class_id = class_map.get(pred_label, 0)
-
-    # Return in the YoloBboxClassOutput format
     return YoloBboxClassOutput(
         class_id=class_id,
         bbox=yolo_box,
@@ -407,7 +402,7 @@ def crop_zip_finalize(jobId: str):
     if jobId not in job_store:
         raise HTTPException(status_code=400, detail="Invalid jobId")
     all_images = job_store[jobId]
-    if len(all_images)==0:
+    if len(all_images) == 0:
         empty_buffer = io.BytesIO()
         with zipfile.ZipFile(empty_buffer, mode="w") as zf:
             pass
@@ -432,7 +427,7 @@ def crop_zip_finalize(jobId: str):
                 right = max(0, min(right, pil_img.width))
                 top = max(0, min(top, pil_img.height))
                 bottom = max(0, min(bottom, pil_img.height))
-                if right<=left or bottom<=top:
+                if right <= left or bottom <= top:
                     continue
                 sub_img = pil_img.crop((left, top, right, bottom))
                 stem = cropImage.originalName.rsplit(".",1)[0]

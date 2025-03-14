@@ -101,80 +101,8 @@
     // 4) We'll add a helper function to create a local crop (base64) from the canvas
     //    for the newly drawn bbox, then call the Python API for a predicted class
     // ----------------------------------------------------------------------------
-    async function autoPredictNewCrop(bbox) {
-        const offCanvas = document.createElement("canvas");
-        offCanvas.width = bbox.width;
-        offCanvas.height = bbox.height;
-        const ctx = offCanvas.getContext("2d");
-        ctx.drawImage(
-            currentImage.object,
-            bbox.x, bbox.y, bbox.width, bbox.height,
-            0, 0, bbox.width, bbox.height
-        );
-        const base64String = offCanvas.toDataURL("image/jpeg");
-        const base64Data = base64String.split(',')[1];
-        try {
-            // -----------------------------------------
-            // UPDATED CODE: Include bbox.uuid in request body
-            // -----------------------------------------
-            const resp = await fetch("http://localhost:8000/predict_base64", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    image_base64: base64Data,
-                    uuid: bbox.uuid
-                }),
-            });
-            const data = await resp.json();
-            const predictedClass = data.prediction;
-
-            // -----------------------------------------
-            // UPDATED CODE: Get the returned UUID and find the correct bbox
-            // -----------------------------------------
-            const returnedUUID = data.uuid;
-            const targetBbox = pendingApiBboxes[returnedUUID];
-            if (!targetBbox) {
-                console.warn("No pending bbox found for uuid:", returnedUUID);
-                return;
-            }
-            // Make that bbox “currentBbox”
-            currentBbox = {
-                bbox: targetBbox,
-                index: -1, // re-compute index below if needed
-                originalX: targetBbox.x,
-                originalY: targetBbox.y,
-                originalWidth: targetBbox.width,
-                originalHeight: targetBbox.height,
-                moving: false,
-                resizing: null
-            };
-
-            // Same logic as before: remove from old class array
-            const oldClass = targetBbox.class;
-            const oldArr = bboxes[currentImage.name][oldClass];
-            const idx = oldArr.indexOf(targetBbox);
-            if (idx !== -1) {
-                oldArr.splice(idx, 1);
-            }
-
-            // Add to new predicted class
-            if (!bboxes[currentImage.name][predictedClass]) {
-                bboxes[currentImage.name][predictedClass] = [];
-            }
-            targetBbox.class = predictedClass;
-            bboxes[currentImage.name][predictedClass].push(targetBbox);
-
-            console.log("Auto-assigned class:", predictedClass,
-                        "→ numeric index:", classes[predictedClass]);
-
-            // Once updated, remove from pending queue
-            delete pendingApiBboxes[returnedUUID];
-
-        } catch (e) {
-            console.error("Error calling API: ", e);
-            alert("Error calling prediction API");
-        }
-    }
+    
+    // First we have the functions that only predict a bbox using SAM
 
     async function sam2BboxPrompt(bbox) {
         const base64Img = await extractBase64Image();
@@ -245,96 +173,332 @@
         }
     }
 
-    async function sam2BboxAutoPrompt(bbox) {
-        // 1) Extract entire image as base64
-        const base64Img = await extractBase64Image();
-      
-        // 2) Build request with the bounding box coords + uuid
-        const bodyData = {
-          image_base64: base64Img,
-          bbox_left: bbox.x,
-          bbox_top: bbox.y,
-          bbox_width: bbox.width,
-          bbox_height: bbox.height,
-          uuid: bbox.uuid
-        };
-      
+    
+    async function sam2PointPrompt(px, py) {
         try {
-          // 3) POST to /sam2_bbox_auto => { "prediction": <string>, "bbox": [...], "uuid": ... }
-          const resp = await fetch("http://localhost:8000/sam2_bbox_auto", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(bodyData)
-          });
-          if (!resp.ok) {
-            throw new Error("sam2_bbox_auto error: " + resp.statusText);
-          }
-          const result = await resp.json();
-          console.log("sam2_bbox_auto returned:", result);
-      
-          // 4) Connect the returned uuid => the pendingApiBboxes
-          const returnedUUID = result.uuid;
-          const targetBbox = pendingApiBboxes[returnedUUID];
-          if (!targetBbox) {
-            console.warn("No pending bbox found for uuid:", returnedUUID);
-            return;
-          }
-      
-          currentBbox = {
-            bbox: targetBbox,
-            index: -1,
-            originalX: targetBbox.x,
-            originalY: targetBbox.y,
-            originalWidth: targetBbox.width,
-            originalHeight: targetBbox.height,
-            moving: false,
-            resizing: null
-          };
-      
-          // 5) If we got a bounding box => update geometry & class
-          if (result.bbox) {
+            const base64Img = await extractBase64Image();
+            const bodyData = {
+                image_base64: base64Img,
+                point_x: px,
+                point_y: py,
+                uuid: currentBbox ? currentBbox.bbox.uuid : null
+            };
+            const resp = await fetch("http://localhost:8000/sam2_point", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(bodyData)
+            });
+            if (!resp.ok) {
+                throw new Error("sam2_point failed: " + resp.statusText);
+            }
+            const result = await resp.json();
+            const returnedUUID = result.uuid;
+            const targetBbox = pendingApiBboxes[returnedUUID];
+            if (!targetBbox) {
+                console.warn("No pending bbox found for uuid:", returnedUUID);
+                return;
+            }
+            // Mark that bbox as current
+            currentBbox = {
+                bbox: targetBbox,
+                index: -1,
+                originalX: targetBbox.x,
+                originalY: targetBbox.y,
+                originalWidth: targetBbox.width,
+                originalHeight: targetBbox.height,
+                moving: false,
+                resizing: null
+            };
+
+            if (!result.bbox) {
+                console.warn("No 'bbox' field in sam2_point response:", result);
+                return;
+            }
             const [cx, cy, wNorm, hNorm] = result.bbox;
             const absW = wNorm * currentImage.width;
             const absH = hNorm * currentImage.height;
             const absX = cx * currentImage.width - absW / 2;
             const absY = cy * currentImage.height - absH / 2;
-      
-            // Remove from old class
-            const oldClass = targetBbox.class;
-            const oldArr = bboxes[currentImage.name][oldClass];
-            const idx = oldArr.indexOf(targetBbox);
-            if (idx !== -1) {
-              oldArr.splice(idx, 1);
-            }
-      
-            // 6) Reassign to new class => 'result.prediction'
-            const newClass = result.prediction;  // same as autoPredictNewCrop
-            if (!bboxes[currentImage.name][newClass]) {
-              bboxes[currentImage.name][newClass] = [];
-            }
-            targetBbox.class = newClass;
-            bboxes[currentImage.name][newClass].push(targetBbox);
-      
+
             // Overwrite geometry
             targetBbox.x = absX;
             targetBbox.y = absY;
             targetBbox.width = absW;
             targetBbox.height = absH;
-      
+
             updateBboxAfterTransform();
-            console.log("sam2_bbox_auto => updated box:", absX, absY, absW, absH, "class:", newClass);
-          } else {
-            console.warn("sam2_bbox_auto => no 'bbox' returned?", result);
-          }
-      
-          // 7) Remove from pending
-          delete pendingApiBboxes[returnedUUID];
-      
+            console.log("Updated existing bbox from point mode:", absX, absY, absW, absH);
+
+            // Done => remove from pending
+            delete pendingApiBboxes[returnedUUID];
+
         } catch (err) {
-          console.error("sam2BboxAutoPrompt error:", err);
-          alert("sam2BboxAutoPrompt call failed: " + err);
+            console.error("sam2PointPrompt error:", err);
+            alert("sam2PointPrompt call failed: " + err);
         }
-      }
+    }
+
+
+        // then we have the calls which use CLIP for full-auto class and bbox
+    /*------------------------------------------------------------------
+    1) autoPredictNewCrop → calls /predict_base64
+        Expects JSON: { "prediction": string, "uuid": string? }
+        If “uuid” is missing => interpret as an error
+    ------------------------------------------------------------------*/
+    async function autoPredictNewCrop(bbox) {
+        // Create an offscreen canvas to crop the region
+        const offCanvas = document.createElement("canvas");
+        offCanvas.width = bbox.width;
+        offCanvas.height = bbox.height;
+        const ctx = offCanvas.getContext("2d");
+        ctx.drawImage(
+        currentImage.object,
+        bbox.x,
+        bbox.y,
+        bbox.width,
+        bbox.height,
+        0,
+        0,
+        bbox.width,
+        bbox.height
+        );
+    
+        // Convert crop to base64
+        const base64String = offCanvas.toDataURL("image/jpeg");
+        const base64Data = base64String.split(",")[1];
+    
+        // Call /predict_base64
+        const resp = await fetch("http://localhost:8000/predict_base64", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            image_base64: base64Data,
+            uuid: bbox.uuid
+        })
+        });
+        const data = await resp.json();
+        console.log("autoPredictNewCrop =>", data);
+    
+        // Check if “uuid” is missing or null => treat as error
+        if (!data.uuid) {
+        alert("Auto mode error: you probably don't have a trained .pkl file for CLIP! You can still use the SAM modes to create automatic bounding boxes but you won't be able to use the Auto Mode class predictions. See Readme to train your CLIP!");
+        removeBbox(bbox);
+        return;
+        }
+    
+        // Normal flow: update the bounding box’s class
+        const predictedClass = data.prediction;
+        const returnedUUID = data.uuid;
+        const targetBbox = pendingApiBboxes[returnedUUID];
+        if (!targetBbox) {
+        console.warn("No pending bbox found for uuid:", returnedUUID);
+        return;
+        }
+    
+        // Make that bbox “currentBbox”
+        currentBbox = {
+        bbox: targetBbox,
+        index: -1,
+        originalX: targetBbox.x,
+        originalY: targetBbox.y,
+        originalWidth: targetBbox.width,
+        originalHeight: targetBbox.height,
+        moving: false,
+        resizing: null
+        };
+    
+        // Remove from the old class array
+        const oldClass = targetBbox.class;
+        const oldArr = bboxes[currentImage.name][oldClass];
+        const idx = oldArr.indexOf(targetBbox);
+        if (idx !== -1) {
+        oldArr.splice(idx, 1);
+        }
+    
+        // Add to the new predicted class
+        if (!bboxes[currentImage.name][predictedClass]) {
+        bboxes[currentImage.name][predictedClass] = [];
+        }
+        targetBbox.class = predictedClass;
+        bboxes[currentImage.name][predictedClass].push(targetBbox);
+    
+        // Remove from pending
+        delete pendingApiBboxes[returnedUUID];
+    }
+    
+    /*------------------------------------------------------------------
+        2) sam2BboxAutoPrompt → calls /sam2_bbox_auto
+        Expects JSON: { "prediction": string, "bbox": <array of 4>, "uuid": string? }
+        If “uuid” is missing or .bbox has fewer than 4 values => error
+    ------------------------------------------------------------------*/
+    async function sam2BboxAutoPrompt(bbox) {
+        // Convert the entire image to base64
+        const base64Img = await extractBase64Image();
+    
+        // Build request
+        const bodyData = {
+        image_base64: base64Img,
+        bbox_left: bbox.x,
+        bbox_top: bbox.y,
+        bbox_width: bbox.width,
+        bbox_height: bbox.height,
+        uuid: bbox.uuid
+        };
+    
+        // Call /sam2_bbox_auto
+        const resp = await fetch("http://localhost:8000/sam2_bbox_auto", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyData)
+        });
+        const result = await resp.json();
+        console.log("sam2_bbox_auto =>", result);
+    
+        // Check if missing .uuid or invalid .bbox => treat as error
+        if (!result.uuid || !result.bbox || result.bbox.length < 4) {
+        alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_bbox_auto response.");
+        removeBbox(bbox);
+        return;
+        }
+    
+        // Find the corresponding bounding box
+        const returnedUUID = result.uuid;
+        const targetBbox = pendingApiBboxes[returnedUUID];
+        if (!targetBbox) {
+        console.warn("No pending bbox found for uuid:", returnedUUID);
+        return;
+        }
+    
+        // Mark as current
+        currentBbox = {
+        bbox: targetBbox,
+        index: -1,
+        originalX: targetBbox.x,
+        originalY: targetBbox.y,
+        originalWidth: targetBbox.width,
+        originalHeight: targetBbox.height,
+        moving: false,
+        resizing: null
+        };
+    
+        // Parse the new bbox geometry
+        const [cx, cy, wNorm, hNorm] = result.bbox;
+        const absW = wNorm * currentImage.width;
+        const absH = hNorm * currentImage.height;
+        const absX = cx * currentImage.width - absW / 2;
+        const absY = cy * currentImage.height - absH / 2;
+    
+        // Remove from old class
+        const oldClass = targetBbox.class;
+        const oldArr = bboxes[currentImage.name][oldClass];
+        const idx = oldArr.indexOf(targetBbox);
+        if (idx !== -1) {
+        oldArr.splice(idx, 1);
+        }
+    
+        // Reassign class => .prediction
+        const newClass = result.prediction;
+        if (!bboxes[currentImage.name][newClass]) {
+        bboxes[currentImage.name][newClass] = [];
+        }
+        targetBbox.class = newClass;
+        bboxes[currentImage.name][newClass].push(targetBbox);
+    
+        // Overwrite geometry
+        targetBbox.x = absX;
+        targetBbox.y = absY;
+        targetBbox.width = absW;
+        targetBbox.height = absH;
+        updateBboxAfterTransform();
+    
+        // Remove from pending
+        delete pendingApiBboxes[returnedUUID];
+    }
+    
+    /*------------------------------------------------------------------
+        3) sam2PointAutoPrompt → calls /sam2_point_auto
+        Expects JSON: { "prediction": string, "bbox": <array of 4>, "uuid": string? }
+        If “uuid” is missing or .bbox is invalid => error
+    ------------------------------------------------------------------*/
+    async function sam2PointAutoPrompt(px, py) {
+        // Convert entire currentImage to base64
+        const base64Img = await extractBase64Image();
+    
+        // Build request body
+        const bodyData = {
+        image_base64: base64Img,
+        point_x: px,
+        point_y: py,
+        uuid: currentBbox ? currentBbox.bbox.uuid : null
+        };
+    
+        // Call /sam2_point_auto
+        const resp = await fetch("http://localhost:8000/sam2_point_auto", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyData)
+        });
+        const result = await resp.json();
+        console.log("sam2_point_auto =>", result);
+    
+        // Check for missing .uuid or invalid .bbox
+        if (!result.uuid || !result.bbox || result.bbox.length < 4) {
+        alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_point_auto response.");
+        removeBbox(currentBbox.bbox);
+        return;
+        }
+    
+        const returnedUUID = result.uuid;
+        const targetBbox = pendingApiBboxes[returnedUUID];
+        if (!targetBbox) {
+        console.warn("No pending bbox found for uuid:", returnedUUID);
+        return;
+        }
+    
+        // Mark it as currentBbox
+        currentBbox = {
+        bbox: targetBbox,
+        index: -1,
+        originalX: targetBbox.x,
+        originalY: targetBbox.y,
+        originalWidth: targetBbox.width,
+        originalHeight: targetBbox.height,
+        moving: false,
+        resizing: null
+        };
+    
+        // Update geometry
+        const [cx, cy, wNorm, hNorm] = result.bbox;
+        const absW = wNorm * currentImage.width;
+        const absH = hNorm * currentImage.height;
+        const absX = cx * currentImage.width - absW / 2;
+        const absY = cy * currentImage.height - absH / 2;
+    
+        // Remove from old class
+        const oldClass = targetBbox.class;
+        const oldArr = bboxes[currentImage.name][oldClass];
+        const idx = oldArr.indexOf(targetBbox);
+        if (idx !== -1) {
+        oldArr.splice(idx, 1);
+        }
+    
+        // Reassign to new class => result.prediction
+        const newClass = result.prediction;
+        if (!bboxes[currentImage.name][newClass]) {
+        bboxes[currentImage.name][newClass] = [];
+        }
+        targetBbox.class = newClass;
+        bboxes[currentImage.name][newClass].push(targetBbox);
+    
+        targetBbox.x = absX;
+        targetBbox.y = absY;
+        targetBbox.width = absW;
+        targetBbox.height = absH;
+        updateBboxAfterTransform();
+    
+        // Remove from pending
+        delete pendingApiBboxes[returnedUUID];
+    }
 
     // A few standard parameters
     const saveInterval = 60;
@@ -1715,169 +1879,6 @@
         };
     }
 
-    // -----------------------------------------
-    // UPDATED sam2PointPrompt => include UUID in request
-    // -----------------------------------------
-    async function sam2PointPrompt(px, py) {
-        try {
-            const base64Img = await extractBase64Image();
-            const bodyData = {
-                image_base64: base64Img,
-                point_x: px,
-                point_y: py,
-                uuid: currentBbox ? currentBbox.bbox.uuid : null
-            };
-            const resp = await fetch("http://localhost:8000/sam2_point", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(bodyData)
-            });
-            if (!resp.ok) {
-                throw new Error("sam2_point failed: " + resp.statusText);
-            }
-            const result = await resp.json();
-            const returnedUUID = result.uuid;
-            const targetBbox = pendingApiBboxes[returnedUUID];
-            if (!targetBbox) {
-                console.warn("No pending bbox found for uuid:", returnedUUID);
-                return;
-            }
-            // Mark that bbox as current
-            currentBbox = {
-                bbox: targetBbox,
-                index: -1,
-                originalX: targetBbox.x,
-                originalY: targetBbox.y,
-                originalWidth: targetBbox.width,
-                originalHeight: targetBbox.height,
-                moving: false,
-                resizing: null
-            };
-
-            if (!result.bbox) {
-                console.warn("No 'bbox' field in sam2_point response:", result);
-                return;
-            }
-            const [cx, cy, wNorm, hNorm] = result.bbox;
-            const absW = wNorm * currentImage.width;
-            const absH = hNorm * currentImage.height;
-            const absX = cx * currentImage.width - absW / 2;
-            const absY = cy * currentImage.height - absH / 2;
-
-            // Overwrite geometry
-            targetBbox.x = absX;
-            targetBbox.y = absY;
-            targetBbox.width = absW;
-            targetBbox.height = absH;
-
-            updateBboxAfterTransform();
-            console.log("Updated existing bbox from point mode:", absX, absY, absW, absH);
-
-            // Done => remove from pending
-            delete pendingApiBboxes[returnedUUID];
-
-        } catch (err) {
-            console.error("sam2PointPrompt error:", err);
-            alert("sam2PointPrompt call failed: " + err);
-        }
-    }
-
-    //-----------------------------------------------
-// 1) New Frontend Function: sam2PointAutoPrompt
-//-----------------------------------------------
-async function sam2PointAutoPrompt(px, py) {
-    try {
-      // 1) Convert entire currentImage to base64
-      const base64Img = await extractBase64Image();
-  
-      // 2) Build request body
-      const bodyData = {
-        image_base64: base64Img,
-        point_x: px,
-        point_y: py,
-        uuid: currentBbox ? currentBbox.bbox.uuid : null
-      };
-  
-      // 3) Call the new /sam2_point_auto endpoint
-      const resp = await fetch("http://localhost:8000/sam2_point_auto", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyData)
-      });
-      if (!resp.ok) {
-        throw new Error("sam2_point_auto failed: " + resp.statusText);
-      }
-  
-      // 4) Response => { "prediction": <string>, "bbox": [cx,cy,w,h], "uuid": ... }
-      const result = await resp.json();
-      console.log("sam2_point_auto =>", result);
-  
-      // 5) Match uuid => pending bbox
-      const returnedUUID = result.uuid;
-      const targetBbox = pendingApiBboxes[returnedUUID];
-      if (!targetBbox) {
-        console.warn("No pending bbox found for uuid:", returnedUUID);
-        return;
-      }
-  
-      // Mark it as currentBbox
-      currentBbox = {
-        bbox: targetBbox,
-        index: -1,
-        originalX: targetBbox.x,
-        originalY: targetBbox.y,
-        originalWidth: targetBbox.width,
-        originalHeight: targetBbox.height,
-        moving: false,
-        resizing: null
-      };
-  
-      // 6) Use result.bbox => update geometry
-      if (!result.bbox) {
-        console.warn("No 'bbox' field returned from sam2_point_auto?");
-        return;
-      }
-      const [cx, cy, wNorm, hNorm] = result.bbox;
-      const absW = wNorm * currentImage.width;
-      const absH = hNorm * currentImage.height;
-      const absX = cx * currentImage.width - absW / 2;
-      const absY = cy * currentImage.height - absH / 2;
-  
-      // Remove from old class array
-      const oldClass = targetBbox.class;
-      const oldArr = bboxes[currentImage.name][oldClass];
-      const idx = oldArr.indexOf(targetBbox);
-      if (idx !== -1) {
-        oldArr.splice(idx, 1);
-      }
-  
-      // 7) Reassign the new class => result.prediction
-      const newClass = result.prediction;
-      if (!bboxes[currentImage.name][newClass]) {
-        bboxes[currentImage.name][newClass] = [];
-      }
-      targetBbox.class = newClass;
-      bboxes[currentImage.name][newClass].push(targetBbox);
-  
-      // Overwrite geometry
-      targetBbox.x = absX;
-      targetBbox.y = absY;
-      targetBbox.width = absW;
-      targetBbox.height = absH;
-  
-      // 8) Finalize geometry
-      updateBboxAfterTransform();
-      console.log("sam2_point_auto updated =>", absX, absY, absW, absH, "class:", newClass);
-  
-      // Remove from pending
-      delete pendingApiBboxes[returnedUUID];
-  
-    } catch (err) {
-      console.error("sam2PointAutoPrompt error:", err);
-      alert("sam2PointAutoPrompt call failed: " + err);
-    }
-  }
-  
 
 
 })();

@@ -8,12 +8,15 @@ This is my little Yolo annotation tool. It's super light and simple and runs loc
 ## it does this:
 
 Automatic class labeling -> 
+
 ![kap_auto_mode](https://github.com/user-attachments/assets/825a2752-c1a6-44d9-a2d4-49b145341a58)
 
 Automatic class labeling + bbox refinement ->
+
 ![Kap_auto_bbox](https://github.com/user-attachments/assets/07ee6070-c6c2-4650-b225-8159566df4af)
 
 Automatic class labeling + bbox from a single click -> 
+
 ![Kap_auto_class_point](https://github.com/user-attachments/assets/d64cccdf-da8b-47a7-81e4-d78249fc87dc)
 
 *Note* in these demos the auto class is not well trained so performance is bad, but don't take it as any indication I just in a hurry to make some GIFs and trained it on very little data!

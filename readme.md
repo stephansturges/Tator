@@ -23,16 +23,6 @@ Automatic class labeling + bbox from a single click -> super lazy single-click m
 
 Of course you can also just use SAM alone and get bboxes, and manually adjust everything because SAM and CLIP are not perfect!
 
-## origin
-
-Most of the frontend code is taken from YBAT, which can be found here:
-https://github.com/drainingsun/ybat
-
-See the original YBAT license here:
-https://github.com/drainingsun/ybat/blob/master/LICENSE
-
-The backend usese CLIP from OpenAI (https://github.com/openai/CLIP) and SAM from Meta (https://github.com/facebookresearch/segment-anything) to automate annotation in a super-responsive and FAST way. 
-
 ## How does it work?
 
 Basically it works like YBAT, but I just added a couple of interface changes to change some colors and allow "auto mode". 
@@ -40,7 +30,7 @@ Basically it works like YBAT, but I just added a couple of interface changes to 
 In order to run the API which serves this "auto mode" you will need to first load a YOLO-format dataset into the tool, export the dataset in the right format (one button) and then run a python script to train the "auto mode" which is just a logistic regression on top of CLIP. 
 Then you can run the API / backend which will serve your CLIP + regression as "auto class annotation" and will also serve SAM in bounding-box or point-mode. Once you have these tools combined you can annotate your data in a single click, letting SAM give you a clean boundinx box and CLIP giving you a class. Of course this won't work 100% of the time but in little experiments I get to >95% accuracy with very little data, which speeds up any remaining manual annotation by a LOT!
 
-## Let's get started!
+## Setup Tutorial!
 
 I'm assuming you've installed all dependencies. I need to write how to do that and add a requirements.txt, for now that's in the "to do" pile.
 
@@ -95,6 +85,7 @@ Need a proper requirements file, especially explaining how to install CLIP
 Need setup instructions
 Add shortcuts for missing modes
 Remove Pascal VOC export
+Clean up messy error handling in API
 Make SAM modes into radial
 Rename the 2 SAM modes to make more sense
 Add option in API to run without regression .pkl + train regression from API 
@@ -105,6 +96,15 @@ Make requirements.txt + add install explanations (especially CLIP)
 Thanks to @drainingsun for a nice clean tool with YBAT!
 Thanks to OpenAI and Meta for the amazing free tools :) 
 Thanks to Dimitri Shteizel for the example image from Pexels https://www.pexels.com/photo/cars-on-car-park-13431628/
+
+Most of the frontend code is taken from YBAT, which can be found here:
+https://github.com/drainingsun/ybat
+
+See the original YBAT license here:
+https://github.com/drainingsun/ybat/blob/master/LICENSE
+
+The backend usese CLIP from OpenAI (https://github.com/openai/CLIP) and SAM from Meta (https://github.com/facebookresearch/segment-anything) to automate annotation in a super-responsive and FAST way. 
+
 
 
 ## Licenses

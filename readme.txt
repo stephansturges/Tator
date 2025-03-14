@@ -40,7 +40,7 @@ Now run python3 clip_kmeans_and_regress.py, which will take a while depending on
 
 Once it's done you will have 2 files called my_label_list.pkl and my_logreg_model.pkl, and it will display some accuracy statistics on your label-based clustering.
 
-Now you're ready to fire up the backend which will serve your CLIP-based label-automation and SAM. You can do this by going to the terminal and running: 
+Now you're ready to restart the backend which will now serve your CLIP-based label-automation as well as SAM. You can do this by going to the terminal and running, once again:
 
 uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
 

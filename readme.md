@@ -19,9 +19,11 @@ Automatic class labeling + bbox from a single click -> super lazy single-click m
 
 ![Kap_auto_class_point](https://github.com/user-attachments/assets/d64cccdf-da8b-47a7-81e4-d78249fc87dc)
 
-*Note* in these demos the auto class is not well trained so performance is bad, but don't take it as any indication I just in a hurry to make some GIFs and trained it on very little data!
+*Note* in these demos the auto class is not well trained so performance is bad... but don't take this as an indication of real performance, I was just in a hurry to make some GIFs and trained it on very little data!
 
 Of course you can also just use SAM alone and get bboxes, and manually adjust everything because SAM and CLIP are not perfect!
+
+## origin
 
 Most of the frontend code is taken from YBAT, which can be found here:
 https://github.com/drainingsun/ybat

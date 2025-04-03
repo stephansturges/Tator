@@ -9,15 +9,15 @@ This is my little Yolo annotation tool. It's super light and simple and runs loc
 
 Automatic class labeling -> select any random class and it gets corrected by CLIP!
 
-![kap_auto_mode](https://github.com/user-attachments/assets/825a2752-c1a6-44d9-a2d4-49b145341a58)
+![gif1](https://github.com/user-attachments/assets/d9642866-3c72-4b3f-acb6-11b83e82b50b)
 
 Automatic class labeling + bbox refinement -> make a messy bbox and get it cleaned by SAM + automatic class label from CLIP!
 
-![Kap_auto_bbox](https://github.com/user-attachments/assets/07ee6070-c6c2-4650-b225-8159566df4af)
+![gif2](https://github.com/user-attachments/assets/83d04011-bb16-4edb-93f7-34321b7db77a)
 
 Automatic class labeling + bbox from a single click -> super lazy single-click mode: get a bbox from SAM and a label from CLIP!
 
-![Kap_auto_class_point](https://github.com/user-attachments/assets/d64cccdf-da8b-47a7-81e4-d78249fc87dc)
+![gif3](https://github.com/user-attachments/assets/7015451b-4453-4b42-9b0d-b458130ec8d7)
 
 *Note* in these demos the auto class is not well trained so performance is bad... but don't take this as an indication of real performance, I was just in a hurry to make some GIFs and trained it on very little data!
 

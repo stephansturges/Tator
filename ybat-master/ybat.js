@@ -43,6 +43,7 @@
     function withAlpha(color, alpha) {
         return color.replace(/(\d?\.?\d+)\)$/, `${alpha})`);
     }
+
     // Global flags for “auto mode”, “SAM mode”, “point mode”
     // plus computed “samAutoMode” (sam + auto) and “samPointAutoMode” (point + auto).
     let autoMode = false;
@@ -52,38 +53,37 @@
     let samPointAutoMode = false;
 
     document.addEventListener("DOMContentLoaded", () => {
-    const autoModeCheckbox = document.getElementById("autoMode");
-    if (autoModeCheckbox) {
-        autoModeCheckbox.addEventListener("change", () => {
-        autoMode = autoModeCheckbox.checked;
-        // update derived flags
-        samAutoMode = samMode && autoMode;
-        samPointAutoMode = pointMode && autoMode;
-        console.log("autoMode =>", autoMode, 
-                    "samAutoMode =>", samAutoMode, 
-                    "samPointAutoMode =>", samPointAutoMode);
-        });
-    }
+        const autoModeCheckbox = document.getElementById("autoMode");
+        if (autoModeCheckbox) {
+            autoModeCheckbox.addEventListener("change", () => {
+                autoMode = autoModeCheckbox.checked;
+                samAutoMode = samMode && autoMode;
+                samPointAutoMode = pointMode && autoMode;
+                console.log("autoMode =>", autoMode, 
+                            "samAutoMode =>", samAutoMode, 
+                            "samPointAutoMode =>", samPointAutoMode);
+            });
+        }
 
-    const samModeCheckbox = document.getElementById("samMode");
-    if (samModeCheckbox) {
-        samModeCheckbox.addEventListener("change", () => {
-        samMode = samModeCheckbox.checked;
-        samAutoMode = samMode && autoMode;
-        console.log("SAM mode =>", samMode, 
-                    "samAutoMode =>", samAutoMode);
-        });
-    }
+        const samModeCheckbox = document.getElementById("samMode");
+        if (samModeCheckbox) {
+            samModeCheckbox.addEventListener("change", () => {
+                samMode = samModeCheckbox.checked;
+                samAutoMode = samMode && autoMode;
+                console.log("SAM mode =>", samMode, 
+                            "samAutoMode =>", samAutoMode);
+            });
+        }
 
-    const pointModeCheckbox = document.getElementById("pointMode");
-    if (pointModeCheckbox) {
-        pointModeCheckbox.addEventListener("change", () => {
-        pointMode = pointModeCheckbox.checked;
-        samPointAutoMode = pointMode && autoMode;
-        console.log("pointMode =>", pointMode, 
-                    "samPointAutoMode =>", samPointAutoMode);
-        });
-    }
+        const pointModeCheckbox = document.getElementById("pointMode");
+        if (pointModeCheckbox) {
+            pointModeCheckbox.addEventListener("change", () => {
+                pointMode = pointModeCheckbox.checked;
+                samPointAutoMode = pointMode && autoMode;
+                console.log("pointMode =>", pointMode, 
+                            "samPointAutoMode =>", samPointAutoMode);
+            });
+        }
     });
 
     // Helper that extracts base64 from currentImage
@@ -97,13 +97,9 @@
         return dataUrl.split(",")[1]; // base64 only
     }
 
-    // ----------------------------------------------------------------------------
-    // 4) We'll add a helper function to create a local crop (base64) from the canvas
-    //    for the newly drawn bbox, then call the Python API for a predicted class
-    // ----------------------------------------------------------------------------
-    
-    // First we have the functions that only predict a bbox using SAM
-
+    /*****************************************************
+     * Existing SAM / CLIP calls (unchanged)
+     *****************************************************/
     async function sam2BboxPrompt(bbox) {
         const base64Img = await extractBase64Image();
         const bodyData = {
@@ -112,9 +108,6 @@
             bbox_top: bbox.y,
             bbox_width: bbox.width,
             bbox_height: bbox.height,
-            // -----------------------------------------
-            // Include the UUID
-            // -----------------------------------------
             uuid: bbox.uuid
         };
         try {
@@ -127,7 +120,6 @@
                 throw new Error("Response not OK: " + resp.statusText);
             }
             const result = await resp.json();
-            // Response should include "uuid"
             const returnedUUID = result.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
             if (!targetBbox) {
@@ -149,31 +141,24 @@
                 const [cx, cy, ww, hh] = result.bbox;
                 const absW = ww * currentImage.width;
                 const absH = hh * currentImage.height;
-                const absX = cx * currentImage.width - (absW / 2);
-                const absY = cy * currentImage.height - (absH / 2);
-
-                // Update geometry in the targetBbox
+                const absX = cx * currentImage.width - absW / 2;
+                const absY = cy * currentImage.height - absH / 2;
                 targetBbox.x = absX;
                 targetBbox.y = absY;
                 targetBbox.width = absW;
                 targetBbox.height = absH;
-
                 updateBboxAfterTransform();
                 console.log("Updated SAM bounding box:", absX, absY, absW, absH);
             } else {
                 console.warn("No 'bbox' field returned from sam2_bbox. Full response:", result);
             }
-
-            // Done => remove from pending
             delete pendingApiBboxes[returnedUUID];
-
         } catch (err) {
             console.error("sam2_bbox error:", err);
             alert("sam2_bbox call failed: " + err);
         }
     }
 
-    
     async function sam2PointPrompt(px, py) {
         try {
             const base64Img = await extractBase64Image();
@@ -198,7 +183,6 @@
                 console.warn("No pending bbox found for uuid:", returnedUUID);
                 return;
             }
-            // Mark that bbox as current
             currentBbox = {
                 bbox: targetBbox,
                 index: -1,
@@ -219,284 +203,198 @@
             const absH = hNorm * currentImage.height;
             const absX = cx * currentImage.width - absW / 2;
             const absY = cy * currentImage.height - absH / 2;
-
-            // Overwrite geometry
             targetBbox.x = absX;
             targetBbox.y = absY;
             targetBbox.width = absW;
             targetBbox.height = absH;
-
             updateBboxAfterTransform();
             console.log("Updated existing bbox from point mode:", absX, absY, absW, absH);
-
-            // Done => remove from pending
             delete pendingApiBboxes[returnedUUID];
-
         } catch (err) {
             console.error("sam2PointPrompt error:", err);
             alert("sam2PointPrompt call failed: " + err);
         }
     }
 
-
-        // then we have the calls which use CLIP for full-auto class and bbox
-    /*------------------------------------------------------------------
-    1) autoPredictNewCrop → calls /predict_base64
-        Expects JSON: { "prediction": string, "uuid": string? }
-        If “uuid” is missing => interpret as an error
-    ------------------------------------------------------------------*/
     async function autoPredictNewCrop(bbox) {
-        // Create an offscreen canvas to crop the region
         const offCanvas = document.createElement("canvas");
         offCanvas.width = bbox.width;
         offCanvas.height = bbox.height;
         const ctx = offCanvas.getContext("2d");
         ctx.drawImage(
-        currentImage.object,
-        bbox.x,
-        bbox.y,
-        bbox.width,
-        bbox.height,
-        0,
-        0,
-        bbox.width,
-        bbox.height
+            currentImage.object,
+            bbox.x,
+            bbox.y,
+            bbox.width,
+            bbox.height,
+            0,
+            0,
+            bbox.width,
+            bbox.height
         );
-    
-        // Convert crop to base64
         const base64String = offCanvas.toDataURL("image/jpeg");
         const base64Data = base64String.split(",")[1];
-    
-        // Call /predict_base64
         const resp = await fetch("http://localhost:8000/predict_base64", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            image_base64: base64Data,
-            uuid: bbox.uuid
-        })
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                image_base64: base64Data,
+                uuid: bbox.uuid
+            })
         });
         const data = await resp.json();
         console.log("autoPredictNewCrop =>", data);
-    
-        // Check if “uuid” is missing or null => treat as error
         if (!data.uuid) {
-        alert("Auto mode error: you probably don't have a trained .pkl file for CLIP! You can still use the SAM modes to create automatic bounding boxes but you won't be able to use the Auto Mode class predictions. See Readme to train your CLIP!");
-        removeBbox(bbox);
-        return;
+            alert("Auto mode error: you probably don't have a trained .pkl file for CLIP!");
+            removeBbox(bbox);
+            return;
         }
-    
-        // Normal flow: update the bounding box’s class
         const predictedClass = data.prediction;
         const returnedUUID = data.uuid;
         const targetBbox = pendingApiBboxes[returnedUUID];
         if (!targetBbox) {
-        console.warn("No pending bbox found for uuid:", returnedUUID);
-        return;
+            console.warn("No pending bbox found for uuid:", returnedUUID);
+            return;
         }
-    
-        // Make that bbox “currentBbox”
         currentBbox = {
-        bbox: targetBbox,
-        index: -1,
-        originalX: targetBbox.x,
-        originalY: targetBbox.y,
-        originalWidth: targetBbox.width,
-        originalHeight: targetBbox.height,
-        moving: false,
-        resizing: null
+            bbox: targetBbox,
+            index: -1,
+            originalX: targetBbox.x,
+            originalY: targetBbox.y,
+            originalWidth: targetBbox.width,
+            originalHeight: targetBbox.height,
+            moving: false,
+            resizing: null
         };
-    
-        // Remove from the old class array
         const oldClass = targetBbox.class;
         const oldArr = bboxes[currentImage.name][oldClass];
         const idx = oldArr.indexOf(targetBbox);
-        if (idx !== -1) {
-        oldArr.splice(idx, 1);
-        }
-    
-        // Add to the new predicted class
+        if (idx !== -1) oldArr.splice(idx, 1);
         if (!bboxes[currentImage.name][predictedClass]) {
-        bboxes[currentImage.name][predictedClass] = [];
+            bboxes[currentImage.name][predictedClass] = [];
         }
         targetBbox.class = predictedClass;
         bboxes[currentImage.name][predictedClass].push(targetBbox);
-    
-        // Remove from pending
         delete pendingApiBboxes[returnedUUID];
     }
-    
-    /*------------------------------------------------------------------
-        2) sam2BboxAutoPrompt → calls /sam2_bbox_auto
-        Expects JSON: { "prediction": string, "bbox": <array of 4>, "uuid": string? }
-        If “uuid” is missing or .bbox has fewer than 4 values => error
-    ------------------------------------------------------------------*/
+
     async function sam2BboxAutoPrompt(bbox) {
-        // Convert the entire image to base64
         const base64Img = await extractBase64Image();
-    
-        // Build request
         const bodyData = {
-        image_base64: base64Img,
-        bbox_left: bbox.x,
-        bbox_top: bbox.y,
-        bbox_width: bbox.width,
-        bbox_height: bbox.height,
-        uuid: bbox.uuid
+            image_base64: base64Img,
+            bbox_left: bbox.x,
+            bbox_top: bbox.y,
+            bbox_width: bbox.width,
+            bbox_height: bbox.height,
+            uuid: bbox.uuid
         };
-    
-        // Call /sam2_bbox_auto
         const resp = await fetch("http://localhost:8000/sam2_bbox_auto", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyData)
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bodyData)
         });
         const result = await resp.json();
         console.log("sam2_bbox_auto =>", result);
-    
-        // Check if missing .uuid or invalid .bbox => treat as error
         if (!result.uuid || !result.bbox || result.bbox.length < 4) {
-        alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_bbox_auto response.");
-        removeBbox(bbox);
-        return;
+            alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_bbox_auto response.");
+            removeBbox(bbox);
+            return;
         }
-    
-        // Find the corresponding bounding box
         const returnedUUID = result.uuid;
         const targetBbox = pendingApiBboxes[returnedUUID];
         if (!targetBbox) {
-        console.warn("No pending bbox found for uuid:", returnedUUID);
-        return;
+            console.warn("No pending bbox found for uuid:", returnedUUID);
+            return;
         }
-    
-        // Mark as current
         currentBbox = {
-        bbox: targetBbox,
-        index: -1,
-        originalX: targetBbox.x,
-        originalY: targetBbox.y,
-        originalWidth: targetBbox.width,
-        originalHeight: targetBbox.height,
-        moving: false,
-        resizing: null
+            bbox: targetBbox,
+            index: -1,
+            originalX: targetBbox.x,
+            originalY: targetBbox.y,
+            originalWidth: targetBbox.width,
+            originalHeight: targetBbox.height,
+            moving: false,
+            resizing: null
         };
-    
-        // Parse the new bbox geometry
         const [cx, cy, wNorm, hNorm] = result.bbox;
         const absW = wNorm * currentImage.width;
         const absH = hNorm * currentImage.height;
         const absX = cx * currentImage.width - absW / 2;
         const absY = cy * currentImage.height - absH / 2;
-    
-        // Remove from old class
         const oldClass = targetBbox.class;
         const oldArr = bboxes[currentImage.name][oldClass];
         const idx = oldArr.indexOf(targetBbox);
-        if (idx !== -1) {
-        oldArr.splice(idx, 1);
-        }
-    
-        // Reassign class => .prediction
+        if (idx !== -1) oldArr.splice(idx, 1);
         const newClass = result.prediction;
         if (!bboxes[currentImage.name][newClass]) {
-        bboxes[currentImage.name][newClass] = [];
+            bboxes[currentImage.name][newClass] = [];
         }
         targetBbox.class = newClass;
         bboxes[currentImage.name][newClass].push(targetBbox);
-    
-        // Overwrite geometry
         targetBbox.x = absX;
         targetBbox.y = absY;
         targetBbox.width = absW;
         targetBbox.height = absH;
         updateBboxAfterTransform();
-    
-        // Remove from pending
         delete pendingApiBboxes[returnedUUID];
     }
-    
-    /*------------------------------------------------------------------
-        3) sam2PointAutoPrompt → calls /sam2_point_auto
-        Expects JSON: { "prediction": string, "bbox": <array of 4>, "uuid": string? }
-        If “uuid” is missing or .bbox is invalid => error
-    ------------------------------------------------------------------*/
+
     async function sam2PointAutoPrompt(px, py) {
-        // Convert entire currentImage to base64
         const base64Img = await extractBase64Image();
-    
-        // Build request body
         const bodyData = {
-        image_base64: base64Img,
-        point_x: px,
-        point_y: py,
-        uuid: currentBbox ? currentBbox.bbox.uuid : null
+            image_base64: base64Img,
+            point_x: px,
+            point_y: py,
+            uuid: currentBbox ? currentBbox.bbox.uuid : null
         };
-    
-        // Call /sam2_point_auto
         const resp = await fetch("http://localhost:8000/sam2_point_auto", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyData)
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bodyData)
         });
         const result = await resp.json();
         console.log("sam2_point_auto =>", result);
-    
-        // Check for missing .uuid or invalid .bbox
         if (!result.uuid || !result.bbox || result.bbox.length < 4) {
-        alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_point_auto response.");
-        removeBbox(currentBbox.bbox);
-        return;
+            alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_point_auto response.");
+            removeBbox(currentBbox.bbox);
+            return;
         }
-    
         const returnedUUID = result.uuid;
         const targetBbox = pendingApiBboxes[returnedUUID];
         if (!targetBbox) {
-        console.warn("No pending bbox found for uuid:", returnedUUID);
-        return;
+            console.warn("No pending bbox found for uuid:", returnedUUID);
+            return;
         }
-    
-        // Mark it as currentBbox
         currentBbox = {
-        bbox: targetBbox,
-        index: -1,
-        originalX: targetBbox.x,
-        originalY: targetBbox.y,
-        originalWidth: targetBbox.width,
-        originalHeight: targetBbox.height,
-        moving: false,
-        resizing: null
+            bbox: targetBbox,
+            index: -1,
+            originalX: targetBbox.x,
+            originalY: targetBbox.y,
+            originalWidth: targetBbox.width,
+            originalHeight: targetBbox.height,
+            moving: false,
+            resizing: null
         };
-    
-        // Update geometry
         const [cx, cy, wNorm, hNorm] = result.bbox;
         const absW = wNorm * currentImage.width;
-        const absH = hNorm * currentImage.height;
+        const absH = wNorm * currentImage.height;
         const absX = cx * currentImage.width - absW / 2;
         const absY = cy * currentImage.height - absH / 2;
-    
-        // Remove from old class
         const oldClass = targetBbox.class;
         const oldArr = bboxes[currentImage.name][oldClass];
         const idx = oldArr.indexOf(targetBbox);
-        if (idx !== -1) {
-        oldArr.splice(idx, 1);
-        }
-    
-        // Reassign to new class => result.prediction
+        if (idx !== -1) oldArr.splice(idx, 1);
         const newClass = result.prediction;
         if (!bboxes[currentImage.name][newClass]) {
-        bboxes[currentImage.name][newClass] = [];
+            bboxes[currentImage.name][newClass] = [];
         }
         targetBbox.class = newClass;
         bboxes[currentImage.name][newClass].push(targetBbox);
-    
         targetBbox.x = absX;
         targetBbox.y = absY;
         targetBbox.width = absW;
         targetBbox.height = absH;
         updateBboxAfterTransform();
-    
-        // Remove from pending
         delete pendingApiBboxes[returnedUUID];
     }
 
@@ -812,15 +710,11 @@
                     mouse.buttonL = false;
                     mouse.buttonR = false;
 
-                    // If both “pointMode” and “autoMode” => samPointAutoPrompt
-                    // else just do sam2PointPrompt
                     if (samPointAutoMode) {
                         await sam2PointAutoPrompt(mouse.realX, mouse.realY);
                     } else {
                         await sam2PointPrompt(mouse.realX, mouse.realY);
                     }
-
-                    // Re-mark & transform to keep the bounding box visible
                     setBboxMarkedState();
                     if (currentBbox) {
                         updateBboxAfterTransform();
@@ -832,42 +726,31 @@
                     const movedHeight = Math.abs(mouse.realY - mouse.startRealY);
     
                     if (movedWidth > minBBoxWidth && movedHeight > minBBoxHeight) {
-                        // If we're making a new bbox
                         if (currentBbox === null) {
                             storeNewBbox(movedWidth, movedHeight);
-    
-                            // Release mouse
                             mouse.buttonL = false;
                             mouse.buttonR = false;
-    
-                            // 5) Combined logic: if (samMode && autoMode) => "sam2BboxAutoPrompt"
                             if (samMode && autoMode) {
                                 await sam2BboxAutoPrompt(currentBbox.bbox);
                             }
-                            // else if only auto => autoPredict
                             else if (autoMode) {
                                 await autoPredictNewCrop(currentBbox.bbox);
                             }
-                            // else if only SAM => sam2BboxPrompt
                             else if (samMode) {
                                 await sam2BboxPrompt(currentBbox.bbox);
                             }
                             else {
-                                // neither => finalize
                                 setBboxMarkedState();
                                 if (currentBbox) {
                                     updateBboxAfterTransform();
                                 }
                             }
-    
-                            // Re-mark & transform again to keep the bbox visible
                             setBboxMarkedState();
                             if (currentBbox) {
                                 updateBboxAfterTransform();
                             }
                         }
                         else {
-                            // Already had a bbox => finalize geometry
                             updateBboxAfterTransform();
                         }
                     }
@@ -889,21 +772,16 @@
                 }
             }
     
-            // 6) Reset mouse
             mouse.buttonR = false;
             mouse.buttonL = false;
         }
     
-        // 7) Standard movement, resizing, etc.
         moveBbox();
         resizeBbox();
         changeCursorByLocation();
         panImage(oldRealX, oldRealY);
     }
 
-    // -----------------------------------------
-    // UPDATED storeNewBbox => each new bbox gets a UUID and goes into pendingApiBboxes
-    // -----------------------------------------
     const storeNewBbox = (movedWidth, movedHeight) => {
         const bbox = {
             x: Math.min(mouse.startRealX, mouse.realX),
@@ -912,18 +790,15 @@
             height: movedHeight,
             marked: true,
             class: currentClass,
-            uuid: generateUUID() // NEW
+            uuid: generateUUID()
         };
-
-        if (typeof bboxes[currentImage.name] === "undefined") {
+        if (!bboxes[currentImage.name]) {
             bboxes[currentImage.name] = {};
         }
-        if (typeof bboxes[currentImage.name][currentClass] === "undefined") {
+        if (!bboxes[currentImage.name][currentClass]) {
             bboxes[currentImage.name][currentClass] = [];
         }
         bboxes[currentImage.name][currentClass].push(bbox);
-
-        // Mark it as the current bounding box
         currentBbox = {
             bbox: bbox,
             index: bboxes[currentImage.name][currentClass].length - 1,
@@ -934,13 +809,11 @@
             moving: false,
             resizing: null
         };
-
-        // Also add to the pending queue for when an API call updates it
         pendingApiBboxes[bbox.uuid] = bbox;
     };
 
     const updateBboxAfterTransform = () => {
-        if (currentBbox.resizing !== null) {
+        if (currentBbox && currentBbox.resizing !== null) {
             if (currentBbox.bbox.width < 0) {
                 currentBbox.bbox.width = Math.abs(currentBbox.bbox.width);
                 currentBbox.bbox.x -= currentBbox.bbox.width;
@@ -951,166 +824,150 @@
             }
             currentBbox.resizing = null;
         }
-        currentBbox.bbox.marked = true;
-        currentBbox.originalX = currentBbox.bbox.x;
-        currentBbox.originalY = currentBbox.bbox.y;
-        currentBbox.originalWidth = currentBbox.bbox.width;
-        currentBbox.originalHeight = currentBbox.bbox.height;
-        currentBbox.moving = false;
+        if (currentBbox) {
+            currentBbox.bbox.marked = true;
+            currentBbox.originalX = currentBbox.bbox.x;
+            currentBbox.originalY = currentBbox.bbox.y;
+            currentBbox.originalWidth = currentBbox.bbox.width;
+            currentBbox.originalHeight = currentBbox.bbox.height;
+            currentBbox.moving = false;
+        }
     };
 
     const setBboxMarkedState = () => {
-        if (currentBbox === null || (currentBbox.moving === false && currentBbox.resizing === null)) {
-            const currentBboxes = bboxes[currentImage.name];
+        if (!currentBbox || (!currentBbox.moving && !currentBbox.resizing)) {
+            const currentBxs = bboxes[currentImage.name];
             let wasInside = false;
             let smallestBbox = Number.MAX_SAFE_INTEGER;
-            for (let className in currentBboxes) {
-                for (let i = 0; i < currentBboxes[className].length; i++) {
-                    const bbox = currentBboxes[className][i];
-                    bbox.marked = false;
-                    const endX = bbox.x + bbox.width;
-                    const endY = bbox.y + bbox.height;
-                    const size = bbox.width * bbox.height;
-                    if (mouse.startRealX >= bbox.x && mouse.startRealX <= endX
-                        && mouse.startRealY >= bbox.y && mouse.startRealY <= endY) {
+            for (let className in currentBxs) {
+                currentBxs[className].forEach((bx, i) => {
+                    bx.marked = false;
+                    const endX = bx.x + bx.width;
+                    const endY = bx.y + bx.height;
+                    const size = bx.width * bx.height;
+                    if (
+                        mouse.startRealX >= bx.x && mouse.startRealX <= endX &&
+                        mouse.startRealY >= bx.y && mouse.startRealY <= endY
+                    ) {
                         wasInside = true;
                         if (size < smallestBbox) {
                             smallestBbox = size;
                             currentBbox = {
-                                bbox: bbox,
+                                bbox: bx,
                                 index: i,
-                                originalX: bbox.x,
-                                originalY: bbox.y,
-                                originalWidth: bbox.width,
-                                originalHeight: bbox.height,
+                                originalX: bx.x,
+                                originalY: bx.y,
+                                originalWidth: bx.width,
+                                originalHeight: bx.height,
                                 moving: false,
                                 resizing: null
                             };
                         }
                     }
-                }
+                });
             }
-            if (wasInside === false) {
+            if (!wasInside) {
                 currentBbox = null;
             }
         }
     };
 
     const moveBbox = () => {
-        if (mouse.buttonL === true && currentBbox !== null) {
-            const endX = currentBbox.bbox.x + currentBbox.bbox.width;
-            const endY = currentBbox.bbox.y + currentBbox.bbox.height;
-            if (mouse.startRealX >= (currentBbox.bbox.x + edgeSize) &&
-                mouse.startRealX <= (endX - edgeSize) &&
-                mouse.startRealY >= (currentBbox.bbox.y + edgeSize) &&
-                mouse.startRealY <= (endY - edgeSize)) {
+        if (mouse.buttonL && currentBbox) {
+            const bx = currentBbox.bbox;
+            const endX = bx.x + bx.width;
+            const endY = bx.y + bx.height;
+            if (
+                mouse.startRealX >= bx.x + edgeSize && mouse.startRealX <= endX - edgeSize &&
+                mouse.startRealY >= bx.y + edgeSize && mouse.startRealY <= endY - edgeSize
+            ) {
                 currentBbox.moving = true;
             }
-            if (currentBbox.moving === true) {
-                currentBbox.bbox.x = currentBbox.originalX + (mouse.realX - mouse.startRealX);
-                currentBbox.bbox.y = currentBbox.originalY + (mouse.realY - mouse.startRealY);
+            if (currentBbox.moving) {
+                bx.x = currentBbox.originalX + (mouse.realX - mouse.startRealX);
+                bx.y = currentBbox.originalY + (mouse.realY - mouse.startRealY);
             }
         }
     };
 
     const resizeBbox = () => {
-        if (mouse.buttonL === true && currentBbox !== null) {
-            const topLeftX = currentBbox.bbox.x;
-            const topLeftY = currentBbox.bbox.y;
-            const bottomLeftX = currentBbox.bbox.x;
-            const bottomLeftY = currentBbox.bbox.y + currentBbox.bbox.height;
-            const topRightX = currentBbox.bbox.x + currentBbox.bbox.width;
-            const topRightY = currentBbox.bbox.y;
-            const bottomRightX = currentBbox.bbox.x + currentBbox.bbox.width;
-            const bottomRightY = currentBbox.bbox.y + currentBbox.bbox.height;
+        if (mouse.buttonL && currentBbox) {
+            const bx = currentBbox.bbox;
+            const tlx = bx.x;
+            const tly = bx.y;
+            const brx = bx.x + bx.width;
+            const bry = bx.y + bx.height;
 
-            // Get correct corner
-            if (mouse.startRealX >= (topLeftX - edgeSize) && mouse.startRealX <= (topLeftX + edgeSize) &&
-                mouse.startRealY >= (topLeftY - edgeSize) && mouse.startRealY <= (topLeftY + edgeSize)) {
+            if (nearCorner(mouse.startRealX, mouse.startRealY, tlx, tly)) {
                 currentBbox.resizing = "topLeft";
-            } else if (mouse.startRealX >= (bottomLeftX - edgeSize) && mouse.startRealX <= (bottomLeftX + edgeSize) &&
-                mouse.startRealY >= (bottomLeftY - edgeSize) && mouse.startRealY <= (bottomLeftY + edgeSize)) {
+            } else if (nearCorner(mouse.startRealX, mouse.startRealY, tlx, bry)) {
                 currentBbox.resizing = "bottomLeft";
-            } else if (mouse.startRealX >= (topRightX - edgeSize) && mouse.startRealX <= (topRightX + edgeSize) &&
-                mouse.startRealY >= (topRightY - edgeSize) && mouse.startRealY <= (topRightY + edgeSize)) {
+            } else if (nearCorner(mouse.startRealX, mouse.startRealY, brx, tly)) {
                 currentBbox.resizing = "topRight";
-            } else if (mouse.startRealX >= (bottomRightX - edgeSize) && mouse.startRealX <= (bottomRightX + edgeSize) &&
-                mouse.startRealY >= (bottomRightY - edgeSize) && mouse.startRealY <= (bottomRightY + edgeSize)) {
+            } else if (nearCorner(mouse.startRealX, mouse.startRealY, brx, bry)) {
                 currentBbox.resizing = "bottomRight";
             }
 
             if (currentBbox.resizing === "topLeft") {
-                currentBbox.bbox.x = mouse.realX;
-                currentBbox.bbox.y = mouse.realY;
-                currentBbox.bbox.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
-                currentBbox.bbox.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
-            } else if (currentBbox.resizing === "bottomLeft") {
-                currentBbox.bbox.x = mouse.realX;
-                currentBbox.bbox.y = mouse.realY - (mouse.realY - currentBbox.originalY);
-                currentBbox.bbox.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
-                currentBbox.bbox.height = mouse.realY - currentBbox.originalY;
-            } else if (currentBbox.resizing === "topRight") {
-                currentBbox.bbox.x = mouse.realX - (mouse.realX - currentBbox.originalX);
-                currentBbox.bbox.y = mouse.realY;
-                currentBbox.bbox.width = mouse.realX - currentBbox.originalX;
-                currentBbox.bbox.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
-            } else if (currentBbox.resizing === "bottomRight") {
-                currentBbox.bbox.x = mouse.realX - (mouse.realX - currentBbox.originalX);
-                currentBbox.bbox.y = mouse.realY - (mouse.realY - currentBbox.originalY);
-                currentBbox.bbox.width = mouse.realX - currentBbox.originalX;
-                currentBbox.bbox.height = mouse.realY - currentBbox.originalY;
+                bx.x = mouse.realX;
+                bx.y = mouse.realY;
+                bx.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
+                bx.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
+            }
+            else if (currentBbox.resizing === "bottomLeft") {
+                bx.x = mouse.realX;
+                bx.y = mouse.realY - (mouse.realY - currentBbox.originalY);
+                bx.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
+                bx.height = mouse.realY - currentBbox.originalY;
+            }
+            else if (currentBbox.resizing === "topRight") {
+                bx.x = mouse.realX - (mouse.realX - currentBbox.originalX);
+                bx.y = mouse.realY;
+                bx.width = mouse.realX - currentBbox.originalX;
+                bx.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
+            }
+            else if (currentBbox.resizing === "bottomRight") {
+                bx.x = mouse.realX - (mouse.realX - currentBbox.originalX);
+                bx.y = mouse.realY - (mouse.realY - currentBbox.originalY);
+                bx.width = mouse.realX - currentBbox.originalX;
+                bx.height = mouse.realY - currentBbox.originalY;
             }
         }
     };
 
+    function nearCorner(px, py, cx, cy) {
+        return (px >= (cx - edgeSize) && px <= (cx + edgeSize) &&
+                py >= (cy - edgeSize) && py <= (cy + edgeSize));
+    }
+
     const changeCursorByLocation = () => {
-        if (currentImage !== null) {
-            const currentBboxes = bboxes[currentImage.name];
-            for (let className in currentBboxes) {
-                for (let i = 0; i < currentBboxes[className].length; i++) {
-                    const bbox = currentBboxes[className][i];
-                    const endX = bbox.x + bbox.width;
-                    const endY = bbox.y + bbox.height;
-                    if (mouse.realX >= (bbox.x + edgeSize) && mouse.realX <= (endX - edgeSize) &&
-                        mouse.realY >= (bbox.y + edgeSize) && mouse.realY <= (endY - edgeSize)) {
-                        document.body.style.cursor = "pointer";
-                        break;
-                    } else {
-                        document.body.style.cursor = "default";
-                    }
+        if (!currentImage) return;
+        document.body.style.cursor = "default";
+        const currentBxs = bboxes[currentImage.name];
+        for (let className in currentBxs) {
+            for (let bx of currentBxs[className]) {
+                const endX = bx.x + bx.width;
+                const endY = bx.y + bx.height;
+                if (mouse.realX >= (bx.x + edgeSize) && mouse.realX <= (endX - edgeSize) &&
+                    mouse.realY >= (bx.y + edgeSize) && mouse.realY <= (endY - edgeSize)) {
+                    document.body.style.cursor = "pointer";
+                    break;
                 }
             }
-            if (currentBbox !== null) {
-                const topLeftX = currentBbox.bbox.x;
-                const topLeftY = currentBbox.bbox.y;
-                const bottomLeftX = currentBbox.bbox.x;
-                const bottomLeftY = currentBbox.bbox.y + currentBbox.bbox.height;
-                const topRightX = currentBbox.bbox.x + currentBbox.bbox.width;
-                const topRightY = currentBbox.bbox.y;
-                const bottomRightX = currentBbox.bbox.x + currentBbox.bbox.width;
-                const bottomRightY = currentBbox.bbox.y + currentBbox.bbox.height;
-                if (mouse.realX >= (topLeftX + edgeSize) && mouse.realX <= (bottomRightX - edgeSize) &&
-                    mouse.realY >= (topLeftY + edgeSize) && mouse.realY <= (bottomRightY - edgeSize)) {
-                    document.body.style.cursor = "move";
-                } else if (mouse.realX >= (topLeftX - edgeSize) && mouse.realX <= (topLeftX + edgeSize) &&
-                    mouse.realY >= (topLeftY - edgeSize) && mouse.realY <= (topLeftY + edgeSize)) {
-                    document.body.style.cursor = "nwse-resize";
-                } else if (mouse.realX >= (bottomLeftX - edgeSize) && mouse.realX <= (bottomLeftX + edgeSize) &&
-                    mouse.realY >= (bottomLeftY - edgeSize) && mouse.realY <= (bottomLeftY + edgeSize)) {
-                    document.body.style.cursor = "nesw-resize";
-                } else if (mouse.realX >= (topRightX - edgeSize) && mouse.realX <= (topRightX + edgeSize) &&
-                    mouse.realY >= (topRightY - edgeSize) && mouse.realY <= (topRightY + edgeSize)) {
-                    document.body.style.cursor = "nesw-resize";
-                } else if (mouse.realX >= (bottomRightX - edgeSize) && mouse.realX <= (bottomRightX + edgeSize) &&
-                    mouse.realY >= (bottomRightY - edgeSize) && mouse.realY <= (bottomRightY + edgeSize)) {
-                    document.body.style.cursor = "nwse-resize";
-                }
+        }
+        if (currentBbox) {
+            const bx = currentBbox.bbox;
+            const brx = bx.x + bx.width;
+            const bry = bx.y + bx.height;
+            if (mouse.realX >= bx.x + edgeSize && mouse.realX <= brx - edgeSize &&
+                mouse.realY >= bx.y + edgeSize && mouse.realY <= bry - edgeSize) {
+                document.body.style.cursor = "move";
             }
         }
     };
 
     const panImage = (xx, yy) => {
-        if (mouse.buttonR === true) {
+        if (mouse.buttonR) {
             canvasX -= mouse.realX - xx;
             canvasY -= mouse.realY - yy;
             mouse.realX = zoomXInv(mouse.x);
@@ -1118,26 +975,17 @@
         }
     };
 
-    const zoom = (number) => {
-        return Math.floor(number * scale);
-    };
+    function zoom(n) { return Math.floor(n * scale); }
+    function zoomX(n) { return Math.floor((n - canvasX) * scale + screenX); }
+    function zoomY(n) { return Math.floor((n - canvasY) * scale + screenY); }
+    function zoomXInv(n) { return Math.floor((n - screenX) / scale + canvasX); }
+    function zoomYInv(n) { return Math.floor((n - screenY) / scale + canvasY); }
 
-    const zoomX = (number) => {
-        return Math.floor((number - canvasX) * scale + screenX);
-    };
-
-    const zoomY = (number) => {
-        return Math.floor((number - canvasY) * scale + screenY);
-    };
-
-    const zoomXInv = (number) => {
-        return Math.floor((number - screenX) * (1 / scale) + canvasX);
-    };
-
-    const zoomYInv = (number) => {
-        return Math.floor((number - screenY) * (1 / scale) + canvasY);
-    };
-
+    /******************************************************
+     * listenImageLoad
+     * We still do one pass for each file to get .width, .height
+     * But we do NOT store big .object for each file (to save memory).
+     ******************************************************/
     const listenImageLoad = () => {
         document.getElementById("images").addEventListener("change", (event) => {
             const imageList = document.getElementById("imageList");
@@ -1145,87 +993,148 @@
             if (files.length > 0) {
                 resetImageList();
                 document.body.style.cursor = "wait";
+                let fileCount = 0;
+
+                // We'll do a small function that reads dimension only:
+                function readDimensions(file) {
+                    return new Promise((resolve) => {
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            const tempImg = new Image();
+                            tempImg.onload = () => {
+                                const width = tempImg.width;
+                                const height = tempImg.height;
+                                resolve({ width, height });
+                            };
+                            tempImg.src = reader.result;
+                        };
+                        reader.readAsDataURL(file);
+                    });
+                }
+
+                // For each file => store { meta, index }, plus width/height
+                // but do NOT keep an .object
+                const promises = [];
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
                     const nameParts = file.name.split(".");
-                    if (extensions.indexOf(nameParts[nameParts.length - 1]) !== -1) {
+                    const ext = nameParts[nameParts.length - 1];
+                    if (extensions.indexOf(ext) !== -1) {
                         images[file.name] = {
                             meta: file,
-                            index: i
+                            index: fileCount,
+                            width: 0,
+                            height: 0,
+                            object: undefined // we won't store an object now
                         };
+                        fileCount++;
                         const option = document.createElement("option");
                         option.value = file.name;
                         option.innerHTML = file.name;
-                        if (i === 0) {
+                        if (fileCount === 1) {
                             option.selected = true;
                         }
                         imageList.appendChild(option);
+
+                        // read dimensions
+                        promises.push(
+                            readDimensions(file).then((dim) => {
+                                images[file.name].width = dim.width;
+                                images[file.name].height = dim.height;
+                            })
+                        );
                     }
                 }
-                const imageArray = Object.keys(images);
-                let async = imageArray.length;
-                for (let imageName in images) {
-                    const reader = new FileReader();
-                    reader.addEventListener("load", () => {
-                        const imageObject = new Image();
-                        imageObject.addEventListener("load", (ev) => {
-                            images[imageName].width = ev.target.width;
-                            images[imageName].height = ev.target.height;
-                            images[imageName].object = imageObject;
-                            if (--async === 0) {
-                                document.body.style.cursor = "default";
-                                setCurrentImage(images[imageArray[0]]);
-                                if (Object.keys(classes).length > 0) {
-                                    document.getElementById("bboxes").disabled = false;
-                                    document.getElementById("restoreBboxes").disabled = false;
-                                }
-                            }
-                        });
-                        imageObject.src = reader.result;
-                    });
-                    reader.readAsDataURL(images[imageName].meta);
-                }
+
+                Promise.all(promises).then(() => {
+                    // all dimension reads done
+                    document.body.style.cursor = "default";
+
+                    // Auto-select the first if any
+                    if (fileCount > 0) {
+                        const firstName = imageList.options[0].innerHTML;
+                        setCurrentImage(images[firstName]);
+                    }
+
+                    // If classes already loaded => enable bboxes
+                    if (Object.keys(classes).length > 0) {
+                        document.getElementById("bboxes").disabled = false;
+                        document.getElementById("restoreBboxes").disabled = false;
+                    }
+                });
             }
         });
     };
 
     const resetImageList = () => {
-        const imageList = document.getElementById("imageList");
-        imageList.innerHTML = "";
+        document.getElementById("imageList").innerHTML = "";
         images = {};
         bboxes = {};
         currentImage = null;
     };
 
-    const setCurrentImage = (image) => {
-        if (resetCanvasOnChange === true) {
+    /**
+     * setCurrentImage(image)
+     * Now we check if image.object is defined:
+     *   - if not, we do a FileReader + Image() => store in image.object
+     *   - then we set currentImage = { ... } referencing that object
+     */
+    function setCurrentImage(image) {
+        if (!image) return;
+
+        // Reset canvas if needed
+        if (resetCanvasOnChange) {
             resetCanvasPlacement();
         }
-        if (fittedZoom === true) {
-            fitZoom(image);
-        }
-        const reader = new FileReader();
-        reader.addEventListener("load", () => {
-            const dataUrl = reader.result;
-            const imageObject = new Image();
-            imageObject.addEventListener("load", () => {
-                currentImage = {
-                    name: image.meta.name,
-                    object: imageObject,
-                    width: image.width,
-                    height: image.height
+
+        // If the image is not loaded into memory yet, load it
+        if (!image.object) {
+            const reader = new FileReader();
+            document.body.style.cursor = "wait";
+            reader.onload = () => {
+                const dataUrl = reader.result;
+                const imageObject = new Image();
+                imageObject.onload = () => {
+                    // Now we store the actual HTMLImageElement
+                    image.object = imageObject; 
+                    // We already have image.width + image.height from dimension pass
+                    currentImage = {
+                        name: image.meta.name,
+                        object: imageObject,
+                        width: image.width,
+                        height: image.height
+                    };
+                    document.body.style.cursor = "default";
+                    if (fittedZoom) {
+                        fitZoom(currentImage);
+                    }
+                    document.getElementById("imageInformation").innerHTML =
+                        `${image.width}x${image.height}, ${formatBytes(image.meta.size)}`;
                 };
-            });
-            imageObject.src = dataUrl;
-            document.getElementById("imageInformation")
-                .innerHTML = `${image.width}x${image.height}, ${formatBytes(image.meta.size)}`;
-        });
-        reader.readAsDataURL(image.meta);
+                imageObject.src = dataUrl;
+            };
+            reader.readAsDataURL(image.meta);
+        }
+        else {
+            // Already loaded => just set currentImage
+            currentImage = {
+                name: image.meta.name,
+                object: image.object,
+                width: image.width,
+                height: image.height
+            };
+            if (fittedZoom) {
+                fitZoom(currentImage);
+            }
+            document.getElementById("imageInformation").innerHTML =
+                `${image.width}x${image.height}, ${formatBytes(image.meta.size)}`;
+        }
+
         if (currentBbox !== null) {
             currentBbox.bbox.marked = false;
             currentBbox = null;
         }
-    };
+    }
 
     const fitZoom = (image) => {
         if (image.width > image.height) {
@@ -1235,25 +1144,29 @@
         }
     };
 
-    const formatBytes = (bytes, decimals) => {
+    function formatBytes(bytes, decimals) {
         if (bytes === 0) {
             return "0 Bytes";
         }
         const k = 1024;
-        const dm = decimals || 2;
+        const dm = decimals === undefined ? 2 : decimals;
         const sizes = ["Bytes", "KB", "MB"];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
-    };
+    }
 
     const listenImageSelect = () => {
         const imageList = document.getElementById("imageList");
         imageList.addEventListener("change", () => {
             imageListIndex = imageList.selectedIndex;
-            setCurrentImage(images[imageList.options[imageListIndex].innerHTML]);
+            const name = imageList.options[imageListIndex].innerHTML;
+            setCurrentImage(images[name]);
         });
     };
 
+    /*******************************************************
+     * Classes
+     *******************************************************/
     const listenClassLoad = () => {
         const classesElement = document.getElementById("classes");
         classesElement.addEventListener("click", () => {
@@ -1321,6 +1234,9 @@
         });
     };
 
+    /*******************************************************
+     * BBox load/save
+     *******************************************************/
     const listenBboxLoad = () => {
         const bboxesElement = document.getElementById("bboxes");
         bboxesElement.addEventListener("click", () => {
@@ -1364,6 +1280,8 @@
     };
 
     const storeBbox = (filename, text) => {
+        // unmodified logic from your code
+        // ...
         let image = null;
         let bbox = null;
         const extension = filename.split(".").pop();
@@ -1486,6 +1404,7 @@
             const zip = new JSZip();
             for (let imageName in bboxes) {
                 const image = images[imageName];
+                if (!image) continue;
                 const name = imageName.split(".");
                 name[name.length - 1] = "txt";
                 const result = [];
@@ -1494,9 +1413,9 @@
                         const bbox = bboxes[imageName][className][i];
                         const x = (bbox.x + bbox.width / 2) / image.width;
                         const y = (bbox.y + bbox.height / 2) / image.height;
-                        const width = bbox.width / image.width;
-                        const height = bbox.height / image.height;
-                        result.push(`${classes[className]} ${x} ${y} ${width} ${height}`);
+                        const w = bbox.width / image.width;
+                        const h = bbox.height / image.height;
+                        result.push(`${classes[className]} ${x} ${y} ${w} ${h}`);
                     }
                 }
                 zip.file(name.join("."), result.join("\n"));
@@ -1514,6 +1433,7 @@
             const zip = new JSZip();
             for (let imageName in bboxes) {
                 const image = images[imageName];
+                if (!image) continue;
                 const name = imageName.split(".");
                 name[name.length - 1] = "xml";
                 const result = [
@@ -1579,16 +1499,18 @@
                 });
             }
             for (let imageName in images) {
+                const im = images[imageName];
                 result.images.push({
-                    id: images[imageName].index + 1,
+                    id: im.index + 1,
                     file_name: imageName,
-                    width: images[imageName].width,
-                    height: images[imageName].height
+                    width: im.width,
+                    height: im.height
                 });
             }
             let id = 0;
             for (let imageName in bboxes) {
                 const image = images[imageName];
+                if (!image) continue;
                 for (let className in bboxes[imageName]) {
                     for (let i = 0; i < bboxes[imageName][className].length; i++) {
                         const bbox = bboxes[imageName][className][i];
@@ -1610,8 +1532,8 @@
                         });
                     }
                 }
-                zip.file("coco.json", JSON.stringify(result));
             }
+            zip.file("coco.json", JSON.stringify(result));
             zip.generateAsync({ type: "blob" })
                 .then((blob) => {
                     saveAs(blob, "bboxes_coco.zip");
@@ -1647,6 +1569,8 @@
                 if (autoModeCheckbox) {
                     autoModeCheckbox.checked = !autoModeCheckbox.checked;
                     autoMode = autoModeCheckbox.checked;
+                    samAutoMode = samMode && autoMode;
+                    samPointAutoMode = pointMode && autoMode;
                     console.log("Auto mode toggled via 'A':", autoMode);
                 }
                 event.preventDefault();
@@ -1657,6 +1581,7 @@
                 if (samModeCheckbox) {
                     samModeCheckbox.checked = !samModeCheckbox.checked;
                     samMode = samModeCheckbox.checked;
+                    samAutoMode = samMode && autoMode;
                     console.log("SAM mode toggled via 'S':", samMode);
                 }
                 event.preventDefault();
@@ -1776,6 +1701,24 @@
             for (const imgName in bboxes) {
                 const imgData = images[imgName];
                 if (!imgData) continue;
+
+                // Make sure it's loaded (not strictly necessary if you're only sending base64?)
+                if (!imgData.object) {
+                    // load it
+                    await new Promise((resolve) => {
+                        const r = new FileReader();
+                        r.onload = () => {
+                            const im = new Image();
+                            im.onload = () => {
+                                imgData.object = im;
+                                resolve();
+                            };
+                            im.src = r.result;
+                        };
+                        r.readAsDataURL(imgData.meta);
+                    });
+                }
+
                 const base64Img = await extractBase64ForImage(imgData);
                 const bbs = [];
                 for (const className in bboxes[imgName]) {
@@ -1878,7 +1821,5 @@
             }
         };
     }
-
-
 
 })();

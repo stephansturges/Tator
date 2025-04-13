@@ -40,7 +40,7 @@ For this you will need a set of data in YOLO format, and you'll need to open the
 
 Then fire up the backend by running this from the main folder:
 
-uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
+python3 -m uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
 
 Next, load a set of labeled images, their labelmap and their bounding boxes in the main tool, then click "crop&save", then wait for the .zip to be exported. This can take some time depending on the size of the dataset and it might look like it's frozen, just wait a bit!
 
@@ -52,7 +52,7 @@ Once it's done you will have 2 files called my_label_list.pkl and my_logreg_mode
 
 Now you're ready to restart the backend which will now serve your CLIP-based label-automation as well as SAM. You can do this by going to the terminal and running, once again:
 
-uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
+python3 -m  uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
 
 Assuming you have all the dependencies set up you should see some output in the console like: 
 Loading CLIP model...
@@ -79,9 +79,20 @@ Each one of these SAM-based bbox-suggestion-modes can ALSO be combined with "aut
 For now there are some bits that need cleaning up in the interface: bad names for tools, missing tooltips and keyboard shortcuts, and I need to make the "SAM mode" (bbox or point) a radial since you cannot use both at the same time... but it already works quite nicely :) 
 
 
+
+## installing requirements
+
+Use pip for all the normal bits.
+
+To install OpenAI-CLIP run:
+
+git clone https://github.com/openai/CLIP.git
+cd CLIP
+pip3 install -r requirements.txt
+
+
 ## todo
 
-Need a proper requirements file, especially explaining how to install CLIP
 Need setup instructions
 Add shortcuts for missing modes
 Remove Pascal VOC export

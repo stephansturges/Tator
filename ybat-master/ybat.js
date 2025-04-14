@@ -21,31 +21,23 @@
 
     // 1) Define a palette of 100 colors spread around the hue wheel
     //    (First ~20 are roughly 0°, 18°, 36°, ..., 342°, then continuing).
-    //    We'll dynamically reduce alpha for fills. Also random offset.
     const colorPalette = [];
     for (let i = 0; i < 100; i++) {
-        const baseHue = i * 20; // increment by 20° each time
-        const randomOffset = Math.random() * 0.3;  // up to ~6°
+        const baseHue = i * 20; 
+        const randomOffset = Math.random() * 0.3;
         const hue = (baseHue + randomOffset) % 360;
         colorPalette.push(`hsla(${hue}, 100%, 45%, 1)`);
     }
 
-    // 2) Function that picks the correct color from the palette
-    //    by using the YOLO class index stored in classes[className].
-    //    We then cycle through the palette if classes are ≥100.
     function getColorFromClass(className) {
-        const index = classes[className] % 100; // fallback cycle if >100 classes
+        const index = classes[className] % 100; 
         return colorPalette[index];
     }
 
-    // 3) A little helper to convert e.g. "hsla(240,100%,45%,1)"
-    //    into the same HSLA color but with alpha=0.2 for the fill.
     function withAlpha(color, alpha) {
         return color.replace(/(\d?\.?\d+)\)$/, `${alpha})`);
     }
 
-    // Global flags for “auto mode”, “SAM mode”, “point mode”
-    // plus computed “samAutoMode” (sam + auto) and “samPointAutoMode” (point + auto).
     let autoMode = false;
     let samMode = false;
     let pointMode = false;
@@ -94,11 +86,11 @@
         const ctx = offCan.getContext("2d");
         ctx.drawImage(currentImage.object, 0, 0);
         const dataUrl = offCan.toDataURL("image/jpeg");
-        return dataUrl.split(",")[1]; // base64 only
+        return dataUrl.split(",")[1];
     }
 
     /*****************************************************
-     * Existing SAM / CLIP calls (unchanged)
+     * Existing SAM / CLIP calls
      *****************************************************/
     async function sam2BboxPrompt(bbox) {
         const base64Img = await extractBase64Image();
@@ -398,7 +390,7 @@
         delete pendingApiBboxes[returnedUUID];
     }
 
-    // A few standard parameters
+    // Standard parameters
     const saveInterval = 60;
     const fontBaseSize = 6;
     const fontColor = "#001f3f";
@@ -670,7 +662,6 @@
     };
 
     async function trackPointer(event) {
-        // 1) Standard pointer tracking
         mouse.bounds = canvas.element.getBoundingClientRect();
         mouse.x = event.clientX - mouse.bounds.left;
         mouse.y = event.clientY - mouse.bounds.top;
@@ -679,7 +670,6 @@
         mouse.realX = zoomXInv(mouse.x);
         mouse.realY = zoomYInv(mouse.y);
     
-        // 2) Check for mousedown/mouseup
         if (event.type === "mousedown") {
             mouse.startRealX = mouse.realX;
             mouse.startRealY = mouse.realY;
@@ -690,26 +680,16 @@
             }
         }
         else if (event.type === "mouseup" || event.type === "mouseout") {
-            // if left button was down, we have an image + class
             if (mouse.buttonL && currentImage !== null && currentClass !== null) {
-    
-                // POINT MODE => forcibly create a 10×10 box
-                // Point-mode logic with optional “samPointAutoMode”
                 if (pointMode) {
-                    // Clear any existing bbox
                     currentBbox = null;
                     const dotSize = 10;
                     const half = dotSize / 2;
-
-                    // Shift the start coords so storeNewBbox yields a 10×10 box
                     mouse.startRealX = mouse.realX - half;
                     mouse.startRealY = mouse.realY - half;
                     storeNewBbox(dotSize, dotSize);
-
-                    // Release the mouse so we don't keep dragging
                     mouse.buttonL = false;
                     mouse.buttonR = false;
-
                     if (samPointAutoMode) {
                         await sam2PointAutoPrompt(mouse.realX, mouse.realY);
                     } else {
@@ -721,10 +701,8 @@
                     }
                 }
                 else {
-                    // Normal bounding-box mode
                     const movedWidth  = Math.abs(mouse.realX - mouse.startRealX);
                     const movedHeight = Math.abs(mouse.realY - mouse.startRealY);
-    
                     if (movedWidth > minBBoxWidth && movedHeight > minBBoxHeight) {
                         if (currentBbox === null) {
                             storeNewBbox(movedWidth, movedHeight);
@@ -755,7 +733,6 @@
                         }
                     }
                     else {
-                        // small => single click logic
                         if (currentBbox === null) {
                             setBboxMarkedState();
                             if (currentBbox !== null) {
@@ -771,7 +748,6 @@
                     }
                 }
             }
-    
             mouse.buttonR = false;
             mouse.buttonL = false;
         }
@@ -984,7 +960,7 @@
     /******************************************************
      * listenImageLoad
      * We still do one pass for each file to get .width, .height
-     * But we do NOT store big .object for each file (to save memory).
+     * But do NOT store big .object for each file (to save memory).
      ******************************************************/
     const listenImageLoad = () => {
         document.getElementById("images").addEventListener("change", (event) => {
@@ -995,7 +971,6 @@
                 document.body.style.cursor = "wait";
                 let fileCount = 0;
 
-                // We'll do a small function that reads dimension only:
                 function readDimensions(file) {
                     return new Promise((resolve) => {
                         const reader = new FileReader();
@@ -1012,8 +987,6 @@
                     });
                 }
 
-                // For each file => store { meta, index }, plus width/height
-                // but do NOT keep an .object
                 const promises = [];
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
@@ -1025,7 +998,7 @@
                             index: fileCount,
                             width: 0,
                             height: 0,
-                            object: undefined // we won't store an object now
+                            object: undefined 
                         };
                         fileCount++;
                         const option = document.createElement("option");
@@ -1036,7 +1009,6 @@
                         }
                         imageList.appendChild(option);
 
-                        // read dimensions
                         promises.push(
                             readDimensions(file).then((dim) => {
                                 images[file.name].width = dim.width;
@@ -1047,16 +1019,11 @@
                 }
 
                 Promise.all(promises).then(() => {
-                    // all dimension reads done
                     document.body.style.cursor = "default";
-
-                    // Auto-select the first if any
                     if (fileCount > 0) {
                         const firstName = imageList.options[0].innerHTML;
                         setCurrentImage(images[firstName]);
                     }
-
-                    // If classes already loaded => enable bboxes
                     if (Object.keys(classes).length > 0) {
                         document.getElementById("bboxes").disabled = false;
                         document.getElementById("restoreBboxes").disabled = false;
@@ -1073,21 +1040,11 @@
         currentImage = null;
     };
 
-    /**
-     * setCurrentImage(image)
-     * Now we check if image.object is defined:
-     *   - if not, we do a FileReader + Image() => store in image.object
-     *   - then we set currentImage = { ... } referencing that object
-     */
     function setCurrentImage(image) {
         if (!image) return;
-
-        // Reset canvas if needed
         if (resetCanvasOnChange) {
             resetCanvasPlacement();
         }
-
-        // If the image is not loaded into memory yet, load it
         if (!image.object) {
             const reader = new FileReader();
             document.body.style.cursor = "wait";
@@ -1095,9 +1052,7 @@
                 const dataUrl = reader.result;
                 const imageObject = new Image();
                 imageObject.onload = () => {
-                    // Now we store the actual HTMLImageElement
                     image.object = imageObject; 
-                    // We already have image.width + image.height from dimension pass
                     currentImage = {
                         name: image.meta.name,
                         object: imageObject,
@@ -1116,7 +1071,6 @@
             reader.readAsDataURL(image.meta);
         }
         else {
-            // Already loaded => just set currentImage
             currentImage = {
                 name: image.meta.name,
                 object: image.object,
@@ -1129,7 +1083,6 @@
             document.getElementById("imageInformation").innerHTML =
                 `${image.width}x${image.height}, ${formatBytes(image.meta.size)}`;
         }
-
         if (currentBbox !== null) {
             currentBbox.bbox.marked = false;
             currentBbox = null;
@@ -1164,9 +1117,6 @@
         });
     };
 
-    /*******************************************************
-     * Classes
-     *******************************************************/
     const listenClassLoad = () => {
         const classesElement = document.getElementById("classes");
         classesElement.addEventListener("click", () => {
@@ -1234,9 +1184,6 @@
         });
     };
 
-    /*******************************************************
-     * BBox load/save
-     *******************************************************/
     const listenBboxLoad = () => {
         const bboxesElement = document.getElementById("bboxes");
         bboxesElement.addEventListener("click", () => {
@@ -1280,8 +1227,7 @@
     };
 
     const storeBbox = (filename, text) => {
-        // unmodified logic from your code
-        // ...
+        // same storeBbox logic you had before
         let image = null;
         let bbox = null;
         const extension = filename.split(".").pop();
@@ -1694,96 +1640,165 @@
         return dataUrl.split(",")[1];
     }
 
+        /****************************************************
+     * listenImageCrop - single-image-at-a-time approach
+     ****************************************************/
     async function listenImageCrop() {
-        const btn = document.getElementById("cropImages");
-        btn.addEventListener("click", async () => {
-            const payloadImages = [];
-            for (const imgName in bboxes) {
-                const imgData = images[imgName];
-                if (!imgData) continue;
+      const btn = document.getElementById("cropImages");
+      btn.addEventListener("click", async () => {
+        const imageNames = Object.keys(bboxes);
+        if (!imageNames.length) {
+          alert("No bounding boxes to crop.");
+          return;
+        }
 
-                // Make sure it's loaded (not strictly necessary if you're only sending base64?)
-                if (!imgData.object) {
-                    // load it
-                    await new Promise((resolve) => {
-                        const r = new FileReader();
-                        r.onload = () => {
-                            const im = new Image();
-                            im.onload = () => {
-                                imgData.object = im;
-                                resolve();
-                            };
-                            im.src = r.result;
-                        };
-                        r.readAsDataURL(imgData.meta);
-                    });
-                }
+        const progressModal = showProgressModal("Initializing crop job...");
+        document.body.style.cursor = "wait";
 
-                const base64Img = await extractBase64ForImage(imgData);
-                const bbs = [];
-                for (const className in bboxes[imgName]) {
-                    bboxes[imgName][className].forEach(bb => {
-                        bbs.push({
-                            className,
-                            x: bb.x,
-                            y: bb.y,
-                            width: bb.width,
-                            height: bb.height
-                        });
-                    });
-                }
-                if (bbs.length === 0) continue;
-                payloadImages.push({
-                    image_base64: base64Img,
-                    originalName: imgName,
-                    bboxes: bbs
-                });
+        try {
+          // 1) Start the server-side job
+          let resp = await fetch("http://localhost:8000/crop_zip_init", { method: "POST" });
+          if (!resp.ok) {
+            throw new Error("crop_zip_init failed: " + resp.status);
+          }
+          const { jobId } = await resp.json();
+          console.log("Got jobId:", jobId);
+
+          // 2) Single-image loop
+          let count = 0;
+          for (const imgName of imageNames) {
+            count++;
+            progressModal.update(`Processing ${count} / ${imageNames.length}: ${imgName}`);
+
+            const imgData = images[imgName];
+            if (!imgData) continue;
+
+            // Load image if not loaded
+            if (!imgData.object) {
+              await loadImageObject(imgData);
             }
-            if (payloadImages.length === 0) {
-                alert("No bounding boxes to crop.");
-                return;
+
+            // Gather bounding boxes
+            const rawBoxes = bboxes[imgName];
+            if (!rawBoxes) {
+              // No bboxes at all for this image
+              imgData.object = null;
+              await yieldToDom(10);
+              continue;
             }
-            const progressModal = showProgressModal("Preparing chunked job...");
-            document.body.style.cursor = "wait";
-            try {
-                let resp = await fetch("http://localhost:8000/crop_zip_init", {
-                    method: "POST"
-                });
-                if (!resp.ok) {
-                    throw new Error("crop_zip_init failed: " + resp.status);
+
+            // Flatten bounding boxes & clamp
+            const allBbs = [];
+            for (const className in rawBoxes) {
+              rawBoxes[className].forEach(bbox => {
+                const copy = { ...bbox };
+                const valid = clampBbox(copy, imgData.width, imgData.height);
+                if (valid) {
+                  allBbs.push({
+                    className, 
+                    x: copy.x,
+                    y: copy.y,
+                    width: copy.width,
+                    height: copy.height
+                  });
                 }
-                const { jobId } = await resp.json();
-                console.log("Got jobId:", jobId);
-                const chunkSize = 5;
-                const chunks = chunkArray(payloadImages, chunkSize);
-                let count = 0;
-                for (const batch of chunks) {
-                    count++;
-                    console.log(`Sending batch ${count}/${chunks.length} to /crop_zip_chunk...`);
-                    resp = await fetch("http://localhost:8000/crop_zip_chunk?jobId=" + jobId, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ images: batch })
-                    });
-                    if (!resp.ok) {
-                        throw new Error("crop_zip_chunk failed: " + resp.status);
-                    }
-                }
-                console.log("All chunks sent. Now finalizing /crop_zip_finalize...");
-                resp = await fetch("http://localhost:8000/crop_zip_finalize?jobId=" + jobId);
-                if (!resp.ok) {
-                    throw new Error("crop_zip_finalize failed: " + resp.status);
-                }
-                const blob = await resp.blob();
-                saveAs(blob, "crops.zip");
-                alert("Done! Single crops.zip downloaded.");
-            } catch (err) {
-                console.error(err);
-                alert("Crop & Save failed: " + err);
-            } finally {
-                progressModal.close();
-                document.body.style.cursor = "default";
+              });
             }
+            if (!allBbs.length) {
+              // no valid bounding boxes => skip
+              console.log("No valid bounding boxes for", imgName, " => skipping");
+              imgData.object = null;
+              await yieldToDom(10);
+              continue;
+            }
+
+            // Convert to base64
+            const base64Img = await extractBase64ForImage(imgData);
+
+            // 3) Send just this one image
+            // If your server wants different keys, rename them here
+            const body = {
+              images: [
+                {
+                  image_base64: base64Img,
+                  originalName: imgName,
+                  bboxes: allBbs
+                }
+              ]
+            };
+            // Debug log
+            console.log("Sending:", JSON.stringify(body, null, 2));
+
+            resp = await fetch(`http://localhost:8000/crop_zip_chunk?jobId=${jobId}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body)
+            });
+            if (!resp.ok) {
+              throw new Error(`crop_zip_chunk failed: ${resp.status}`);
+            }
+
+            // free memory
+            imgData.object = null;
+            await yieldToDom(10);
+          }
+
+          // 4) Finalize
+          progressModal.update("Finalizing crop_zip_finalize...");
+          resp = await fetch(`http://localhost:8000/crop_zip_finalize?jobId=${jobId}`);
+          if (!resp.ok) {
+            throw new Error("crop_zip_finalize failed: " + resp.status);
+          }
+          const blob = await resp.blob();
+          saveAs(blob, "crops.zip");
+          alert("Done! crops.zip downloaded.");
+        } catch (err) {
+          console.error(err);
+          alert("Crop & Save failed: " + err);
+        } finally {
+          progressModal.close();
+          document.body.style.cursor = "default";
+        }
+      });
+    }
+
+    // Example clamp function
+    function clampBbox(bbox, imgW, imgH) {
+      // ensure x, y >= 0
+      bbox.x = Math.max(0, bbox.x);
+      bbox.y = Math.max(0, bbox.y);
+
+      // ensure x + w <= imgW
+      if (bbox.x > imgW) return false;
+      if (bbox.y > imgH) return false;
+
+      const maxW = imgW - bbox.x;
+      const maxH = imgH - bbox.y;
+      bbox.width = Math.min(bbox.width, maxW);
+      bbox.height = Math.min(bbox.height, maxH);
+
+      if (bbox.width <= 0 || bbox.height <= 0) return false;
+      return true;
+    }
+
+    /**
+     * Helper function to load an image from its File object (imgData.meta)
+     * and store the resulting <img> in imgData.object.
+     */
+    function loadImageObject(imgData) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const im = new Image();
+                im.onload = () => {
+                    imgData.object = im;
+                    resolve();
+                };
+                im.onerror = reject;
+                im.src = reader.result;
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(imgData.meta);
         });
     }
 
@@ -1795,6 +1810,7 @@
         return result;
     }
 
+    // Enhanced showProgressModal that can update text
     function showProgressModal(initialText = "") {
         const overlay = document.createElement("div");
         overlay.style.position = "fixed";
@@ -1808,14 +1824,20 @@
         overlay.style.alignItems = "center";
         overlay.style.justifyContent = "center";
         overlay.style.flexDirection = "column";
+
         const textDiv = document.createElement("div");
         textDiv.style.color = "#fff";
         textDiv.style.fontSize = "20px";
         textDiv.style.marginBottom = "10px";
         textDiv.textContent = initialText;
+
         overlay.appendChild(textDiv);
         document.body.appendChild(overlay);
+
         return {
+            update(msg) {
+                textDiv.textContent = msg;
+            },
             close() {
                 document.body.removeChild(overlay);
             }

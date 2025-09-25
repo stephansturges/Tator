@@ -1,0 +1,34 @@
+# Core runtime (pinned with broad bounds)
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.24,<1.0
+numpy>=1.24,<3.0
+pillow>=10.0,<11.0
+joblib>=1.3,<2.0
+scikit-learn>=1.3,<2.0
+scipy>=1.10,<2.0  # for reorder_labelmap.py (Hungarian assignment)
+pydantic>=1.10,<2.0
+python-multipart>=0.0.6,<1.0
+
+# Torch (select the build matching your CUDA/CPU environment)
+torch
+torchvision
+
+# CLIP and helpers
+ftfy
+regex
+tqdm
+git+https://github.com/openai/CLIP.git
+
+# Segment Anything (SAM)
+git+https://github.com/facebookresearch/segment-anything.git
+
+# Segment Anything 2 (SAM2) — optional, enable if you plan to use SAM2
+# git+https://github.com/facebookresearch/sam2.git
+
+# Optional extras for advanced training
+# timm                # for DINOv2 encoders
+# opencv-python       # common image ops (not strictly required)
+# matplotlib          # plotting in notebooks/scripts
+
+# Observability (optional)
+prometheus-client>=0.16,<1.0

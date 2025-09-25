@@ -1,149 +1,113 @@
-🥔
+# 🥔 Tator – Local CLIP + SAM Annotation Toolkit
 
-## my little YOLO annotator
+Tator is a single-machine annotation workflow that pairs the YBAT frontend with a FastAPI backend to deliver fast bounding-box and class suggestions powered by CLIP and Segment Anything (SAM). The UI now bundles labeling, CLIP training, and model management in one place so you can iterate on datasets without leaving the browser.
 
-This is my little Yolo annotation tool. It's super light and simple and runs locally but uses some nice bits like CLIP and SAM on the backend to auto-annotate and make things super easy to use. I rarely label stuff manually but when I do I get *super frustrated* because offline tools are slooooow and clunky and online tools are laggy and expensive and want to force you into contorted workflows and upsell stuff... which is probably great for a big enterprise, but when I'm doing manual annotation it's usually because I'm just messing around with a new dataset or want to benchmark some stuff and I don't need a 1-year 5-seat license with 20 credits to train models.
+## Key Features
+- **One-click assists** – auto class, SAM box/point refinements, and multi-point prompts with live progress indicators.
+- **SAM 1 & SAM 2** – switch backends at runtime, optionally preload images into SAM to minimise round-trips.
+- **Embedded CLIP trainer** – start training jobs from the UI, watch convergence metrics, and reuse cached embeddings across runs.
+- **Model switcher** – activate new CLIP + regression pairs without restarting the server; metadata keeps backbone/labelmap in sync.
+- **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
+## Repository Layout
+- `app/`, `localinferenceapi.py` – FastAPI app, SAM/CLIP orchestration, training endpoints.
+- `ybat-master/` – browser UI (`ybat.html`, CSS/JS, assets).
+- `tools/` – reusable training helpers and CLI scripts.
+- `uploads/`, `crops/`, `corrected_labels/` – runtime artifacts, embedding cache, and exported crops (ignored by git).
+- `AGENTS.md` – contributor handbook and project conventions.
 
-## it does this:
+## Prerequisites
+- Python 3.10 or newer (3.11+ recommended).
+- Optional GPU with CUDA for faster CLIP/SAM inference.
+- Model weights: `sam_vit_h_4b8939.pth` (SAM1) plus any desired SAM2 checkpoints/configs.
 
-Automatic class labeling -> select any random class and it gets corrected by CLIP!
+## Quick Start
+1. **Create an environment**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate        # Windows: .\\.venv\\Scripts\\activate
+   ```
+2. **Install runtime deps**
+   ```bash
+   pip install -r requirements.txt
+   ```
+   Torch wheels are hardware-specific; replace `torch`/`torchvision` with the build matching your CUDA/cuDNN stack if needed.
+3. **Install dev tooling (optional)**
+   ```bash
+   pip install -r requirements-dev.txt
+   pre-commit install
+   ```
+4. **Fetch model weights**
+   - Place `sam_vit_h_4b8939.pth` in the repo root.
+   - For SAM2, download a config + checkpoint pair (e.g. `sam2_hiera_large.yaml`, `sam2_hiera_large.pt`). Keep absolute paths handy.
+5. **Configure the backend**
+   ```bash
+   cp .env.example .env
+   ```
+   Update `.env`:
+   ```bash
+   LOGREG_PATH=./my_logreg_model.pkl
+   LABELMAP_PATH=./my_label_list.pkl
+   CLIP_MODEL_NAME=ViT-B/32
+   SAM_VARIANT=sam1                # or sam2
+   SAM_CHECKPOINT_PATH=./sam_vit_h_4b8939.pth
+   SAM2_CONFIG_PATH=/abs/path/to/sam2_config.yaml
+   SAM2_CHECKPOINT_PATH=/abs/path/to/sam2_weights.pt
+   ENABLE_METRICS=true             # optional Prometheus
+   ```
+   You can also point `CLIP_EMBED_CACHE` to customise where training caches embeddings (`./uploads/clip_embeddings` by default).
+6. **Run the API**
+   ```bash
+   python -m uvicorn app:app --host 0.0.0.0 --port 8000
+   ```
+   Watch the logs for confirmations that CLIP, SAM, and the logistic regression model loaded correctly.
+7. **Open the UI** – load `ybat-master/ybat.html` (locally renamed “Tator 🥔”) in your browser.
 
-![gif1](https://github.com/user-attachments/assets/d9642866-3c72-4b3f-acb6-11b83e82b50b)
+## Using the UI
+### Label Images Tab
+- Load images via the folder picker; per-image CLIP/SAM helpers live in the left rail.
+- Toggle **Preload SAM** to stream the next image into memory; the side progress bar shows status and cancels stale tasks when you move to another image.
+- Auto class, SAM box/point modes, and multi-point masks share a top progress indicator and support keyboard shortcuts documented in the panel footer.
 
-Automatic class labeling + bbox refinement -> make a messy bbox and get it cleaned by SAM + automatic class label from CLIP!
+### Train CLIP Tab
+1. Choose **Image folder** and **Label folder** via native directory pickers. Only files matching YOLO expectations are enumerated.
+2. (Optional) Provide a labelmap so class ordering matches the labeling tab.
+3. Configure solver, class weights, max iterations, batch size, hard-example mining, and **Cache & reuse embeddings** (enabled by default).
+4. Select an output directory; training writes `{model,labelmap,meta}.pkl` plus JSON metrics.
+5. Click **Start Training**. Progress logs stream live, including per-iteration convergence and per-class precision/recall/F1. Completed runs appear in the summary panel with download links.
 
-![gif2](https://github.com/user-attachments/assets/83d04011-bb16-4edb-93f7-34321b7db77a)
+Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keyed by dataset paths + CLIP backbone, independent of batch size. Toggling cache reuse will hit the store when inputs match.
 
-Automatic class labeling + bbox from a single click -> super lazy single-click mode: get a bbox from SAM and a label from CLIP!
+### CLIP Model Tab
+- Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct CLIP backbone and labelmap.
+- Guidance text explains backbone auto-detection when a `.meta.pkl` file accompanies the classifier.
 
-![gif3](https://github.com/user-attachments/assets/7015451b-4453-4b42-9b0d-b458130ec8d7)
+## Command-Line Training
+The UI shares its engine with `tools/train_clip_regression_from_YOLO.py`:
+```bash
+python tools/train_clip_regression_from_YOLO.py \
+  --images_path ./images \
+  --labels_path ./labels \
+  --labelmap_path my_label_list.pkl \
+  --model_output my_logreg_model.pkl \
+  --labelmap_output my_label_list.pkl \
+  --solver saga --max_iter 1000 --device_override cuda
+```
+Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasise frequently misclassified classes.
 
-*Note* in these demos the auto class is not well trained so performance is bad... but don't take this as an indication of real performance, I was just in a hurry to make some GIFs and trained it on very little data!
+## Development & Testing
+- Run unit tests: `pytest`
+- Static checks: `ruff check .`, `black --check .`, `mypy .`
+- See `AGENTS.md` for coding conventions, PR expectations, and manual verification steps.
 
-Of course you can also just use SAM alone and get bboxes, and manually adjust everything because SAM and CLIP are not perfect!
+## Troubleshooting
+- **Torch install errors** – install the wheel that matches your platform (`pip install torch==<version>+cu118 ...`).
+- **SAM weights missing** – confirm paths in `.env`. SAM2 requires both config and checkpoint.
+- **Large datasets** – enable caching (default) to avoid recomputing embeddings; caches are safe to prune manually.
+- **Prometheus scraper fails** – ensure `/metrics` is enabled and FastAPI is reachable; the endpoint now serves plaintext output compatible with Prometheus.
 
-## How does it work?
+## Credits
+Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything) / [SAM2](https://github.com/facebookresearch/sam2). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
 
-Basically it works like YBAT, but I just added a couple of interface changes to change some colors and allow "auto mode". 
-
-In order to run the API which serves this "auto mode" you will need to first load a YOLO-format dataset into the tool, export the dataset in the right format (one button) and then run a python script to train the "auto mode" which is just a logistic regression on top of CLIP. 
-Then you can run the API / backend which will serve your CLIP + regression as "auto class annotation" and will also serve SAM in bounding-box or point-mode. Once you have these tools combined you can annotate your data in a single click, letting SAM give you a clean boundinx box and CLIP giving you a class. Of course this won't work 100% of the time but in little experiments I get to >95% accuracy with very little data, which speeds up any remaining manual annotation by a LOT!
-
-## Setup Tutorial!
-
-I'm assuming you've installed all dependencies. I need to write how to do that and add a requirements.txt, for now that's in the "to do" pile.
-
-OK so let's train the CLIP logistic regression.
-
-For this you will need a set of data in YOLO format, and you'll need to open the ybat.html file in ./ybat-master/ in your browser.
-
-Then fire up the backend by running this from the main folder:
-
-python3 -m uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
-
-Next, load a set of labeled images, their labelmap and their bounding boxes in the main tool, then click "crop&save", then wait for the .zip to be exported. This can take some time depending on the size of the dataset and it might look like it's frozen, just wait a bit!
-
-Save the .zip in your root file of this tool (next to clip_kmeans_and_regress.py) and unzip it so that the contents are in ./crops/
-
-Now run python3 clip_kmeans_and_regress.py, which will take a while depending on your machine. This will train a logistic regression on top of the CLIP vectors extracted from all the little images that are now in your ./crops/ folder, and save it as a .pkl file in the root of this project.
-
-Once it's done you will have 2 files called my_label_list.pkl and my_logreg_model.pkl, and it will display some accuracy statistics on your label-based clustering.
-
-Now you're ready to restart the backend which will now serve your CLIP-based label-automation as well as SAM. You can do this by going to the terminal and running, once again:
-
-python3 -m  uvicorn localinferenceapi:app --host 0.0.0.0 --port 8000
-
-Assuming you have all the dependencies set up you should see some output in the console like: 
-Loading CLIP model...
-Loading logistic regression...
-INFO:     Started server process [79641]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-
-
-You're good to go, time to go back to your browswer!
-
-Now if you select "Auto Mode" in the interface before creating a bounding box your local CLIP API which will serve you an automatic label guess for the bbox you are creating. 
-
-If the guess is wrong, remove "auto mode" and make the bbox manually.
-
-Messing around a bit on some of my local datasets I can get >95% confidence in the CLIP suggestions, which makes manual annotation a LOT easier. 
-
-You can also use "SAM mode" (which needs renaning to something like "SAM bbox mode") to create a bounding box with SAM: just drag a bounding box and wait a second, and SAM will refine it for you.
-You can also use "Point mode", which uses SAM with a single "spot" annotation to suggest a bounding box.
-
-Each one of these SAM-based bbox-suggestion-modes can ALSO be combined with "auto mode", in which case you get the bbox from SAM and the class label from CLIP, for lighting-fast new-data annotation!
-
-For now there are some bits that need cleaning up in the interface: bad names for tools, missing tooltips and keyboard shortcuts, and I need to make the "SAM mode" (bbox or point) a radial since you cannot use both at the same time... but it already works quite nicely :) 
-
-
-
-## installing requirements
-
-Use pip for all the normal bits.
-
-To install OpenAI-CLIP run:
-
-git clone https://github.com/openai/CLIP.git
-cd CLIP
-pip3 install -r requirements.txt
-
-
-## todo
-
-Need setup instructions
-Add shortcuts for missing modes
-Remove Pascal VOC export
-Clean up messy error handling in API
-Make SAM modes into radial
-Rename the 2 SAM modes to make more sense
-Add option in API to run without regression .pkl + train regression from API 
-Make requirements.txt + add install explanations (especially CLIP)
-
-## Thanks
-
-Thanks to @drainingsun for a nice clean tool with YBAT!
-Thanks to OpenAI and Meta for the amazing free tools :) 
-Thanks to Dimitri Shteizel for the example image from Pexels https://www.pexels.com/photo/cars-on-car-park-13431628/
-
-Most of the frontend code is taken from YBAT, which can be found here:
-https://github.com/drainingsun/ybat
-
-See the original YBAT license here:
-https://github.com/drainingsun/ybat/blob/master/LICENSE
-
-The backend usese CLIP from OpenAI (https://github.com/openai/CLIP) and SAM from Meta (https://github.com/facebookresearch/segment-anything) to automate annotation in a super-responsive and FAST way. 
-
-
-
-## Licenses
-
-License for all third-party packages including Clip (OpenAI) and SAM (Meta) are the users' own responsibility.
-
-YBAT code license can be found above, and you can find the original repository here: https://github.com/drainingsun/ybat
-
-All the novel code is MIT license:
-
-Copyright (c) 2025 Aircortex.com
-
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+## License
+Copyright (c) 2025 Aircortex.com — released under the MIT License. Third-party assets retain their original licenses.

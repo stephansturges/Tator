@@ -196,6 +196,39 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# ----------------------------------------------------------------------------
+# Project-specific artifacts
+# ----------------------------------------------------------------------------
+
+# Model weights and generated classifiers
+*.pth
+*.pt
+*.pkl
+*.joblib
+*.meta.json
+*.meta.yaml
+*.meta.pkl
+
+# Exported datasets and caches
+crops/
+corrected_labels/
+uploads/
+calib_example/
+training.txr
+*.zip
+*.tar
+*.tgz
+*.tar.gz
+
+# Local configuration / logs
+.env
+logs/
+*.log
+
+# Front-end scratch artifacts
+ybat-master/ybat_*.js
+ybat-master/ybas_*.js
+
 ### Python Patch ###
 # Poetry local configuration file - https://python-poetry.org/docs/configuration/#local-configuration
 poetry.toml

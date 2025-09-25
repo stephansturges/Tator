@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Ybat - YOLO BBox Annotation Tool</title>
+    <title>🥔 Tator Annotation Tool</title>
     <link href="ybat.css" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
@@ -14,93 +14,284 @@
     <script src="ybat.js"></script>
 </head>
 <body>
-    <div class="container" id="container">
-        <div class="left">
-            <form action="">
-                <label for="images">Images:</label>
-                <input type="file" id="images" name="images[]" accept="image/jpeg, image/png" multiple />
-                <!-- This is the button that triggers the cropping. -->
-                <input type="button" name="cropImages" id="cropImages" value="Crop&Save" />
-                <br />
-                <label for="imageSearch">Search:</label>
-                <input type="text" id="imageSearch" name="imageSearch" />
-                <label for="imageList"></label>
-                <select name="imageList" id="imageList" size="10" multiple></select>
-                <div id="imageInformation"></div>
-                <hr />
-                <label for="classes">Classes:</label>
-                <input type="file" id="classes" name="classes" accept="text/plain" />
-                <label for="classList"></label>
-                <select name="classList" id="classList" size="10" multiple></select>
-                <div id="bboxInformation"></div>
-                <!-- Add a small toggle for "Auto Mode" -->
-                <label for="autoMode">Auto Mode:</label>
-                <input type="checkbox" id="autoMode" name="autoMode" />
-                <br />
-                <!-- Add a small toggle for "SAM Mode" -->
-                <label for="samMode">SAM Mode:</label>
-                <input type="checkbox" id="samMode" name="samMode" />
-                <br />
-                <label for="pointMode">Point Mode:</label> 
-                <input type="checkbox" id="pointMode" name="pointMode" />
-                <br />
-                <hr />
-                <label for="bboxes">Bboxes:</label>
-                <input type="file" id="bboxes" name="bboxes[]" accept="text/plain, application/zip" disabled multiple />
-                <input type="button" name="restoreBboxes" id="restoreBboxes" value="Restore" disabled />
-                <input type="button" name="saveBboxes" id="saveBboxes" value="Save YOLO" />
-                <div id="voc">
-                    <label for="vocFolder">Voc folder:</label>
-                    <input type="text" id="vocFolder" name="vocFolder" value="data" />
-                    <input type="button" name="saveVocBboxes" id="saveVocBboxes" value="Save VOC" />
-                    <input type="button" name="saveCocoBboxes" id="saveCocoBboxes" value="Save COCO" />
-                </div>
-                <div id="coco">
-                </div>
-                <hr />
-                <div id="description">
-                    SHORTCUTS:
-                    <ul>
-                        <li>Mouse WHEEL - zoom in/out image</li>
-                        <li>Mouse RIGHT BUTTON - pan image</li>
-                        <li>Arrows LEFT and RIGHT - cycle images</li>
-                        <li>Arrows UP and DOWN - cycle classes</li>
-                        <li>Key DELETE - remove selected Bbox</li>
-                    </ul>
-                    <p>Version: 0.2.5 | Copyright © 2018-2019 Draining Sun.</p>
-                </div>
-            </form>
+    <div class="tab-shell">
+        <div class="tab-bar" role="tablist">
+            <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
+            <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
+            <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
         </div>
-        <div class="right" id="right">
-            <canvas id="canvas"></canvas>
-            <canvas id="hiddenCanvas"></canvas>
+        <div class="tab-panels">
+            <div class="tab-panel active" id="tabLabeling" data-tab-panel="labeling">
+                <div class="container" id="container">
+                    <div class="left">
+                        <form action="">
+                            <label for="images">Images:</label>
+                            <input type="file" id="images" name="images[]" accept="image/jpeg, image/png" multiple class="file-input-hidden" />
+                            <label for="images" id="imagesSelect" class="training-button" role="button" tabindex="0">Choose Images…</label>
+                            <button type="button" name="cropImages" id="cropImages" class="training-button">Crop &amp; Save</button>
+                            <br />
+                            <label for="imageSearch">Search:</label>
+                            <input type="text" id="imageSearch" name="imageSearch" />
+                            <label for="imageList"></label>
+                            <select name="imageList" id="imageList" size="10" multiple></select>
+                            <div id="imageInformation"></div>
+                            <label for="classes">Classes:</label>
+                            <input type="file" id="classes" name="classes" accept="text/plain" class="file-input-hidden" />
+                            <label for="classes" id="classesSelect" class="training-button" role="button" tabindex="0">Load Classes…</label>
+                            <label for="classList"></label>
+                            <select name="classList" id="classList" size="10" multiple></select>
+                            <div id="bboxInformation"></div>
+                            <!-- Toggle for automatic class assignment -->
+                            <label for="autoMode">Auto Class:</label>
+                            <input type="checkbox" id="autoMode" name="autoMode" />
+                            <br />
+                            <!-- Add a small toggle for "SAM Mode" -->
+                            <label for="samMode">SAM Mode:</label>
+                            <input type="checkbox" id="samMode" name="samMode" />
+                            <br />
+                            <label for="samVariant">SAM Model:</label>
+                            <select id="samVariant" name="samVariant">
+                                <option value="sam1" selected>SAM 1</option>
+                                <option value="sam2">SAM 2</option>
+                            </select>
+                            <br />
+                            <label for="samPreload">Preload SAM:</label>
+                            <input type="checkbox" id="samPreload" name="samPreload" />
+                            <br />
+                            <label for="pointMode">Point Mode:</label>
+                            <input type="checkbox" id="pointMode" name="pointMode" />
+                            <br />
+                            <label for="multiPointMode">Multi-Point Mode:</label>
+                            <input type="checkbox" id="multiPointMode" name="multiPointMode" />
+                            <br />
+                            <div id="samStatus" class="sam-status" role="status" aria-live="polite"></div>
+                            <div id="samStatusProgress" class="sam-status-progress" aria-hidden="true">
+                                <div id="samStatusProgressFill"></div>
+                            </div>
+                            <br />
+                            <!-- Fallback CLIP crop policy -->
+                            <label for="useFallbackDilate">Fallback: Dilate crop on low confidence</label>
+                            <input type="checkbox" id="useFallbackDilate" name="useFallbackDilate" />
+                            <div class="fallback-options">
+                              <label for="minProba">Min proba (0-1):</label>
+                              <input type="number" id="minProba" name="minProba" min="0" max="1" step="0.05" value="0.55" />
+                              <label for="dilateRatio">Dilate ratio:</label>
+                              <input type="number" id="dilateRatio" name="dilateRatio" min="0" max="1" step="0.05" value="0.10" />
+                            </div>
+                            <br />
+                            <hr />
+                            <label for="bboxes">Bboxes:</label>
+                            <input type="file" id="bboxes" name="bboxes[]" accept="text/plain, application/zip" disabled multiple class="file-input-hidden" />
+                            <label for="bboxes" id="bboxesSelect" class="training-button button-disabled" aria-disabled="true" role="button" tabindex="-1">Import Bboxes…</label>
+                            <button type="button" name="restoreBboxes" id="restoreBboxes" class="training-button" disabled>Restore</button>
+                            <button type="button" name="saveBboxes" id="saveBboxes" class="training-button">Save YOLO</button>
+                            <hr />
+                            <div id="description">
+                                SHORTCUTS:
+                                <ul>
+                                    <li>Mouse wheel — zoom</li>
+                                    <li>Shift + wheel — pan</li>
+                                    <li>Right-click drag — pan</li>
+                                    <li>← / → — cycle images</li>
+                                    <li>↑ / ↓ — cycle classes</li>
+                                    <li>Delete / Backspace — remove selected bbox</li>
+                                    <li>A — toggle auto class</li>
+                                    <li>S — toggle SAM</li>
+                                    <li>D — toggle SAM point mode</li>
+                                    <li>M — toggle SAM multi-point</li>
+                                    <li>F — add positive point</li>
+                                    <li>G — add negative point</li>
+                                    <li>Enter — submit multi-point mask</li>
+                                    <li>Hold Z — disable modes temporarily</li>
+                                </ul>
+                                <p>Version: 0.2.5 | Copyright © 2018-2019 Draining Sun.</p>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="right" id="right">
+                        <div id="clipProgressBar"><div id="clipProgressFill"></div></div>
+                        <canvas id="canvas"></canvas>
+                        <canvas id="hiddenCanvas"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabTraining" data-tab-panel="training">
+                <div class="training-wrapper">
+                    <section class="training-form-section">
+                        <h2>Train CLIP Model</h2>
+                        <div class="training-field">
+                            <label for="clipBackboneSelect">CLIP Backbone</label>
+                            <select id="clipBackboneSelect"></select>
+                        </div>
+                        <div class="training-field">
+                            <label for="trainSolver">Solver</label>
+                            <select id="trainSolver">
+                                <option value="saga" selected>SAGA (elastic net-friendly)</option>
+                                <option value="lbfgs">LBFGS</option>
+                                <option value="liblinear">LibLinear</option>
+                                <option value="sag">SAG</option>
+                                <option value="newton-cg">Newton-CG</option>
+                            </select>
+                        </div>
+                        <div class="training-field">
+                            <label for="trainImagesBtn">Images Folder</label>
+                            <div class="training-picker">
+                                <button type="button" class="training-button" id="trainImagesBtn">Choose folder…</button>
+                                <input type="file" id="trainImages" accept="image/jpeg,image/png,image/webp,image/bmp,image/tiff" webkitdirectory directory multiple class="file-input-hidden" />
+                            </div>
+                            <div class="training-help" id="trainImagesSummary">No folder selected</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="trainLabelsBtn">Labels Folder (YOLO txt)</label>
+                            <div class="training-picker">
+                                <button type="button" class="training-button" id="trainLabelsBtn">Choose folder…</button>
+                                <input type="file" id="trainLabels" accept="text/plain" webkitdirectory directory multiple class="file-input-hidden" />
+                            </div>
+                            <div class="training-help" id="trainLabelsSummary">No folder selected</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="trainLabelmap">Labelmap (.txt or .pkl)</label>
+                            <input type="file" id="trainLabelmap" accept=".txt,.pkl" />
+                            <div class="training-help" id="trainLabelmapSummary">Optional</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="trainOutputDirBtn">Output Directory</label>
+                            <button type="button" class="training-button" id="trainOutputDirBtn">Choose folder…</button>
+                            <div class="training-help" id="trainOutputDirSummary">Server default (.)</div>
+                        </div>
+                        <div class="training-field-double">
+                            <div>
+                                <label for="trainModelFilename">Model Filename</label>
+                                <input type="text" id="trainModelFilename" value="my_logreg_model.pkl" />
+                            </div>
+                            <div>
+                                <label for="trainLabelmapFilename">Labelmap Filename</label>
+                                <input type="text" id="trainLabelmapFilename" value="my_label_list.pkl" />
+                            </div>
+                        </div>
+                        <div class="training-advanced-grid">
+                            <div>
+                                <label for="trainTestSize">Test Size</label>
+                                <input type="number" id="trainTestSize" min="0" max="0.9" step="0.05" value="0.2" />
+                                <div class="training-help">Fraction of images reserved for evaluation.</div>
+                            </div>
+                            <div>
+                                <label for="trainRandomSeed">Seed</label>
+                                <input type="number" id="trainRandomSeed" value="42" />
+                                <div class="training-help">Controls deterministic train/test split.</div>
+                            </div>
+                            <div>
+                                <label for="trainBatchSize">Batch Size</label>
+                                <input type="number" id="trainBatchSize" value="64" min="1" />
+                                <div class="training-help">Images encoded per CLIP forward pass.</div>
+                            </div>
+                            <div>
+                                <label for="trainMaxIter">Max Iter</label>
+                                <input type="number" id="trainMaxIter" value="1000" min="100" step="50" />
+                                <div class="training-help">Upper bound on solver iterations.</div>
+                            </div>
+                            <div>
+                                <label for="trainMinPerClass">Min / Class</label>
+                                <input type="number" id="trainMinPerClass" value="2" min="1" />
+                                <div class="training-help">Drops classes with fewer samples before training.</div>
+                            </div>
+                            <div>
+                                <label for="trainRegC">C</label>
+                                <input type="number" id="trainRegC" value="1.0" step="0.1" min="0.01" />
+                                <div class="training-help">Inverse regularisation strength (higher = less regularisation).</div>
+                            </div>
+                            <div>
+                                <label for="trainClassWeight">Class Weight</label>
+                                <select id="trainClassWeight">
+                                    <option value="none" selected>None</option>
+                                    <option value="balanced">Balanced</option>
+                                </select>
+                                <div class="training-help">`balanced` reweights rare classes; `none` leaves raw counts.</div>
+                            </div>
+                            <div>
+                                <label for="trainDeviceOverride">Device Override</label>
+                                <input type="text" id="trainDeviceOverride" placeholder="cpu or cuda" />
+                            </div>
+                        </div>
+                        <button type="button" id="startTrainingBtn">Start Training</button>
+                        <div class="training-toggle-row">
+                            <label><input type="checkbox" id="trainReuseEmbeddings" checked /> Cache and reuse embeddings</label>
+                            <label><input type="checkbox" id="trainHardMining" /> Hard example mining</label>
+                        </div>
+                        <div class="training-message" id="trainingMessage" role="status"></div>
+                    </section>
+                    <section class="training-status-section">
+                        <h2>Training Status</h2>
+                        <div class="training-progress" id="trainingProgressBar">
+                            <div class="training-progress-fill" id="trainingProgressFill"></div>
+                        </div>
+                        <div class="training-status-text" id="trainingStatusText">Idle</div>
+                        <div class="training-summary" id="trainingSummary"></div>
+                        <div class="training-logs">
+                            <h3>Logs</h3>
+                            <pre id="trainingLog"></pre>
+                        </div>
+                        <div class="training-history">
+                            <h3>Recent Jobs</h3>
+                            <div id="trainingHistory"></div>
+                        </div>
+                    </section>
+                    <section class="active-meta">
+                        <h3>Latest Training Run</h3>
+                        <div class="active-latest" id="activeLatestArtifact"></div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabActive" data-tab-panel="active">
+                <div class="active-wrapper">
+                    <section class="active-controls">
+                        <h2>Switch Models</h2>
+                        <div class="active-message" id="activeMessage" role="status"></div>
+                        <p class="active-help">When you activate a trained classifier, the system loads the CLIP backbone saved in its metadata. Use these controls if you need to override the paths manually.</p>
+                        <div class="active-field">
+                            <label for="activeClipSelect">CLIP Backbone</label>
+                            <select id="activeClipSelect"></select>
+                            <div class="active-help">CLIP encoder that will run before the logistic regression head.</div>
+                        </div>
+                        <div class="active-field">
+                            <label for="activeClassifierPath">Classifier Path</label>
+                            <div class="active-picker">
+                                <input type="text" id="activeClassifierPath" placeholder="./my_logreg_model.pkl" />
+                                <button type="button" class="training-button" id="activeClassifierBrowse">Browse…</button>
+                            </div>
+                            <div class="active-help">Choose the logistic-regression `.pkl` returned by training.</div>
+                        </div>
+                        <div class="active-field">
+                            <label for="activeLabelmapPath">Labelmap Path</label>
+                            <div class="active-picker">
+                                <input type="text" id="activeLabelmapPath" placeholder="Optional" />
+                                <button type="button" class="training-button" id="activeLabelmapBrowse">Browse…</button>
+                            </div>
+                            <div class="active-help">Optional `.pkl`/`.txt` mapping to keep YOLO order.</div>
+                        </div>
+                        <div class="active-buttons">
+                            <button type="button" class="training-button" id="activateLatestModelBtn" disabled>Activate Latest Training Run</button>
+                            <button type="button" class="training-button" id="applyActiveModelBtn">Apply Changes</button>
+                            <button type="button" class="training-button" id="refreshActiveModelBtn">Refresh</button>
+                        </div>
+                        <input type="file" id="activeClassifierUpload" accept=".pkl" class="file-input-hidden" />
+                        <input type="file" id="activeLabelmapUpload" accept=".pkl,.txt" class="file-input-hidden" />
+                    </section>
+                    <section class="active-meta">
+                        <h3>Latest Training Run</h3>
+                        <div class="active-latest" id="activeLatestArtifact"></div>
+                    </section>
+                </div>
+            </div>
         </div>
     </div>
 
-    <!-- Add this script block to sort images alphabetically -->
     <script>
         document.addEventListener("DOMContentLoaded", function() {
-          const imagesInput = document.getElementById("images");
-          const imageListSelect = document.getElementById("imageList");
-    
-          // Existing code for sorting images
-          imagesInput.addEventListener("change", function() {
-            const fileList = Array.from(imagesInput.files);
-            fileList.sort((a, b) => a.name.localeCompare(b.name));
-            imageListSelect.innerHTML = "";
-            fileList.forEach(file => {
-              const option = document.createElement("option");
-              option.value = file.name;
-              option.textContent = file.name;
-              imageListSelect.appendChild(option);
-            });
-          });
-    
-          // NEW: Set up the crop button if it's defined in ybat.js
           if (typeof listenImageCrop === "function") {
             listenImageCrop();
           }
         });
         </script>
-    </body>
+</body>
 </html>

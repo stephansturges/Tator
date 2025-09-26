@@ -212,6 +212,31 @@
                                 <label for="trainDeviceOverride">Device Override</label>
                                 <input type="text" id="trainDeviceOverride" placeholder="cpu or cuda" />
                             </div>
+                            <div>
+                                <label for="trainHardMisWeight">Hard W (misclass)</label>
+                                <input type="number" id="trainHardMisWeight" value="3.0" min="1" step="0.1" />
+                                <div class="training-help">Multiplier applied to misclassified samples in hard mining.</div>
+                            </div>
+                            <div>
+                                <label for="trainHardLowConfWeight">Hard W (low conf)</label>
+                                <input type="number" id="trainHardLowConfWeight" value="2.0" min="1" step="0.1" />
+                                <div class="training-help">Multiplier for low-confidence samples (below the thresholds).</div>
+                            </div>
+                            <div>
+                                <label for="trainHardLowConfThreshold">Low-conf threshold</label>
+                                <input type="number" id="trainHardLowConfThreshold" value="0.65" min="0" max="0.9999" step="0.01" />
+                                <div class="training-help">Samples with max probability below this value get boosted.</div>
+                            </div>
+                            <div>
+                                <label for="trainHardMarginThreshold">Margin threshold</label>
+                                <input type="number" id="trainHardMarginThreshold" value="0.15" min="0" max="1" step="0.01" />
+                                <div class="training-help">Boost samples whose top-1 vs top-2 gap falls under this margin.</div>
+                            </div>
+                            <div>
+                                <label for="trainConvergenceTol">Convergence tol</label>
+                                <input type="number" id="trainConvergenceTol" value="0.0001" min="0" step="0.00001" />
+                                <div class="training-help">Lower tolerance forces more iterations before convergence.</div>
+                            </div>
                         </div>
                         <button type="button" id="startTrainingBtn">Start Training</button>
                         <div class="training-toggle-row">
@@ -226,6 +251,9 @@
                             <div class="training-progress-fill" id="trainingProgressFill"></div>
                         </div>
                         <div class="training-status-text" id="trainingStatusText">Idle</div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button training-button-danger" id="cancelTrainingBtn" disabled>Cancel Job</button>
+                        </div>
                         <div class="training-summary" id="trainingSummary"></div>
                         <div class="training-logs">
                             <h3>Logs</h3>
@@ -235,10 +263,6 @@
                             <h3>Recent Jobs</h3>
                             <div id="trainingHistory"></div>
                         </div>
-                    </section>
-                    <section class="active-meta">
-                        <h3>Latest Training Run</h3>
-                        <div class="active-latest" id="activeLatestArtifact"></div>
                     </section>
                 </div>
             </div>
@@ -276,10 +300,6 @@
                         </div>
                         <input type="file" id="activeClassifierUpload" accept=".pkl" class="file-input-hidden" />
                         <input type="file" id="activeLabelmapUpload" accept=".pkl,.txt" class="file-input-hidden" />
-                    </section>
-                    <section class="active-meta">
-                        <h3>Latest Training Run</h3>
-                        <div class="active-latest" id="activeLatestArtifact"></div>
                     </section>
                 </div>
             </div>

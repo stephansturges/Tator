@@ -418,6 +418,7 @@ class ClipTrainingJob:
     images_dir: Optional[str] = None
     labels_dir: Optional[str] = None
     labelmap_path: Optional[str] = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
 TRAINING_JOBS: Dict[str, ClipTrainingJob] = {}
@@ -709,15 +710,27 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                            clip_name: str, output_dir: str, model_filename: str, labelmap_filename: str,
                            test_size: float, random_seed: int, batch_size: int, max_iter: int,
                            min_per_class: int, class_weight: str, C: float, device_override: Optional[str],
-                           solver: str, reuse_embeddings: bool, hard_example_mining: bool) -> None:
+                           solver: str, reuse_embeddings: bool, hard_example_mining: bool,
+                           hard_mining_misclassified_weight: float,
+                           hard_mining_low_conf_weight: float,
+                           hard_mining_low_conf_threshold: float,
+                           hard_mining_margin_threshold: float,
+                           convergence_tol: float,
+                           cancel_event: threading.Event) -> None:
 
     def progress_cb(value: float, message: str) -> None:
         with TRAINING_JOBS_LOCK:
+            if cancel_event.is_set() and job.status not in {"cancelled", "failed"}:
+                _job_update(job, status="cancelling", message="Cancellation requested ...", progress=value)
+                return
             _job_update(job, status="running", progress=value, message=message)
 
     def worker() -> None:
         try:
             with TRAINING_JOBS_LOCK:
+                if cancel_event.is_set():
+                    _job_update(job, status="cancelled", progress=job.progress, message="Training cancelled before start.")
+                    return
                 _job_update(job, status="running", progress=0.01, message="Preparing training job ...")
             artifacts = train_clip_from_yolo(
                 images_path=images_dir,
@@ -736,16 +749,26 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 solver=solver,
                 reuse_embeddings=reuse_embeddings,
                 hard_example_mining=hard_example_mining,
+                hard_mining_misclassified_weight=hard_mining_misclassified_weight,
+                hard_mining_low_conf_weight=hard_mining_low_conf_weight,
+                hard_mining_low_conf_threshold=hard_mining_low_conf_threshold,
+                hard_mining_margin_threshold=hard_mining_margin_threshold,
+                convergence_tol=convergence_tol,
                 device=device_override,
                 progress_cb=progress_cb,
+                should_cancel=cancel_event.is_set,
             )
             payload = _artifacts_to_payload(artifacts)
             with TRAINING_JOBS_LOCK:
                 _job_update(job, status="succeeded", progress=1.0, message="Training completed.", artifacts=payload)
         except TrainingError as exc:
             with TRAINING_JOBS_LOCK:
-                _job_update(job, status="failed", message=str(exc), error=str(exc))
-            logger.warning("[clip-train %s] Training failed: %s", job.job_id[:8], exc)
+                if str(exc) == "cancelled":
+                    _job_update(job, status="cancelled", message="Training cancelled by user.")
+                    logger.info("[clip-train %s] Training cancelled", job.job_id[:8])
+                else:
+                    _job_update(job, status="failed", message=str(exc), error=str(exc))
+                    logger.warning("[clip-train %s] Training failed: %s", job.job_id[:8], exc)
         except Exception as exc:  # noqa: BLE001
             with TRAINING_JOBS_LOCK:
                 _job_update(job, status="failed", message="Training crashed.", error=str(exc))
@@ -823,6 +846,11 @@ async def start_clip_training(
     solver: str = Form("saga"),
     reuse_embeddings: Optional[str] = Form(None),
     hard_example_mining: Optional[str] = Form(None),
+    hard_mis_weight: float = Form(3.0),
+    hard_low_conf_weight: float = Form(2.0),
+    hard_low_conf_threshold: float = Form(0.65),
+    hard_margin_threshold: float = Form(0.15),
+    convergence_tol: float = Form(1e-4),
 ):
     images_path_native = _normalise_optional_path(images_path_native)
     labels_path_native = _normalise_optional_path(labels_path_native)
@@ -892,7 +920,7 @@ async def start_clip_training(
     if reuse_embeddings_flag:
         extras.append("cache")
     if hard_example_flag:
-        extras.append("hard")
+        extras.append(f"hard({hard_mis_weight_f:.1f}/{hard_low_conf_weight_f:.1f})")
     job_message += f" [{', '.join(extras)}]"
     _job_log(job, job_message)
 
@@ -906,6 +934,11 @@ async def start_clip_training(
         class_weight_norm = "none"
     C_f = _coerce_float(C, 1.0, minimum=0.0001)
     device_override_clean = (device_override or None)
+    hard_mis_weight_f = _coerce_float(hard_mis_weight, 3.0, minimum=1.0)
+    hard_low_conf_weight_f = _coerce_float(hard_low_conf_weight, 2.0, minimum=1.0)
+    hard_low_conf_threshold_f = _coerce_float(hard_low_conf_threshold, 0.65, minimum=0.0, maximum=0.9999)
+    hard_margin_threshold_f = _coerce_float(hard_margin_threshold, 0.15, minimum=0.0)
+    convergence_tol_f = _coerce_float(convergence_tol, 1e-4, minimum=1e-8)
 
     with TRAINING_JOBS_LOCK:
         TRAINING_JOBS[job_id] = job
@@ -930,6 +963,12 @@ async def start_clip_training(
         solver=solver_name,
         reuse_embeddings=reuse_embeddings_flag,
         hard_example_mining=hard_example_flag,
+        hard_mining_misclassified_weight=hard_mis_weight_f,
+        hard_mining_low_conf_weight=hard_low_conf_weight_f,
+        hard_mining_low_conf_threshold=hard_low_conf_threshold_f,
+        hard_mining_margin_threshold=hard_margin_threshold_f,
+        convergence_tol=convergence_tol_f,
+        cancel_event=job.cancel_event,
     )
 
     return {"job_id": job_id}
@@ -946,6 +985,21 @@ def list_training_jobs():
 def get_training_job(job_id: str):
     job = _validate_job_exists(job_id)
     return _serialize_job(job)
+
+
+@app.post("/clip/train/{job_id}/cancel")
+def cancel_training_job(job_id: str):
+    job = _validate_job_exists(job_id)
+    next_status = job.status
+    with TRAINING_JOBS_LOCK:
+        if job.status in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        if job.cancel_event.is_set():
+            return {"status": job.status}
+        job.cancel_event.set()
+        next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
+        _job_update(job, status=next_status, message="Cancellation requested ...")
+    return {"status": next_status}
 
 
 @app.get("/clip/active_model", response_model=ActiveModelResponse)

@@ -83,7 +83,6 @@
                             <label for="bboxes">Bboxes:</label>
                             <input type="file" id="bboxes" name="bboxes[]" accept="text/plain, application/zip" disabled multiple class="file-input-hidden" />
                             <label for="bboxes" id="bboxesSelect" class="training-button button-disabled" aria-disabled="true" role="button" tabindex="-1">Import Bboxes…</label>
-                            <button type="button" name="restoreBboxes" id="restoreBboxes" class="training-button" disabled>Restore</button>
                             <button type="button" name="saveBboxes" id="saveBboxes" class="training-button">Save YOLO</button>
                             <hr />
                             <div id="description">
@@ -95,16 +94,15 @@
                                     <li>← / → — cycle images</li>
                                     <li>↑ / ↓ — cycle classes</li>
                                     <li>Delete / Backspace — remove selected bbox</li>
+                                    <li>Enter — submit multi-point mask</li>
+                                    <li>Hold Z — temporarily disable Auto Class and all SAM modes so you can select or delete the active bbox</li>
                                     <li>A — toggle auto class</li>
                                     <li>S — toggle SAM</li>
                                     <li>D — toggle SAM point mode</li>
                                     <li>M — toggle SAM multi-point</li>
                                     <li>F — add positive point</li>
                                     <li>G — add negative point</li>
-                                    <li>Enter — submit multi-point mask</li>
-                                    <li>Hold Z — disable modes temporarily</li>
                                 </ul>
-                                <p>Version: 0.2.5 | Copyright © 2018-2019 Draining Sun.</p>
                             </div>
                         </form>
                     </div>

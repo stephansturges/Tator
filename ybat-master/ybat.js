@@ -3282,7 +3282,7 @@
     const markedBackgroundColor = "rgba(255, 133, 27, 0.2)";
     const minBBoxWidth = 5;
     const minBBoxHeight = 5;
-    const scrollSpeed = 1.02;
+    const scrollSpeed = 1.03;
     const minZoom = 0.1;
     const maxZoom = 5;
     const edgeSize = 5;
@@ -3600,7 +3600,7 @@
 
     const trackWheel = (event) => {
         if (event.shiftKey) {
-            const panSpeed = -1;
+            const panSpeed = -1.5;
             canvasX -= event.deltaX * panSpeed;
             canvasY -= event.deltaY * panSpeed;
             mouse.realX = zoomXInv(mouse.x);

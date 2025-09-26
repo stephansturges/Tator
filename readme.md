@@ -1,6 +1,33 @@
 # 🥔 Tator – Local CLIP + SAM Annotation Toolkit
 
-Tator is a single-machine annotation workflow that pairs the YBAT frontend with a FastAPI backend to deliver fast bounding-box and class suggestions powered by CLIP and Segment Anything (SAM). The UI now bundles labeling, CLIP training, and model management in one place so you can iterate on datasets without leaving the browser.
+Tator is a single-machine annotation workflow that pairs a clean, fast, simple, web-based frontend with a FastAPI backend to deliver _fast_ bounding-box annotation for images as well as some cool optional automation like class suggestions powered by CLIP and bbox cleanup / auto-suggestion using Segment Anything (SAM). The UI now bundles labeling, CLIP training, and model management in one place so you can iterate on datasets without leaving the browser.
+
+## Lightning-Fast Labeling Modes
+
+### Auto Class Corrector
+Drop any tentative label and let CLIP clean it up instantly. Tator double-checks every box and snaps it to the class with the highest confidence so you can move through image stacks at warp speed.
+
+<!-- Add GIF: Auto Class Corrector -->
+
+### Auto Box Refinement
+Rough sketches are enough—SAM reshapes your loose bounding boxes into pixel-perfect rectangles while CLIP verifies the class. It feels like spell-check for geometry.
+
+<!-- Add GIF: Auto Box Refinement -->
+
+### One-Click Point-to-Box
+Tap once anywhere on the object and SAM conjures a tight box while CLIP names it. Perfect for those “I just need this labeled now” marathons.
+
+<!-- Add GIF: One-Click Point-to-Box -->
+
+### Multi-Point Magic
+When objects are tricky, sprinkle a few positive/negative points and let SAM sculpt the exact mask. Queue up new selections immediately—no waiting for the previous mask to land.
+
+<!-- Add GIF: Multi-Point Magic -->
+
+### SAM Preload Boost
+Enable preloading to keep the next image warmed up inside SAM. You’ll see progress ticks in the side rail and enjoy near-zero latency when you start pointing.
+
+<!-- Add GIF: SAM Preload Boost -->
 
 ## Key Features
 - **One-click assists** – auto class, SAM box/point refinements, and multi-point prompts with live progress indicators.
@@ -72,7 +99,7 @@ Tator is a single-machine annotation workflow that pairs the YBAT frontend with 
 ### Train CLIP Tab
 1. Choose **Image folder** and **Label folder** via native directory pickers. Only files matching YOLO expectations are enumerated.
 2. (Optional) Provide a labelmap so class ordering matches the labeling tab.
-3. Configure solver, class weights, max iterations, batch size, hard-example mining, and **Cache & reuse embeddings** (enabled by default).
+3. Configure solver, class weights, max iterations, batch size, convergence tolerance, and hard-example mining (with adjustable weights/thresholds) plus **Cache & reuse embeddings** (enabled by default).
 4. Select an output directory; training writes `{model,labelmap,meta}.pkl` plus JSON metrics.
 5. Click **Start Training**. Progress logs stream live, including per-iteration convergence and per-class precision/recall/F1. Completed runs appear in the summary panel with download links.
 
@@ -108,6 +135,18 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything) / [SAM2](https://github.com/facebookresearch/sam2). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
+
+
+## LOP
+1. **[planned]** SAM2 implementation is not properly tested yet - it's likely there are some issues to be cleaned up!
+2. **[planned]** CLIP regression / training is in early stages - it works but it's likely we can develop some better default recipes
+3. **[up for grabs]** We should add OBB support, it would be pretty simple to do in terms of UX and can really leverage SAM refinement
+4. **[up for grabs]** Tracking / video sequence-annotation would be a cool longer-term objective. 
+5. **[planned]** Docs should be improved, especially around explaining how to run the backend on a remore GPU-enabled server for bigger labeling jobs.
+6. **[up for grabs]** Clean multi-user support would be nice in the future, using a single backend with some UX / UI to deconflict and distribute work packages.
+7. **[planned]** Faster, faster! Everything should be made faster to keep the UX enjoyable.
+8. **[up for grabs]** The logic of running the training from a remote server (transferring images in base64) is untested, and most likely buggy.
+MRs welcome!
 
 ## License
 Copyright (c) 2025 Aircortex.com — released under the MIT License. Third-party assets retain their original licenses.

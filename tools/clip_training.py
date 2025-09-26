@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 ProgressCallback = Callable[[float, str], None]
+CancelCallback = Callable[[], bool]
 
 
 class TrainingError(RuntimeError):
@@ -62,6 +63,11 @@ class TrainingArtifacts:
     hard_example_mining: bool
     class_weight: str
     per_class_metrics: List[Dict[str, Optional[float]]]
+    hard_mining_misclassified_weight: float
+    hard_mining_low_conf_weight: float
+    hard_mining_low_conf_threshold: float
+    hard_mining_margin_threshold: float
+    convergence_tol: float
 
 
 def _safe_progress(progress_cb: Optional[ProgressCallback], value: float, message: str) -> None:
@@ -252,7 +258,13 @@ def train_clip_from_yolo(
     solver: str = "saga",
     reuse_embeddings: bool = False,
     hard_example_mining: bool = False,
+    hard_mining_misclassified_weight: float = 3.0,
+    hard_mining_low_conf_weight: float = 2.0,
+    hard_mining_low_conf_threshold: float = 0.65,
+    hard_mining_margin_threshold: float = 0.15,
+    convergence_tol: float = 1e-4,
     progress_cb: Optional[ProgressCallback] = None,
+    should_cancel: Optional[CancelCallback] = None,
 ) -> TrainingArtifacts:
     """Train a CLIP+LogReg model from a YOLO-style dataset.
 
@@ -270,6 +282,12 @@ def train_clip_from_yolo(
     if class_weight not in {"none", "balanced"}:
         class_weight = "none"
 
+    hard_mining_misclassified_weight = float(max(1.0, hard_mining_misclassified_weight))
+    hard_mining_low_conf_weight = float(max(1.0, hard_mining_low_conf_weight))
+    hard_mining_low_conf_threshold = float(max(0.0, min(0.9999, hard_mining_low_conf_threshold)))
+    hard_mining_margin_threshold = float(max(0.0, hard_mining_margin_threshold))
+    convergence_tol = float(max(1e-8, convergence_tol))
+
     # Prepare paths early to fail fast on unwritable destinations.
     model_dir = os.path.dirname(os.path.abspath(model_output)) or "."
     labelmap_dir = os.path.dirname(os.path.abspath(labelmap_output)) or "."
@@ -278,6 +296,12 @@ def train_clip_from_yolo(
             raise TrainingError(f"Output directory does not exist: {path}")
 
     _safe_progress(progress_cb, 0.0, "Loading configuration ...")
+
+    def _check_cancel() -> None:
+        if should_cancel and should_cancel():
+            raise TrainingError("cancelled")
+
+    _check_cancel()
     labelmap_list = _load_labelmap(input_labelmap)
     resolved_device = _resolve_device(device)
     clip_net, preprocess = _load_clip(clip_model, resolved_device)
@@ -291,6 +315,7 @@ def train_clip_from_yolo(
     if reuse_embeddings:
         _ensure_cache_root()
         cache_signature = _compute_dataset_signature(images_path, labels_path, clip_model)
+        _check_cancel()
         cache_payload = _load_cached_embeddings(cache_signature)
         if cache_payload:
             using_cached_embeddings = True
@@ -307,6 +332,7 @@ def train_clip_from_yolo(
         f for f in os.listdir(images_path)
         if os.path.splitext(f)[1].lower() in valid_exts
     )
+    _check_cancel()
     if not image_files:
         raise TrainingError("No supported images found in the provided folder.")
 
@@ -317,6 +343,7 @@ def train_clip_from_yolo(
     encountered_cids: set[int]
 
     if using_cached_embeddings and cache_payload:
+        _check_cancel()
         _safe_progress(progress_cb, 0.05, f"Found cached embeddings for signature {cache_signature[:8]}…")
         chunk_dir = Path(cache_payload["chunk_dir"])
         chunk_records = list(cache_payload["chunk_records"])
@@ -352,6 +379,7 @@ def train_clip_from_yolo(
         nonlocal batch_crops, batch_meta
         if not batch_crops:
             return
+        _check_cancel()
         embs = _encode_batch(clip_net, preprocess, resolved_device, batch_crops)
         chunk_start = len(y_class_names)
         chunk_path = chunk_dir / f"chunk_{len(chunk_records):06d}.npy"
@@ -384,6 +412,7 @@ def train_clip_from_yolo(
                 raise TrainingError(f"Failed to read label file '{label_file}': {exc}") from exc
 
             for ln in lines:
+                _check_cancel()
                 parts = ln.split()
                 if len(parts) < 5:
                     continue
@@ -423,6 +452,7 @@ def train_clip_from_yolo(
                 _safe_progress(progress_cb, 0.05 + 0.30 * frac, f"Processed {idx}/{len(image_files)} images (accumulated crops={total_valid}) ...")
 
         flush_batch()
+        _check_cancel()
     else:
         total_valid = len(y_numeric)
 
@@ -454,12 +484,14 @@ def train_clip_from_yolo(
     use_group_split = len(unique_groups) >= 2
     if use_group_split:
         try:
+            _check_cancel()
             splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_seed)
             train_idx, test_idx = next(splitter.split(np.arange(len(y_numeric_np)), y_class_names_arr, groups=groups_np))
         except Exception:
             use_group_split = False
     if not use_group_split:
         stratify = y_class_names_arr if len(set(y_class_names_arr)) > 1 else None
+        _check_cancel()
         train_idx, test_idx = train_test_split(
             np.arange(len(y_numeric_np)),
             test_size=test_size,
@@ -481,6 +513,7 @@ def train_clip_from_yolo(
     X_test_mm = np.memmap(test_memmap_path, dtype=np.float64, mode="w+", shape=(test_size, 512))
 
     for chunk_path, old_start, count in chunk_records:
+        _check_cancel()
         chunk = np.load(chunk_path)
         chunk = np.asarray(chunk, dtype=np.float64)
         old_indices = np.arange(old_start, old_start + count)
@@ -527,8 +560,9 @@ def train_clip_from_yolo(
         C=C,
         warm_start=True,
         verbose=0,
+        tol=convergence_tol,
     )
-    tol = getattr(clf, "tol", 1e-4)
+    tol = convergence_tol
     prev_coef: Optional[np.ndarray] = None
     prev_loss: Optional[float] = None
     last_train_pred: Optional[np.ndarray] = None
@@ -540,6 +574,7 @@ def train_clip_from_yolo(
 
     try:
         for iteration in range(1, max_iter + 1):
+            _check_cancel()
             clf.fit(X_train, y_train)
             proba_train = clf.predict_proba(X_train)
             train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
@@ -606,67 +641,87 @@ def train_clip_from_yolo(
         if hard_example_mining and last_train_pred is not None and last_train_proba is not None:
             _safe_progress(progress_cb, 0.66, "Starting hard example mining pass ...")
             sample_weight = np.ones(len(y_train), dtype=np.float64)
-            misclassified = (last_train_pred != y_train)
-            sample_weight[misclassified] = 3.0
-            margins = last_train_proba.max(axis=1)
-            low_conf = margins < 0.65
-            sample_weight[low_conf] = np.maximum(sample_weight[low_conf], 2.0)
 
-            extra_iters = max(5, min(200, max_iter // 5))
-            for extra_iter in range(1, extra_iters + 1):
-                clf.fit(X_train, y_train, sample_weight=sample_weight)
-                proba_train = clf.predict_proba(X_train)
-                train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
-                train_pred = clf.predict(X_train)
-                train_acc = float((train_pred == y_train).mean())
-                last_train_pred = train_pred
-                last_train_proba = proba_train
+            if hard_mining_misclassified_weight > 1.0:
+                misclassified_mask = last_train_pred != y_train
+                if np.any(misclassified_mask):
+                    sample_weight[misclassified_mask] = np.maximum(
+                        sample_weight[misclassified_mask], hard_mining_misclassified_weight
+                    )
 
-                val_loss = None
-                val_acc = None
-                if y_test.size:
-                    proba_val = clf.predict_proba(X_test)
-                    val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
-                    val_pred = clf.predict(X_test)
-                    val_acc = float((val_pred == y_test).mean())
-                    last_val_pred = val_pred
-                    last_val_proba = proba_val
+            if hard_mining_low_conf_weight > 1.0:
+                top1 = last_train_proba.max(axis=1)
+                low_conf_mask = np.zeros_like(top1, dtype=bool)
+                if hard_mining_low_conf_threshold > 0.0:
+                    low_conf_mask |= top1 < hard_mining_low_conf_threshold
+                if hard_mining_margin_threshold > 0.0 and last_train_proba.shape[1] > 1:
+                    second_best = np.partition(last_train_proba, -2, axis=1)[:, -2]
+                    margin_gap = top1 - second_best
+                    low_conf_mask |= margin_gap < hard_mining_margin_threshold
+                if np.any(low_conf_mask):
+                    sample_weight[low_conf_mask] = np.maximum(
+                        sample_weight[low_conf_mask], hard_mining_low_conf_weight
+                    )
 
-                coef_delta = float(np.linalg.norm(clf.coef_ - prev_coef)) if prev_coef is not None else None
-                loss_delta = float(abs(prev_loss - train_loss)) if prev_loss is not None else None
+            if not np.any(sample_weight != 1.0):
+                _safe_progress(progress_cb, 0.7, "Hard mining skipped — no samples met weighting criteria.")
+            else:
+                extra_iters = max(5, min(200, max_iter // 5))
+                for extra_iter in range(1, extra_iters + 1):
+                    _check_cancel()
+                    clf.fit(X_train, y_train, sample_weight=sample_weight)
+                    proba_train = clf.predict_proba(X_train)
+                    train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
+                    train_pred = clf.predict(X_train)
+                    train_acc = float((train_pred == y_train).mean())
+                    last_train_pred = train_pred
+                    last_train_proba = proba_train
 
-                iteration_counter += 1
-                convergence_trace.append({
-                    "iteration": iteration_counter,
-                    "train_loss": train_loss,
-                    "train_accuracy": train_acc,
-                    "val_loss": val_loss,
-                    "val_accuracy": val_acc,
-                    "coef_delta": coef_delta,
-                    "loss_delta": loss_delta,
-                })
+                    val_loss = None
+                    val_acc = None
+                    if y_test.size:
+                        proba_val = clf.predict_proba(X_test)
+                        val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
+                        val_pred = clf.predict(X_test)
+                        val_acc = float((val_pred == y_test).mean())
+                        last_val_pred = val_pred
+                        last_val_proba = proba_val
 
-                progress_fraction = 0.66 + 0.09 * (extra_iter / extra_iters)
-                status_parts = [
-                    f"hard_iter {extra_iter}",
-                    f"train_loss={train_loss:.4f}",
-                    f"train_acc={train_acc:.3f}",
-                ]
-                if val_loss is not None:
-                    status_parts.append(f"val_loss={val_loss:.4f}")
-                if val_acc is not None:
-                    status_parts.append(f"val_acc={val_acc:.3f}")
-                _safe_progress(progress_cb, progress_fraction, "Hard mining: " + ", ".join(status_parts))
+                    coef_delta = float(np.linalg.norm(clf.coef_ - prev_coef)) if prev_coef is not None else None
+                    loss_delta = float(abs(prev_loss - train_loss)) if prev_loss is not None else None
 
-                prev_coef = clf.coef_.copy()
-                prev_loss = train_loss
+                    iteration_counter += 1
+                    convergence_trace.append({
+                        "iteration": iteration_counter,
+                        "train_loss": train_loss,
+                        "train_accuracy": train_acc,
+                        "val_loss": val_loss,
+                        "val_accuracy": val_acc,
+                        "coef_delta": coef_delta,
+                        "loss_delta": loss_delta,
+                    })
 
-                if coef_delta is not None and coef_delta <= tol:
-                    converged = True
-                    break
-                if loss_delta is not None and loss_delta <= tol:
-                    converged = True
-                    break
+                    progress_fraction = 0.66 + 0.09 * (extra_iter / extra_iters)
+                    status_parts = [
+                        f"hard_iter {extra_iter}",
+                        f"train_loss={train_loss:.4f}",
+                        f"train_acc={train_acc:.3f}",
+                    ]
+                    if val_loss is not None:
+                        status_parts.append(f"val_loss={val_loss:.4f}")
+                    if val_acc is not None:
+                        status_parts.append(f"val_acc={val_acc:.3f}")
+                    _safe_progress(progress_cb, progress_fraction, "Hard mining: " + ", ".join(status_parts))
+
+                    prev_coef = clf.coef_.copy()
+                    prev_loss = train_loss
+
+                    if coef_delta is not None and coef_delta <= tol:
+                        converged = True
+                        break
+                    if loss_delta is not None and loss_delta <= tol:
+                        converged = True
+                        break
 
             iterations_run = iteration_counter
 
@@ -702,6 +757,7 @@ def train_clip_from_yolo(
             })
 
         _safe_progress(progress_cb, 0.75, f"Saving classifier to {model_output} and labelmap to {labelmap_output} ...")
+        _check_cancel()
         joblib.dump(clf, model_output, compress=3)
 
         encountered_sorted = sorted(encountered_cids)
@@ -734,6 +790,11 @@ def train_clip_from_yolo(
             "C": C,
             "solver": solver,
             "hard_example_mining": hard_example_mining,
+            "hard_mining_misclassified_weight": hard_mining_misclassified_weight,
+            "hard_mining_low_conf_weight": hard_mining_low_conf_weight,
+            "hard_mining_low_conf_threshold": hard_mining_low_conf_threshold,
+            "hard_mining_margin_threshold": hard_mining_margin_threshold,
+            "convergence_tol": convergence_tol,
             "n_classes_seen": len(encountered_sorted),
             "n_samples_train": n_train,
             "n_samples_test": n_test,
@@ -742,9 +803,11 @@ def train_clip_from_yolo(
             "converged": converged,
         }
         meta_path = os.path.splitext(model_output)[0] + ".meta.pkl"
+        _check_cancel()
         joblib.dump(meta, meta_path, compress=3)
 
         if reuse_embeddings and not using_cached_embeddings and cache_signature:
+            _check_cancel()
             _write_cache_metadata(
                 cache_signature,
                 chunk_dir,
@@ -781,6 +844,11 @@ def train_clip_from_yolo(
             hard_example_mining=hard_example_mining,
             class_weight=class_weight,
             per_class_metrics=per_class_metrics,
+            hard_mining_misclassified_weight=hard_mining_misclassified_weight,
+            hard_mining_low_conf_weight=hard_mining_low_conf_weight,
+            hard_mining_low_conf_threshold=hard_mining_low_conf_threshold,
+            hard_mining_margin_threshold=hard_mining_margin_threshold,
+            convergence_tol=convergence_tol,
         )
 
     finally:

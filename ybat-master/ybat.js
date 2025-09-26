@@ -200,6 +200,7 @@
         classWeightSelect: null,
         deviceOverrideInput: null,
         startButton: null,
+        cancelButton: null,
         progressFill: null,
         statusText: null,
         message: null,
@@ -213,7 +214,6 @@
     const activeElements = {
         message: null,
         info: null,
-        latest: null,
         clipSelect: null,
         classifierPath: null,
         classifierUpload: null,
@@ -343,7 +343,60 @@
             </div>`;
         }).join("");
 
-        return `<div class="per-class-metrics"><h4>Per-class Metrics</h4><div class="metric-rows">${rows}</div></div>`;
+        const chart = renderPerClassMetricChart(metrics);
+        const glossary = renderMetricGlossary();
+
+        return `<div class="per-class-metrics"><h4>Per-class Metrics</h4><div class="metric-rows">${rows}</div>${chart}${glossary}</div>`;
+    }
+
+    function renderPerClassMetricChart(metrics) {
+        if (!Array.isArray(metrics) || !metrics.length) {
+            return "";
+        }
+
+        const columns = metrics.map((entry) => {
+            const label = escapeHtml(String(entry.label ?? "class"));
+            const precision = Number.isFinite(entry.precision) ? Math.max(0, Math.min(100, entry.precision * 100)) : null;
+            const recall = Number.isFinite(entry.recall) ? Math.max(0, Math.min(100, entry.recall * 100)) : null;
+            const f1 = Number.isFinite(entry.f1) ? Math.max(0, Math.min(100, entry.f1 * 100)) : null;
+
+            const precisionBar = precision === null
+                ? '<div class="metric-chart-bar precision empty"></div>'
+                : `<div class="metric-chart-bar precision" style="height:${precision.toFixed(1)}%" title="Precision: ${precision.toFixed(1)}%"></div>`;
+            const recallBar = recall === null
+                ? '<div class="metric-chart-bar recall empty"></div>'
+                : `<div class="metric-chart-bar recall" style="height:${recall.toFixed(1)}%" title="Recall: ${recall.toFixed(1)}%"></div>`;
+            const f1Bar = f1 === null
+                ? '<div class="metric-chart-bar f1 empty"></div>'
+                : `<div class="metric-chart-bar f1" style="height:${f1.toFixed(1)}%" title="F1: ${f1.toFixed(1)}%"></div>`;
+
+            return `<div class="metric-chart-column">
+                <div class="metric-chart-bars">
+                    ${precisionBar}
+                    ${recallBar}
+                    ${f1Bar}
+                </div>
+                <div class="metric-chart-class" title="${label}">${label}</div>
+            </div>`;
+        }).join("");
+
+        return `<div class="metric-chart">
+            <h4>Per-class Score Chart</h4>
+            <div class="metric-chart-grid">${columns}</div>
+            <div class="metric-chart-legend">
+                <div class="metric-chart-legend-item"><span class="legend-swatch precision"></span>Precision</div>
+                <div class="metric-chart-legend-item"><span class="legend-swatch recall"></span>Recall</div>
+                <div class="metric-chart-legend-item"><span class="legend-swatch f1"></span>F1</div>
+            </div>
+        </div>`;
+    }
+
+    function renderMetricGlossary() {
+        return `<div class="metric-glossary">
+            <strong>Precision</strong> measures how many of the model's positive predictions were correct. 
+            <strong>Recall</strong> captures how many true examples the model managed to find. 
+            <strong>F1</strong> balances precision and recall in a single score.
+        </div>`;
     }
 
     function setTrainingMessage(text, variant) {
@@ -792,48 +845,6 @@
             setActiveMessage(`Unable to read active model: ${error.message || error}`, "error");
         }
     }
-    function updateLatestArtifactCard() {
-        if (!activeElements.latest) {
-            return;
-        }
-        const art = trainingState.latestArtifacts;
-        if (!art) {
-            activeElements.latest.textContent = "Train a model to enable quick activation.";
-            if (activeElements.activateLatestButton) {
-                activeElements.activateLatestButton.disabled = true;
-            }
-            return;
-        }
-        const accuracyPct = Number.isFinite(art.accuracy) ? `${(art.accuracy * 100).toFixed(1)}%` : "n/a";
-        const iterationsInfo = Number.isFinite(art.iterations_run) ? art.iterations_run : "n/a";
-        const convergedInfo = typeof art.converged === "boolean" ? (art.converged ? "yes" : "no") : "n/a";
-        activeElements.latest.innerHTML = [
-            `Latest run`,
-            `Model: ${escapeHtml(art.model_path)}`,
-            `Labelmap: ${escapeHtml(art.labelmap_path)}`,
-            `Accuracy: ${accuracyPct}`,
-            `Class weight: ${escapeHtml(art.class_weight || 'none')}`,
-            `Solver: ${escapeHtml(art.solver || 'saga')}`,
-            `Iterations: ${escapeHtml(String(iterationsInfo))}`,
-            `Converged: ${escapeHtml(convergedInfo)}`,
-            `Hard mining: ${art.hard_example_mining ? 'yes' : 'no'}`,
-        ].map((line) => `<div>${line}</div>`).join("");
-        if (activeElements.activateLatestButton) {
-            activeElements.activateLatestButton.disabled = false;
-        }
-        if (activeElements.classifierPath) {
-            activeElements.classifierPath.value = art.model_path;
-        }
-        if (activeElements.labelmapPath) {
-            activeElements.labelmapPath.value = art.labelmap_path || "";
-        }
-        if (activeElements.clipSelect && art.clip_model) {
-            activeElements.clipSelect.value = art.clip_model;
-        }
-        setActiveMessage(`Latest classifier trained with ${art.clip_model || 'selected CLIP backbone'}.`, null);
-    }
-
-
     function renderTrainingHistoryItem(container, job) {
         const item = document.createElement("div");
         item.className = "training-history-item";
@@ -1004,6 +1015,10 @@
         if (trainingElements.progressFill) {
             trainingElements.progressFill.style.width = `${pct}%`;
         }
+        if (trainingElements.cancelButton) {
+            const cancellable = status.status === "running" || status.status === "queued";
+            trainingElements.cancelButton.disabled = !cancellable;
+        }
         if (trainingElements.statusText) {
             const message = status.message ? ` — ${status.message}` : "";
             trainingElements.statusText.textContent = `${status.status}${message}`;
@@ -1036,13 +1051,17 @@
                     `Iterations: ${escapeHtml(String(iterationsInfo))}`,
                     `Converged: ${escapeHtml(convergedInfo)}`,
                     `Hard mining: ${art.hard_example_mining ? 'yes' : 'no'}`,
+                    `Hard W (misclass): ${escapeHtml(formatNumber(art.hard_mining_misclassified_weight, 2))}`,
+                    `Hard W (low conf): ${escapeHtml(formatNumber(art.hard_mining_low_conf_weight, 2))}`,
+                    `Low-conf threshold: ${escapeHtml(formatNumber(art.hard_mining_low_conf_threshold, 3))}`,
+                    `Margin threshold: ${escapeHtml(formatNumber(art.hard_mining_margin_threshold, 3))}`,
+                    `Convergence tol: ${escapeHtml(formatNumber(art.convergence_tol, 6))}`,
                 ];
                 const summaryHtml = summaryLines.map((line) => `<div>${line}</div>`).join("");
                 const perClassHtml = renderPerClassMetrics(art.per_class_metrics);
                 const convergenceHtml = renderConvergenceTable(art.convergence_trace);
                 trainingElements.summary.innerHTML = summaryHtml + perClassHtml + convergenceHtml;
                 trainingState.latestArtifacts = art;
-                updateLatestArtifactCard();
             } else if (status.status !== "succeeded") {
                 trainingElements.summary.textContent = "";
             }
@@ -1051,11 +1070,32 @@
             setTrainingMessage("Training completed successfully.", "success");
             setActiveMessage("Training completed successfully. Activate it from the CLIP Model tab.", "success");
             stopTrainingPoll();
+            if (trainingElements.cancelButton) {
+                trainingElements.cancelButton.disabled = true;
+            }
         } else if (status.status === "failed") {
             const message = status.error || "Training failed.";
             setTrainingMessage(message, "error");
             setActiveMessage(message, "error");
             stopTrainingPoll();
+            if (trainingElements.cancelButton) {
+                trainingElements.cancelButton.disabled = true;
+            }
+        } else if (status.status === "cancelled") {
+            setTrainingMessage("Training cancelled.", "warn");
+            setActiveMessage("Training cancelled.", "warn");
+            stopTrainingPoll();
+            if (trainingElements.cancelButton) {
+                trainingElements.cancelButton.disabled = true;
+            }
+        } else if (status.status === "cancelling") {
+            setTrainingMessage("Cancellation in progress…", "warn");
+            setActiveMessage("Cancellation in progress…", "warn");
+            trainingState.pollHandle = setTimeout(() => {
+                pollTrainingJob(status.job_id).catch((err) => {
+                    console.error("Training poll error", err);
+                });
+            }, 1500);
         } else if (status.status === "running" || status.status === "queued") {
             trainingState.pollHandle = setTimeout(() => {
                 pollTrainingJob(status.job_id).catch((err) => {
@@ -1173,6 +1213,21 @@
         if (trainingElements.classWeightSelect) {
             formData.append("class_weight", trainingElements.classWeightSelect.value || "none");
         }
+        if (trainingElements.hardMisWeightInput) {
+            formData.append("hard_mis_weight", trainingElements.hardMisWeightInput.value || "3.0");
+        }
+        if (trainingElements.hardLowConfWeightInput) {
+            formData.append("hard_low_conf_weight", trainingElements.hardLowConfWeightInput.value || "2.0");
+        }
+        if (trainingElements.hardLowConfThresholdInput) {
+            formData.append("hard_low_conf_threshold", trainingElements.hardLowConfThresholdInput.value || "0.65");
+        }
+        if (trainingElements.hardMarginThresholdInput) {
+            formData.append("hard_margin_threshold", trainingElements.hardMarginThresholdInput.value || "0.15");
+        }
+        if (trainingElements.convergenceTolInput) {
+            formData.append("convergence_tol", trainingElements.convergenceTolInput.value || "0.0001");
+        }
         if (trainingElements.deviceOverrideInput && trainingElements.deviceOverrideInput.value.trim()) {
             formData.append("device_override", trainingElements.deviceOverrideInput.value.trim());
         }
@@ -1209,6 +1264,9 @@
             if (trainingElements.statusText) {
                 trainingElements.statusText.textContent = "queued";
             }
+            if (trainingElements.cancelButton) {
+                trainingElements.cancelButton.disabled = true;
+            }
             stopTrainingPoll();
             const resp = await fetch(`${API_ROOT}/clip/train`, {
                 method: "POST",
@@ -1224,28 +1282,13 @@
                 throw new Error("Training job id missing in response.");
             }
             trainingState.latestArtifacts = null;
-            updateLatestArtifactCard();
             setTrainingMessage(`Training job ${jobId} started.`, "success");
             setActiveMessage(`Training job ${jobId} started.`, "success");
             startTrainingPoll(jobId, true);
             refreshTrainingHistory();
-            trainingState.imageEntries = [];
-            trainingState.labelEntries = [];
-            trainingState.imageTotalCount = 0;
-            trainingState.labelTotalCount = 0;
-            trainingState.imagesFolderName = null;
-            trainingState.labelsFolderName = null;
-            trainingState.nativeImagesPath = null;
-            trainingState.nativeLabelsPath = null;
-            if (trainingElements.imagesInput) {
-                trainingElements.imagesInput.value = "";
+            if (trainingElements.cancelButton) {
+                trainingElements.cancelButton.disabled = false;
             }
-            if (trainingElements.labelsInput) {
-                trainingElements.labelsInput.value = "";
-            }
-            updateFileSummary(null, trainingElements.imagesSummary, { emptyText: "No folder selected", mode: "path", path: "" });
-            updateFileSummary(null, trainingElements.labelsSummary, { emptyText: "No folder selected", mode: "path", path: "" });
-            updateFileSummary(trainingElements.labelmapInput, trainingElements.labelmapSummary, { emptyText: "Optional" });
         } catch (error) {
             console.error("Failed to start training", error);
             const msg = error.message || String(error);
@@ -1254,6 +1297,35 @@
         } finally {
             if (trainingElements.startButton) {
                 trainingElements.startButton.disabled = false;
+            }
+        }
+    }
+
+    async function cancelActiveTrainingJob() {
+        if (!trainingState.activeJobId) {
+            setTrainingMessage("No active training job to cancel.", "warn");
+            return;
+        }
+        if (trainingElements.cancelButton) {
+            trainingElements.cancelButton.disabled = true;
+        }
+        try {
+            setTrainingMessage("Requesting cancellation…", "warn");
+            setActiveMessage("Requesting cancellation…", "warn");
+            const resp = await fetch(`${API_ROOT}/clip/train/${trainingState.activeJobId}/cancel`, {
+                method: "POST",
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+        } catch (error) {
+            console.error("Failed to cancel training", error);
+            const msg = error.message || String(error);
+            setTrainingMessage(msg, "error");
+            setActiveMessage(msg, "error");
+            if (trainingElements.cancelButton) {
+                trainingElements.cancelButton.disabled = false;
             }
         }
     }
@@ -1375,7 +1447,6 @@
             initializeActiveModelUi();
             populateClipBackbones();
             refreshActiveModelPanel();
-            updateLatestArtifactCard();
         }
         if (tabName === TAB_LABELING) {
             ensureCanvasDimensions();
@@ -1415,7 +1486,13 @@
         trainingElements.regCInput = document.getElementById("trainRegC");
         trainingElements.classWeightSelect = document.getElementById("trainClassWeight");
         trainingElements.deviceOverrideInput = document.getElementById("trainDeviceOverride");
+        trainingElements.hardMisWeightInput = document.getElementById("trainHardMisWeight");
+        trainingElements.hardLowConfWeightInput = document.getElementById("trainHardLowConfWeight");
+        trainingElements.hardLowConfThresholdInput = document.getElementById("trainHardLowConfThreshold");
+        trainingElements.hardMarginThresholdInput = document.getElementById("trainHardMarginThreshold");
+        trainingElements.convergenceTolInput = document.getElementById("trainConvergenceTol");
         trainingElements.startButton = document.getElementById("startTrainingBtn");
+        trainingElements.cancelButton = document.getElementById("cancelTrainingBtn");
         trainingElements.progressFill = document.getElementById("trainingProgressFill");
         trainingElements.statusText = document.getElementById("trainingStatusText");
         trainingElements.message = document.getElementById("trainingMessage");
@@ -1452,6 +1529,13 @@
                 });
             });
         }
+        if (trainingElements.cancelButton) {
+            trainingElements.cancelButton.addEventListener("click", () => {
+                cancelActiveTrainingJob().catch((err) => {
+                    console.error("Cancel training error", err);
+                });
+            });
+        }
 
         updateFileSummary(trainingElements.imagesInput, trainingElements.imagesSummary, { emptyText: "No folder selected", mode: "folder", allowedExts: IMAGE_EXTENSIONS });
         updateFileSummary(trainingElements.labelsInput, trainingElements.labelsSummary, { emptyText: "No folder selected", mode: "folder", allowedExts: LABEL_EXTENSIONS });
@@ -1470,7 +1554,6 @@
         activeUiInitialized = true;
         activeElements.message = document.getElementById("activeMessage");
         activeElements.info = document.getElementById("activeModelInfo");
-        activeElements.latest = document.getElementById("activeLatestArtifact");
         activeElements.clipSelect = document.getElementById("activeClipSelect");
         activeElements.classifierPath = document.getElementById("activeClassifierPath");
         activeElements.classifierUpload = document.getElementById("activeClassifierUpload");
@@ -1523,11 +1606,6 @@
             activeElements.labelmapUpload.addEventListener("change", (event) => {
                 handleLabelmapUploadChange(event).catch((err) => console.error('Labelmap upload error', err));
             });
-        }
-
-        updateLatestArtifactCard();
-        if (activeElements.latest) {
-            activeElements.latest.innerHTML = "<div>No training runs yet.</div>";
         }
     }
 

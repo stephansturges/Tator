@@ -93,6 +93,36 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run a short second pass focusing on misclassified / low-confidence samples.",
     )
+    parser.add_argument(
+        "--hard-misclassified-weight",
+        type=float,
+        default=3.0,
+        help="Weight multiplier applied to misclassified samples during hard mining.",
+    )
+    parser.add_argument(
+        "--hard-low-conf-weight",
+        type=float,
+        default=2.0,
+        help="Weight multiplier applied to low-confidence samples during hard mining.",
+    )
+    parser.add_argument(
+        "--hard-low-conf-threshold",
+        type=float,
+        default=0.65,
+        help="Maximum predicted probability to consider a sample low-confidence (0 disables threshold).",
+    )
+    parser.add_argument(
+        "--hard-margin-threshold",
+        type=float,
+        default=0.15,
+        help="Minimum gap between top-1 and top-2 class probabilities before a sample is treated as ambiguous (0 disables margin check).",
+    )
+    parser.add_argument(
+        "--convergence-tol",
+        type=float,
+        default=1e-4,
+        help="Tolerance for detecting convergence; lower values force additional iterations.",
+    )
     return parser.parse_args()
 
 
@@ -133,6 +163,11 @@ def main() -> None:
             solver=args.solver,
             reuse_embeddings=args.reuse_embeddings,
             hard_example_mining=args.hard_example_mining,
+            hard_mining_misclassified_weight=args.hard_misclassified_weight,
+            hard_mining_low_conf_weight=args.hard_low_conf_weight,
+            hard_mining_low_conf_threshold=args.hard_low_conf_threshold,
+            hard_mining_margin_threshold=args.hard_margin_threshold,
+            convergence_tol=args.convergence_tol,
             progress_cb=emit,
         )
     except TrainingError as exc:

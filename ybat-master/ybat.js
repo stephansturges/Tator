@@ -3272,7 +3272,6 @@
     }
 
     // Standard parameters
-    const saveInterval = 60;
     const fontBaseSize = 6;
     const fontColor = "#001f3f";
     const borderColor = "#001f3f";
@@ -3321,27 +3320,6 @@
         e.preventDefault();
     }, false);
 
-    const isSupported = () => {
-        try {
-            const key = "__test_ls_key__";
-            localStorage.setItem(key, key);
-            localStorage.removeItem(key);
-            return true;
-        } catch (e) {
-            return false;
-        }
-    };
-
-    if (isSupported() === true) {
-        setInterval(() => {
-            if (Object.keys(bboxes).length > 0) {
-                localStorage.setItem("bboxes", JSON.stringify(bboxes));
-            }
-        }, saveInterval * 1000);
-    } else {
-        alert("Restore function is not supported in this browser.");
-    }
-
     document.onreadystatechange = () => {
         if (document.readyState === "complete") {
             listenCanvas();
@@ -3352,7 +3330,6 @@
             listenClassSelect();
             listenBboxLoad();
             listenBboxSave();
-            listenBboxRestore();
             listenKeyboard();
             listenImageSearch();
             listenImageCrop();
@@ -4054,7 +4031,6 @@
                         bboxesInput.disabled = false;
                     }
                     setButtonDisabled(bboxesButton, false);
-                    document.getElementById("restoreBboxes").disabled = false;
                 }
                 setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
                 imagesInput.value = "";
@@ -4076,10 +4052,6 @@
         }
         const bboxesBtn = document.getElementById("bboxesSelect");
         setButtonDisabled(bboxesBtn, true);
-        const restoreBtn = document.getElementById("restoreBboxes");
-        if (restoreBtn) {
-            restoreBtn.disabled = true;
-        }
         cancelAllSamJobs({ reason: "image reset", announce: false });
         cancelPendingMultiPoint({ clearMarkers: true, removePendingBbox: true });
     };
@@ -4489,15 +4461,6 @@
                 .then((blob) => {
                     saveAs(blob, "bboxes_yolo.zip");
                 });
-        });
-    };
-
-    const listenBboxRestore = () => {
-        document.getElementById("restoreBboxes").addEventListener("click", () => {
-            const item = localStorage.getItem("bboxes");
-            if (item) {
-                bboxes = JSON.parse(item);
-            }
         });
     };
 

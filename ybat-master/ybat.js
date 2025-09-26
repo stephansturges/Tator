@@ -3294,6 +3294,47 @@
     let images = {};
     let classes = {};
     let bboxes = {};
+    let bboxCreationCounter = 0;
+
+    const stampBboxCreation = (bbox) => {
+        if (!bbox || typeof bbox !== "object") {
+            return bbox;
+        }
+        if (typeof bbox.createdAt !== "number") {
+            bbox.createdAt = ++bboxCreationCounter;
+        }
+        return bbox;
+    };
+
+    const findLatestCreatedBbox = (imageName) => {
+        const classBuckets = bboxes[imageName];
+        if (!classBuckets) {
+            return null;
+        }
+        let latest = null;
+        for (const className of Object.keys(classBuckets)) {
+            const bucket = classBuckets[className];
+            if (!Array.isArray(bucket) || bucket.length === 0) {
+                continue;
+            }
+            for (let i = bucket.length - 1; i >= 0; i--) {
+                const candidate = bucket[i];
+                if (!candidate) {
+                    continue;
+                }
+                const createdAt = typeof candidate.createdAt === "number" ? candidate.createdAt : -Infinity;
+                if (!latest || createdAt > latest.createdAt || (createdAt === latest.createdAt && i > latest.index)) {
+                    latest = {
+                        className,
+                        index: i,
+                        bbox: candidate,
+                        createdAt
+                    };
+                }
+            }
+        }
+        return latest;
+    };
     const extensions = ["jpg", "jpeg", "png", "JPG", "JPEG", "PNG"];
     let currentImage = null;
     let currentClass = null;
@@ -3711,6 +3752,7 @@
             class: currentClass,
             uuid: generateUUID()
         };
+        stampBboxCreation(bbox);
         if (!bboxes[currentImage.name]) {
             bboxes[currentImage.name] = {};
         }
@@ -4345,14 +4387,16 @@
                                     const x = cols[1] * image.width - width * 0.5;
                                     const height = cols[4] * image.height;
                                     const y = cols[2] * image.height - height * 0.5;
-                                    bbox[className].push({
+                                    const bboxRecord = {
                                         x: Math.floor(x),
                                         y: Math.floor(y),
                                         width: Math.floor(width),
                                         height: Math.floor(height),
                                         marked: false,
                                         class: className
-                                    });
+                                    };
+                                    stampBboxCreation(bboxRecord);
+                                    bbox[className].push(bboxRecord);
                                     break;
                                 }
                             }
@@ -4373,14 +4417,16 @@
                                     const bndBoxY = bndBox.getElementsByTagName("ymin")[0].childNodes[0].nodeValue;
                                     const bndBoxMaxX = bndBox.getElementsByTagName("xmax")[0].childNodes[0].nodeValue;
                                     const bndBoxMaxY = bndBox.getElementsByTagName("ymax")[0].childNodes[0].nodeValue;
-                                    bbox[className].push({
+                                    const bboxRecord = {
                                         x: parseInt(bndBoxX),
                                         y: parseInt(bndBoxY),
                                         width: parseInt(bndBoxMaxX) - parseInt(bndBoxX),
                                         height: parseInt(bndBoxMaxY) - parseInt(bndBoxY),
                                         marked: false,
                                         class: className
-                                    });
+                                    };
+                                    stampBboxCreation(bboxRecord);
+                                    bbox[className].push(bboxRecord);
                                     break;
                                 }
                             }
@@ -4421,14 +4467,16 @@
                         const bboxY = json.annotations[i].bbox[1];
                         const bboxWidth = json.annotations[i].bbox[2];
                         const bboxHeight = json.annotations[i].bbox[3];
-                        bbox[className].push({
+                        const bboxRecord = {
                             x: bboxX,
                             y: bboxY,
                             width: bboxWidth,
                             height: bboxHeight,
                             marked: false,
                             class: className
-                        });
+                        };
+                        stampBboxCreation(bboxRecord);
+                        bbox[className].push(bboxRecord);
                         break;
                     }
                 }
@@ -4497,6 +4545,31 @@
                     document.body.style.cursor = "default";
                 }
                 event.preventDefault();
+            }
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 81 || event.key === "q" || event.key === "Q")) {
+                let removed = false;
+                if (currentImage && bboxes[currentImage.name]) {
+                    const latest = findLatestCreatedBbox(currentImage.name);
+                    if (latest) {
+                        const bucket = bboxes[currentImage.name][latest.className];
+                        if (bucket) {
+                            const spliceResult = bucket.splice(latest.index, 1);
+                            if (bucket.length === 0) {
+                                delete bboxes[currentImage.name][latest.className];
+                            }
+                            if (spliceResult.length > 0) {
+                                removed = true;
+                                if (currentBbox && currentBbox.bbox === spliceResult[0]) {
+                                    currentBbox = null;
+                                    document.body.style.cursor = "default";
+                                }
+                            }
+                        }
+                    }
+                }
+                if (removed) {
+                    event.preventDefault();
+                }
             }
             // 'a' => toggle auto class
             if (key === 65 && !modeSnapshot) {

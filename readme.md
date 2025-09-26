@@ -7,27 +7,29 @@ Tator is a single-machine annotation workflow that pairs a clean, fast, simple, 
 ### Auto Class Corrector
 Drop any tentative label and let CLIP clean it up instantly. Tator double-checks every box and snaps it to the class with the highest confidence so you can move through image stacks at warp speed.
 
-<!-- Add GIF: Auto Class Corrector -->
+![bbox_clip_correction](https://github.com/user-attachments/assets/b339541a-e60c-4091-b5bb-2ff105cf0bc6)
+
 
 ### Auto Box Refinement
 Rough sketches are enough—SAM reshapes your loose bounding boxes into pixel-perfect rectangles while CLIP verifies the class. It feels like spell-check for geometry.
 
-<!-- Add GIF: Auto Box Refinement -->
+![bbox_sam_refiner](https://github.com/user-attachments/assets/04f678c4-5520-489e-ac06-aa34df0f60ce)
+
 
 ### One-Click Point-to-Box
 Tap once anywhere on the object and SAM conjures a tight box while CLIP names it. Perfect for those “I just need this labeled now” marathons.
 
-<!-- Add GIF: One-Click Point-to-Box -->
+![clip_and_SAM](https://github.com/user-attachments/assets/746c12ba-3241-4fa4-8286-d06891cb54ca)
 
 ### Multi-Point Magic
 When objects are tricky, sprinkle a few positive/negative points and let SAM sculpt the exact mask. Queue up new selections immediately—no waiting for the previous mask to land.
 
-<!-- Add GIF: Multi-Point Magic -->
+![multipoint_sam_and_clip](https://github.com/user-attachments/assets/d82e2f49-cc20-4927-b941-05cfe344817d)
+
 
 ### SAM Preload Boost
 Enable preloading to keep the next image warmed up inside SAM. You’ll see progress ticks in the side rail and enjoy near-zero latency when you start pointing.
 
-<!-- Add GIF: SAM Preload Boost -->
 
 ## Key Features
 - **One-click assists** – auto class, SAM box/point refinements, and multi-point prompts with live progress indicators.

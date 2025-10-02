@@ -1,4 +1,4 @@
-# 🥔 Tator – Local CLIP + SAM Annotation Toolkit
+# 🥔 Tator – Local CLIP + SAM Image Annotation Toolkit
 
 Tator is a single-machine annotation workflow that pairs a clean, fast, simple, web-based frontend with a FastAPI backend to deliver _fast_ bounding-box annotation for images as well as some cool optional automation like class suggestions powered by CLIP and bbox cleanup / auto-suggestion using Segment Anything (SAM). The UI now bundles labeling, CLIP training, and model management in one place so you can iterate on datasets without leaving the browser.
 

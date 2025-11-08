@@ -140,6 +140,32 @@
     let samPreloadCurrentVariant = null;
     const SAM_PRELOAD_WAIT_TIMEOUT_MS = 8000;
     const samPreloadWatchers = new Map();
+    const slotPreloadControllers = { next: null, previous: null };
+    const slotPreloadPromises = new Map();
+    const slotLoadingIndicators = new Map();
+    let latestSlotStatuses = [];
+    let samSlotStatusTimer = null;
+    let samSlotStatusPending = false;
+    let samSlotStatusNeedsRefresh = false;
+    const SAM_SLOT_STATUS_DEBOUNCE_MS = 600;
+    let samSlotsEnabled = false;
+    let samSlotsSupportChecked = false;
+    let samPredictorBudget = 3;
+    let predictorTabInitialized = false;
+    let predictorRefreshTimer = null;
+    let predictorRefreshInFlight = false;
+    const PREDICTOR_REFRESH_INTERVAL_MS = 5000;
+    let predictorSettings = {
+        maxPredictors: 3,
+        minPredictors: 1,
+        maxSupportedPredictors: 3,
+        activePredictors: 3,
+        loadedPredictors: 0,
+        processRamMb: 0,
+        totalRamMb: 0,
+        availableRamMb: 0,
+        imageRamMb: 0,
+    };
 
     let imagesSelectButton = null;
     let classesSelectButton = null;
@@ -151,6 +177,7 @@
     let samJobSequence = 0;
     let samCancelVersion = 0;
     const samActiveJobs = new Map();
+    let imageListSelectionLock = 0;
 
     const multiPointColors = {
         positive: { stroke: "#2ecc71", fill: "rgba(46, 204, 113, 0.35)" },
@@ -161,6 +188,7 @@
     const TAB_LABELING = "labeling";
     const TAB_TRAINING = "training";
     const TAB_ACTIVE = "active";
+    const TAB_PREDICTORS = "predictors";
 
     let activeTab = TAB_LABELING;
     let trainingUiInitialized = false;
@@ -171,9 +199,22 @@
         labelingButton: null,
         trainingButton: null,
         activeButton: null,
+        predictorsButton: null,
         labelingPanel: null,
         trainingPanel: null,
         activePanel: null,
+        predictorsPanel: null,
+    };
+
+    const predictorElements = {
+        countInput: null,
+        applyButton: null,
+        message: null,
+        activeCount: null,
+        loadedCount: null,
+        processRam: null,
+        imageRam: null,
+        systemFreeRam: null,
     };
 
     const trainingElements = {
@@ -1399,9 +1440,11 @@
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
+        tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
         tabElements.labelingPanel = document.getElementById("tabLabeling");
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.activePanel = document.getElementById("tabActive");
+        tabElements.predictorsPanel = document.getElementById("tabPredictors");
         if (tabElements.labelingButton) {
             tabElements.labelingButton.addEventListener("click", () => setActiveTab(TAB_LABELING));
         }
@@ -1410,6 +1453,9 @@
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
+        }
+        if (tabElements.predictorsButton) {
+            tabElements.predictorsButton.addEventListener("click", () => setActiveTab(TAB_PREDICTORS));
         }
         setActiveTab(activeTab);
     }
@@ -1426,6 +1472,9 @@
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
         }
+        if (tabElements.predictorsButton) {
+            tabElements.predictorsButton.classList.toggle("active", tabName === TAB_PREDICTORS);
+        }
         if (tabElements.labelingPanel) {
             tabElements.labelingPanel.classList.toggle("active", tabName === TAB_LABELING);
         }
@@ -1434,6 +1483,9 @@
         }
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);
+        }
+        if (tabElements.predictorsPanel) {
+            tabElements.predictorsPanel.classList.toggle("active", tabName === TAB_PREDICTORS);
         }
         if (tabName === TAB_TRAINING && previous !== TAB_TRAINING) {
             initializeTrainingUi();
@@ -1447,6 +1499,12 @@
             initializeActiveModelUi();
             populateClipBackbones();
             refreshActiveModelPanel();
+        }
+        if (tabName === TAB_PREDICTORS && previous !== TAB_PREDICTORS) {
+            initializePredictorTab();
+            startPredictorRefresh(true);
+        } else if (previous === TAB_PREDICTORS && tabName !== TAB_PREDICTORS) {
+            stopPredictorRefresh();
         }
         if (tabName === TAB_LABELING) {
             ensureCanvasDimensions();
@@ -1857,6 +1915,754 @@
         })();
     }
 
+    function abortSlotPreload(slotName, options = {}) {
+        const existing = slotPreloadControllers[slotName];
+        if (!existing) {
+            return;
+        }
+        const preserveSet = options?.preserveImages instanceof Set
+            ? options.preserveImages
+            : toImageNameSet(options?.preserveImages);
+        if (preserveSet && existing.imageName && preserveSet.has(existing.imageName)) {
+            return;
+        }
+        try {
+            existing.controller?.abort();
+        } catch (err) {
+            console.debug(`Slot preload abort (${slotName}) failed`, err);
+        }
+        if (typeof existing.releaseLoading === "function") {
+            existing.releaseLoading();
+        }
+        slotPreloadControllers[slotName] = null;
+    }
+
+    function getNeighborSlots(currentName) {
+        const listEl = document.getElementById("imageList");
+        if (!listEl || !currentName) {
+            return { nextName: null, previousName: null };
+        }
+        const options = Array.from(listEl.options);
+        const idx = options.findIndex((opt) => (opt.value || opt.innerHTML) === currentName);
+        if (idx === -1) {
+            return { nextName: null, previousName: null };
+        }
+        const nextOpt = idx < options.length - 1 ? options[idx + 1] : null;
+        const prevOpt = idx > 0 ? options[idx - 1] : null;
+        return {
+            nextName: nextOpt ? (nextOpt.value || nextOpt.innerHTML) : null,
+            previousName: prevOpt ? (prevOpt.value || prevOpt.innerHTML) : null,
+        };
+    }
+
+    function isSlotRoleEnabled(slotRole) {
+        if (!slotRole || slotRole === "current") {
+            return true;
+        }
+        if (slotRole === "next") {
+            return samPredictorBudget >= 2;
+        }
+        if (slotRole === "previous") {
+            return samPredictorBudget >= 3;
+        }
+        return true;
+    }
+
+    function ensureImageListVisibility(targetIndex) {
+        const listEl = document.getElementById("imageList");
+        if (!listEl || typeof targetIndex !== "number" || targetIndex < 0) {
+            return;
+        }
+        const option = listEl.options[targetIndex];
+        if (!option) {
+            return;
+        }
+        const optionHeight = option.offsetHeight || parseInt(window.getComputedStyle(option).lineHeight || "0", 10) || 18;
+        const listHeight = listEl.clientHeight || (optionHeight * listEl.size) || optionHeight;
+        const visibleCount = optionHeight ? Math.max(1, Math.floor(listHeight / optionHeight)) : listEl.options.length;
+        if (visibleCount >= listEl.options.length) {
+            listEl.scrollTop = 0;
+            return;
+        }
+        const halfWindow = Math.max(1, Math.floor(visibleCount / 2));
+        const lastIndex = listEl.options.length - 1;
+        const maxStart = Math.max(0, listEl.options.length - visibleCount);
+        let firstIndex;
+        if (targetIndex <= halfWindow) {
+            firstIndex = 0;
+        } else if (targetIndex >= lastIndex - halfWindow) {
+            firstIndex = maxStart;
+        } else {
+            firstIndex = targetIndex - halfWindow;
+        }
+        const desiredScroll = firstIndex * optionHeight;
+        if (Math.abs(listEl.scrollTop - desiredScroll) > 1) {
+            listEl.scrollTop = desiredScroll;
+        }
+    }
+
+    function syncImageSelectionToName(imageName, options = {}) {
+        const listEl = document.getElementById("imageList");
+        if (!listEl || !imageName) {
+            return;
+        }
+        const opts = Array.from(listEl.options);
+        const targetIndex = opts.findIndex((opt) => (opt.value || opt.innerHTML) === imageName);
+        if (targetIndex === -1) {
+            return;
+        }
+        const releaseLock = lockImageSelection();
+        opts.forEach((opt, idx) => {
+            opt.selected = idx === targetIndex;
+        });
+        listEl.selectedIndex = targetIndex;
+        imageListIndex = targetIndex;
+        if (options.ensureVisible) {
+            ensureImageListVisibility(targetIndex);
+        }
+        releaseLock();
+    }
+
+    function lockImageSelection() {
+        imageListSelectionLock++;
+        let released = false;
+        return () => {
+            if (released) {
+                return;
+            }
+            released = true;
+            imageListSelectionLock = Math.max(0, imageListSelectionLock - 1);
+        };
+    }
+
+    function toImageNameSet(values) {
+        if (!values) {
+            return null;
+        }
+        if (values instanceof Set) {
+            return values;
+        }
+        if (!Array.isArray(values)) {
+            return new Set(values ? [values] : []);
+        }
+        const filtered = values.filter(Boolean);
+        return filtered.length ? new Set(filtered) : null;
+    }
+
+    function triggerNeighborSlotPreloads(currentName) {
+        if (!samPreloadEnabled || !samSlotsEnabled || !currentName) {
+            abortSlotPreload("next");
+            abortSlotPreload("previous");
+            return;
+        }
+        const { nextName, previousName } = getNeighborSlots(currentName);
+        if (!isSlotRoleEnabled("next")) {
+            abortSlotPreload("next");
+        } else {
+            if (nextName && shouldPreloadNeighborImage(nextName, "next")) {
+                preloadSlotForImage(nextName, "next").catch((err) => {
+                    console.debug("Next-slot preload failure", err);
+                });
+            } else if (!nextName) {
+                abortSlotPreload("next");
+            }
+        }
+        if (!isSlotRoleEnabled("previous")) {
+            abortSlotPreload("previous");
+        } else {
+            if (previousName && shouldPreloadNeighborImage(previousName, "previous")) {
+                preloadSlotForImage(previousName, "previous").catch((err) => {
+                    console.debug("Previous-slot preload failure", err);
+                });
+            } else if (!previousName) {
+                abortSlotPreload("previous");
+            }
+        }
+    }
+
+    async function activateImageSlot(imageName) {
+        if (!samPreloadEnabled || !imageName) {
+            return false;
+        }
+        if (!samSlotsEnabled) {
+            const supported = await ensureSamSlotsSupport();
+            if (!supported) {
+                return false;
+            }
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/sam_activate_slot`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ image_name: imageName, sam_variant: samVariant }),
+            });
+            if (!resp.ok) {
+                return false;
+            }
+            await resp.json();
+            scheduleSamSlotStatusRefresh(true);
+            return true;
+        } catch (error) {
+            console.debug("activateImageSlot failed", error);
+            return false;
+        }
+    }
+
+    async function prepareSamForCurrentImage(options = {}) {
+        if (!samPreloadEnabled || !currentImage || !currentImage.name) {
+            return;
+        }
+        const targetName = currentImage.name;
+        const { messagePrefix = null, immediate = false } = options;
+        if (samSlotsEnabled || await ensureSamSlotsSupport()) {
+            let activated = await activateImageSlot(targetName);
+            if (!activated && samSlotsEnabled) {
+                const waited = await waitForSlotPreload(targetName);
+                if (waited && currentImage && currentImage.name === targetName) {
+                    activated = await activateImageSlot(targetName);
+                }
+            }
+            if (activated) {
+                if (!currentImage || currentImage.name !== targetName) {
+                    return;
+                }
+                clearImageSlotLoading(targetName);
+                setSamStatus(`SAM ready for ${targetName}`, { variant: "success", duration: 2000 });
+                resolveSamPreloadWaiters(targetName, samVariant);
+                hideSamPreloadProgress();
+                triggerNeighborSlotPreloads(targetName);
+                scheduleSamSlotStatusRefresh(true);
+                return;
+            }
+        }
+        scheduleSamPreload({
+            force: true,
+            delayMs: immediate ? 0 : SAM_PRELOAD_IMAGE_SWITCH_DELAY_MS,
+            messagePrefix,
+            slot: samSlotsEnabled ? "current" : undefined,
+        });
+    }
+
+    async function ensureImageRecordReady(imageRecord) {
+        if (!imageRecord) {
+            return false;
+        }
+        if (imageRecord.object) {
+            imageRecord.width = imageRecord.width || imageRecord.object.naturalWidth || imageRecord.object.width || imageRecord.width || 0;
+            imageRecord.height = imageRecord.height || imageRecord.object.naturalHeight || imageRecord.object.height || imageRecord.height || 0;
+            return true;
+        }
+        if (!imageRecord.meta) {
+            return false;
+        }
+        try {
+            await loadImageObject(imageRecord);
+            imageRecord.width = imageRecord.width || imageRecord.object?.naturalWidth || imageRecord.object?.width || imageRecord.width || 0;
+            imageRecord.height = imageRecord.height || imageRecord.object?.naturalHeight || imageRecord.object?.height || imageRecord.height || 0;
+            return Boolean(imageRecord.object);
+        } catch (err) {
+            console.warn("Failed to load image record", imageRecord?.meta?.name, err);
+            return false;
+        }
+    }
+
+    async function getBase64ForImageRecord(imageRecord) {
+        if (!imageRecord) {
+            return null;
+        }
+        if (imageRecord.dataUrl && imageRecord.dataUrl.includes(',')) {
+            return imageRecord.dataUrl.split(',')[1];
+        }
+        const ready = await ensureImageRecordReady(imageRecord);
+        if (!ready || !imageRecord.object) {
+            return null;
+        }
+        const offCanvas = document.createElement("canvas");
+        offCanvas.width = imageRecord.width || imageRecord.object.naturalWidth || imageRecord.object.width || 0;
+        offCanvas.height = imageRecord.height || imageRecord.object.naturalHeight || imageRecord.object.height || 0;
+        if (!offCanvas.width || !offCanvas.height) {
+            return null;
+        }
+        const ctx = offCanvas.getContext("2d");
+        ctx.drawImage(imageRecord.object, 0, 0, offCanvas.width, offCanvas.height);
+        const dataUrl = offCanvas.toDataURL("image/jpeg");
+        imageRecord.dataUrl = dataUrl;
+        return dataUrl.split(',')[1];
+    }
+
+    async function preloadSlotForImage(imageName, slotName) {
+        if (!samPreloadEnabled || !imageName) {
+            return null;
+        }
+        if (!samSlotsEnabled) {
+            const supported = await ensureSamSlotsSupport();
+            if (!supported) {
+                return null;
+            }
+        }
+        const imageRecord = images[imageName];
+        if (!imageRecord) {
+            return null;
+        }
+        const existingPromise = slotPreloadPromises.get(imageName);
+        if (existingPromise) {
+            return existingPromise;
+        }
+        const existingTask = slotPreloadControllers[slotName];
+        if (existingTask && existingTask.imageName === imageName) {
+            const promise = slotPreloadPromises.get(imageName);
+            if (promise) {
+                return promise;
+            }
+        }
+        abortSlotPreload(slotName);
+
+        const runPromise = (async () => {
+            const controller = new AbortController();
+            const slotTask = { controller, releaseLoading: null, imageName };
+            slotPreloadControllers[slotName] = slotTask;
+            try {
+                const requestBody = { slot: slotName, sam_variant: samVariant, image_name: imageName };
+                const cachedToken = getSamToken(imageName, samVariant);
+                if (cachedToken) {
+                    requestBody.image_token = cachedToken;
+                } else {
+                    const base64Img = await getBase64ForImageRecord(imageRecord);
+                    if (!base64Img) {
+                        if (slotPreloadControllers[slotName] === slotTask) {
+                            if (typeof slotTask.releaseLoading === "function") {
+                                slotTask.releaseLoading();
+                            }
+                            slotPreloadControllers[slotName] = null;
+                        }
+                        return null;
+                    }
+                    requestBody.image_base64 = base64Img;
+                }
+
+                slotTask.releaseLoading = beginImageSlotLoading(imageName, slotName);
+                const resp = await fetch(`${API_ROOT}/sam_preload`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(requestBody),
+                    signal: controller.signal,
+                });
+                if (!resp.ok) {
+                    const detail = await resp.text();
+                    throw new Error(detail || `HTTP ${resp.status}`);
+                }
+                const result = await resp.json();
+                if (result?.token) {
+                    rememberSamToken(imageName, samVariant, result.token);
+                }
+                return result;
+            } catch (error) {
+                if (!error || error.name !== "AbortError") {
+                    console.warn(`Background SAM preload failed for ${imageName} (${slotName})`, error);
+                }
+                throw error;
+            } finally {
+                const activeTask = slotPreloadControllers[slotName];
+                if (activeTask === slotTask) {
+                    if (typeof slotTask.releaseLoading === "function") {
+                        slotTask.releaseLoading();
+                    }
+                    slotPreloadControllers[slotName] = null;
+                }
+                slotPreloadPromises.delete(imageName);
+                scheduleSamSlotStatusRefresh();
+            }
+        })();
+
+        slotPreloadPromises.set(imageName, runPromise);
+        runPromise.catch(() => null);
+        return runPromise;
+    }
+
+    async function ensureSamSlotsSupport() {
+        if (samSlotsSupportChecked) {
+            return samSlotsEnabled;
+        }
+        samSlotsSupportChecked = true;
+        try {
+            const resp = await fetch(`${API_ROOT}/sam_slots`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const data = await resp.json();
+            samSlotsEnabled = Array.isArray(data);
+            if (samSlotsEnabled) {
+                updateSlotHighlights(Array.isArray(data) ? data : []);
+            }
+        } catch (error) {
+            samSlotsEnabled = false;
+        }
+        return samSlotsEnabled;
+    }
+
+    function scheduleSamSlotStatusRefresh(immediate = false) {
+        if (!samSlotsEnabled || !samPreloadEnabled) {
+            if (samSlotStatusTimer) {
+                clearTimeout(samSlotStatusTimer);
+                samSlotStatusTimer = null;
+            }
+            updateSlotHighlights([]);
+            return;
+        }
+        if (samSlotStatusTimer) {
+            clearTimeout(samSlotStatusTimer);
+            samSlotStatusTimer = null;
+        }
+        if (immediate) {
+            if (samSlotStatusPending) {
+                samSlotStatusNeedsRefresh = true;
+            } else {
+                refreshSamSlotStatus();
+            }
+            return;
+        }
+        samSlotStatusTimer = setTimeout(() => {
+            samSlotStatusTimer = null;
+            if (samSlotStatusPending) {
+                samSlotStatusNeedsRefresh = true;
+            } else {
+                refreshSamSlotStatus();
+            }
+        }, SAM_SLOT_STATUS_DEBOUNCE_MS);
+    }
+
+    async function refreshSamSlotStatus() {
+        if (!samSlotsEnabled || !samPreloadEnabled) {
+            return;
+        }
+        if (samSlotStatusPending) {
+            samSlotStatusNeedsRefresh = true;
+            return;
+        }
+        samSlotStatusPending = true;
+        try {
+            const resp = await fetch(`${API_ROOT}/sam_slots`);
+            if (!resp.ok) {
+                if (resp.status === 404) {
+                    samSlotsEnabled = false;
+                    updateSlotHighlights([]);
+                    return;
+                }
+                throw new Error(await resp.text());
+            }
+            const data = await resp.json();
+            updateSlotHighlights(Array.isArray(data) ? data : []);
+        } catch (error) {
+            console.debug("SAM slot status refresh failed", error);
+        } finally {
+            samSlotStatusPending = false;
+            if (samSlotStatusNeedsRefresh) {
+                samSlotStatusNeedsRefresh = false;
+                refreshSamSlotStatus();
+            }
+        }
+    }
+
+    function beginImageSlotLoading(imageName, slotName = "current") {
+        if (!imageName) {
+            return () => {};
+        }
+        const normalizedSlot = slotName || "current";
+        let entry = slotLoadingIndicators.get(imageName);
+        if (!entry) {
+            entry = { slots: new Map() };
+            slotLoadingIndicators.set(imageName, entry);
+        }
+        const currentCount = entry.slots.get(normalizedSlot) || 0;
+        entry.slots.set(normalizedSlot, currentCount + 1);
+        applySlotStatusClasses();
+        let released = false;
+        return () => {
+            if (released) {
+                return;
+            }
+            released = true;
+            const activeEntry = slotLoadingIndicators.get(imageName);
+            if (!activeEntry) {
+                applySlotStatusClasses();
+                return;
+            }
+            const remaining = (activeEntry.slots.get(normalizedSlot) || 1) - 1;
+            if (remaining <= 0) {
+                activeEntry.slots.delete(normalizedSlot);
+            } else {
+                activeEntry.slots.set(normalizedSlot, remaining);
+            }
+            if (activeEntry.slots.size === 0) {
+                slotLoadingIndicators.delete(imageName);
+            }
+            applySlotStatusClasses();
+        };
+    }
+
+    function clearImageSlotLoading(imageName) {
+        if (!imageName) {
+            return;
+        }
+        if (slotLoadingIndicators.delete(imageName)) {
+            applySlotStatusClasses();
+        }
+    }
+
+    function applySlotStatusClasses(options = {}) {
+        const imageList = document.getElementById("imageList");
+        if (!imageList) {
+            return;
+        }
+        const slotStatusMap = new Map();
+        latestSlotStatuses.forEach((entry) => {
+            if (entry?.image_name) {
+                slotStatusMap.set(entry.image_name, entry);
+            }
+        });
+        const optionsArray = Array.from(imageList.options);
+        let needsSelectionFix = false;
+        optionsArray.forEach((option) => {
+            option.classList.remove(
+                "sam-slot-current",
+                "sam-slot-next",
+                "sam-slot-previous",
+                "sam-slot-loaded",
+                "sam-slot-loading"
+            );
+            const name = option.value || option.innerHTML;
+            const slotEntry = slotStatusMap.get(name);
+            const loadingEntry = slotLoadingIndicators.get(name);
+            if (slotEntry?.slot) {
+                option.classList.add(`sam-slot-${slotEntry.slot}`);
+            }
+            if (loadingEntry?.slots?.size) {
+                loadingEntry.slots.forEach((count, slotName) => {
+                    if (slotName && count > 0) {
+                        option.classList.add(`sam-slot-${slotName}`);
+                    }
+                });
+                option.classList.add("sam-slot-loading");
+            } else if (slotEntry?.slot) {
+                option.classList.add("sam-slot-loaded");
+                if (slotEntry.busy) {
+                    option.classList.add("sam-slot-loading");
+                }
+            }
+            if (
+                !needsSelectionFix &&
+                currentImage &&
+                currentImage.name === name &&
+                !option.selected
+            ) {
+                needsSelectionFix = true;
+            }
+        });
+        if (needsSelectionFix && imageListSelectionLock === 0) {
+            syncImageSelectionToName(currentImage.name, { ensureVisible: false });
+        }
+    }
+
+    function updateSlotHighlights(statusList) {
+        latestSlotStatuses = Array.isArray(statusList) ? statusList : [];
+        applySlotStatusClasses();
+    }
+
+    function findSlotStatusForImage(imageName, variant = samVariant) {
+        if (!imageName) {
+            return null;
+        }
+        return latestSlotStatuses.find((entry) => {
+            if (!entry || entry.image_name !== imageName) {
+                return false;
+            }
+            if (!entry.variant || !variant) {
+                return true;
+            }
+            return entry.variant === variant;
+        }) || null;
+    }
+
+    function isImageCurrentlyLoading(imageName) {
+        if (!imageName) {
+            return false;
+        }
+        return slotLoadingIndicators.has(imageName);
+    }
+
+    function shouldPreloadNeighborImage(imageName, slotRole = "current", variant = samVariant) {
+        if (!imageName) {
+            return false;
+        }
+        if (currentImage && currentImage.name === imageName) {
+            return false;
+        }
+        if (!isSlotRoleEnabled(slotRole)) {
+            return false;
+        }
+        if (isImageCurrentlyLoading(imageName)) {
+            return false;
+        }
+        const entry = findSlotStatusForImage(imageName, variant);
+        return !entry;
+    }
+
+    function waitForSlotPreload(imageName) {
+        if (!imageName) {
+            return Promise.resolve(false);
+        }
+        const promise = slotPreloadPromises.get(imageName);
+        if (!promise) {
+            return Promise.resolve(false);
+        }
+        return promise.then(() => true).catch(() => false);
+    }
+
+    function setPredictorMessage(text, variant = "info") {
+        if (!predictorElements.message) {
+            return;
+        }
+        predictorElements.message.textContent = text || "";
+        predictorElements.message.className = `predictor-message ${variant}`;
+    }
+
+    function applyPredictorState(data) {
+        if (!data) {
+            return;
+        }
+        predictorSettings = {
+            maxPredictors: Number(data.max_predictors) || predictorSettings.maxPredictors,
+            minPredictors: Number(data.min_predictors) || predictorSettings.minPredictors,
+            maxSupportedPredictors: Number(data.max_supported_predictors) || predictorSettings.maxSupportedPredictors,
+            activePredictors: Number(data.active_predictors) || predictorSettings.activePredictors,
+            loadedPredictors: Number(data.loaded_predictors) || predictorSettings.loadedPredictors,
+            processRamMb: Number(data.process_ram_mb) || 0,
+            totalRamMb: Number(data.total_ram_mb) || 0,
+            availableRamMb: Number(data.available_ram_mb) || 0,
+            imageRamMb: Number(data.image_ram_mb) || 0,
+        };
+        samPredictorBudget = predictorSettings.maxPredictors;
+        if (predictorElements.countInput) {
+            predictorElements.countInput.min = predictorSettings.minPredictors || 1;
+            predictorElements.countInput.max = predictorSettings.maxSupportedPredictors || predictorElements.countInput.max || 3;
+            predictorElements.countInput.value = predictorSettings.maxPredictors;
+        }
+        renderPredictorStats();
+    }
+
+    function renderPredictorStats() {
+        if (predictorElements.activeCount) {
+            predictorElements.activeCount.textContent = `${predictorSettings.activePredictors} / ${predictorSettings.maxSupportedPredictors}`;
+        }
+        if (predictorElements.loadedCount) {
+            predictorElements.loadedCount.textContent = `${predictorSettings.loadedPredictors}`;
+        }
+        if (predictorElements.processRam) {
+            predictorElements.processRam.textContent = formatMb(predictorSettings.processRamMb);
+        }
+        if (predictorElements.imageRam) {
+            predictorElements.imageRam.textContent = formatMb(predictorSettings.imageRamMb);
+        }
+        if (predictorElements.systemFreeRam) {
+            const free = predictorSettings.availableRamMb;
+            const total = predictorSettings.totalRamMb;
+            predictorElements.systemFreeRam.textContent = total
+                ? `${formatMb(free)} / ${formatMb(total)}`
+                : formatMb(free);
+        }
+    }
+
+    function formatMb(value) {
+        if (typeof value !== "number" || Number.isNaN(value)) {
+            return "--";
+        }
+        return `${value.toFixed(1)} MB`;
+    }
+
+    async function refreshPredictorMetrics(options = {}) {
+        if (predictorRefreshInFlight) {
+            return;
+        }
+        predictorRefreshInFlight = true;
+        try {
+            const resp = await fetch(`${API_ROOT}/predictor_settings`);
+            if (!resp.ok) {
+                throw new Error(await resp.text() || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            applyPredictorState(data);
+            if (!options.silent) {
+                setPredictorMessage("Predictor stats updated.", "success");
+            }
+        } catch (error) {
+            if (!options.silent) {
+                setPredictorMessage(`Unable to fetch predictor stats: ${error.message || error}`, "error");
+            }
+        } finally {
+            predictorRefreshInFlight = false;
+        }
+    }
+
+    async function submitPredictorSettings(desiredCount) {
+        const min = predictorSettings.minPredictors || 1;
+        const max = predictorSettings.maxSupportedPredictors || 3;
+        const normalized = Math.max(min, Math.min(max, Number(desiredCount) || min));
+        setPredictorMessage("Updating predictor budget…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/predictor_settings`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ max_predictors: normalized }),
+            });
+            if (!resp.ok) {
+                throw new Error(await resp.text() || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            applyPredictorState(data);
+            setPredictorMessage("Predictor budget updated.", "success");
+        } catch (error) {
+            setPredictorMessage(`Failed to update predictor budget: ${error.message || error}`, "error");
+        }
+    }
+
+    function startPredictorRefresh(immediate = false) {
+        if (predictorRefreshTimer) {
+            clearInterval(predictorRefreshTimer);
+            predictorRefreshTimer = null;
+        }
+        if (immediate) {
+            refreshPredictorMetrics({ silent: true });
+        }
+        predictorRefreshTimer = setInterval(() => {
+            refreshPredictorMetrics({ silent: true });
+        }, PREDICTOR_REFRESH_INTERVAL_MS);
+    }
+
+    function stopPredictorRefresh() {
+        if (predictorRefreshTimer) {
+            clearInterval(predictorRefreshTimer);
+            predictorRefreshTimer = null;
+        }
+    }
+
+    function initializePredictorTab() {
+        if (predictorTabInitialized) {
+            return;
+        }
+        predictorTabInitialized = true;
+        refreshPredictorMetrics({ silent: true });
+    }
+
+    function handlePredictorApply(event) {
+        if (event) {
+            event.preventDefault();
+        }
+        if (!predictorElements.countInput) {
+            return;
+        }
+        submitPredictorSettings(predictorElements.countInput.value);
+    }
+
     function resetSamPreloadState() {
         const finishedImage = samPreloadCurrentImageName;
         const finishedVariant = samPreloadCurrentVariant;
@@ -2122,12 +2928,15 @@
         console.log("Point mode =>", pointMode, "samPointAutoMode =>", samPointAutoMode);
     }
 
-    function cancelSamPreload() {
+    function cancelSamPreload(options = {}) {
+        const preserveSet = toImageNameSet(options.preserveImages);
         samPreloadToken++;
         if (samPreloadAbortController) {
             samPreloadAbortController.abort();
             samPreloadAbortController = null;
         }
+        abortSlotPreload("next", { preserveImages: preserveSet });
+        abortSlotPreload("previous", { preserveImages: preserveSet });
         if (samPreloadTimer) {
             clearTimeout(samPreloadTimer);
             samPreloadTimer = null;
@@ -2139,6 +2948,7 @@
         const { finishedImage, finishedVariant } = resetSamPreloadState();
         hideSamPreloadProgress();
         resolveSamPreloadWaiters(finishedImage, finishedVariant);
+        scheduleSamSlotStatusRefresh(true);
     }
 
     function updateSamPreloadState(checked) {
@@ -2149,10 +2959,17 @@
         if (!samPreloadEnabled) {
             samPreloadLastKey = null;
             cancelSamPreload();
+            abortSlotPreload("next");
+            abortSlotPreload("previous");
             return;
         }
         if (currentImage && currentImage.object) {
-            scheduleSamPreload({ force: true, immediate: true });
+            ensureSamSlotsSupport().finally(() => {
+                scheduleSamPreload({ force: true, immediate: true });
+                if (samSlotsEnabled) {
+                    scheduleSamSlotStatusRefresh(true);
+                }
+            });
         }
     }
 
@@ -2178,6 +2995,9 @@
             queuedAt: Date.now(),
             generation,
         };
+        if (samSlotsEnabled) {
+            requestOptions.slot = options.slot || "current";
+        }
         samPreloadTimer = setTimeout(() => {
             samPreloadTimer = null;
             executeSamPreload(requestOptions).catch((err) => {
@@ -2240,8 +3060,16 @@
         setSamStatus(`${prefixText}Preloading SAM: ${preloadLabel}`, { variant: "info", duration: 0 });
         showSamPreloadProgress();
 
+        let releaseSlotLoading = null;
         try {
+            const slotLabel = samSlotsEnabled ? (options.slot || "current") : "current";
             const requestBody = { sam_variant: variantSnapshot };
+            if (samSlotsEnabled && slotLabel) {
+                requestBody.slot = slotLabel;
+            }
+            if (samSlotsEnabled && imageSnapshot?.name) {
+                requestBody.image_name = imageSnapshot.name;
+            }
             let tokenUsed = false;
             if (useTokenOnly) {
                 requestBody.image_token = cachedToken;
@@ -2262,6 +3090,10 @@
             }
             if (options.generation) {
                 requestBody.preload_generation = options.generation;
+            }
+
+            if (!releaseSlotLoading && imageSnapshot?.name) {
+                releaseSlotLoading = beginImageSlotLoading(imageSnapshot.name, slotLabel || "current");
             }
 
             let resp = await fetch(`${API_ROOT}/sam_preload`, {
@@ -2291,14 +3123,21 @@
                     resumeMultiPointQueueIfIdle();
                     return;
                 }
+                const fallbackBody = {
+                    image_base64: base64Img,
+                    sam_variant: variantSnapshot,
+                    preload_generation: options.generation || null,
+                };
+                if (samSlotsEnabled && slotLabel) {
+                    fallbackBody.slot = slotLabel;
+                }
+                if (samSlotsEnabled && imageSnapshot?.name) {
+                    fallbackBody.image_name = imageSnapshot.name;
+                }
                 resp = await fetch(`${API_ROOT}/sam_preload`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        image_base64: base64Img,
-                        sam_variant: variantSnapshot,
-                        preload_generation: options.generation || null,
-                    }),
+                    body: JSON.stringify(fallbackBody),
                     signal: controller.signal,
                 });
                 if (resp.status === 409) {
@@ -2328,6 +3167,10 @@
                 setSamStatus(`Image ${preloadLabel} loaded in SAM`, { variant: "success", duration: 3000 });
                 hideSamPreloadProgress();
                 resolveSamPreloadWaiters(finishedImage, finishedVariant);
+                if (slotLabel === "current" && imageSnapshot?.name) {
+                    triggerNeighborSlotPreloads(imageSnapshot.name);
+                    scheduleSamSlotStatusRefresh(true);
+                }
             }
         } catch (error) {
             if (error && error.name === "AbortError") {
@@ -2348,6 +3191,9 @@
             hideSamPreloadProgress();
             resolveSamPreloadWaiters(finishedImage, finishedVariant);
         } finally {
+            if (typeof releaseSlotLoading === "function") {
+                releaseSlotLoading();
+            }
             if (samPreloadAbortController === controller) {
                 samPreloadAbortController = null;
             }
@@ -2406,6 +3252,14 @@
         bboxesSelectButton = document.getElementById("bboxesSelect");
         samStatusEl = document.getElementById("samStatus");
         samStatusProgressEl = document.getElementById("samStatusProgress");
+        predictorElements.countInput = document.getElementById("predictorCount");
+        predictorElements.applyButton = document.getElementById("predictorApply");
+        predictorElements.message = document.getElementById("predictorMessage");
+        predictorElements.activeCount = document.getElementById("predictorActiveCount");
+        predictorElements.loadedCount = document.getElementById("predictorLoadedCount");
+        predictorElements.processRam = document.getElementById("predictorProcessRam");
+        predictorElements.imageRam = document.getElementById("predictorImageRam");
+        predictorElements.systemFreeRam = document.getElementById("predictorSystemFreeRam");
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));
@@ -2457,6 +3311,17 @@
             });
         }
 
+        if (predictorElements.applyButton) {
+            predictorElements.applyButton.addEventListener("click", handlePredictorApply);
+        }
+        if (predictorElements.countInput) {
+            predictorElements.countInput.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") {
+                    handlePredictorApply(event);
+                }
+            });
+        }
+
         updateSamModeState(Boolean(samModeCheckbox?.checked));
         updateAutoModeState(Boolean(autoModeCheckbox?.checked));
         updatePointModeState(Boolean(pointModeCheckbox?.checked));
@@ -2493,6 +3358,9 @@
         const variantForRequest = samVariant;
         const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
         let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        if (samSlotsEnabled && imageNameForRequest && !payload.image_name) {
+            payload.image_name = imageNameForRequest;
+        }
         let resp = await fetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -4088,6 +4956,11 @@
         samPreloadLastKey = null;
         cancelSamPreload();
         samTokenCache.clear();
+        slotLoadingIndicators.clear();
+        slotPreloadPromises.clear();
+        latestSlotStatuses = [];
+        applySlotStatusClasses();
+        updateSlotHighlights([]);
         const bboxesInput = document.getElementById("bboxes");
         if (bboxesInput) {
             bboxesInput.disabled = true;
@@ -4103,14 +4976,19 @@
         const previousImageName = currentImage ? currentImage.name : null;
         const cancellation = cancelAllSamJobs({ reason: "image switch", imageName: previousImageName, announce: false });
         cancelPendingMultiPoint({ clearMarkers: true, removePendingBbox: true });
-        if (previousImageName) {
-            cancelSamPreload();
-        }
         const pendingImageName = image?.meta?.name || image?.name || null;
+        if (previousImageName) {
+            const preserveImages = pendingImageName ? [pendingImageName] : null;
+            cancelSamPreload({ preserveImages });
+        }
+        const hasActivePreload = pendingImageName
+            ? (slotPreloadPromises.has(pendingImageName) || isImageCurrentlyLoading(pendingImageName))
+            : false;
         if (samPreloadEnabled && pendingImageName) {
             samPreloadCurrentImageName = pendingImageName;
             samPreloadCurrentVariant = samVariant;
-            setSamStatus(`Preparing SAM preload: ${pendingImageName}`, { variant: "info", duration: 0 });
+            const statusLabel = hasActivePreload ? "Continuing SAM preload" : "Preparing SAM preload";
+            setSamStatus(`${statusLabel}: ${pendingImageName}`, { variant: "info", duration: 0 });
             showSamPreloadProgress();
         }
         const loadVersion = (image._loadVersion = (image._loadVersion || 0) + 1);
@@ -4153,7 +5031,9 @@
                     if (!bboxes[currentImage.name]) {
                         bboxes[currentImage.name] = {};
                     }
-                    scheduleSamPreload({ force: true, delayMs: SAM_PRELOAD_IMAGE_SWITCH_DELAY_MS, messagePrefix });
+                    prepareSamForCurrentImage({ messagePrefix }).catch((err) => {
+                        console.debug("prepareSamForCurrentImage failed", err);
+                    });
                 };
                 imageObject.src = dataUrl;
             };
@@ -4182,11 +5062,16 @@
             if (!bboxes[currentImage.name]) {
                 bboxes[currentImage.name] = {};
             }
-            scheduleSamPreload({ force: true, delayMs: SAM_PRELOAD_IMAGE_SWITCH_DELAY_MS, messagePrefix });
+            prepareSamForCurrentImage({ messagePrefix, immediate: true }).catch((err) => {
+                console.debug("prepareSamForCurrentImage failed", err);
+            });
         }
         if (currentBbox !== null) {
             currentBbox.bbox.marked = false;
             currentBbox = null;
+        }
+        if (currentImage?.name) {
+            syncImageSelectionToName(currentImage.name, { ensureVisible: true });
         }
         if (!samPreloadEnabled && messagePrefix) {
             setSamStatus(messagePrefix, { variant: "warn", duration: 5000 });

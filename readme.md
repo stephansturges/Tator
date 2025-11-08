@@ -36,6 +36,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **SAM 1 & SAM 2** – switch backends at runtime, optionally preload images into SAM to minimise round-trips.
 - **Embedded CLIP trainer** – start training jobs from the UI, watch convergence metrics, and reuse cached embeddings across runs.
 - **Model switcher** – activate new CLIP + regression pairs without restarting the server; metadata keeps backbone/labelmap in sync.
+- **Predictor budget control** – dial the number of warm SAM predictors (1–3) and monitor their RAM usage so the UI can stay snappy on machines with more headroom.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
 ## Repository Layout
@@ -111,6 +112,11 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 - Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct CLIP backbone and labelmap.
 - Guidance text explains backbone auto-detection when a `.meta.pkl` file accompanies the classifier.
 
+### Predictors Tab
+- Choose how many SAM predictors stay resident (current + optional next/previous) so you can preload in whichever direction you travel.
+- See live stats for active/loaded slots, predictor RAM consumption, total FastAPI RAM usage, and free system memory. Values refresh automatically every few seconds while the tab is open.
+- The Label Images tab respects this budget immediately: with 1 predictor only the current image stays hot, with 2 the “next” image preloads, and with 3 you also keep the previous image ready for instant backtracking.
+
 ## Command-Line Training
 The UI shares its engine with `tools/train_clip_regression_from_YOLO.py`:
 ```bash
@@ -137,6 +143,12 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything) / [SAM2](https://github.com/facebookresearch/sam2). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
+
+
+## 2025-11-08 – Multi-Predictor Controller
+- Unified the FastAPI backend so it always runs the multi-predictor SAM workflow with a configurable budget (1–3 slots) and exposes `/predictor_settings` for automation.
+- Added a Predictors tab in the UI to adjust the budget, monitor slot counts, and watch RAM usage without leaving the browser.
+- Taught the labeling tab to respect the budget automatically: the current image is always pinned, the “next” slot activates once you allow ≥2 predictors, and the “previous” slot joins in at ≥3, all while reusing in-flight preloads when you change images.
 
 
 ## LOP

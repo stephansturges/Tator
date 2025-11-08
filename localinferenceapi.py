@@ -9,6 +9,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, root_validator
+import psutil
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
@@ -24,6 +25,12 @@ import itertools
 from dataclasses import dataclass, field, asdict
 
 from tools.clip_training import train_clip_from_yolo, TrainingError, TrainingArtifacts
+
+MAX_PREDICTOR_SLOTS = 3
+
+
+def _bytes_to_mb(value: int) -> float:
+    return round(value / (1024 * 1024), 2)
 
 # ----------------------------------------------------------------
 # 1) Define a global error message and a global load-flag for CLIP
@@ -93,15 +100,266 @@ if clip_model is None or clf is None:
 # 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = "vit_h"
 CHECKPOINT_PATH = "./sam_vit_h_4b8939.pth"
-sam_model = sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH)
-predictor = SamPredictor(sam_model)
+
+
+class PredictorSlot:
+    def __init__(self, name: str):
+        self.name = name
+        self.predictor = SamPredictor(sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH))
+        self.token: Optional[str] = None
+        self.variant: Optional[str] = None
+        self.image_shape: Optional[Tuple[int, int, int]] = None
+        self.image_name: Optional[str] = None
+        self.last_loaded: float = 0.0
+        self.lock = threading.RLock()
+        self._busy = threading.Event()
+        self.image_memory_bytes: int = 0
+
+    def set_image(self, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
+        with self.lock:
+            self._busy.set()
+            try:
+                self.predictor.set_image(np_img)
+                self.token = token
+                self.variant = variant
+                self.image_shape = np_img.shape
+                self.image_name = image_name
+                self.last_loaded = time.time()
+                self.image_memory_bytes = int(np_img.nbytes)
+            finally:
+                self._busy.clear()
+
+    def predict(self, **kwargs):
+        with self.lock:
+            self._busy.set()
+            try:
+                return self.predictor.predict(**kwargs)
+            finally:
+                self._busy.clear()
+
+    def is_busy(self) -> bool:
+        return self._busy.is_set()
+
+    def clear(self) -> None:
+        with self.lock:
+            self.token = None
+            self.variant = None
+            self.image_shape = None
+            self.image_name = None
+            self.last_loaded = 0.0
+            self.image_memory_bytes = 0
+
+
+class PredictorManager:
+    def __init__(self):
+        self.slots: Dict[str, PredictorSlot] = {
+            "current": PredictorSlot("current"),
+            "next": PredictorSlot("next"),
+            "previous": PredictorSlot("previous"),
+        }
+        self.slot_order: List[str] = ["current", "next", "previous"]
+        self.capacity_lock = threading.RLock()
+        self.capacity: int = min(MAX_PREDICTOR_SLOTS, len(self.slot_order))
+        self.enabled_slots: set[str] = set(self.slot_order[: self.capacity])
+        self.token_index: Dict[Tuple[str, str], PredictorSlot] = {}
+        self.image_index: Dict[Tuple[str, str], PredictorSlot] = {}
+        self.queue: "queue.Queue[Tuple[str, Dict[str, Any]]]" = queue.Queue()
+        self.stop_event = threading.Event()
+        self.worker = threading.Thread(target=self._worker, name="predictor-preload-worker", daemon=True)
+        self.worker.start()
+
+    def _slot_key(self, token: Optional[str], variant: Optional[str]) -> Optional[Tuple[str, str]]:
+        if not token or not variant:
+            return None
+        return (token, variant)
+
+    def _image_key(self, image_name: Optional[str], variant: Optional[str]) -> Optional[Tuple[str, str]]:
+        if not image_name or not variant:
+            return None
+        return (variant, image_name)
+
+    def is_slot_enabled(self, slot_name: str) -> bool:
+        return slot_name in self.enabled_slots
+
+    def resolve_slot(self, slot_name: Optional[str]) -> str:
+        candidate = (slot_name or "current").lower()
+        if candidate not in self.slots:
+            return "current"
+        return candidate if self.is_slot_enabled(candidate) else "current"
+
+    def capacity_limits(self) -> Tuple[int, int]:
+        return (1, min(MAX_PREDICTOR_SLOTS, len(self.slot_order)))
+
+    def get_capacity(self) -> int:
+        with self.capacity_lock:
+            return self.capacity
+
+    def set_capacity(self, capacity: int) -> None:
+        minimum, maximum = self.capacity_limits()
+        normalized = max(minimum, min(maximum, capacity))
+        with self.capacity_lock:
+            if normalized == self.capacity:
+                return
+            self.capacity = normalized
+            new_enabled = set(self.slot_order[: normalized])
+            disabled = self.enabled_slots - new_enabled
+            self.enabled_slots = new_enabled
+            for slot_name in disabled:
+                slot = self.slots.get(slot_name)
+                if slot:
+                    self._clear_slot_refs(slot)
+                    slot.clear()
+
+    def active_slot_count(self) -> int:
+        return len(self.enabled_slots)
+
+    def loaded_slot_count(self) -> int:
+        return sum(1 for name, slot in self.slots.items() if name in self.enabled_slots and slot.token)
+
+    def total_image_memory_bytes(self) -> int:
+        return sum(slot.image_memory_bytes for name, slot in self.slots.items() if name in self.enabled_slots)
+
+    def _clear_slot_refs(self, slot: PredictorSlot) -> None:
+        remove_keys = [key for key, value in self.token_index.items() if value is slot]
+        for key in remove_keys:
+            self.token_index.pop(key, None)
+        remove_image_keys = [key for key, value in self.image_index.items() if value is slot]
+        for key in remove_image_keys:
+            self.image_index.pop(key, None)
+
+    def set_slot(self, slot_name: str, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
+        slot_name = self.resolve_slot(slot_name)
+        slot = self.slots[slot_name]
+        self._clear_slot_refs(slot)
+        slot.set_image(np_img, token, variant, image_name)
+        key = self._slot_key(token, variant)
+        if key:
+            self.token_index[key] = slot
+        image_key = self._image_key(image_name, variant)
+        if image_key:
+            self.image_index[image_key] = slot
+
+    def ensure_current(self, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> PredictorSlot:
+        slot = self.token_index.get(self._slot_key(token, variant)) if token and variant else None
+        if slot and slot.name == "current":
+            return slot
+        self.set_slot("current", np_img, token, variant, image_name)
+        return self.slots["current"]
+
+    def get_slot_for_token(self, token: Optional[str], variant: Optional[str]) -> Optional[PredictorSlot]:
+        key = self._slot_key(token, variant)
+        if key is None:
+            return None
+        return self.token_index.get(key)
+
+    def get_slot_for_image(self, image_name: Optional[str], variant: Optional[str]) -> Optional[PredictorSlot]:
+        key = self._image_key(image_name, variant)
+        if key is None:
+            return None
+        return self.image_index.get(key)
+
+    def promote_slot(self, slot_name: str) -> bool:
+        if slot_name not in self.slots or slot_name == "current" or not self.is_slot_enabled(slot_name):
+            return False
+        if slot_name == "next":
+            prev_slot = self.slots["previous"]
+            curr_slot = self.slots["current"]
+            next_slot = self.slots["next"]
+            self.slots["previous"] = curr_slot
+            self.slots["current"] = next_slot
+            self.slots["next"] = prev_slot
+        elif slot_name == "previous":
+            prev_slot = self.slots["previous"]
+            curr_slot = self.slots["current"]
+            next_slot = self.slots["next"]
+            self.slots["next"] = curr_slot
+            self.slots["current"] = prev_slot
+            self.slots["previous"] = next_slot
+        else:
+            return False
+        self.slots["previous"].name = "previous"
+        self.slots["current"].name = "current"
+        self.slots["next"].name = "next"
+        return True
+
+    def predict(self, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str], **predict_kwargs):
+        slot = self.get_slot_for_token(token, variant)
+        if slot is None:
+            slot = self.ensure_current(np_img, token, variant, image_name)
+        return slot.predict(**predict_kwargs)
+
+    def set_slot_with_wait(self, slot_name: str, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
+        slot_name = self.resolve_slot(slot_name)
+        if slot_name != "current":
+            while self.slots["current"].is_busy() and not self.stop_event.is_set():
+                time.sleep(0.01)
+        self.set_slot(slot_name, np_img, token, variant, image_name)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.worker.join(timeout=1.0)
+
+    def schedule_slot(self, slot_name: str, payload: Dict[str, Any]) -> None:
+        self.queue.put((slot_name, payload))
+
+    def status(self) -> List[Dict[str, Any]]:
+        info = []
+        for name, slot in self.slots.items():
+            entry: Dict[str, Any] = {
+                "slot": name,
+                "token": slot.token,
+                "variant": slot.variant,
+                "image_name": slot.image_name,
+                "last_loaded": slot.last_loaded,
+                "busy": slot.is_busy(),
+                "enabled": self.is_slot_enabled(name),
+                "memory_bytes": slot.image_memory_bytes,
+            }
+            if slot.image_shape:
+                entry["height"] = slot.image_shape[0]
+                entry["width"] = slot.image_shape[1]
+            info.append(entry)
+        return info
+
+    def _materialize(self, payload: Dict[str, Any]) -> Tuple[np.ndarray, str, str, Optional[str]]:
+        variant = _default_variant(payload.get("sam_variant"))
+        image_name = payload.get("image_name")
+        token = payload.get("image_token")
+        if token:
+            cached = _fetch_preloaded_image(token, variant)
+            if cached is not None:
+                return cached, token, variant, image_name
+        base64_data = payload.get("image_base64")
+        if not base64_data:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_payload_missing")
+        data = base64.b64decode(base64_data)
+        pil_img = Image.open(BytesIO(data)).convert("RGB")
+        np_img = np.array(pil_img)
+        token = hashlib.md5(np_img.tobytes()).hexdigest()
+        _store_preloaded_image(token, np_img, variant)
+        return np_img, token, variant, image_name
+
+    def _worker(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                slot_name, payload = self.queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                np_img, token, variant, image_name = self._materialize(payload)
+                self.set_slot_with_wait(slot_name, np_img, token, variant, image_name)
+            except Exception as exc:  # noqa: BLE001
+                print(f"predictor preload failed: {exc}")
+
+
+predictor_manager = PredictorManager()
 
 # 5) Threading lock for SAM usage:
 sam_lock = threading.Lock()
 
 job_store: Dict[str, List["CropImage"]] = {}
 
-app = FastAPI()
+app = FastAPI(title="Local Inference API (Multi-Predictor)")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -114,21 +372,9 @@ if not logger.handlers:
 logger.propagate = False
 
 # Cache for repeated calls
-last_image_hash = None
-last_image_np = None
-
 SAM_CACHE_LIMIT = 8
 sam_cache_lock = threading.Lock()
 sam_preload_cache: "OrderedDict[str, Tuple[np.ndarray, str]]" = OrderedDict()
-
-def set_image_if_needed(np_img: np.ndarray):
-    global last_image_hash, last_image_np
-    new_hash = hashlib.md5(np_img.tobytes()).hexdigest()
-    with sam_lock:
-        if new_hash != last_image_hash:
-            predictor.set_image(np_img)
-            last_image_np = np_img
-            last_image_hash = new_hash
 
 
 def _store_preloaded_image(token: str, np_img: np.ndarray, variant: str) -> None:
@@ -152,6 +398,17 @@ def _fetch_preloaded_image(token: str, variant: str) -> Optional[np.ndarray]:
         return arr
 
 
+def _predict_with_cache(
+    np_img: np.ndarray,
+    token: Optional[str],
+    variant: str,
+    *,
+    image_name: Optional[str] = None,
+    **predict_kwargs: Any,
+):
+    return predictor_manager.predict(np_img, token, variant, image_name=image_name, **predict_kwargs)
+
+
 def _default_variant(value: Optional[str]) -> str:
     return (value or "sam1").lower()
 
@@ -166,6 +423,8 @@ class SamPreloadJob:
     generation: Optional[int]
     image_token: Optional[str]
     image_base64: Optional[str]
+    image_name: Optional[str]
+    slot: str
     event: threading.Event
     result: Optional['SamPreloadResponse'] = None
     error: Optional[Exception] = None
@@ -180,13 +439,24 @@ class SamPreloadManager:
         self.worker = threading.Thread(target=self._worker, name="sam-preload-worker", daemon=True)
         self.worker.start()
 
-    def submit(self, *, variant: str, generation: Optional[int], image_token: Optional[str], image_base64: Optional[str]) -> 'SamPreloadResponse':
+    def submit(
+        self,
+        *,
+        variant: str,
+        generation: Optional[int],
+        image_token: Optional[str],
+        image_base64: Optional[str],
+        image_name: Optional[str],
+        slot: str,
+    ) -> 'SamPreloadResponse':
         job = SamPreloadJob(
             request_id=next(_job_id_counter),
             variant=variant,
             generation=generation,
             image_token=image_token,
             image_base64=image_base64,
+            image_name=image_name,
+            slot=slot,
             event=threading.Event(),
         )
         with self.lock:
@@ -227,13 +497,15 @@ class SamPreloadManager:
 
     def _process_job(self, job: SamPreloadJob) -> 'SamPreloadResponse':
         variant = job.variant
+        slot_name = predictor_manager.resolve_slot(job.slot)
+        image_name = job.image_name
 
         if job.image_token:
             cached = _fetch_preloaded_image(job.image_token, variant)
             if cached is not None:
                 if self._is_superseded(job):
                     return SamPreloadResponse(status="superseded", width=int(cached.shape[1]), height=int(cached.shape[0]), token=job.image_token)
-                set_image_if_needed(cached)
+                predictor_manager.set_slot_with_wait(slot_name, cached, job.image_token, variant, image_name)
                 height, width = cached.shape[:2]
                 return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=job.image_token)
             if not job.image_base64:
@@ -249,7 +521,7 @@ class SamPreloadManager:
         if self._is_superseded(job):
             return SamPreloadResponse(status="superseded", width=int(np_img.shape[1]), height=int(np_img.shape[0]), token=token)
 
-        set_image_if_needed(np_img)
+        predictor_manager.set_slot_with_wait(slot_name, np_img, token, variant, image_name)
         height, width = np_img.shape[:2]
         return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=token)
 
@@ -272,7 +544,6 @@ def resolve_image_payload(image_base64: Optional[str], image_token: Optional[str
         cached = _fetch_preloaded_image(image_token, variant)
         if cached is None:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
-        set_image_if_needed(cached)
         pil_img = Image.fromarray(cached)
         return pil_img, cached, image_token
     if not image_base64:
@@ -282,7 +553,6 @@ def resolve_image_payload(image_base64: Optional[str], image_token: Optional[str
     np_img = np.array(pil_img)
     token = hashlib.md5(np_img.tobytes()).hexdigest()
     _store_preloaded_image(token, np_img, variant)
-    set_image_if_needed(np_img)
     return pil_img, np_img, token
 
 class Base64Payload(BaseModel):
@@ -315,6 +585,7 @@ class PointPrompt(BaseModel):
     point_y: float
     uuid: Optional[str] = None
     sam_variant: Optional[str] = None
+    image_name: Optional[str] = None
 
     @root_validator
     def _ensure_image_payload(cls, values):
@@ -331,6 +602,7 @@ class BboxPrompt(BaseModel):
     bbox_height: float
     uuid: Optional[str] = None
     sam_variant: Optional[str] = None
+    image_name: Optional[str] = None
 
     @root_validator
     def _ensure_bbox_payload(cls, values):
@@ -344,11 +616,15 @@ class SamPreloadRequest(BaseModel):
     image_token: Optional[str] = None
     sam_variant: Optional[str] = None
     preload_generation: Optional[int] = None
+    image_name: Optional[str] = None
+    slot: Optional[str] = "current"
 
     @root_validator
     def _ensure_preload_payload(cls, values):
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
+        if values.get("slot") and values.get("slot") != "current" and not values.get("image_name"):
+            raise ValueError("image_name_required_for_slot")
         return values
 
 
@@ -362,6 +638,46 @@ class SamPreloadResponse(BaseModel):
 sam_preload_manager = SamPreloadManager()
 
 
+class SamSlotStatus(BaseModel):
+    slot: str
+    image_name: Optional[str]
+    token: Optional[str]
+    variant: Optional[str]
+    width: Optional[int]
+    height: Optional[int]
+    busy: bool
+    last_loaded: float
+    enabled: bool = True
+    memory_bytes: Optional[int] = None
+
+
+class SamActivateRequest(BaseModel):
+    image_name: str
+    sam_variant: Optional[str] = None
+
+
+class SamActivateResponse(BaseModel):
+    status: str
+    slot: Optional[str] = None
+    token: Optional[str] = None
+
+
+class PredictorSettings(BaseModel):
+    max_predictors: int
+    min_predictors: int
+    max_supported_predictors: int
+    active_predictors: int
+    loaded_predictors: int
+    process_ram_mb: float
+    total_ram_mb: float
+    available_ram_mb: float
+    image_ram_mb: float
+
+
+class PredictorSettingsUpdate(BaseModel):
+    max_predictors: int
+
+
 class MultiPointPrompt(BaseModel):
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
@@ -369,6 +685,7 @@ class MultiPointPrompt(BaseModel):
     negative_points: List[List[float]] = []
     uuid: Optional[str] = None
     sam_variant: Optional[str] = None
+    image_name: Optional[str] = None
 
     @root_validator
     def _ensure_multi_payload(cls, values):
@@ -1102,11 +1419,66 @@ def sam_preload(payload: SamPreloadRequest):
             generation=payload.preload_generation,
             image_token=payload.image_token,
             image_base64=payload.image_base64,
+            image_name=payload.image_name,
+            slot=predictor_manager.resolve_slot(payload.slot),
         )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"sam_preload_failed:{exc}") from exc
+
+
+@app.get("/sam_slots", response_model=List[SamSlotStatus])
+def sam_slots():
+    return predictor_manager.status()
+
+
+@app.post("/sam_activate_slot", response_model=SamActivateResponse)
+def sam_activate_slot(payload: SamActivateRequest):
+    variant = _default_variant(payload.sam_variant)
+    slot = predictor_manager.get_slot_for_image(payload.image_name, variant)
+    if slot is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="slot_not_found")
+    promoted = predictor_manager.promote_slot(slot.name)
+    if not promoted and slot.name != "current":
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="slot_busy")
+    return SamActivateResponse(status="promoted", slot="current", token=slot.token)
+
+
+def _predictor_settings_payload() -> PredictorSettings:
+    min_cap, max_cap = predictor_manager.capacity_limits()
+    current_cap = predictor_manager.get_capacity()
+    active = predictor_manager.active_slot_count()
+    loaded = predictor_manager.loaded_slot_count()
+    image_memory = predictor_manager.total_image_memory_bytes()
+    vm = psutil.virtual_memory()
+    process = psutil.Process(os.getpid())
+    process_mb = _bytes_to_mb(process.memory_info().rss)
+    total_mb = _bytes_to_mb(int(vm.total))
+    available_mb = _bytes_to_mb(int(vm.available))
+    image_mb = _bytes_to_mb(image_memory)
+    return PredictorSettings(
+        max_predictors=current_cap,
+        min_predictors=min_cap,
+        max_supported_predictors=max_cap,
+        active_predictors=active,
+        loaded_predictors=loaded,
+        process_ram_mb=process_mb,
+        total_ram_mb=total_mb,
+        available_ram_mb=available_mb,
+        image_ram_mb=image_mb,
+    )
+
+
+@app.get("/predictor_settings", response_model=PredictorSettings)
+def get_predictor_settings():
+    return _predictor_settings_payload()
+
+
+@app.post("/predictor_settings", response_model=PredictorSettings)
+def update_predictor_settings(payload: PredictorSettingsUpdate):
+    predictor_manager.set_capacity(payload.max_predictors)
+    return _predictor_settings_payload()
 
 
 @app.post("/predict_crop", response_model=PredictResponse)
@@ -1140,10 +1512,15 @@ def sam2_point(prompt: PointPrompt):
     )
     coords = np.array([[prompt.point_x, prompt.point_y]])
     labels = np.array([1])
-    masks, scores, logits = predictor.predict(
+    variant = _default_variant(getattr(prompt, "sam_variant", None))
+    masks, scores, logits = _predict_with_cache(
+        np_img,
+        token,
+        variant,
+        image_name=getattr(prompt, "image_name", None),
         point_coords=coords,
         point_labels=labels,
-        multimask_output=False
+        multimask_output=False,
     )
     mask = masks[0]
     left, top, right, bottom = mask_to_bounding_box(mask)
@@ -1182,7 +1559,15 @@ def sam2_bbox_auto(prompt: BboxPrompt):
             image_token=token,
         )
     sub_box = np.array([left, top, right, bottom], dtype=np.float32)
-    masks, _, _ = predictor.predict(box=sub_box, multimask_output=False)
+    variant = _default_variant(getattr(prompt, "sam_variant", None))
+    masks, _, _ = _predict_with_cache(
+        np_img,
+        token,
+        variant,
+        image_name=getattr(prompt, "image_name", None),
+        box=sub_box,
+        multimask_output=False,
+    )
     mask = masks[0]
     x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
@@ -1225,10 +1610,15 @@ def sam2_point_auto(prompt: PointPrompt):
     )
     coords = np.array([[prompt.point_x, prompt.point_y]])
     labels = np.array([1])
-    masks,_,_ = predictor.predict(
+    variant = _default_variant(getattr(prompt, "sam_variant", None))
+    masks, _, _ = _predict_with_cache(
+        np_img,
+        token,
+        variant,
+        image_name=getattr(prompt, "image_name", None),
         point_coords=coords,
         point_labels=labels,
-        multimask_output=False
+        multimask_output=False,
     )
     mask = masks[0]
     left, top, right, bottom = mask_to_bounding_box(mask)
@@ -1263,7 +1653,12 @@ def sam2_point_multi(prompt: MultiPointPrompt):
     )
     coords = np.array(positive + negative, dtype=np.float32)
     labels = np.array([1] * len(positive) + [0] * len(negative), dtype=np.int64)
-    masks, _, _ = predictor.predict(
+    variant = _default_variant(getattr(prompt, "sam_variant", None))
+    masks, _, _ = _predict_with_cache(
+        np_img,
+        token,
+        variant,
+        image_name=getattr(prompt, "image_name", None),
         point_coords=coords,
         point_labels=labels,
         multimask_output=False,
@@ -1290,7 +1685,12 @@ def sam2_point_multi_auto(prompt: MultiPointPrompt):
     )
     coords = np.array(positive + negative, dtype=np.float32)
     labels = np.array([1] * len(positive) + [0] * len(negative), dtype=np.int64)
-    masks, _, _ = predictor.predict(
+    variant = _default_variant(getattr(prompt, "sam_variant", None))
+    masks, _, _ = _predict_with_cache(
+        np_img,
+        token,
+        variant,
+        image_name=getattr(prompt, "image_name", None),
         point_coords=coords,
         point_labels=labels,
         multimask_output=False,
@@ -1333,7 +1733,15 @@ def sam2_bbox(prompt: BboxPrompt):
             uuid=prompt.uuid
         )
     sub_box = np.array([left, top, right, bottom], dtype=np.float32)
-    masks, _, _ = predictor.predict(box=sub_box, multimask_output=False)
+    variant = _default_variant(getattr(prompt, "sam_variant", None))
+    masks, _, _ = _predict_with_cache(
+        np_img,
+        token,
+        variant,
+        image_name=getattr(prompt, "image_name", None),
+        box=sub_box,
+        multimask_output=False,
+    )
     mask = masks[0]
     x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
@@ -1381,9 +1789,14 @@ def sam2_bbox_auto(prompt: BboxPrompt):
             image_token=token,
         )
     sub_box = np.array([left, top, right, bottom], dtype=np.float32)
-    masks, _, _ = predictor.predict(
+    variant = _default_variant(getattr(prompt, "sam_variant", None))
+    masks, _, _ = _predict_with_cache(
+        np_img,
+        token,
+        variant,
+        image_name=getattr(prompt, "image_name", None),
         box=sub_box,
-        multimask_output=False
+        multimask_output=False,
     )
     mask = masks[0]
     x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)

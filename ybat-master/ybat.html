@@ -19,6 +19,7 @@
             <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
+            <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">Predictors</button>
         </div>
         <div class="tab-panels">
             <div class="tab-panel active" id="tabLabeling" data-tab-panel="labeling">
@@ -300,6 +301,44 @@
                         <input type="file" id="activeClassifierUpload" accept=".pkl" class="file-input-hidden" />
                         <input type="file" id="activeLabelmapUpload" accept=".pkl,.txt" class="file-input-hidden" />
                     </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabPredictors" data-tab-panel="predictors">
+                <div class="predictor-panel">
+                    <div class="predictor-card">
+                        <h2>Predictor Budget</h2>
+                        <p>Choose how many SAM predictors stay loaded so you can flip between images without delays.</p>
+                        <div class="predictor-control">
+                            <label for="predictorCount">Concurrent predictors</label>
+                            <div class="predictor-control-inline">
+                                <input type="number" id="predictorCount" min="1" max="3" value="3" />
+                                <button type="button" class="training-button" id="predictorApply">Apply</button>
+                            </div>
+                        </div>
+                        <div class="predictor-message" id="predictorMessage"></div>
+                    </div>
+                    <div class="predictor-grid">
+                        <div class="predictor-stat">
+                            <span>Active slots</span>
+                            <strong id="predictorActiveCount">--</strong>
+                        </div>
+                        <div class="predictor-stat">
+                            <span>Loaded predictors</span>
+                            <strong id="predictorLoadedCount">--</strong>
+                        </div>
+                        <div class="predictor-stat">
+                            <span>Predictor RAM</span>
+                            <strong id="predictorImageRam">--</strong>
+                        </div>
+                        <div class="predictor-stat">
+                            <span>Process RAM</span>
+                            <strong id="predictorProcessRam">--</strong>
+                        </div>
+                        <div class="predictor-stat">
+                            <span>System free / total</span>
+                            <strong id="predictorSystemFreeRam">--</strong>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

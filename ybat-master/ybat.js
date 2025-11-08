@@ -4852,7 +4852,7 @@
         if (!imagesInput) {
             return;
         }
-        imagesInput.addEventListener("change", (event) => {
+        imagesInput.addEventListener("change", async (event) => {
             const imageList = document.getElementById("imageList");
             if (!imageList) {
                 setSamStatus("Image list element is missing.", { variant: "error", duration: 5000 });
@@ -4869,7 +4869,7 @@
             resetImageList();
             document.body.style.cursor = "wait";
             let fileCount = 0;
-            const promises = [];
+            const YIELD_EVERY = 50;
 
             function readDimensions(file) {
                 return new Promise((resolve) => {
@@ -4906,12 +4906,16 @@
                     }
                     imageList.appendChild(option);
 
-                    promises.push(
-                        readDimensions(file).then((dim) => {
-                            images[file.name].width = dim.width;
-                            images[file.name].height = dim.height;
-                        })
-                    );
+                    try {
+                        const dim = await readDimensions(file);
+                        images[file.name].width = dim.width;
+                        images[file.name].height = dim.height;
+                    } catch (error) {
+                        console.debug("Failed to read image dimensions", file.name, error);
+                    }
+                    if (fileCount % YIELD_EVERY === 0) {
+                        await yieldToDom(0);
+                    }
                 }
             }
 
@@ -4924,27 +4928,25 @@
 
             setSamStatus(`Detected ${fileCount} supported image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 2000 });
 
-            Promise.all(promises).then(() => {
-                document.body.style.cursor = "default";
-                if (fileCount > 0) {
-                    const firstName = imageList.options[0].innerHTML;
-                    if (!images[firstName]) {
-                        setSamStatus(`Failed to stage image data for ${firstName}.`, { variant: "error", duration: 6000 });
-                        imagesInput.value = "";
-                        return;
-                    }
-                    setCurrentImage(images[firstName]);
+            document.body.style.cursor = "default";
+            if (fileCount > 0) {
+                const firstName = imageList.options[0].innerHTML;
+                if (!images[firstName]) {
+                    setSamStatus(`Failed to stage image data for ${firstName}.`, { variant: "error", duration: 6000 });
+                    imagesInput.value = "";
+                    return;
                 }
-                if (Object.keys(classes).length > 0) {
-                    const bboxesInput = document.getElementById("bboxes");
-                    if (bboxesInput) {
-                        bboxesInput.disabled = false;
-                    }
-                    setButtonDisabled(bboxesButton, false);
+                setCurrentImage(images[firstName]);
+            }
+            if (Object.keys(classes).length > 0) {
+                const bboxesInput = document.getElementById("bboxes");
+                if (bboxesInput) {
+                    bboxesInput.disabled = false;
                 }
-                setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
-                imagesInput.value = "";
-            });
+                setButtonDisabled(bboxesButton, false);
+            }
+            setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
+            imagesInput.value = "";
         });
     };
 

@@ -37,6 +37,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **Embedded CLIP trainer** – start training jobs from the UI, watch convergence metrics, and reuse cached embeddings across runs.
 - **Model switcher** – activate new CLIP + regression pairs without restarting the server; metadata keeps backbone/labelmap in sync.
 - **Predictor budget control** – dial the number of warm SAM predictors (1–3) and monitor their RAM usage so the UI can stay snappy on machines with more headroom.
+- **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
 ## Repository Layout
@@ -93,11 +94,49 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    Watch the logs for confirmations that CLIP, SAM, and the logistic regression model loaded correctly.
 7. **Open the UI** – load `ybat-master/ybat.html` (locally renamed “Tator 🥔”) in your browser.
 
+### Running the Backend on a Remote GPU Host
+You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a remote machine:
+
+1. **Prepare the remote host** (GPU recommended):
+   ```bash
+   ssh user@gpu-host
+   git clone https://github.com/aircortex/tator.git && cd tator
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   python -m uvicorn app:app --host 127.0.0.1 --port 8000
+   ```
+   Keep this `uvicorn` process running (tmux/screen systemd, etc.).
+
+2. **Tunnel the API locally** from your laptop:
+   ```bash
+   ssh -L 8000:127.0.0.1:8000 user@gpu-host
+   ```
+   As long as the tunnel is open, `http://localhost:8000` points to the GPU server.
+
+3. **Open the UI on your laptop** (`ybat-master/ybat.html`). The default `API_ROOT = http://localhost:8000` already targets the tunnel, so the browser uploads images/bboxes over SSH and the remote SAM/CLIP predictors do the work.
+
+#### Multi-user tips
+- Run one FastAPI instance per user on unique ports (`uvicorn app:app --port 8010`, `8011`, …).
+- Each user tunnels their assigned port (`ssh -L 8010:127.0.0.1:8010 user@gpu-host`).
+- Optionally front the instances with an authenticated reverse proxy (nginx/traefik) so users hit different URLs without managing SSH tunnels.
+- The UI is stateless: as long as `API_ROOT` points to the user’s tunnel/URL, their browser uploads images as base64 and never touches the remote filesystem.
+
 ## Using the UI
 ### Label Images Tab
 - Load images via the folder picker; per-image CLIP/SAM helpers live in the left rail.
 - Toggle **Preload SAM** to stream the next image into memory; the side progress bar shows status and cancels stale tasks when you move to another image.
+- Press **`X`** with a bbox selected and SAM/CLIP will refine it in place without redrawing. *(GIF placeholder)*
 - Auto class, SAM box/point modes, and multi-point masks share a top progress indicator and support keyboard shortcuts documented in the panel footer.
+
+#### Keyboard Shortcuts
+- `X` – press while a bbox is selected to trigger the one-click SAM tweak.
+- `A` – toggle Auto Class.
+- `S` – toggle SAM Mode.
+- `D` – toggle SAM Point Mode.
+- `M` – toggle SAM Multi-Point Mode.
+- `F` / `G` – add positive / negative multi-point markers.
+- `Enter` – submit multi-point selection.
+- Arrow keys – move through images/classes; `Q` removes the most recent bbox.
 
 ### Train CLIP Tab
 1. Choose **Image folder** and **Label folder** via native directory pickers. Only files matching YOLO expectations are enumerated.
@@ -149,6 +188,7 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 - Unified the FastAPI backend so it always runs the multi-predictor SAM workflow with a configurable budget (1–3 slots) and exposes `/predictor_settings` for automation.
 - Added a Predictors tab in the UI to adjust the budget, monitor slot counts, and watch RAM usage without leaving the browser.
 - Taught the labeling tab to respect the budget automatically: the current image is always pinned, the “next” slot activates once you allow ≥2 predictors, and the “previous” slot joins in at ≥3, all while reusing in-flight preloads when you change images.
+- Introduced One-click SAM bbox tweak so pressing `X` with a bbox selected resubmits it to SAM/CLIP for cleanup without redrawing.
 
 
 ## LOP

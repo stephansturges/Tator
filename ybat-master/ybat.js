@@ -178,6 +178,10 @@
     let samCancelVersion = 0;
     const samActiveJobs = new Map();
     let imageListSelectionLock = 0;
+    let imageLoadInProgress = false;
+    let imageLoadPromise = null;
+    const tweakPreserveSet = new Set();
+    let magicTweakRunning = false;
 
     const multiPointColors = {
         positive: { stroke: "#2ecc71", fill: "rgba(46, 204, 113, 0.35)" },
@@ -205,6 +209,7 @@
         activePanel: null,
         predictorsPanel: null,
     };
+
 
     const predictorElements = {
         countInput: null,
@@ -1680,7 +1685,10 @@
         if (currentBbox && currentBbox.bbox && currentBbox.bbox.uuid === uuid) {
             currentBbox = null;
         }
-        if (imageName && bboxes[imageName]) {
+        const preserveExisting = uuid && tweakPreserveSet.has(uuid);
+        if (preserveExisting) {
+            tweakPreserveSet.delete(uuid);
+        } else if (imageName && bboxes[imageName]) {
             const classBuckets = bboxes[imageName];
             for (const className of Object.keys(classBuckets)) {
                 const bucket = classBuckets[className];
@@ -1943,16 +1951,23 @@
             return { nextName: null, previousName: null };
         }
         const options = Array.from(listEl.options);
-        const idx = options.findIndex((opt) => (opt.value || opt.innerHTML) === currentName);
+        const idx = options.findIndex((opt) => getOptionImageName(opt) === currentName);
         if (idx === -1) {
             return { nextName: null, previousName: null };
         }
         const nextOpt = idx < options.length - 1 ? options[idx + 1] : null;
         const prevOpt = idx > 0 ? options[idx - 1] : null;
         return {
-            nextName: nextOpt ? (nextOpt.value || nextOpt.innerHTML) : null,
-            previousName: prevOpt ? (prevOpt.value || prevOpt.innerHTML) : null,
+            nextName: getOptionImageName(nextOpt),
+            previousName: getOptionImageName(prevOpt),
         };
+    }
+
+    function getOptionImageName(option) {
+        if (!option) {
+            return null;
+        }
+        return option.value || option.text || option.innerHTML || null;
     }
 
     function isSlotRoleEnabled(slotRole) {
@@ -2007,7 +2022,7 @@
             return;
         }
         const opts = Array.from(listEl.options);
-        const targetIndex = opts.findIndex((opt) => (opt.value || opt.innerHTML) === imageName);
+        const targetIndex = opts.findIndex((opt) => getOptionImageName(opt) === imageName);
         if (targetIndex === -1) {
             return;
         }
@@ -3295,6 +3310,7 @@
                 updateSamPreloadState(samPreloadCheckbox.checked);
             });
         }
+
 
         if (samVariantSelect) {
             samVariant = samVariantSelect.value || "sam1";
@@ -4585,17 +4601,9 @@
                         }
                     }
                     else {
-                        if (currentBbox === null) {
-                            setBboxMarkedState();
-                            if (currentBbox !== null) {
-                                updateBboxAfterTransform();
-                            }
-                        }
-                        else {
-                            setBboxMarkedState();
-                            if (currentBbox !== null) {
-                                updateBboxAfterTransform();
-                            }
+                        setBboxMarkedState();
+                        if (currentBbox !== null) {
+                            updateBboxAfterTransform();
                         }
                     }
                 }
@@ -4700,6 +4708,53 @@
             }
         }
     };
+
+    async function runMagicTweakForCurrentBbox() {
+        if (!currentBbox || !currentBbox.bbox) {
+            setSamStatus("Select a bbox before pressing X", { variant: "warn", duration: 3000 });
+            return false;
+        }
+        if (!samMode && !autoMode) {
+            setSamStatus("Enable SAM or Auto Class to tweak bboxes", { variant: "warn", duration: 3000 });
+            return false;
+        }
+        if (!currentImage || !currentImage.name) {
+            return false;
+        }
+        if (samMode && samSlotsEnabled && samPreloadEnabled) {
+            const token = getSamToken(currentImage.name, samVariant);
+            if (!token) {
+                setSamStatus("Waiting for SAM to load this image…", { variant: "info", duration: 3000 });
+                prepareSamForCurrentImage({ messagePrefix: "Preparing SAM" }).catch((err) => {
+                    console.debug("prepareSamForCurrentImage (tweak) failed", err);
+                });
+                return false;
+            }
+        }
+        const bbox = currentBbox.bbox;
+        pendingApiBboxes[bbox.uuid] = bbox;
+        tweakPreserveSet.add(bbox.uuid);
+        try {
+            if (samMode && autoMode) {
+                await sam2BboxAutoPrompt(bbox);
+            } else if (samMode) {
+                await sam2BboxPrompt(bbox);
+            } else if (autoMode) {
+                await autoPredictNewCrop(bbox);
+            }
+            setBboxMarkedState();
+            if (currentBbox) {
+                updateBboxAfterTransform();
+            }
+            return true;
+        } catch (error) {
+            console.warn("One-click tweak failed", error);
+            setSamStatus(`Tweak failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+            return false;
+        } finally {
+            tweakPreserveSet.delete(bbox.uuid);
+        }
+    }
 
     const moveBbox = () => {
         if (mouse.buttonL && currentBbox) {
@@ -4866,89 +4921,108 @@
                 return;
             }
 
-            resetImageList();
-            document.body.style.cursor = "wait";
-            let fileCount = 0;
-            const YIELD_EVERY = 50;
-
-            function readDimensions(file) {
-                return new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        const tempImg = new Image();
-                        tempImg.onload = () => {
-                            resolve({ width: tempImg.width, height: tempImg.height });
-                        };
-                        tempImg.src = reader.result;
-                    };
-                    reader.readAsDataURL(file);
-                });
+            if (imageLoadInProgress && imageLoadPromise) {
+                await waitForImageLoadCompletion();
             }
 
+            imageLoadInProgress = true;
+            const loadPromise = ingestImageFiles(files, imageList, imagesInput, bboxesButton);
+            imageLoadPromise = loadPromise;
+            try {
+                await loadPromise;
+            } finally {
+                if (imageLoadPromise === loadPromise) {
+                    imageLoadPromise = null;
+                }
+                imageLoadInProgress = false;
+            }
+        });
+    };
+
+    async function waitForImageLoadCompletion() {
+        if (imageLoadInProgress && imageLoadPromise) {
+            try {
+                await imageLoadPromise;
+            } catch (error) {
+                console.debug("Image load completion wait failed", error);
+            }
+        }
+    }
+
+    async function ingestImageFiles(files, imageList, imagesInput, bboxesButton) {
+        resetImageList();
+        const total = files.length;
+        document.body.style.cursor = "wait";
+        const loadingLabel = `Loading ${total} image${total === 1 ? "" : "s"}… please wait`;
+        setSamStatus(loadingLabel, { variant: "info", duration: 0 });
+        let fileCount = 0;
+        const YIELD_EVERY = 75;
+
+        try {
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
                 const nameParts = file.name.split(".");
                 const ext = nameParts[nameParts.length - 1];
-                if (extensions.indexOf(ext) !== -1) {
-                    images[file.name] = {
-                        meta: file,
-                        index: fileCount,
-                        width: 0,
-                        height: 0,
-                        object: undefined,
-                    };
-                    fileCount++;
-                    const option = document.createElement("option");
-                    option.value = file.name;
-                    option.innerHTML = file.name;
-                    if (fileCount === 1) {
-                        option.selected = true;
-                    }
-                    imageList.appendChild(option);
+                if (extensions.indexOf(ext) === -1) {
+                    continue;
+                }
+                images[file.name] = {
+                    meta: file,
+                    index: fileCount,
+                    width: 0,
+                    height: 0,
+                    object: undefined,
+                };
+                fileCount++;
+                const option = document.createElement("option");
+                option.value = file.name;
+                option.text = file.name;
+                if (fileCount === 1) {
+                    option.selected = true;
+                }
+                imageList.appendChild(option);
 
-                    try {
-                        const dim = await readDimensions(file);
-                        images[file.name].width = dim.width;
-                        images[file.name].height = dim.height;
-                    } catch (error) {
-                        console.debug("Failed to read image dimensions", file.name, error);
-                    }
-                    if (fileCount % YIELD_EVERY === 0) {
-                        await yieldToDom(0);
-                    }
+                try {
+                    const dim = await readImageDimensions(file);
+                    images[file.name].width = dim.width;
+                    images[file.name].height = dim.height;
+                } catch (error) {
+                    console.debug("Failed to read image dimensions", file.name, error);
+                }
+
+                if (fileCount % YIELD_EVERY === 0) {
+                    await yieldToDom(0);
                 }
             }
-
-            if (fileCount === 0) {
-                document.body.style.cursor = "default";
-                setSamStatus("No supported image files were selected.", { variant: "warn", duration: 5000 });
-                imagesInput.value = "";
-                return;
-            }
-
-            setSamStatus(`Detected ${fileCount} supported image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 2000 });
-
+        } finally {
             document.body.style.cursor = "default";
-            if (fileCount > 0) {
-                const firstName = imageList.options[0].innerHTML;
-                if (!images[firstName]) {
-                    setSamStatus(`Failed to stage image data for ${firstName}.`, { variant: "error", duration: 6000 });
-                    imagesInput.value = "";
-                    return;
-                }
-                setCurrentImage(images[firstName]);
-            }
-            if (Object.keys(classes).length > 0) {
-                const bboxesInput = document.getElementById("bboxes");
-                if (bboxesInput) {
-                    bboxesInput.disabled = false;
-                }
-                setButtonDisabled(bboxesButton, false);
-            }
-            setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
+        }
+
+        if (fileCount === 0) {
+            setSamStatus("No supported image files were selected.", { variant: "warn", duration: 5000 });
             imagesInput.value = "";
-        });
-    };
+            return;
+        }
+
+        const firstName = getOptionImageName(imageList.options[0]);
+        if (!images[firstName]) {
+            setSamStatus(`Failed to stage image data for ${firstName}.`, { variant: "error", duration: 6000 });
+            imagesInput.value = "";
+            return;
+        }
+        setCurrentImage(images[firstName]);
+
+        if (Object.keys(classes).length > 0) {
+            const bboxesInput = document.getElementById("bboxes");
+            if (bboxesInput) {
+                bboxesInput.disabled = false;
+            }
+            setButtonDisabled(bboxesButton, false);
+        }
+
+        setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
+        imagesInput.value = "";
+    }
 
     const resetImageList = () => {
         document.getElementById("imageList").innerHTML = "";
@@ -5115,7 +5189,7 @@
         const imageList = document.getElementById("imageList");
         imageList.addEventListener("change", () => {
             imageListIndex = imageList.selectedIndex;
-            const name = imageList.options[imageListIndex].innerHTML;
+            const name = getOptionImageName(imageList.options[imageListIndex]);
             setCurrentImage(images[name]);
         });
     };
@@ -5208,7 +5282,11 @@
         bboxesElement.addEventListener("click", () => {
             bboxesElement.value = "";
         });
-        bboxesElement.addEventListener("change", (event) => {
+        bboxesElement.addEventListener("change", async (event) => {
+            if (imageLoadInProgress) {
+                setSamStatus("Still loading images — please wait before importing bboxes.", { variant: "info", duration: 3000 });
+                await waitForImageLoadCompletion();
+            }
             const files = event.target.files;
             if (files.length > 0) {
                 resetBboxes();
@@ -5425,6 +5503,14 @@
                 return;
             }
 
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 88 || event.key === "x" || event.key === "X")) {
+                handleMagicTweakHotkey().catch((err) => {
+                    console.debug("Magic tweak hotkey failed", err);
+                });
+                event.preventDefault();
+                return;
+            }
+
             if (key === 8 || (key === 46 && event.metaKey === true)) {
                 if (currentBbox !== null) {
                     bboxes[currentImage.name][currentBbox.bbox.class].splice(currentBbox.index, 1);
@@ -5518,7 +5604,10 @@
                     }
                     imageList.options[imageListIndex].selected = true;
                     imageList.selectedIndex = imageListIndex;
-                    setCurrentImage(images[imageList.options[imageListIndex].innerHTML]);
+                    const imageName = getOptionImageName(imageList.options[imageListIndex]);
+                    if (imageName && images[imageName]) {
+                        setCurrentImage(images[imageName]);
+                    }
                     document.body.style.cursor = "default";
                 }
                 event.preventDefault();
@@ -5533,7 +5622,10 @@
                     }
                     imageList.options[imageListIndex].selected = true;
                     imageList.selectedIndex = imageListIndex;
-                    setCurrentImage(images[imageList.options[imageListIndex].innerHTML]);
+                    const imageName = getOptionImageName(imageList.options[imageListIndex]);
+                    if (imageName && images[imageName]) {
+                        setCurrentImage(images[imageName]);
+                    }
                     document.body.style.cursor = "default";
                 }
                 event.preventDefault();
@@ -5584,6 +5676,18 @@
             }
         });
     };
+
+    async function handleMagicTweakHotkey() {
+        if (magicTweakRunning) {
+            return;
+        }
+        magicTweakRunning = true;
+        try {
+            await runMagicTweakForCurrentBbox();
+        } finally {
+            magicTweakRunning = false;
+        }
+    }
 
     const resetCanvasPlacement = () => {
         scale = defaultScale;

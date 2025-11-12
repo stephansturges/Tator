@@ -106,7 +106,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 6. **Open `ybat-master/ybat.html`:**
    - Click **Choose Images…** and select your local `images/` folder (browser uploads as needed).
    - Load classes via **Load Classes…** with `my_label_list.txt`.
-   - Import existing YOLO boxes via **Import Bboxes…** if desired.
+   - Import existing YOLO boxes via **Import Bboxes…** — you can point it at a folder of `.txt` files or drop a `.zip` containing them.
    - Enable **SAM Mode** and/or **Auto Class** and start annotating.
 7. **Training loop:** use the Train CLIP tab to train on the same `images/` + `labels/` folders, then activate the resulting `.pkl` via the CLIP Model tab.
 

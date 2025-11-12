@@ -94,6 +94,23 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    Watch the logs for confirmations that CLIP, SAM, and the logistic regression model loaded correctly.
 7. **Open the UI** – load `ybat-master/ybat.html` (locally renamed “Tator 🥔”) in your browser.
 
+### Getting Started (First Project)
+1. **Create a workspace folder** on your laptop with subfolders `images/` and `labels/` (YOLO-format `.txt`).
+2. **Collect a labelmap:** create `my_label_list.txt` with one class per line or export it from YOLO training runs.
+3. **Download model weights:**
+   - Place `sam_vit_h_4b8939.pth` in the repo root.
+   - (Optional) add SAM2 configs/checkpoints and point them via `.env`.
+   - CLIP weights are auto-downloaded by `pip install -r requirements.txt` the first time.
+4. **Install dependencies & copy `.env`:** see steps above (`python3 -m venv`, `pip install -r requirements.txt`, `cp .env.example .env`).
+5. **Start the backend** (`python -m uvicorn app:app --host 0.0.0.0 --port 8000`).
+6. **Open `ybat-master/ybat.html`:**
+   - Click **Choose Images…** and select your local `images/` folder (browser uploads as needed).
+   - Load classes via **Load Classes…** with `my_label_list.txt`.
+   - Import existing YOLO boxes via **Import Bboxes…** if desired.
+   - Enable **SAM Mode** and/or **Auto Class** and start annotating.
+7. **Training loop:** use the Train CLIP tab to train on the same `images/` + `labels/` folders, then activate the resulting `.pkl` via the CLIP Model tab.
+
+
 ### Running the Backend on a Remote GPU Host
 You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a remote machine:
 

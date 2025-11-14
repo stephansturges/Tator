@@ -144,7 +144,7 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 - Load images via the folder picker; per-image CLIP/SAM helpers live in the left rail.
 - Toggle **Preload SAM** to stream the next image into memory; the side progress bar shows status and cancels stale tasks when you move to another image.
 - The **task queue overlay** in the lower-left corner lists every pending SAM preload/activation/tweak so you always know what work is queued up.
-- Press **`X`** with a bbox selected and SAM/CLIP will refine it in place without redrawing; double-tap `X` to batch-tweak the entire class. *(GIF placeholder)*
+- Press **`X`** with a bbox selected and SAM/CLIP will refine it in place; double-tap `X` to batch-tweak the entire class (the tweak always targets whichever class is currently selected in the sidebar). *(GIF placeholder)*
 - Import YOLO `.txt` folders or zipped annotation bundles via the dedicated buttons—the app now streams bboxes even while images are still ingesting.
 - Auto class, SAM box/point modes, and multi-point masks share a top progress indicator and support keyboard shortcuts documented in the panel footer.
 

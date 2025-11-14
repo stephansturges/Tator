@@ -14,6 +14,34 @@
     <script src="ybat.js"></script>
 </head>
 <body>
+    <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
+        <div id="ingestProgressLabel" class="ingest-progress__label">Loading…</div>
+        <div id="ingestProgressDetail" class="ingest-progress__detail">0/0</div>
+    </div>
+    <div id="backgroundLoadModal" class="modal" aria-hidden="true">
+        <div class="modal__backdrop" data-modal-dismiss="background"></div>
+        <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="backgroundLoadTitle">
+            <div class="modal__title" id="backgroundLoadTitle">Still loading…</div>
+            <p class="modal__body" id="backgroundLoadMessage">Images and annotations are still being prepared in the background.</p>
+            <div class="modal__actions">
+                <button type="button" class="modal__btn modal__btn--primary" id="backgroundLoadDismiss">OK</button>
+            </div>
+        </div>
+    </div>
+    <div id="batchTweakModal" class="modal" aria-hidden="true">
+        <div class="modal__backdrop" data-modal-dismiss="batchTweak"></div>
+        <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="batchTweakTitle">
+            <div class="modal__title" id="batchTweakTitle">Apply SAM tweak?</div>
+            <p class="modal__body" id="batchTweakMessage">
+                Apply SAM bbox tweak to all boxes in <span id="batchTweakClass">this class</span>?
+            </p>
+            <div class="modal__actions">
+                <button type="button" class="modal__btn modal__btn--primary" id="batchTweakConfirm">Yes</button>
+                <button type="button" class="modal__btn" id="batchTweakCancel">No</button>
+            </div>
+        </div>
+    </div>
+    <div id="taskQueue" class="task-queue" aria-live="polite" aria-atomic="true"></div>
     <div class="tab-shell">
         <div class="tab-bar" role="tablist">
             <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
@@ -82,8 +110,10 @@
                             <br />
                             <hr />
                             <label for="bboxes">Bboxes:</label>
-                            <input type="file" id="bboxes" name="bboxes[]" accept="text/plain, application/zip" disabled multiple webkitdirectory directory class="file-input-hidden" />
+                            <input type="file" id="bboxes" name="bboxes[]" accept="text/plain,application/zip" disabled multiple class="file-input-hidden" />
                             <label for="bboxes" id="bboxesSelect" class="training-button button-disabled" aria-disabled="true" role="button" tabindex="-1">Import Bboxes…</label>
+                            <input type="file" id="bboxesFolder" name="bboxesFolder[]" accept="text/plain" disabled multiple webkitdirectory directory class="file-input-hidden" />
+                            <label for="bboxesFolder" id="bboxesSelectFolder" class="training-button button-disabled" aria-disabled="true" role="button" tabindex="-1">Import Bboxes Folder…</label>
                             <button type="button" name="saveBboxes" id="saveBboxes" class="training-button">Save YOLO</button>
                             <hr />
                             <div id="description">

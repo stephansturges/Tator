@@ -15,6 +15,7 @@ from starlette.status import (
     HTTP_404_NOT_FOUND,
     HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_428_PRECONDITION_REQUIRED,
+    HTTP_409_CONFLICT,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 from collections import OrderedDict
@@ -181,11 +182,23 @@ class PredictorManager:
     def is_slot_enabled(self, slot_name: str) -> bool:
         return slot_name in self.enabled_slots
 
-    def resolve_slot(self, slot_name: Optional[str]) -> str:
+    def resolve_slot(self, slot_name: Optional[str], *, allow_disabled_fallback: bool = True) -> str:
+        """Return a normalised slot name.
+
+        When ``allow_disabled_fallback`` is False we fail fast if the requested
+        slot is currently disabled instead of silently falling back to the
+        "current" slot. This prevents background preloads from clobbering the
+        user's active predictor when the capacity shrinks.
+        """
+
         candidate = (slot_name or "current").lower()
         if candidate not in self.slots:
             return "current"
-        return candidate if self.is_slot_enabled(candidate) else "current"
+        if self.is_slot_enabled(candidate):
+            return candidate
+        if allow_disabled_fallback:
+            return "current"
+        raise ValueError(f"slot_disabled:{candidate}")
 
     def capacity_limits(self) -> Tuple[int, int]:
         return (1, min(MAX_PREDICTOR_SLOTS, len(self.slot_order)))
@@ -228,7 +241,7 @@ class PredictorManager:
             self.image_index.pop(key, None)
 
     def set_slot(self, slot_name: str, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
-        slot_name = self.resolve_slot(slot_name)
+        slot_name = self.resolve_slot(slot_name, allow_disabled_fallback=False)
         slot = self.slots[slot_name]
         self._clear_slot_refs(slot)
         slot.set_image(np_img, token, variant, image_name)
@@ -289,10 +302,19 @@ class PredictorManager:
         return slot.predict(**predict_kwargs)
 
     def set_slot_with_wait(self, slot_name: str, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
-        slot_name = self.resolve_slot(slot_name)
+        slot_name = self.resolve_slot(slot_name, allow_disabled_fallback=False)
         if slot_name != "current":
-            while self.slots["current"].is_busy() and not self.stop_event.is_set():
+            waited = 0.0
+            # Give the "current" slot a brief head start so the active image always begins loading first,
+            # but do not block background slots for the full duration of set_image.
+            while (
+                not self.stop_event.is_set()
+                and waited < 0.2
+                and not self.slots["current"].is_busy()
+                and not self.slots["current"].token
+            ):
                 time.sleep(0.01)
+                waited += 0.01
         self.set_slot(slot_name, np_img, token, variant, image_name)
 
     def stop(self) -> None:
@@ -347,7 +369,11 @@ class PredictorManager:
                 continue
             try:
                 np_img, token, variant, image_name = self._materialize(payload)
-                self.set_slot_with_wait(slot_name, np_img, token, variant, image_name)
+                try:
+                    self.set_slot_with_wait(slot_name, np_img, token, variant, image_name)
+                except ValueError:
+                    # Slot was disabled while this job was in flight; skip.
+                    continue
             except Exception as exc:  # noqa: BLE001
                 print(f"predictor preload failed: {exc}")
 
@@ -497,7 +523,10 @@ class SamPreloadManager:
 
     def _process_job(self, job: SamPreloadJob) -> 'SamPreloadResponse':
         variant = job.variant
-        slot_name = predictor_manager.resolve_slot(job.slot)
+        try:
+            slot_name = predictor_manager.resolve_slot(job.slot, allow_disabled_fallback=False)
+        except ValueError:
+            return SamPreloadResponse(status="slot_disabled", width=0, height=0, token=job.image_token or "")
         image_name = job.image_name
 
         if job.image_token:
@@ -1414,16 +1443,19 @@ def set_active_model(payload: ActiveModelRequest):
 def sam_preload(payload: SamPreloadRequest):
     variant = _default_variant(payload.sam_variant)
     try:
+        slot_name = predictor_manager.resolve_slot(payload.slot, allow_disabled_fallback=False)
         return sam_preload_manager.submit(
             variant=variant,
             generation=payload.preload_generation,
             image_token=payload.image_token,
             image_base64=payload.image_base64,
             image_name=payload.image_name,
-            slot=predictor_manager.resolve_slot(payload.slot),
+            slot=slot_name,
         )
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"sam_preload_failed:{exc}") from exc
 

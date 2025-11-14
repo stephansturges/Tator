@@ -143,6 +143,7 @@
     const slotPreloadControllers = { next: null, previous: null };
     const slotPreloadPromises = new Map();
     const slotLoadingIndicators = new Map();
+    let samPreloadQueuedKey = null;
     let latestSlotStatuses = [];
     let samSlotStatusTimer = null;
     let samSlotStatusPending = false;
@@ -170,6 +171,7 @@
     let imagesSelectButton = null;
     let classesSelectButton = null;
     let bboxesSelectButton = null;
+    let bboxesFolderSelectButton = null;
 
     let samStatusEl = null;
     let samStatusTimer = null;
@@ -198,6 +200,356 @@
     let trainingUiInitialized = false;
     let activeUiInitialized = false;
     let loadedClassList = [];
+    const INGEST_PHASE_LABELS = {
+        images: "Loading images",
+        bboxes: "Importing bboxes",
+    };
+
+    function ensureIngestElements() {
+        if (!ingestProgressState.element) {
+            ingestProgressState.element = document.getElementById("ingestProgress");
+            ingestProgressState.labelEl = document.getElementById("ingestProgressLabel");
+            ingestProgressState.detailEl = document.getElementById("ingestProgressDetail");
+        }
+    }
+
+    function startIngestProgress({ phase, total = 0, extraLabel = null }) {
+        ensureIngestElements();
+        if (!ingestProgressState.element) {
+            return;
+        }
+        ingestProgressState.phase = phase;
+        ingestProgressState.total = Math.max(0, Number(total) || 0);
+        ingestProgressState.completed = 0;
+        ingestProgressState.extraLabel = extraLabel;
+        ingestProgressState.extraValue = 0;
+        ingestProgressState.visible = true;
+        renderIngestProgress();
+    }
+
+    function renderIngestProgress() {
+        ensureIngestElements();
+        if (!ingestProgressState.element) {
+            return;
+        }
+        if (!ingestProgressState.visible) {
+            ingestProgressState.element.classList.remove("visible");
+            return;
+        }
+        const label = INGEST_PHASE_LABELS[ingestProgressState.phase] || "Loading";
+        const total = ingestProgressState.total;
+        const completed = total ? Math.min(ingestProgressState.completed, total) : ingestProgressState.completed;
+        let detail = total ? `${completed}/${total}` : `${completed}`;
+        if (ingestProgressState.extraLabel) {
+            detail += ` • ${ingestProgressState.extraLabel}: ${ingestProgressState.extraValue}`;
+        }
+        ingestProgressState.labelEl.textContent = label;
+        ingestProgressState.detailEl.textContent = detail;
+        ingestProgressState.element.classList.add("visible");
+    }
+
+    function incrementIngestProgress(delta = 1) {
+        if (!ingestProgressState.visible) {
+            return;
+        }
+        ingestProgressState.completed = Math.max(0, ingestProgressState.completed + delta);
+        renderIngestProgress();
+    }
+
+    function adjustIngestTotal(delta) {
+        if (!ingestProgressState.visible || !delta) {
+            return;
+        }
+        ingestProgressState.total = Math.max(0, ingestProgressState.total + delta);
+        renderIngestProgress();
+    }
+
+    function incrementIngestExtra(delta = 1) {
+        if (!ingestProgressState.visible || !ingestProgressState.extraLabel) {
+            return;
+        }
+        ingestProgressState.extraValue = Math.max(0, ingestProgressState.extraValue + delta);
+        renderIngestProgress();
+    }
+
+    function stopIngestProgress() {
+        ensureIngestElements();
+        if (!ingestProgressState.element) {
+            return;
+        }
+        ingestProgressState.visible = false;
+        ingestProgressState.phase = null;
+        ingestProgressState.total = 0;
+        ingestProgressState.completed = 0;
+        ingestProgressState.extraValue = 0;
+        ingestProgressState.element.classList.remove("visible");
+    }
+
+    function noteImportedBbox(count = 1) {
+        if (!bboxImportCounterActive) {
+            return;
+        }
+        incrementIngestExtra(count);
+    }
+
+    function ensureBackgroundLoadElements() {
+        if (backgroundLoadModal.element) {
+            return;
+        }
+        backgroundLoadModal.element = document.getElementById("backgroundLoadModal");
+        backgroundLoadModal.dismissBtn = document.getElementById("backgroundLoadDismiss");
+        if (backgroundLoadModal.dismissBtn) {
+            backgroundLoadModal.dismissBtn.addEventListener("click", () => hideBackgroundLoadModal());
+        }
+        const backdrop = backgroundLoadModal.element?.querySelector(".modal__backdrop");
+        if (backdrop) {
+            backdrop.addEventListener("click", () => hideBackgroundLoadModal());
+        }
+    }
+
+    function showBackgroundLoadModal(message = null) {
+        ensureBackgroundLoadElements();
+        if (!backgroundLoadModal.element) {
+            return;
+        }
+        const msgEl = document.getElementById("backgroundLoadMessage");
+        if (msgEl && message) {
+            msgEl.textContent = message;
+        }
+        backgroundLoadModal.visible = true;
+        backgroundLoadModal.element.classList.add("visible");
+        backgroundLoadModal.element.setAttribute("aria-hidden", "false");
+    }
+
+    function hideBackgroundLoadModal() {
+        if (!backgroundLoadModal.element) {
+            return;
+        }
+        backgroundLoadModal.visible = false;
+        backgroundLoadModal.element.classList.remove("visible");
+        backgroundLoadModal.element.setAttribute("aria-hidden", "true");
+    }
+
+    function ensureTaskQueueElement() {
+        if (!taskQueueState.element) {
+            taskQueueState.element = document.getElementById("taskQueue");
+        }
+        return taskQueueState.element;
+    }
+
+    function enqueueTask({ kind, imageName, detail }) {
+        const container = ensureTaskQueueElement();
+        if (!container) {
+            return null;
+        }
+        const entry = {
+            id: ++taskQueueState.counter,
+            kind: kind || "sam",
+            imageName: imageName || null,
+            detail: detail || null,
+            timestamp: Date.now(),
+        };
+        taskQueueState.items.push(entry);
+        renderTaskQueue();
+        return entry.id;
+    }
+
+    function completeTask(taskId) {
+        if (!taskId) {
+            return;
+        }
+        const idx = taskQueueState.items.findIndex((item) => item.id === taskId);
+        if (idx !== -1) {
+            taskQueueState.items.splice(idx, 1);
+            renderTaskQueue();
+        }
+    }
+
+    function clearTaskQueue(predicate, { statusMessage = null } = {}) {
+        if (!taskQueueState.items.length) {
+            return;
+        }
+        if (typeof predicate !== "function") {
+            taskQueueState.items = [];
+        } else {
+            taskQueueState.items = taskQueueState.items.filter((item) => !predicate(item));
+        }
+        if (statusMessage) {
+            setSamStatus(statusMessage, { variant: "warn", duration: 4000 });
+        }
+        renderTaskQueue();
+    }
+
+    function renderTaskQueue() {
+        const container = ensureTaskQueueElement();
+        if (!container) {
+            return;
+        }
+        if (!taskQueueState.items.length) {
+            container.innerHTML = "";
+            container.classList.remove("visible");
+            return;
+        }
+        const fragments = taskQueueState.items.map((item) => {
+            const label = TASK_LABELS[item.kind] || item.kind || "task";
+            const name = item.imageName ? shortenName(item.imageName) : "—";
+            const detail = item.detail ? ` · ${item.detail}` : "";
+            return `<div class="task-queue__entry"><span class="task-queue__type">${label}</span><span class="task-queue__label">${name}${detail}</span></div>`;
+        });
+        container.innerHTML = fragments.join("");
+        container.classList.add("visible");
+    }
+
+    function shortenName(name) {
+        if (!name) {
+            return "—";
+        }
+        return name.length > 10 ? `${name.slice(0, 10)}…` : name;
+    }
+
+    function ensureBatchTweakElements() {
+        if (!batchTweakElements.modal) {
+            batchTweakElements.modal = document.getElementById("batchTweakModal");
+            batchTweakElements.backdrop = batchTweakElements.modal?.querySelector(".modal__backdrop");
+            batchTweakElements.confirm = document.getElementById("batchTweakConfirm");
+            batchTweakElements.cancel = document.getElementById("batchTweakCancel");
+            batchTweakElements.classLabel = document.getElementById("batchTweakClass");
+            if (batchTweakElements.confirm) {
+                batchTweakElements.confirm.addEventListener("click", () => {
+                    closeBatchTweakModal();
+                    runBatchTweakForCurrentCategory().catch((err) => {
+                        console.error("Batch tweak failed", err);
+                        setSamStatus(`Batch tweak failed: ${err.message || err}`, { variant: "error", duration: 5000 });
+                    });
+                });
+            }
+            if (batchTweakElements.cancel) {
+                batchTweakElements.cancel.addEventListener("click", () => {
+                    closeBatchTweakModal();
+                });
+            }
+            if (batchTweakElements.backdrop) {
+                batchTweakElements.backdrop.addEventListener("click", () => closeBatchTweakModal());
+            }
+            document.addEventListener("keydown", (event) => {
+                if (event.key === "Escape" && batchTweakElements.modal?.classList.contains("visible")) {
+                    closeBatchTweakModal();
+                }
+            });
+        }
+    }
+
+    function openBatchTweakModal() {
+        ensureBatchTweakElements();
+        if (!batchTweakElements.modal || !currentBbox || !currentBbox.bbox) {
+            setSamStatus("Select a bbox before batch tweaking", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (batchTweakRunning) {
+            setSamStatus("Batch tweak already running", { variant: "info", duration: 2500 });
+            return;
+        }
+        if (!currentImage || !currentImage.name || !currentClass) {
+            setSamStatus("Choose an image and class before batch tweaking", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const bucket = bboxes[currentImage.name]?.[currentClass] || [];
+        if (!bucket.length) {
+            setSamStatus("No bboxes available for this class", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (!samMode) {
+            setSamStatus("Enable SAM mode to batch tweak", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (batchTweakElements.classLabel) {
+            batchTweakElements.classLabel.textContent = `${currentClass} (${bucket.length})`;
+        }
+        batchTweakElements.modal.classList.add("visible");
+        batchTweakElements.modal.setAttribute("aria-hidden", "false");
+    }
+
+    function closeBatchTweakModal() {
+        if (!batchTweakElements.modal) {
+            return;
+        }
+        batchTweakElements.modal.classList.remove("visible");
+        batchTweakElements.modal.setAttribute("aria-hidden", "true");
+    }
+
+    function requestBatchTweakModal() {
+        if (!currentBbox || !currentBbox.bbox) {
+            setSamStatus("Select a bbox before batch tweaking", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (!currentClass) {
+            setSamStatus("Select a class before batch tweaking", { variant: "warn", duration: 3000 });
+            return;
+        }
+        openBatchTweakModal();
+    }
+
+    function handleXHotkeyPress() {
+        if (xHotkeyTimeoutId) {
+            clearTimeout(xHotkeyTimeoutId);
+            xHotkeyTimeoutId = null;
+            requestBatchTweakModal();
+            return;
+        }
+        xHotkeyTimeoutId = window.setTimeout(() => {
+            xHotkeyTimeoutId = null;
+            handleMagicTweakHotkey().catch((err) => {
+                console.debug("Magic tweak hotkey failed", err);
+            });
+        }, DOUBLE_TAP_WINDOW_MS);
+    }
+
+    const ingestProgressState = {
+        element: null,
+        labelEl: null,
+        detailEl: null,
+        phase: null,
+        total: 0,
+        completed: 0,
+        extraLabel: null,
+        extraValue: 0,
+        visible: false,
+    };
+    let bboxImportCounterActive = false;
+    const DOUBLE_TAP_WINDOW_MS = 260;
+    let xHotkeyTimeoutId = null;
+    let batchTweakRunning = false;
+    const batchTweakElements = {
+        modal: null,
+        backdrop: null,
+        confirm: null,
+        cancel: null,
+        classLabel: null,
+    };
+    const backgroundLoadModal = {
+        element: null,
+        dismissBtn: null,
+        visible: false,
+        decimalsTotal: 0,
+        decimalsDone: 0,
+    };
+    const taskQueueState = {
+        element: null,
+        items: [],
+        counter: 0,
+    };
+    const TASK_LABELS = {
+        "sam-bbox": "SAM bbox",
+        "sam-bbox-auto": "SAM auto",
+        "sam-point": "SAM point",
+        "sam-point-auto": "SAM point auto",
+        "sam-multipoint": "SAM multi",
+        "sam-multipoint-auto": "SAM multi auto",
+        "sam-batch": "SAM batch",
+        "sam-preload": "Preload",
+        "sam-activate": "Activate",
+        sam: "SAM",
+    };
 
     const tabElements = {
         labelingButton: null,
@@ -1768,6 +2120,21 @@
         });
     }
 
+    function setBboxImportEnabled(enabled) {
+        const bboxFileInput = document.getElementById("bboxes");
+        const bboxFolderInput = document.getElementById("bboxesFolder");
+        if (bboxFileInput) {
+            bboxFileInput.disabled = !enabled;
+        }
+        if (bboxFolderInput) {
+            bboxFolderInput.disabled = !enabled;
+        }
+        const bboxFileButton = document.getElementById("bboxesSelect");
+        const bboxFolderButton = document.getElementById("bboxesSelectFolder");
+        setButtonDisabled(bboxFileButton, !enabled);
+        setButtonDisabled(bboxFolderButton, !enabled);
+    }
+
     function setSamStatus(text, { variant = null, duration = 4000 } = {}) {
         if (!samStatusEl) {
             samStatusMessageToken++;
@@ -1942,7 +2309,12 @@
         if (typeof existing.releaseLoading === "function") {
             existing.releaseLoading();
         }
+        if (existing.imageName) {
+            slotPreloadPromises.delete(existing.imageName);
+            slotLoadingIndicators.delete(existing.imageName);
+        }
         slotPreloadControllers[slotName] = null;
+        scheduleSamSlotStatusRefresh(true);
     }
 
     function getNeighborSlots(currentName) {
@@ -2105,6 +2477,7 @@
                 return false;
             }
         }
+        const taskId = enqueueTask({ kind: "sam-activate", imageName });
         try {
             const resp = await fetch(`${API_ROOT}/sam_activate_slot`, {
                 method: "POST",
@@ -2112,13 +2485,16 @@
                 body: JSON.stringify({ image_name: imageName, sam_variant: samVariant }),
             });
             if (!resp.ok) {
+                completeTask(taskId);
                 return false;
             }
             await resp.json();
             scheduleSamSlotStatusRefresh(true);
+            completeTask(taskId);
             return true;
         } catch (error) {
             console.debug("activateImageSlot failed", error);
+            completeTask(taskId);
             return false;
         }
     }
@@ -2129,6 +2505,8 @@
         }
         const targetName = currentImage.name;
         const { messagePrefix = null, immediate = false } = options;
+        const variantSnapshot = samVariant;
+        const preloadAlreadyRunning = isSamPreloadActiveFor(targetName, variantSnapshot);
         if (samSlotsEnabled || await ensureSamSlotsSupport()) {
             let activated = await activateImageSlot(targetName);
             if (!activated && samSlotsEnabled) {
@@ -2151,10 +2529,11 @@
             }
         }
         scheduleSamPreload({
-            force: true,
+            force: !preloadAlreadyRunning,
             delayMs: immediate ? 0 : SAM_PRELOAD_IMAGE_SWITCH_DELAY_MS,
             messagePrefix,
             slot: samSlotsEnabled ? "current" : undefined,
+            variant: variantSnapshot,
         });
     }
 
@@ -2541,20 +2920,28 @@
         predictorElements.message.className = `predictor-message ${variant}`;
     }
 
+    function coerceNumber(value, fallback) {
+        if (value === null || typeof value === "undefined") {
+            return fallback;
+        }
+        const parsed = Number(value);
+        return Number.isNaN(parsed) ? fallback : parsed;
+    }
+
     function applyPredictorState(data) {
         if (!data) {
             return;
         }
         predictorSettings = {
-            maxPredictors: Number(data.max_predictors) || predictorSettings.maxPredictors,
-            minPredictors: Number(data.min_predictors) || predictorSettings.minPredictors,
-            maxSupportedPredictors: Number(data.max_supported_predictors) || predictorSettings.maxSupportedPredictors,
-            activePredictors: Number(data.active_predictors) || predictorSettings.activePredictors,
-            loadedPredictors: Number(data.loaded_predictors) || predictorSettings.loadedPredictors,
-            processRamMb: Number(data.process_ram_mb) || 0,
-            totalRamMb: Number(data.total_ram_mb) || 0,
-            availableRamMb: Number(data.available_ram_mb) || 0,
-            imageRamMb: Number(data.image_ram_mb) || 0,
+            maxPredictors: coerceNumber(data.max_predictors, predictorSettings.maxPredictors),
+            minPredictors: coerceNumber(data.min_predictors, predictorSettings.minPredictors),
+            maxSupportedPredictors: coerceNumber(data.max_supported_predictors, predictorSettings.maxSupportedPredictors),
+            activePredictors: coerceNumber(data.active_predictors, predictorSettings.activePredictors),
+            loadedPredictors: coerceNumber(data.loaded_predictors, predictorSettings.loadedPredictors),
+            processRamMb: coerceNumber(data.process_ram_mb, 0),
+            totalRamMb: coerceNumber(data.total_ram_mb, 0),
+            availableRamMb: coerceNumber(data.available_ram_mb, 0),
+            imageRamMb: coerceNumber(data.image_ram_mb, 0),
         };
         samPredictorBudget = predictorSettings.maxPredictors;
         if (predictorElements.countInput) {
@@ -2683,6 +3070,7 @@
         const finishedVariant = samPreloadCurrentVariant;
         samPreloadCurrentImageName = null;
         samPreloadCurrentVariant = null;
+        samPreloadQueuedKey = null;
         return { finishedImage, finishedVariant };
     }
 
@@ -2858,6 +3246,27 @@
         return getSamToken(currentImage.name, variant);
     }
 
+    function isSamPreloadActiveFor(imageName, variant) {
+        if (!imageName) {
+            return false;
+        }
+        const targetKey = getSamTokenKey(imageName, variant || samVariant);
+        if (!targetKey) {
+            return false;
+        }
+        if (samPreloadQueuedKey && samPreloadQueuedKey === targetKey) {
+            return true;
+        }
+        if (!samPreloadCurrentImageName) {
+            return false;
+        }
+        const activeKey = getSamTokenKey(
+            samPreloadCurrentImageName,
+            samPreloadCurrentVariant || samVariant || variant,
+        );
+        return activeKey === targetKey;
+    }
+
     function registerSamJob({ type, imageName, cleanup }) {
         const jobId = ++samJobSequence;
         const record = {
@@ -2866,12 +3275,17 @@
             imageName: imageName || null,
             version: samCancelVersion,
             cleanup: typeof cleanup === "function" ? cleanup : null,
+            taskId: enqueueTask({ kind: type || "sam", imageName }),
         };
         samActiveJobs.set(jobId, record);
         return { id: jobId, version: record.version };
     }
 
     function completeSamJob(jobId) {
+        const record = samActiveJobs.get(jobId);
+        if (record && record.taskId) {
+            completeTask(record.taskId);
+        }
         samActiveJobs.delete(jobId);
     }
 
@@ -2895,6 +3309,9 @@
         const reasonText = reason ? ` (${reason})` : "";
         const message = `Canceled ${count} SAM job${count === 1 ? "" : "s"}${label}${reasonText}`;
         jobs.forEach((job) => {
+            if (job.taskId) {
+                completeTask(job.taskId);
+            }
             if (typeof job.cleanup === "function") {
                 try {
                     job.cleanup();
@@ -2996,6 +3413,20 @@
         if (samPreloadTimer) {
             clearTimeout(samPreloadTimer);
         }
+        const variantSnapshot = options.variant || samVariant;
+        const targetKey = getSamTokenKey(currentImage.name, variantSnapshot);
+        if (!options.force && targetKey) {
+            const activeKey = samPreloadCurrentImageName
+                ? getSamTokenKey(samPreloadCurrentImageName, samPreloadCurrentVariant || samVariant || variantSnapshot)
+                : null;
+            if (targetKey === samPreloadQueuedKey || targetKey === activeKey) {
+                if (options.messagePrefix) {
+                    setSamStatus(`${options.messagePrefix}: continuing SAM preload`, { variant: "info", duration: 2000 });
+                }
+                showSamPreloadProgress();
+                return;
+            }
+        }
         const delay = typeof options.delayMs === "number"
             ? Math.max(0, options.delayMs)
             : (options.immediate ? 0 : SAM_PRELOAD_DEBOUNCE_MS);
@@ -3009,10 +3440,21 @@
             version: targetVersion,
             queuedAt: Date.now(),
             generation,
+            variant: variantSnapshot,
+            queueKey: targetKey,
+            taskId: null,
         };
+        if (targetImage?.meta?.name) {
+            requestOptions.taskId = enqueueTask({
+                kind: "sam-preload",
+                imageName: targetImage.meta.name,
+                detail: options.slot || "curr",
+            });
+        }
         if (samSlotsEnabled) {
             requestOptions.slot = options.slot || "current";
         }
+        samPreloadQueuedKey = targetKey;
         samPreloadTimer = setTimeout(() => {
             samPreloadTimer = null;
             executeSamPreload(requestOptions).catch((err) => {
@@ -3022,19 +3464,25 @@
     }
 
     async function executeSamPreload(options) {
+        if (options.queueKey && samPreloadQueuedKey === options.queueKey) {
+            samPreloadQueuedKey = null;
+        }
         const startTime = Date.now();
         const elapsed = startTime - (options.queuedAt || startTime);
         if (elapsed > 3000) {
+            completeTask(options.taskId);
             return;
         }
         if (options.generation && options.generation < samPreloadGeneration) {
             hideSamPreloadProgress();
             resumeMultiPointQueueIfIdle();
+            completeTask(options.taskId);
             return;
         }
         if (!samPreloadEnabled) {
             hideSamPreloadProgress();
             resumeMultiPointQueueIfIdle();
+            completeTask(options.taskId);
             return;
         }
         const activeImage = currentImage;
@@ -3042,10 +3490,10 @@
             const { finishedImage, finishedVariant } = resetSamPreloadState();
             hideSamPreloadProgress();
             resolveSamPreloadWaiters(finishedImage, finishedVariant);
+            completeTask(options.taskId);
             return;
         }
-
-        const variantSnapshot = samVariant;
+        const variantSnapshot = options.variant || samVariant;
         const imageSnapshot = activeImage;
         const imageKey = `${imageSnapshot.name || ""}::${variantSnapshot}`;
         const cachedToken = getSamToken(imageSnapshot.name, variantSnapshot);
@@ -3099,6 +3547,7 @@
                 if (newToken !== samPreloadToken) {
                     hideSamPreloadProgress();
                     resumeMultiPointQueueIfIdle();
+                    completeTask(options.taskId);
                     return;
                 }
                 requestBody.image_base64 = base64Img;
@@ -3122,6 +3571,7 @@
                 const { finishedImage, finishedVariant } = resetSamPreloadState();
                 hideSamPreloadProgress();
                 resolveSamPreloadWaiters(finishedImage, finishedVariant);
+                completeTask(options.taskId);
                 return;
             }
 
@@ -3159,6 +3609,7 @@
                     const { finishedImage, finishedVariant } = resetSamPreloadState();
                     hideSamPreloadProgress();
                     resolveSamPreloadWaiters(finishedImage, finishedVariant);
+                    completeTask(options.taskId);
                     return;
                 }
             }
@@ -3172,6 +3623,7 @@
                 const { finishedImage, finishedVariant } = resetSamPreloadState();
                 hideSamPreloadProgress();
                 resolveSamPreloadWaiters(finishedImage, finishedVariant);
+                completeTask(options.taskId);
                 return;
             }
             if (newToken === samPreloadToken) {
@@ -3186,11 +3638,13 @@
                     triggerNeighborSlotPreloads(imageSnapshot.name);
                     scheduleSamSlotStatusRefresh(true);
                 }
+                completeTask(options.taskId);
             }
         } catch (error) {
             if (error && error.name === "AbortError") {
                 hideSamPreloadProgress();
                 resumeMultiPointQueueIfIdle();
+                completeTask(options.taskId);
                 return;
             }
             console.warn("SAM preload failed", error);
@@ -3205,6 +3659,7 @@
             setSamStatus(`SAM preload failed for ${preloadLabel}: ${detail}`, { variant: "error", duration: 6000 });
             hideSamPreloadProgress();
             resolveSamPreloadWaiters(finishedImage, finishedVariant);
+            completeTask(options.taskId);
         } finally {
             if (typeof releaseSlotLoading === "function") {
                 releaseSlotLoading();
@@ -3265,6 +3720,7 @@
         imagesSelectButton = document.getElementById("imagesSelect");
         classesSelectButton = document.getElementById("classesSelect");
         bboxesSelectButton = document.getElementById("bboxesSelect");
+        bboxesFolderSelectButton = document.getElementById("bboxesSelectFolder");
         samStatusEl = document.getElementById("samStatus");
         samStatusProgressEl = document.getElementById("samStatusProgress");
         predictorElements.countInput = document.getElementById("predictorCount");
@@ -3278,7 +3734,7 @@
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));
-        registerFileLabel(bboxesSelectButton, document.getElementById("bboxes"));
+        registerFileLabel(bboxesFolderSelectButton, document.getElementById("bboxesFolder"));
         hideSamPreloadProgress();
 
         if (autoModeCheckbox) {
@@ -4184,6 +4640,9 @@
         if (!bbox || typeof bbox !== "object") {
             return bbox;
         }
+        if (typeof bbox.uuid === "undefined" || !bbox.uuid) {
+            bbox.uuid = generateUUID();
+        }
         if (typeof bbox.createdAt !== "number") {
             bbox.createdAt = ++bboxCreationCounter;
         }
@@ -4258,6 +4717,7 @@
             listenKeyboard();
             listenImageSearch();
             listenImageCrop();
+            ensureBatchTweakElements();
         }
     };
 
@@ -4709,9 +5169,8 @@
         }
     };
 
-    async function runMagicTweakForCurrentBbox() {
-        if (!currentBbox || !currentBbox.bbox) {
-            setSamStatus("Select a bbox before pressing X", { variant: "warn", duration: 3000 });
+    async function runMagicTweakForBbox(targetBbox, { updateSelection = false } = {}) {
+        if (!targetBbox) {
             return false;
         }
         if (!samMode && !autoMode) {
@@ -4722,29 +5181,42 @@
             return false;
         }
         if (samMode && samSlotsEnabled && samPreloadEnabled) {
-            const token = getSamToken(currentImage.name, samVariant);
+            let token = getSamToken(currentImage.name, samVariant);
             if (!token) {
-                setSamStatus("Waiting for SAM to load this image…", { variant: "info", duration: 3000 });
-                prepareSamForCurrentImage({ messagePrefix: "Preparing SAM" }).catch((err) => {
-                    console.debug("prepareSamForCurrentImage (tweak) failed", err);
-                });
-                return false;
+                const alreadyQueued = isSamPreloadActiveFor(currentImage.name, samVariant);
+                setSamStatus("Waiting for SAM to load this image…", { variant: "info", duration: 0 });
+                showSamPreloadProgress();
+                if (!alreadyQueued) {
+                    prepareSamForCurrentImage({ messagePrefix: "Preparing SAM" }).catch((err) => {
+                        console.debug("prepareSamForCurrentImage (tweak) failed", err);
+                    });
+                }
+                token = await waitForSamPreloadIfActive(currentImage.name, samVariant);
+                if (!token) {
+                    setSamStatus("Using fresh SAM load for this image", { variant: "info", duration: 2500 });
+                } else {
+                    setSamStatus(`SAM ready for ${currentImage.name}`, { variant: "success", duration: 1200 });
+                }
             }
         }
-        const bbox = currentBbox.bbox;
-        pendingApiBboxes[bbox.uuid] = bbox;
-        tweakPreserveSet.add(bbox.uuid);
+        if (!targetBbox.uuid) {
+            stampBboxCreation(targetBbox);
+        }
+        pendingApiBboxes[targetBbox.uuid] = targetBbox;
+        tweakPreserveSet.add(targetBbox.uuid);
         try {
             if (samMode && autoMode) {
-                await sam2BboxAutoPrompt(bbox);
+                await sam2BboxAutoPrompt(targetBbox);
             } else if (samMode) {
-                await sam2BboxPrompt(bbox);
+                await sam2BboxPrompt(targetBbox);
             } else if (autoMode) {
-                await autoPredictNewCrop(bbox);
+                await autoPredictNewCrop(targetBbox);
             }
-            setBboxMarkedState();
-            if (currentBbox) {
-                updateBboxAfterTransform();
+            if (updateSelection) {
+                setBboxMarkedState();
+                if (currentBbox) {
+                    updateBboxAfterTransform();
+                }
             }
             return true;
         } catch (error) {
@@ -4752,7 +5224,80 @@
             setSamStatus(`Tweak failed: ${error.message || error}`, { variant: "error", duration: 4000 });
             return false;
         } finally {
-            tweakPreserveSet.delete(bbox.uuid);
+            tweakPreserveSet.delete(targetBbox.uuid);
+        }
+    }
+
+    async function runMagicTweakForCurrentBbox() {
+        if (!currentBbox || !currentBbox.bbox) {
+            setSamStatus("Select a bbox before pressing X", { variant: "warn", duration: 3000 });
+            return false;
+        }
+        return runMagicTweakForBbox(currentBbox.bbox, { updateSelection: true });
+    }
+
+    async function runBatchTweakForCurrentCategory() {
+        if (batchTweakRunning) {
+            setSamStatus("Batch tweak already running", { variant: "info", duration: 2500 });
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSamStatus("Load an image before batch tweaking", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (!currentClass) {
+            const inferred = guessClassFromSelection();
+            if (inferred) {
+                currentClass = inferred;
+                const classListEl = document.getElementById("classList");
+                if (classListEl) {
+                    for (let i = 0; i < classListEl.options.length; i++) {
+                        if (classListEl.options[i].text === inferred) {
+                            classListEl.selectedIndex = i;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                setSamStatus("Select a class before batch tweaking", { variant: "warn", duration: 3000 });
+                return;
+            }
+        }
+        if (!samMode) {
+            setSamStatus("Enable SAM mode to batch tweak", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const bucket = (bboxes[currentImage.name] && bboxes[currentImage.name][currentClass]) || [];
+        if (!bucket.length) {
+            setSamStatus("No bboxes available for this class", { variant: "warn", duration: 3000 });
+            return;
+        }
+        batchTweakRunning = true;
+        if (batchTweakElements.confirm) {
+            batchTweakElements.confirm.disabled = true;
+        }
+        setSamStatus(`Tweaking ${bucket.length} ${currentClass} bbox${bucket.length === 1 ? "" : "es"}…`, { variant: "info", duration: 0 });
+        let successCount = 0;
+        try {
+            for (const bbox of bucket) {
+                const ok = await runMagicTweakForBbox(bbox, { updateSelection: false });
+                if (ok) {
+                    successCount += 1;
+                }
+            }
+            setSamStatus(`Tweaked ${successCount}/${bucket.length} ${currentClass} bbox${bucket.length === 1 ? "" : "es"}.`, { variant: "success", duration: 3500 });
+            setBboxMarkedState();
+            if (currentBbox) {
+                updateBboxAfterTransform();
+            }
+        } catch (error) {
+            console.error("Batch tweak failed", error);
+            setSamStatus(`Batch tweak failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+        } finally {
+            batchTweakRunning = false;
+            if (batchTweakElements.confirm) {
+                batchTweakElements.confirm.disabled = false;
+            }
         }
     }
 
@@ -4903,7 +5448,6 @@
 
     const listenImageLoad = () => {
         const imagesInput = document.getElementById("images");
-        const bboxesButton = document.getElementById("bboxesSelect");
         if (!imagesInput) {
             return;
         }
@@ -4926,7 +5470,7 @@
             }
 
             imageLoadInProgress = true;
-            const loadPromise = ingestImageFiles(files, imageList, imagesInput, bboxesButton);
+            const loadPromise = ingestImageFiles(files, imageList, imagesInput);
             imageLoadPromise = loadPromise;
             try {
                 await loadPromise;
@@ -4949,23 +5493,29 @@
         }
     }
 
-    async function ingestImageFiles(files, imageList, imagesInput, bboxesButton) {
+    async function ingestImageFiles(files, imageList, imagesInput) {
         resetImageList();
-        const total = files.length;
+        const selectedFiles = Array.from(files || []);
+        const supportedFiles = selectedFiles.filter((file) => {
+            const parts = file.name.split(".");
+            const ext = parts[parts.length - 1];
+            return extensions.indexOf(ext) !== -1;
+        });
+        const total = selectedFiles.length;
         document.body.style.cursor = "wait";
         const loadingLabel = `Loading ${total} image${total === 1 ? "" : "s"}… please wait`;
         setSamStatus(loadingLabel, { variant: "info", duration: 0 });
         let fileCount = 0;
         const YIELD_EVERY = 75;
 
+        if (supportedFiles.length > 0) {
+            startIngestProgress({ phase: "images", total: supportedFiles.length });
+            showBackgroundLoadModal("Images are still loading in the background. You can continue once the counter finishes.");
+        }
+
         try {
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const nameParts = file.name.split(".");
-                const ext = nameParts[nameParts.length - 1];
-                if (extensions.indexOf(ext) === -1) {
-                    continue;
-                }
+            for (let i = 0; i < supportedFiles.length; i++) {
+                const file = supportedFiles[i];
                 images[file.name] = {
                     meta: file,
                     index: fileCount,
@@ -4990,12 +5540,18 @@
                     console.debug("Failed to read image dimensions", file.name, error);
                 }
 
+                incrementIngestProgress();
+
                 if (fileCount % YIELD_EVERY === 0) {
                     await yieldToDom(0);
                 }
             }
         } finally {
             document.body.style.cursor = "default";
+            if (supportedFiles.length > 0) {
+                stopIngestProgress();
+                hideBackgroundLoadModal();
+            }
         }
 
         if (fileCount === 0) {
@@ -5013,11 +5569,7 @@
         setCurrentImage(images[firstName]);
 
         if (Object.keys(classes).length > 0) {
-            const bboxesInput = document.getElementById("bboxes");
-            if (bboxesInput) {
-                bboxesInput.disabled = false;
-            }
-            setButtonDisabled(bboxesButton, false);
+            setBboxImportEnabled(true);
         }
 
         setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
@@ -5037,12 +5589,7 @@
         latestSlotStatuses = [];
         applySlotStatusClasses();
         updateSlotHighlights([]);
-        const bboxesInput = document.getElementById("bboxes");
-        if (bboxesInput) {
-            bboxesInput.disabled = true;
-        }
-        const bboxesBtn = document.getElementById("bboxesSelect");
-        setButtonDisabled(bboxesBtn, true);
+        setBboxImportEnabled(false);
         cancelAllSamJobs({ reason: "image reset", announce: false });
         cancelPendingMultiPoint({ clearMarkers: true, removePendingBbox: true });
     };
@@ -5061,8 +5608,6 @@
             ? (slotPreloadPromises.has(pendingImageName) || isImageCurrentlyLoading(pendingImageName))
             : false;
         if (samPreloadEnabled && pendingImageName) {
-            samPreloadCurrentImageName = pendingImageName;
-            samPreloadCurrentVariant = samVariant;
             const statusLabel = hasActivePreload ? "Continuing SAM preload" : "Preparing SAM preload";
             setSamStatus(`${statusLabel}: ${pendingImageName}`, { variant: "info", duration: 0 });
             showSamPreloadProgress();
@@ -5233,12 +5778,7 @@
                             }
                             setCurrentClass();
                             if (Object.keys(images).length > 0) {
-                                const bboxesInput = document.getElementById("bboxes");
-                                if (bboxesInput) {
-                                    bboxesInput.disabled = false;
-                                }
-                                const bboxesBtn = document.getElementById("bboxesSelect");
-                                setButtonDisabled(bboxesBtn, false);
+                                setBboxImportEnabled(true);
                                 document.getElementById("restoreBboxes").disabled = false;
                             }
                         }
@@ -5276,49 +5816,99 @@
         });
     };
 
-    const listenBboxLoad = () => {
-        const bboxesElement = document.getElementById("bboxes");
-        const bboxesButton = document.getElementById("bboxesSelect");
-        bboxesElement.addEventListener("click", () => {
-            bboxesElement.value = "";
+    function readFileAsTextPromise(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+            reader.readAsText(file);
         });
-        bboxesElement.addEventListener("change", async (event) => {
+    }
+
+    function readFileAsArrayBufferPromise(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    async function processBboxFile(file) {
+        const rawExtension = file.name.split(".").pop() || "";
+        const extension = rawExtension.toLowerCase();
+        if (extension === "txt" || extension === "xml" || extension === "json") {
+            const text = await readFileAsTextPromise(file);
+            storeBbox(file.name, text);
+            incrementIngestProgress();
+            return;
+        }
+        const buffer = await readFileAsArrayBufferPromise(file);
+        const zip = await (typeof JSZip.loadAsync === "function"
+            ? JSZip.loadAsync(buffer)
+            : new JSZip().loadAsync(buffer));
+        const entries = Object.values(zip.files || {}).filter((entry) => entry && !entry.dir);
+        if (entries.length === 0) {
+            incrementIngestProgress();
+            return;
+        }
+        if (entries.length > 1) {
+            adjustIngestTotal(entries.length - 1);
+        }
+        for (const entry of entries) {
+            const text = await entry.async("string");
+            storeBbox(entry.name, text);
+            incrementIngestProgress();
+        }
+    }
+
+    const listenBboxLoad = () => {
+        const fileInput = document.getElementById("bboxes");
+        const folderInput = document.getElementById("bboxesFolder");
+        const fileButton = document.getElementById("bboxesSelect");
+        const folderButton = document.getElementById("bboxesSelectFolder");
+        registerFileLabel(fileButton, fileInput);
+        registerFileLabel(folderButton, folderInput);
+        setupBboxInputListeners(fileInput);
+        setupBboxInputListeners(folderInput);
+    };
+
+    function setupBboxInputListeners(input) {
+        if (!input) {
+            return;
+        }
+        input.addEventListener("click", () => {
+            input.value = "";
+        });
+        input.addEventListener("change", async (event) => {
             if (imageLoadInProgress) {
                 setSamStatus("Still loading images — please wait before importing bboxes.", { variant: "info", duration: 3000 });
                 await waitForImageLoadCompletion();
             }
             const files = event.target.files;
-            if (files.length > 0) {
+            if (files && files.length > 0) {
                 resetBboxes();
-                for (let i = 0; i < files.length; i++) {
-                    const reader = new FileReader();
-                    const extension = files[i].name.split(".").pop();
-                    reader.addEventListener("load", () => {
-                        if (extension === "txt" || extension === "xml" || extension === "json") {
-                            storeBbox(files[i].name, reader.result);
-                        } else {
-                            const zip = new JSZip();
-                            zip.loadAsync(reader.result)
-                                .then((result) => {
-                                    for (let filename in result.files) {
-                                        result.file(filename).async("string")
-                                            .then((text) => {
-                                                storeBbox(filename, text);
-                                            });
-                                    }
-                                });
-                        }
-                    });
-                    if (extension === "txt" || extension === "xml" || extension === "json") {
-                        reader.readAsText(files[i]);
-                    } else {
-                        reader.readAsArrayBuffer(event.target.files[i]);
+                bboxImportCounterActive = true;
+                startIngestProgress({ phase: "bboxes", total: files.length, extraLabel: "UUIDs" });
+                try {
+                    const tasks = [];
+                    for (let i = 0; i < files.length; i++) {
+                        tasks.push(
+                            processBboxFile(files[i]).catch((err) => {
+                                console.error("Failed to import bbox file", files[i]?.name, err);
+                                setSamStatus(`Failed to import ${files[i]?.name}: ${err.message || err}`, { variant: "error", duration: 5000 });
+                            })
+                        );
                     }
+                    await Promise.all(tasks);
+                } finally {
+                    bboxImportCounterActive = false;
+                    stopIngestProgress();
                 }
             }
-            bboxesElement.value = "";
+            input.value = "";
         });
-    };
+    }
 
     const resetBboxes = () => {
         bboxes = {};
@@ -5328,10 +5918,12 @@
         // same storeBbox logic you had before
         let image = null;
         let bbox = null;
-        const extension = filename.split(".").pop();
+        const rawExtension = filename.split(".").pop() || "";
+        const extension = rawExtension.toLowerCase();
+        const baseName = rawExtension ? filename.slice(0, -(rawExtension.length + 1)) : filename;
         if (extension === "txt" || extension === "xml") {
             for (let i = 0; i < extensions.length; i++) {
-                const imageName = filename.replace(`.${extension}`, `.${extensions[i]}`);
+                const imageName = `${baseName}.${extensions[i]}`;
                 if (typeof images[imageName] !== "undefined") {
                     image = images[imageName];
                     if (typeof bboxes[imageName] === "undefined") {
@@ -5362,6 +5954,7 @@
                                     };
                                     stampBboxCreation(bboxRecord);
                                     bbox[className].push(bboxRecord);
+                                    noteImportedBbox();
                                     break;
                                 }
                             }
@@ -5392,6 +5985,7 @@
                                     };
                                     stampBboxCreation(bboxRecord);
                                     bbox[className].push(bboxRecord);
+                                    noteImportedBbox();
                                     break;
                                 }
                             }
@@ -5442,6 +6036,7 @@
                         };
                         stampBboxCreation(bboxRecord);
                         bbox[className].push(bboxRecord);
+                        noteImportedBbox();
                         break;
                     }
                 }
@@ -5504,10 +6099,8 @@
             }
 
             if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 88 || event.key === "x" || event.key === "X")) {
-                handleMagicTweakHotkey().catch((err) => {
-                    console.debug("Magic tweak hotkey failed", err);
-                });
                 event.preventDefault();
+                handleXHotkeyPress();
                 return;
             }
 

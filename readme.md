@@ -37,7 +37,8 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **Embedded CLIP trainer** – start training jobs from the UI, watch convergence metrics, and reuse cached embeddings across runs.
 - **Model switcher** – activate new CLIP + regression pairs without restarting the server; metadata keeps backbone/labelmap in sync.
 - **Predictor budget control** – dial the number of warm SAM predictors (1–3) and monitor their RAM usage so the UI can stay snappy on machines with more headroom.
-- **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup.
+- **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
+- **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
 ## Repository Layout
@@ -142,11 +143,14 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 ### Label Images Tab
 - Load images via the folder picker; per-image CLIP/SAM helpers live in the left rail.
 - Toggle **Preload SAM** to stream the next image into memory; the side progress bar shows status and cancels stale tasks when you move to another image.
-- Press **`X`** with a bbox selected and SAM/CLIP will refine it in place without redrawing. *(GIF placeholder)*
+- The **task queue overlay** in the lower-left corner lists every pending SAM preload/activation/tweak so you always know what work is queued up.
+- Press **`X`** with a bbox selected and SAM/CLIP will refine it in place without redrawing; double-tap `X` to batch-tweak the entire class. *(GIF placeholder)*
+- Import YOLO `.txt` folders or zipped annotation bundles via the dedicated buttons—the app now streams bboxes even while images are still ingesting.
 - Auto class, SAM box/point modes, and multi-point masks share a top progress indicator and support keyboard shortcuts documented in the panel footer.
 
 #### Keyboard Shortcuts
 - `X` – press while a bbox is selected to trigger the one-click SAM tweak.
+- `X` `X` – double tap to batch-tweak every bbox of the current class.
 - `A` – toggle Auto Class.
 - `S` – toggle SAM Mode.
 - `D` – toggle SAM Point Mode.
@@ -200,6 +204,13 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything) / [SAM2](https://github.com/facebookresearch/sam2). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
 
+
+## 2025-11-09 – Task Queue & Batch Tweaks
+
+- Added a persistent task queue overlay that surfaces every pending SAM preload/activation/tweak so you can see exactly what the backend is chewing on.
+- Double-tapping `X` now opens a batch-tweak prompt that runs the SAM cleanup across every bbox of the current class.
+- Image ingestion + bbox imports now run concurrently; new progress toasts show when large batches are still being staged, and YOLO `.zip` bundles are supported alongside raw folders.
+- Tweaks wait for any in-flight preload instead of forcing a brand-new predictor, eliminating the “stuck” state when hammering `X` on freshly loaded images.
 
 ## 2025-11-08 – Multi-Predictor Controller
 - Unified the FastAPI backend so it always runs the multi-predictor SAM workflow with a configurable budget (1–3 slots) and exposes `/predictor_settings` for automation.

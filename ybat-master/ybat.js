@@ -342,9 +342,11 @@
         if (!container) {
             return null;
         }
+        const group = TASK_GROUP_MAP[kind] || kind || "misc";
         const entry = {
             id: ++taskQueueState.counter,
             kind: kind || "sam",
+            group,
             imageName: imageName || null,
             detail: detail || null,
             timestamp: Date.now(),
@@ -390,11 +392,15 @@
             container.classList.remove("visible");
             return;
         }
-        const fragments = taskQueueState.items.map((item) => {
-            const label = TASK_LABELS[item.kind] || item.kind || "task";
-            const name = item.imageName ? shortenName(item.imageName) : "—";
-            const detail = item.detail ? ` · ${item.detail}` : "";
-            return `<div class="task-queue__entry"><span class="task-queue__type">${label}</span><span class="task-queue__label">${name}${detail}</span></div>`;
+        const summary = new Map();
+        taskQueueState.items.forEach((item) => {
+            const group = item.group || item.kind || "misc";
+            summary.set(group, (summary.get(group) || 0) + 1);
+        });
+        const fragments = Array.from(summary.entries()).map(([group, count]) => {
+            const label = (TASK_GROUP_LABELS[group] || group).toLowerCase();
+            const noun = count === 1 ? "task" : "tasks";
+            return `<div class="task-queue__entry"><span class="task-queue__label">${count} ${label} ${noun} pending</span></div>`;
         });
         container.innerHTML = fragments.join("");
         container.classList.add("visible");
@@ -441,8 +447,11 @@
 
     function openBatchTweakModal() {
         ensureBatchTweakElements();
-        if (!batchTweakElements.modal || !currentBbox || !currentBbox.bbox) {
-            setSamStatus("Select a bbox before batch tweaking", { variant: "warn", duration: 3000 });
+        if (!batchTweakElements.modal) {
+            return;
+        }
+        if (!currentClass) {
+            setSamStatus("Select a class in the list before batch tweaking", { variant: "warn", duration: 3000 });
             return;
         }
         if (batchTweakRunning) {
@@ -478,12 +487,8 @@
     }
 
     function requestBatchTweakModal() {
-        if (!currentBbox || !currentBbox.bbox) {
-            setSamStatus("Select a bbox before batch tweaking", { variant: "warn", duration: 3000 });
-            return;
-        }
         if (!currentClass) {
-            setSamStatus("Select a class before batch tweaking", { variant: "warn", duration: 3000 });
+            setSamStatus("Select a class in the list before batch tweaking", { variant: "warn", duration: 3000 });
             return;
         }
         openBatchTweakModal();
@@ -538,17 +543,24 @@
         items: [],
         counter: 0,
     };
-    const TASK_LABELS = {
-        "sam-bbox": "SAM bbox",
-        "sam-bbox-auto": "SAM auto",
-        "sam-point": "SAM point",
-        "sam-point-auto": "SAM point auto",
-        "sam-multipoint": "SAM multi",
-        "sam-multipoint-auto": "SAM multi auto",
-        "sam-batch": "SAM batch",
-        "sam-preload": "Preload",
-        "sam-activate": "Activate",
-        sam: "SAM",
+    const TASK_GROUP_MAP = {
+        "sam-bbox": "bbox",
+        "sam-bbox-auto": "bbox",
+        "sam-point": "bbox",
+        "sam-point-auto": "bbox",
+        "sam-multipoint": "bbox",
+        "sam-multipoint-auto": "bbox",
+        "sam-batch": "bbox",
+        "sam-preload": "preload",
+        "sam-activate": "preload",
+        sam: "bbox",
+        "clip-auto": "clip",
+    };
+
+    const TASK_GROUP_LABELS = {
+        preload: "SAM preloads",
+        bbox: "bbox adjustments",
+        clip: "CLIP tasks",
     };
 
     const tabElements = {
@@ -4023,6 +4035,7 @@
 
     async function autoPredictNewCrop(bbox) {
         const progressToken = beginClipProgress();
+        const clipTaskId = enqueueTask({ kind: "clip-auto", imageName: currentImage ? currentImage.name : null, detail: bbox?.class || currentClass || null });
         try {
             const offCanvas = document.createElement("canvas");
             offCanvas.width = bbox.width;
@@ -4060,9 +4073,9 @@
             const returnedUUID = data.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
             if (!targetBbox) {
-                console.warn("No pending bbox found for uuid:", returnedUUID);
-                return;
-            }
+            console.warn("No pending bbox found for uuid:", returnedUUID);
+            return;
+        }
             currentBbox = {
                 bbox: targetBbox,
                 index: -1,
@@ -4093,6 +4106,7 @@
             }
             delete pendingApiBboxes[returnedUUID];
         } finally {
+            completeTask(clipTaskId);
             endClipProgress(progressToken);
         }
     }
@@ -5246,22 +5260,8 @@
             return;
         }
         if (!currentClass) {
-            const inferred = guessClassFromSelection();
-            if (inferred) {
-                currentClass = inferred;
-                const classListEl = document.getElementById("classList");
-                if (classListEl) {
-                    for (let i = 0; i < classListEl.options.length; i++) {
-                        if (classListEl.options[i].text === inferred) {
-                            classListEl.selectedIndex = i;
-                            break;
-                        }
-                    }
-                }
-            } else {
-                setSamStatus("Select a class before batch tweaking", { variant: "warn", duration: 3000 });
-                return;
-            }
+            setSamStatus("Select a class before batch tweaking", { variant: "warn", duration: 3000 });
+            return;
         }
         if (!samMode) {
             setSamStatus("Enable SAM mode to batch tweak", { variant: "warn", duration: 3000 });

@@ -165,6 +165,7 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 - `F` / `G` – add positive / negative multi-point markers.
 - `Enter` – submit multi-point selection.
 - Arrow keys – move through images/classes; `Q` removes the most recent bbox.
+- `Backspace` / `W` – delete the currently selected bbox (⌘+Delete on macOS still works too).
 
 ### Train CLIP Tab
 1. Choose **Image folder** and **Label folder** via native directory pickers. Only files matching YOLO expectations are enumerated.

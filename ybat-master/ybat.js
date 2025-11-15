@@ -195,6 +195,7 @@
     let API_ROOT = loadStoredApiRoot();
     const TAB_LABELING = "labeling";
     const TAB_TRAINING = "training";
+    const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_ACTIVE = "active";
     const TAB_QWEN = "qwen";
     const TAB_PREDICTORS = "predictors";
@@ -596,12 +597,14 @@
     const tabElements = {
         labelingButton: null,
         trainingButton: null,
+        qwenTrainButton: null,
         activeButton: null,
         qwenButton: null,
         predictorsButton: null,
         settingsButton: null,
         labelingPanel: null,
         trainingPanel: null,
+        qwenTrainPanel: null,
         activePanel: null,
         qwenPanel: null,
         predictorsPanel: null,
@@ -640,25 +643,28 @@
         maxResults: null,
         runButton: null,
     };
-    const qwenConfigElements = {
-        bboxBase: null,
-        bboxImageType: null,
-        bboxExtra: null,
-        pointBase: null,
-        pointImageType: null,
-        pointExtra: null,
+    const DEFAULT_QWEN_METADATA = {
+        id: "default",
+        label: "Base Qwen",
+        dataset_context: "",
+        classes: [],
+        system_prompt: "",
+    };
+
+    const qwenModelElements = {
         status: null,
-        saveButton: null,
-        resetButton: null,
-        reloadButton: null,
+        list: null,
+        details: null,
     };
     let qwenAvailable = false;
     let qwenRequestActive = false;
     let qwenClassOverride = false;
-    let qwenConfigLoaded = false;
-    let qwenConfig = null;
     let qwenAdvancedVisible = false;
-    let qwenConfigUiInitialized = false;
+    const qwenModelState = {
+        models: [],
+        activeId: "default",
+        activeMetadata: DEFAULT_QWEN_METADATA,
+    };
 
     let settingsUiInitialized = false;
 
@@ -697,6 +703,38 @@
         hardMiningCheckbox: null,
     };
 
+    const qwenTrainElements = {
+        runNameInput: null,
+        contextInput: null,
+        modelIdInput: null,
+        systemPromptInput: null,
+        systemPromptNoiseInput: null,
+        acceleratorSelect: null,
+        loraRadios: null,
+        batchSizeInput: null,
+        epochsInput: null,
+        lrInput: null,
+        accumulateInput: null,
+        loraRankInput: null,
+        loraAlphaInput: null,
+        loraDropoutInput: null,
+        patienceInput: null,
+        sampleButton: null,
+        sampleCanvas: null,
+        samplePrompt: null,
+        sampleExpected: null,
+        sampleMessage: null,
+        sampleMeta: null,
+        startButton: null,
+        cancelButton: null,
+        progressFill: null,
+        statusText: null,
+        message: null,
+        summary: null,
+        log: null,
+        historyContainer: null,
+    };
+
     const activeElements = {
         message: null,
         info: null,
@@ -726,6 +764,11 @@
         labelTotalCount: 0,
         nativeImagesPath: null,
         nativeLabelsPath: null,
+    };
+
+    const qwenTrainState = {
+        activeJobId: null,
+        pollHandle: null,
     };
 
     function escapeHtml(value) {
@@ -1331,21 +1374,727 @@
             setActiveMessage(`Unable to read active model: ${error.message || error}`, "error");
         }
     }
-    function renderTrainingHistoryItem(container, job) {
-        const item = document.createElement("div");
-        item.className = "training-history-item";
-        const left = document.createElement("div");
-        left.textContent = `${job.job_id.slice(0, 8)}… — ${job.status}`;
-        const right = document.createElement("div");
-        const viewBtn = document.createElement("button");
-        viewBtn.type = "button";
-        viewBtn.textContent = "View";
-        viewBtn.addEventListener("click", () => {
-            loadTrainingJob(job.job_id, { forcePoll: job.status === "running" || job.status === "queued" });
+function renderTrainingHistoryItem(container, job) {
+    const item = document.createElement("div");
+    item.className = "training-history-item";
+    const left = document.createElement("div");
+    left.textContent = `${job.job_id.slice(0, 8)}… — ${job.status}`;
+    const right = document.createElement("div");
+    const viewBtn = document.createElement("button");
+    viewBtn.type = "button";
+    viewBtn.textContent = "View";
+    viewBtn.addEventListener("click", () => {
+        loadTrainingJob(job.job_id, { forcePoll: job.status === "running" || job.status === "queued" });
+    });
+    right.appendChild(viewBtn);
+    item.append(left, right);
+    container.appendChild(item);
+}
+
+function setQwenTrainMessage(text, variant = null) {
+    if (!qwenTrainElements.message) {
+        return;
+    }
+    qwenTrainElements.message.textContent = text || "";
+    qwenTrainElements.message.classList.remove("error", "warn", "success");
+    if (variant) {
+        qwenTrainElements.message.classList.add(variant);
+    }
+}
+
+function readNumberInput(input, { integer = false } = {}) {
+    if (!input) {
+        return undefined;
+    }
+    const raw = String(input.value ?? "").trim();
+    if (!raw) {
+        return undefined;
+    }
+    const parsed = integer ? parseInt(raw, 10) : parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function getSelectedQwenLoraMode() {
+    const selected = document.querySelector('input[name="qwenLoraMode"]:checked');
+    return selected ? selected.value : "qlora";
+}
+
+function shuffleArray(input) {
+    const arr = [...input];
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
+function sanitizeDatasetFilename(name) {
+    return (name || "image").replace(/[\\/]/g, "_");
+}
+
+function makeUniqueFilename(baseName, usageMap) {
+    const safeBase = sanitizeDatasetFilename(baseName);
+    const count = usageMap.get(safeBase) || 0;
+    usageMap.set(safeBase, count + 1);
+    if (count === 0) {
+        return safeBase;
+    }
+    const dotIndex = safeBase.lastIndexOf(".");
+    if (dotIndex !== -1) {
+        const stem = safeBase.slice(0, dotIndex);
+        const ext = safeBase.slice(dotIndex);
+        return `${stem}_${count}${ext}`;
+    }
+    return `${safeBase}_${count}`;
+}
+
+async function ensureImageDimensions(imageRecord) {
+    if (imageRecord.width && imageRecord.height) {
+        return;
+    }
+    await loadImageObject(imageRecord);
+    const width = imageRecord.object?.naturalWidth || imageRecord.object?.width || imageRecord.width;
+    const height = imageRecord.object?.naturalHeight || imageRecord.object?.height || imageRecord.height;
+    if (!width || !height) {
+        throw new Error(`Unable to read dimensions for ${imageRecord.meta?.name || "image"}`);
+    }
+    imageRecord.width = width;
+    imageRecord.height = height;
+}
+
+function buildQwenInstruction(contextText, classNames) {
+    const parts = [];
+    if (contextText) {
+        parts.push(`This image shows ${contextText}.`);
+    }
+    if (classNames.length) {
+        parts.push(`Objects of interest: ${classNames.join(", ")}.`);
+    }
+    return parts.join(" ").trim();
+}
+
+function buildDetectionRecords(imageName, imageRecord) {
+    const width = imageRecord.width || 0;
+    const height = imageRecord.height || 0;
+    const buckets = bboxes[imageName] || {};
+    const records = [];
+    for (const className of Object.keys(buckets)) {
+        const bucket = buckets[className] || [];
+        bucket.forEach((bbox) => {
+            if (!bbox) {
+                return;
+            }
+            const copy = {
+                x: bbox.x,
+                y: bbox.y,
+                width: bbox.width,
+                height: bbox.height,
+            };
+            const valid = clampBbox(copy, width, height);
+            if (!valid) {
+                return;
+            }
+            const x1 = Math.round(copy.x);
+            const y1 = Math.round(copy.y);
+            const x2 = Math.round(copy.x + copy.width);
+            const y2 = Math.round(copy.y + copy.height);
+            const cx = Math.round(copy.x + copy.width / 2);
+            const cy = Math.round(copy.y + copy.height / 2);
+            records.push({
+                label: className,
+                bbox: [x1, y1, x2, y2],
+                point: [cx, cy],
+            });
         });
-        right.appendChild(viewBtn);
-        item.append(left, right);
-        container.appendChild(item);
+    }
+    return records;
+}
+
+function chooseQwenSampleLabelSet(detections) {
+    const labels = Array.from(new Set((detections || []).map((det) => (det.label || "").trim()).filter(Boolean))).sort();
+    if (!labels.length) {
+        return { labels: [], mode: "all" };
+    }
+    if (labels.length === 1) {
+        return Math.random() < 0.5 ? { labels, mode: "single" } : { labels, mode: "all" };
+    }
+    const roll = Math.random();
+    if (roll < 0.34) {
+        return { labels, mode: "all" };
+    }
+    if (roll < 0.67) {
+        return { labels: [labels[Math.floor(Math.random() * labels.length)]], mode: "single" };
+    }
+    const subsetSize = Math.max(2, Math.floor(Math.random() * labels.length) + 1);
+    const shuffled = shuffleArray(labels.slice());
+    return { labels: shuffled.slice(0, Math.min(subsetSize, labels.length)).sort(), mode: "subset" };
+}
+
+function filterDetectionsForLabels(detections, labels, mode) {
+    if (!Array.isArray(detections) || !detections.length || !labels || !labels.length || mode === "all") {
+        return detections || [];
+    }
+    const labelSet = new Set(labels.map((label) => label.trim()).filter(Boolean));
+    return detections.filter((det) => labelSet.has((det.label || "").trim()));
+}
+
+function buildQwenSampleUserPrompt(context, labels, mode, type) {
+    const parts = [];
+    if (context) {
+        parts.push(context);
+    }
+    if (labels && labels.length) {
+        if (mode === "single") {
+            parts.push(`Focus only on the class '${labels[0]}'.`);
+        } else if (mode === "subset") {
+            parts.push(`Focus only on these classes: ${labels.join(", ")}.`);
+        } else {
+            parts.push(`Return detections for these classes: ${labels.join(", ")}.`);
+        }
+    } else {
+        parts.push("Return detections for every labeled object.");
+    }
+    if (type === "bbox") {
+        parts.push("Return a JSON object named \"detections\". Each detection must include \"label\" and \"bbox\" as [x1,y1,x2,y2] pixel coordinates (integers). If nothing is present, respond with {\"detections\": []}. Respond with JSON only.");
+    } else {
+        parts.push("Return a JSON object named \"detections\". Each detection must include \"label\" and \"point\" as [x,y] pixel coordinates near the object center. If nothing is present, respond with {\"detections\": []}. Respond with JSON only.");
+    }
+    return parts.filter(Boolean).join(" ").trim();
+}
+
+async function buildQwenDatasetZip() {
+    const imageNames = Object.keys(images);
+    if (!imageNames.length) {
+        throw new Error("Load images before starting Qwen training.");
+    }
+    const classNames = Object.keys(classes || {});
+    if (!classNames.length) {
+        throw new Error("Load a label map before starting Qwen training.");
+    }
+    const contextText = qwenTrainElements.contextInput?.value?.trim() || "";
+    const instruction = buildQwenInstruction(contextText, classNames);
+    const shuffled = shuffleArray(imageNames);
+    let valCount = Math.max(1, Math.round(shuffled.length * 0.2));
+    if (valCount >= shuffled.length && shuffled.length > 1) {
+        valCount = Math.max(1, shuffled.length - 1);
+    }
+    if (shuffled.length === 1) {
+        valCount = 1;
+    }
+    const valSet = new Set(shuffled.slice(0, valCount));
+    const usedNames = new Map();
+    const trainRecords = [];
+    const valRecords = [];
+    let totalBoxes = 0;
+
+    for (const imageKey of imageNames) {
+        const imageRecord = images[imageKey];
+        if (!imageRecord || !imageRecord.meta) {
+            throw new Error(`Missing original file for ${imageKey}. Re-import the images and try again.`);
+        }
+        await ensureImageDimensions(imageRecord);
+        const baseName = imageRecord.meta.name || imageKey;
+        const safeName = makeUniqueFilename(baseName, usedNames);
+        const detections = buildDetectionRecords(imageKey, imageRecord);
+        totalBoxes += detections.length;
+        const annotation = JSON.stringify({
+            image: safeName,
+            context: instruction,
+            detections,
+        });
+        const entry = { annotation, imageName: safeName, file: imageRecord.meta };
+        if (valSet.has(imageKey)) {
+            valRecords.push(entry);
+        } else {
+            trainRecords.push(entry);
+        }
+    }
+
+    if (!trainRecords.length && valRecords.length) {
+        trainRecords.push(valRecords[0]);
+    }
+    if (!valRecords.length && trainRecords.length) {
+        valRecords.push(trainRecords[0]);
+    }
+    if (totalBoxes === 0) {
+        throw new Error("No bounding boxes available. Draw bboxes before training.");
+    }
+
+    const zip = new JSZip();
+    const trainFolder = zip.folder("train");
+    const valFolder = zip.folder("val");
+    trainRecords.forEach((record) => {
+        trainFolder.file(record.imageName, record.file);
+    });
+    valRecords.forEach((record) => {
+        valFolder.file(record.imageName, record.file);
+    });
+    trainFolder.file("annotations.jsonl", trainRecords.map((r) => r.annotation).join("\n") + "\n");
+    valFolder.file("annotations.jsonl", valRecords.map((r) => r.annotation).join("\n") + "\n");
+    const datasetMeta = {
+        context: contextText,
+        classes: classNames,
+        created_at: Date.now(),
+    };
+    zip.file("dataset_meta.json", JSON.stringify(datasetMeta, null, 2));
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    const preferredName = qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
+    const safeDataset = preferredName.replace(/[^A-Za-z0-9._-]/g, "_") || "qwen_dataset";
+    return {
+        blob,
+        fileName: `${safeDataset}.zip`,
+        suggestedRunName: preferredName,
+    };
+}
+
+async function uploadQwenDatasetZip() {
+    setQwenTrainMessage("Packaging dataset…");
+    const { blob, fileName, suggestedRunName } = await buildQwenDatasetZip();
+    setQwenTrainMessage("Uploading dataset…");
+    const formData = new FormData();
+    formData.append("file", blob, fileName);
+    if (suggestedRunName) {
+        formData.append("run_name", suggestedRunName);
+    }
+    const resp = await fetch(`${API_ROOT}/qwen/train/dataset/upload`, {
+        method: "POST",
+        body: formData,
+    });
+    if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `Dataset upload failed (${resp.status})`);
+    }
+    return resp.json();
+}
+
+function buildQwenTrainingPayload(datasetRoot, datasetRunName) {
+    const payload = { dataset_root: datasetRoot };
+    const runName = qwenTrainElements.runNameInput?.value?.trim() || datasetRunName;
+    if (runName) {
+        payload.run_name = runName;
+    }
+    const modelId = qwenTrainElements.modelIdInput?.value?.trim();
+    if (modelId) {
+        payload.model_id = modelId;
+    }
+    const systemPrompt = qwenTrainElements.systemPromptInput?.value?.trim();
+    if (systemPrompt) {
+        payload.system_prompt = systemPrompt;
+    }
+    const promptNoise = readNumberInput(qwenTrainElements.systemPromptNoiseInput, { integer: false });
+    if (promptNoise !== undefined) {
+        payload.system_prompt_noise = promptNoise;
+    }
+    const accelerator = qwenTrainElements.acceleratorSelect?.value;
+    if (accelerator) {
+        payload.accelerator = accelerator;
+    }
+    payload.use_qlora = getSelectedQwenLoraMode() !== "lora";
+    const numericMap = [
+        ["batch_size", qwenTrainElements.batchSizeInput, { integer: true }],
+        ["max_epochs", qwenTrainElements.epochsInput, { integer: true }],
+        ["lr", qwenTrainElements.lrInput, { integer: false }],
+        ["accumulate_grad_batches", qwenTrainElements.accumulateInput, { integer: true }],
+        ["lora_rank", qwenTrainElements.loraRankInput, { integer: true }],
+        ["lora_alpha", qwenTrainElements.loraAlphaInput, { integer: true }],
+        ["lora_dropout", qwenTrainElements.loraDropoutInput, { integer: false }],
+        ["patience", qwenTrainElements.patienceInput, { integer: true }],
+    ];
+    numericMap.forEach(([key, input, opts]) => {
+        const value = readNumberInput(input, opts || {});
+        if (value !== undefined) {
+            payload[key] = value;
+        }
+    });
+    return payload;
+}
+
+function setQwenSampleOverlay(text, variant) {
+    const overlay = qwenTrainElements.sampleMessage;
+    if (!overlay) {
+        return;
+    }
+    overlay.textContent = text || "";
+    overlay.classList.remove("hidden", "error", "success");
+    if (variant) {
+        overlay.classList.add(variant);
+    }
+    if (!text) {
+        overlay.classList.add("hidden");
+    }
+}
+
+function updateQwenSampleMeta(text) {
+    if (qwenTrainElements.sampleMeta) {
+        qwenTrainElements.sampleMeta.textContent = text || "";
+    }
+}
+
+async function generateRandomQwenSample() {
+    if (!qwenTrainElements.sampleButton) {
+        return;
+    }
+    qwenTrainElements.sampleButton.disabled = true;
+    try {
+        setQwenSampleOverlay("Building sample…", "");
+        const sample = await buildRandomQwenSampleData();
+        await renderQwenSamplePreview(sample);
+        const scope = describeQwenSampleScope(sample.mode, sample.labels);
+        updateQwenSampleMeta(`Image: ${sample.imageLabel} • ${sample.useBBox ? "Bounding boxes" : "Points"} • ${scope}`);
+        setQwenSampleOverlay("", "");
+    } catch (error) {
+        console.error(error);
+        clearQwenSamplePreview();
+        setQwenSampleOverlay(error.message || "Unable to build sample", "error");
+        updateQwenSampleMeta("");
+    } finally {
+        qwenTrainElements.sampleButton.disabled = false;
+    }
+}
+
+function describeQwenSampleScope(mode, labels) {
+    if (!labels || !labels.length || mode === "all") {
+        return "All classes";
+    }
+    if (mode === "single") {
+        return `Only '${labels[0]}'`;
+    }
+    return `Subset: ${labels.join(", ")}`;
+}
+
+async function buildRandomQwenSampleData() {
+    const imageKeys = Object.keys(images || {});
+    if (!imageKeys.length) {
+        throw new Error("Load images before generating a sample.");
+    }
+    const classNames = Object.keys(classes || {});
+    if (!classNames.length) {
+        throw new Error("Load a label map before generating a sample.");
+    }
+    const randomKey = imageKeys[Math.floor(Math.random() * imageKeys.length)];
+    const imageRecord = images[randomKey];
+    if (!imageRecord || !imageRecord.meta) {
+        throw new Error("Selected image is missing its source file. Re-import and try again.");
+    }
+    await ensureImageDimensions(imageRecord);
+    if (!imageRecord.object) {
+        await loadImageObject(imageRecord);
+    }
+    const detections = buildDetectionRecords(randomKey, imageRecord);
+    const contextText = qwenTrainElements.contextInput?.value?.trim() || "";
+    const datasetInstruction = buildQwenInstruction(contextText, classNames);
+    const { labels, mode } = chooseQwenSampleLabelSet(detections);
+    const filtered = filterDetectionsForLabels(detections, labels, mode);
+    const useBBox = Math.random() < 0.5;
+    const prompt = buildQwenSampleUserPrompt(datasetInstruction, labels, mode, useBBox ? "bbox" : "point");
+    const expectedDetections = filtered.map((det) => {
+        const payload = { label: det.label };
+        if (useBBox) {
+            payload.bbox = det.bbox;
+        } else {
+            payload.point = det.point;
+        }
+        return payload;
+    });
+    return {
+        imageKey: randomKey,
+        imageLabel: imageRecord.meta.name || randomKey,
+        imageRecord,
+        prompt,
+        expected: { detections: expectedDetections },
+        labels,
+        mode,
+        useBBox,
+    };
+}
+
+function clearQwenSamplePreview() {
+    if (qwenTrainElements.sampleCanvas) {
+        const ctx = qwenTrainElements.sampleCanvas.getContext("2d");
+        if (ctx) {
+            ctx.clearRect(0, 0, qwenTrainElements.sampleCanvas.width, qwenTrainElements.sampleCanvas.height);
+        }
+    }
+    if (qwenTrainElements.samplePrompt) {
+        qwenTrainElements.samplePrompt.textContent = "";
+    }
+    if (qwenTrainElements.sampleExpected) {
+        qwenTrainElements.sampleExpected.textContent = "";
+    }
+}
+
+async function renderQwenSamplePreview(sample) {
+    if (!qwenTrainElements.sampleCanvas || !sample.imageRecord.object) {
+        return;
+    }
+    const canvas = qwenTrainElements.sampleCanvas;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+        return;
+    }
+    const width = sample.imageRecord.width || sample.imageRecord.object.width || 1;
+    const height = sample.imageRecord.height || sample.imageRecord.object.height || 1;
+    const maxW = 360;
+    const maxH = 260;
+    const scale = Math.min(maxW / width, maxH / height, 1);
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(sample.imageRecord.object, 0, 0, canvas.width, canvas.height);
+    if (sample.useBBox) {
+        ctx.strokeStyle = "#10b981";
+        ctx.lineWidth = Math.max(1, 2 * scale);
+        (sample.expected.detections || []).forEach((det) => {
+            if (!det.bbox) {
+                return;
+            }
+            const [x1, y1, x2, y2] = det.bbox;
+            ctx.strokeRect(x1 * scale, y1 * scale, (x2 - x1) * scale, (y2 - y1) * scale);
+        });
+    } else {
+        ctx.fillStyle = "#ef4444";
+        const radius = Math.max(3, 4 * scale);
+        (sample.expected.detections || []).forEach((det) => {
+            if (!det.point) {
+                return;
+            }
+            const [x, y] = det.point;
+            ctx.beginPath();
+            ctx.arc(x * scale, y * scale, radius, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    }
+    if (qwenTrainElements.samplePrompt) {
+        qwenTrainElements.samplePrompt.textContent = sample.prompt;
+    }
+    if (qwenTrainElements.sampleExpected) {
+        qwenTrainElements.sampleExpected.textContent = JSON.stringify(sample.expected, null, 2);
+    }
+}
+
+async function handleStartQwenTraining() {
+    if (qwenTrainElements.startButton) {
+        qwenTrainElements.startButton.disabled = true;
+    }
+    try {
+        const datasetInfo = await uploadQwenDatasetZip();
+        setQwenTrainMessage("Starting training job…");
+        const payload = buildQwenTrainingPayload(datasetInfo.dataset_root, datasetInfo.run_name);
+        const resp = await fetch(`${API_ROOT}/qwen/train/jobs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        qwenTrainState.activeJobId = data.job_id;
+        setQwenTrainMessage("Job started", "success");
+        if (qwenTrainElements.cancelButton) {
+            qwenTrainElements.cancelButton.disabled = false;
+        }
+        await pollQwenTrainingJob(data.job_id, { force: true });
+        await refreshQwenTrainingHistory();
+    } catch (error) {
+        console.error("Qwen training submit failed", error);
+        setQwenTrainMessage(error.message || "Failed to start training", "error");
+    } finally {
+        if (qwenTrainElements.startButton) {
+            qwenTrainElements.startButton.disabled = false;
+        }
+    }
+}
+
+async function cancelQwenTrainingJobRequest() {
+    if (!qwenTrainState.activeJobId) {
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${qwenTrainState.activeJobId}/cancel`, { method: "POST" });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        setQwenTrainMessage("Cancellation requested", "warn");
+    } catch (error) {
+        console.error("Cancel Qwen job failed", error);
+        setQwenTrainMessage(error.message || "Failed to cancel job", "error");
+    }
+}
+
+function updateQwenTrainingUI(job) {
+    if (!job) {
+        return;
+    }
+    const pct = Math.round((job.progress || 0) * 100);
+    if (qwenTrainElements.progressFill) {
+        qwenTrainElements.progressFill.style.width = `${pct}%`;
+    }
+    if (qwenTrainElements.statusText) {
+        const message = job.message ? ` • ${job.message}` : "";
+        qwenTrainElements.statusText.textContent = `${job.status?.toUpperCase() || ""}${message}`;
+    }
+    if (qwenTrainElements.log) {
+        const logs = Array.isArray(job.logs) ? job.logs : [];
+        qwenTrainElements.log.textContent = logs
+            .map((entry) => `[${formatTimestamp(entry.timestamp)}] ${entry.message}`)
+            .join("\n");
+    }
+    if (qwenTrainElements.summary) {
+        if (job.result) {
+            const latest = job.result.latest || "–";
+            const epochs = job.result.epochs_ran ?? "–";
+            qwenTrainElements.summary.innerHTML = `
+                <p><strong>Latest checkpoint:</strong> ${escapeHtml(latest)}</p>
+                <p><strong>Epochs:</strong> ${escapeHtml(String(epochs))}</p>
+            `;
+        } else {
+            qwenTrainElements.summary.textContent = "";
+        }
+    }
+    if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+        if (qwenTrainElements.cancelButton) {
+            qwenTrainElements.cancelButton.disabled = true;
+        }
+    }
+}
+
+function renderQwenTrainingHistoryItem(container, job) {
+    if (!container) {
+        return;
+    }
+    const item = document.createElement("div");
+    item.className = "training-history-item";
+    const label = job?.config?.run_name || job.job_id;
+    const status = job.status || "unknown";
+    const created = job.created_at ? new Date(job.created_at * 1000).toLocaleString() : "";
+    const left = document.createElement("div");
+    left.innerHTML = `<strong>${escapeHtml(label)}</strong><div class="training-help">${escapeHtml(status)} • ${escapeHtml(created)}</div>`;
+    const right = document.createElement("div");
+    const viewBtn = document.createElement("button");
+    viewBtn.type = "button";
+    viewBtn.className = "training-button";
+    viewBtn.textContent = "View";
+    viewBtn.addEventListener("click", () => {
+        qwenTrainState.activeJobId = job.job_id;
+        pollQwenTrainingJob(job.job_id, { force: true }).catch((error) => console.error("Poll Qwen job failed", error));
+    });
+    right.appendChild(viewBtn);
+    item.append(left, right);
+    container.appendChild(item);
+}
+
+async function refreshQwenTrainingHistory() {
+    if (!qwenTrainElements.historyContainer) {
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/qwen/train/jobs`);
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const jobs = await resp.json();
+        qwenTrainElements.historyContainer.innerHTML = "";
+        if (!Array.isArray(jobs) || !jobs.length) {
+            const empty = document.createElement("div");
+            empty.className = "training-history-item";
+            empty.textContent = "No Qwen jobs yet.";
+            qwenTrainElements.historyContainer.appendChild(empty);
+            return;
+        }
+        jobs.forEach((job) => renderQwenTrainingHistoryItem(qwenTrainElements.historyContainer, job));
+    } catch (error) {
+        console.error("Failed to load Qwen job history", error);
+        qwenTrainElements.historyContainer.textContent = `Unable to load history: ${error.message || error}`;
+    }
+}
+
+function scheduleQwenJobPoll(jobId, delayMs = 1500) {
+    if (qwenTrainState.pollHandle) {
+        clearTimeout(qwenTrainState.pollHandle);
+    }
+    qwenTrainState.pollHandle = window.setTimeout(() => {
+        pollQwenTrainingJob(jobId).catch((error) => console.error("Qwen poll failed", error));
+    }, delayMs);
+}
+
+    async function pollQwenTrainingJob(jobId, { force = false } = {}) {
+        if (!jobId) {
+            return;
+        }
+        if (!force && activeTab !== TAB_QWEN_TRAIN) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${jobId}`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const job = await resp.json();
+            qwenTrainState.activeJobId = job.job_id;
+            updateQwenTrainingUI(job);
+            if (job.status === "running" || job.status === "cancelling") {
+                scheduleQwenJobPoll(job.job_id);
+            } else if (qwenTrainState.pollHandle) {
+                clearTimeout(qwenTrainState.pollHandle);
+                qwenTrainState.pollHandle = null;
+            }
+        } catch (error) {
+            console.error("pollQwenTrainingJob error", error);
+            setQwenTrainMessage(error.message || "Unable to load job", "error");
+        }
+    }
+
+    function initQwenTrainingTab() {
+        if (qwenTrainElements.runNameInput) {
+            return;
+        }
+        qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
+        qwenTrainElements.contextInput = document.getElementById("qwenTrainContext");
+        qwenTrainElements.modelIdInput = document.getElementById("qwenTrainModelId");
+        qwenTrainElements.systemPromptInput = document.getElementById("qwenTrainSystemPrompt");
+        qwenTrainElements.systemPromptNoiseInput = document.getElementById("qwenTrainPromptNoise");
+        qwenTrainElements.acceleratorSelect = document.getElementById("qwenTrainAccelerator");
+        qwenTrainElements.batchSizeInput = document.getElementById("qwenTrainBatchSize");
+        qwenTrainElements.epochsInput = document.getElementById("qwenTrainEpochs");
+        qwenTrainElements.lrInput = document.getElementById("qwenTrainLR");
+        qwenTrainElements.accumulateInput = document.getElementById("qwenTrainAccumulate");
+        qwenTrainElements.loraRankInput = document.getElementById("qwenTrainLoraRank");
+        qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
+        qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
+        qwenTrainElements.patienceInput = document.getElementById("qwenTrainPatience");
+        qwenTrainElements.sampleButton = document.getElementById("qwenSampleBtn");
+        qwenTrainElements.sampleCanvas = document.getElementById("qwenSampleCanvas");
+        qwenTrainElements.samplePrompt = document.getElementById("qwenSamplePrompt");
+        qwenTrainElements.sampleExpected = document.getElementById("qwenSampleExpected");
+        qwenTrainElements.sampleMessage = document.getElementById("qwenSampleMessage");
+        qwenTrainElements.sampleMeta = document.getElementById("qwenSampleMeta");
+        qwenTrainElements.startButton = document.getElementById("qwenTrainStartBtn");
+        qwenTrainElements.cancelButton = document.getElementById("qwenTrainCancelBtn");
+        qwenTrainElements.progressFill = document.getElementById("qwenTrainProgressFill");
+        qwenTrainElements.statusText = document.getElementById("qwenTrainStatusText");
+        qwenTrainElements.message = document.getElementById("qwenTrainMessage");
+        qwenTrainElements.summary = document.getElementById("qwenTrainSummary");
+        qwenTrainElements.log = document.getElementById("qwenTrainLog");
+        qwenTrainElements.historyContainer = document.getElementById("qwenTrainHistory");
+        if (qwenTrainElements.startButton) {
+            qwenTrainElements.startButton.addEventListener("click", () => {
+                handleStartQwenTraining().catch((error) => console.error("Qwen training start failed", error));
+            });
+        }
+        if (qwenTrainElements.cancelButton) {
+            qwenTrainElements.cancelButton.addEventListener("click", () => {
+                cancelQwenTrainingJobRequest().catch((error) => console.error("Qwen cancel failed", error));
+            });
+            qwenTrainElements.cancelButton.disabled = true;
+        }
+        if (qwenTrainElements.sampleButton) {
+            qwenTrainElements.sampleButton.addEventListener("click", () => {
+                generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
+            });
+        }
     }
 
 
@@ -1884,12 +2633,14 @@
     function setupTabNavigation() {
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
+        tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
         tabElements.qwenButton = document.getElementById("tabQwenButton");
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
         tabElements.settingsButton = document.getElementById("tabSettingsButton");
         tabElements.labelingPanel = document.getElementById("tabLabeling");
         tabElements.trainingPanel = document.getElementById("tabTraining");
+        tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.activePanel = document.getElementById("tabActive");
         tabElements.qwenPanel = document.getElementById("tabQwen");
         tabElements.predictorsPanel = document.getElementById("tabPredictors");
@@ -1899,6 +2650,9 @@
         }
         if (tabElements.trainingButton) {
             tabElements.trainingButton.addEventListener("click", () => setActiveTab(TAB_TRAINING));
+        }
+        if (tabElements.qwenTrainButton) {
+            tabElements.qwenTrainButton.addEventListener("click", () => setActiveTab(TAB_QWEN_TRAIN));
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
@@ -1924,6 +2678,9 @@
         if (tabElements.trainingButton) {
             tabElements.trainingButton.classList.toggle("active", tabName === TAB_TRAINING);
         }
+        if (tabElements.qwenTrainButton) {
+            tabElements.qwenTrainButton.classList.toggle("active", tabName === TAB_QWEN_TRAIN);
+        }
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
         }
@@ -1941,6 +2698,9 @@
         }
         if (tabElements.trainingPanel) {
             tabElements.trainingPanel.classList.toggle("active", tabName === TAB_TRAINING);
+        }
+        if (tabElements.qwenTrainPanel) {
+            tabElements.qwenTrainPanel.classList.toggle("active", tabName === TAB_QWEN_TRAIN);
         }
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);
@@ -1962,13 +2722,20 @@
                 loadTrainingJob(trainingState.activeJobId, { forcePoll: true });
             }
         }
+        if (tabName === TAB_QWEN_TRAIN && previous !== TAB_QWEN_TRAIN) {
+            initQwenTrainingTab();
+            refreshQwenTrainingHistory();
+            if (qwenTrainState.activeJobId) {
+                pollQwenTrainingJob(qwenTrainState.activeJobId, { force: true }).catch((error) => console.error("Qwen job poll failed", error));
+            }
+        }
         if (tabName === TAB_ACTIVE && previous !== TAB_ACTIVE) {
             initializeActiveModelUi();
             populateClipBackbones();
             refreshActiveModelPanel();
         }
         if (tabName === TAB_QWEN && previous !== TAB_QWEN) {
-            initializeQwenConfigTab();
+            initQwenModelTab();
         }
         if (tabName === TAB_PREDICTORS && previous !== TAB_PREDICTORS) {
             initializePredictorTab();
@@ -3228,6 +3995,7 @@
             qwenElements.advancedToggle.addEventListener("click", () => toggleQwenAdvanced());
         }
         toggleQwenAdvanced(false);
+        applyActiveQwenMetadata(qwenModelState.activeMetadata);
         updateQwenRunButton();
         updateQwenClassOptions({ resetOverride: true });
         refreshQwenStatus({ silent: true }).catch((error) => {
@@ -3376,145 +4144,127 @@
         }
     }
 
-    function setQwenConfigStatus(message, variant = "info") {
-        if (!qwenConfigElements.status) {
+    function setQwenModelStatus(message, variant = "info") {
+        if (!qwenModelElements.status) {
             return;
         }
-        qwenConfigElements.status.textContent = message || "";
-        qwenConfigElements.status.className = variant ? `qwen-config-status ${variant}` : "qwen-config-status";
+        qwenModelElements.status.textContent = message || "";
+        qwenModelElements.status.className = variant ? `qwen-model-status ${variant}` : "qwen-model-status";
     }
 
-    async function loadQwenConfig(force = false) {
-        if (qwenConfigLoaded && !force && qwenConfig) {
-            return qwenConfig;
+    function applyActiveQwenMetadata(metadata) {
+        qwenModelState.activeMetadata = metadata || null;
+        const badge = document.getElementById("qwenActiveModelLabel");
+        if (badge) {
+            badge.textContent = metadata?.label ? `Active: ${metadata.label}` : "Active: Base Qwen";
         }
-        setQwenConfigStatus("Loading templates…", "info");
+        const context = metadata?.dataset_context || "";
+        const classes = Array.isArray(metadata?.classes) ? metadata.classes : [];
+        if (qwenElements.imageTypeInput && !qwenElements.imageTypeInput.value) {
+            qwenElements.imageTypeInput.placeholder = context || "Describe the image";
+        }
+        if (qwenElements.itemsInput && !qwenElements.itemsInput.value) {
+            qwenElements.itemsInput.placeholder = classes.length ? classes.join(", ") : "car, bus, kiosk";
+        }
+    }
+
+    function renderQwenModelDetails(metadata) {
+        if (!qwenModelElements.details) {
+            return;
+        }
+        if (!metadata) {
+            qwenModelElements.details.innerHTML = "Select a model to see its prompts and defaults.";
+            return;
+        }
+        const classes = Array.isArray(metadata.classes) ? metadata.classes.join(", ") : "(not specified)";
+        const context = metadata.dataset_context || "(not specified)";
+        qwenModelElements.details.innerHTML = `
+            <p><strong>Name:</strong> ${metadata.label || metadata.id || "Custom Run"}</p>
+            <p><strong>Base model:</strong> ${metadata.model_id || "Qwen/Qwen2.5-VL-3B-Instruct"}</p>
+            <p><strong>Context hint:</strong> ${context}</p>
+            <p><strong>Classes:</strong> ${classes}</p>
+            <label>System prompt</label>
+            <pre>${metadata.system_prompt || ""}</pre>
+        `;
+    }
+
+    function renderQwenModelList() {
+        if (!qwenModelElements.list) {
+            return;
+        }
+        qwenModelElements.list.innerHTML = "";
+        qwenModelState.models.forEach((entry) => {
+            const card = document.createElement("div");
+            card.className = entry.active ? "qwen-model-card active" : "qwen-model-card";
+            const title = document.createElement("h3");
+            title.textContent = entry.label || entry.id;
+            card.appendChild(title);
+            const metaText = document.createElement("p");
+            const context = entry.metadata?.dataset_context;
+            const classes = Array.isArray(entry.metadata?.classes) ? entry.metadata.classes.join(", ") : "";
+            metaText.textContent = [context, classes].filter(Boolean).join(" • ") || "No context provided";
+            card.appendChild(metaText);
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "training-button";
+            button.textContent = entry.active ? "Active" : "Activate";
+            button.disabled = !!entry.active;
+            button.addEventListener("click", () => activateQwenModel(entry.id));
+            card.appendChild(button);
+            qwenModelElements.list.appendChild(card);
+        });
+    }
+
+    async function refreshQwenModels() {
+        setQwenModelStatus("Loading models…", "info");
         try {
-            const resp = await fetch(`${API_ROOT}/qwen/config`);
+            const resp = await fetch(`${API_ROOT}/qwen/models`);
             if (!resp.ok) {
                 const text = await resp.text();
                 throw new Error(text || `HTTP ${resp.status}`);
             }
-            qwenConfig = await resp.json();
-            qwenConfigLoaded = true;
-            populateQwenConfigForm(qwenConfig);
-            setQwenConfigStatus("Templates loaded.", "success");
-            return qwenConfig;
+            const data = await resp.json();
+            qwenModelState.models = data.models || [];
+            qwenModelState.activeId = data.active || "default";
+            const activeEntry = qwenModelState.models.find((entry) => entry.id === qwenModelState.activeId);
+            applyActiveQwenMetadata(activeEntry?.metadata || null);
+            renderQwenModelList();
+            renderQwenModelDetails(activeEntry?.metadata || null);
+            setQwenModelStatus("Models loaded.", "success");
         } catch (error) {
-            qwenConfigLoaded = false;
-            setQwenConfigStatus(`Failed to load templates: ${error.message || error}`, "error");
-            throw error;
+            console.error("Failed to load Qwen models", error);
+            setQwenModelStatus(`Failed to load models: ${error.message || error}`, "error");
         }
     }
 
-    function populateQwenConfigForm(config) {
-        if (!config) {
-            return;
-        }
-        if (qwenConfigElements.bboxBase) {
-            qwenConfigElements.bboxBase.value = config?.bbox?.base_prompt || "";
-        }
-        if (qwenConfigElements.bboxImageType) {
-            qwenConfigElements.bboxImageType.value = config?.bbox?.default_image_type || "";
-        }
-        if (qwenConfigElements.bboxExtra) {
-            qwenConfigElements.bboxExtra.value = config?.bbox?.default_extra_context || "";
-        }
-        if (qwenConfigElements.pointBase) {
-            qwenConfigElements.pointBase.value = config?.point?.base_prompt || "";
-        }
-        if (qwenConfigElements.pointImageType) {
-            qwenConfigElements.pointImageType.value = config?.point?.default_image_type || "";
-        }
-        if (qwenConfigElements.pointExtra) {
-            qwenConfigElements.pointExtra.value = config?.point?.default_extra_context || "";
-        }
-    }
-
-    function readQwenConfigForm() {
-        return {
-            bbox: {
-                base_prompt: qwenConfigElements.bboxBase?.value || "",
-                default_image_type: qwenConfigElements.bboxImageType?.value || "",
-                default_extra_context: qwenConfigElements.bboxExtra?.value || "",
-            },
-            point: {
-                base_prompt: qwenConfigElements.pointBase?.value || "",
-                default_image_type: qwenConfigElements.pointImageType?.value || "",
-                default_extra_context: qwenConfigElements.pointExtra?.value || "",
-            },
-        };
-    }
-
-    async function handleQwenConfigSave() {
+    async function activateQwenModel(modelId) {
+        setQwenModelStatus("Switching models…", "info");
         try {
-            setQwenConfigStatus("Saving…", "info");
-            const payload = readQwenConfigForm();
-            const resp = await fetch(`${API_ROOT}/qwen/config`, {
+            const resp = await fetch(`${API_ROOT}/qwen/models/activate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
+                body: JSON.stringify({ model_id: modelId }),
             });
             if (!resp.ok) {
                 const text = await resp.text();
                 throw new Error(text || `HTTP ${resp.status}`);
             }
-            qwenConfig = await resp.json();
-            qwenConfigLoaded = true;
-            populateQwenConfigForm(qwenConfig);
-            setQwenConfigStatus("Templates updated.", "success");
+            await refreshQwenModels();
+            setQwenModelStatus("Model activated.", "success");
         } catch (error) {
-            console.error("Failed to save Qwen config", error);
-            setQwenConfigStatus(`Save failed: ${error.message || error}`, "error");
+            console.error("Failed to activate Qwen model", error);
+            setQwenModelStatus(`Activation failed: ${error.message || error}`, "error");
         }
     }
 
-    async function handleQwenConfigReset() {
-        try {
-            setQwenConfigStatus("Restoring defaults…", "info");
-            const resp = await fetch(`${API_ROOT}/qwen/config/reset`, { method: "POST" });
-            if (!resp.ok) {
-                const text = await resp.text();
-                throw new Error(text || `HTTP ${resp.status}`);
-            }
-            qwenConfig = await resp.json();
-            qwenConfigLoaded = true;
-            populateQwenConfigForm(qwenConfig);
-            setQwenConfigStatus("Defaults restored.", "success");
-        } catch (error) {
-            console.error("Failed to reset Qwen config", error);
-            setQwenConfigStatus(`Reset failed: ${error.message || error}`, "error");
+    function initQwenModelTab() {
+        if (qwenModelElements.status) {
+            return;
         }
-    }
-
-    async function handleQwenConfigReload() {
-        try {
-            await loadQwenConfig(true);
-        } catch (error) {
-            console.error("Failed to reload Qwen config", error);
-        }
-    }
-
-    function initializeQwenConfigTab() {
-        if (!qwenConfigUiInitialized) {
-            qwenConfigUiInitialized = true;
-            qwenConfigElements.bboxBase = document.getElementById("qwenBboxBase");
-            qwenConfigElements.bboxImageType = document.getElementById("qwenBboxImageType");
-            qwenConfigElements.bboxExtra = document.getElementById("qwenBboxExtra");
-            qwenConfigElements.pointBase = document.getElementById("qwenPointBase");
-            qwenConfigElements.pointImageType = document.getElementById("qwenPointImageType");
-            qwenConfigElements.pointExtra = document.getElementById("qwenPointExtra");
-            qwenConfigElements.status = document.getElementById("qwenConfigStatus");
-            qwenConfigElements.saveButton = document.getElementById("qwenConfigSave");
-            qwenConfigElements.resetButton = document.getElementById("qwenConfigReset");
-            qwenConfigElements.reloadButton = document.getElementById("qwenConfigReload");
-            qwenConfigElements.saveButton?.addEventListener("click", handleQwenConfigSave);
-            qwenConfigElements.resetButton?.addEventListener("click", handleQwenConfigReset);
-            qwenConfigElements.reloadButton?.addEventListener("click", handleQwenConfigReload);
-        }
-        loadQwenConfig().catch((error) => {
-            console.debug("Unable to load Qwen config", error);
-        });
+        qwenModelElements.status = document.getElementById("qwenModelStatus");
+        qwenModelElements.list = document.getElementById("qwenModelList");
+        qwenModelElements.details = document.getElementById("qwenModelDetails");
+        refreshQwenModels();
     }
 
     async function handleQwenRun() {
@@ -4404,6 +5154,8 @@
         predictorElements.imageRam = document.getElementById("predictorImageRam");
         predictorElements.systemFreeRam = document.getElementById("predictorSystemFreeRam");
         initQwenPanel();
+        initQwenTrainingTab();
+        initQwenModelTab();
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));

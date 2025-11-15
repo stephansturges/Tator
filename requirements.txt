@@ -29,6 +29,11 @@ accelerate>=0.30,<1.0
 qwen-vl-utils>=0.0.8
 safetensors>=0.4,<0.5
 sentencepiece>=0.1.99,<0.2
+peft>=0.11,<1.0
+bitsandbytes>=0.43,<1.0
+lightning>=2.4,<3.0
+nltk>=3.8,<4.0
+decord>=0.6,<1.0
 
 # Segment Anything 2 (SAM2) — optional, enable if you plan to use SAM2
 # git+https://github.com/facebookresearch/sam2.git

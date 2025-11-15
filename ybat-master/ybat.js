@@ -395,6 +395,7 @@
             hintText = null,
             progressText = "Preparing files…",
             indeterminate = true,
+        summaryText = null,
         } = options;
         const imageSummary = stats
             ? `${stats.imageCount} image${stats.imageCount === 1 ? "" : "s"} (${formatBytes(stats.imageBytes)})`
@@ -404,7 +405,9 @@
             : "";
         const totalSummary = stats ? `${stats.totalFiles} files ≈ ${formatBytes(stats.totalBytes)}` : null;
         if (trainingPackagingModal.summaryEl) {
-            if (stats) {
+            if (summaryText) {
+                trainingPackagingModal.summaryEl.textContent = summaryText;
+            } else if (stats) {
                 trainingPackagingModal.summaryEl.textContent = `${imageSummary} + ${labelSummary} (${totalSummary})`;
             } else {
                 trainingPackagingModal.summaryEl.textContent = "Packaging dataset…";
@@ -1862,10 +1865,12 @@ async function uploadQwenDatasetStream() {
     let packagingModalVisible = false;
     let jobId = null;
     try {
+        const summaryText = `${stats.imageCount} image${stats.imageCount === 1 ? "" : "s"} (${formatBytes(stats.imageBytes)}) + streaming annotations`;
         showTrainingPackagingModal(stats, {
             indeterminate: false,
             progressText: "Preparing dataset…",
             hintText: "Keep this tab open while we package the dataset for Qwen training.",
+            summaryText,
         });
         packagingModalVisible = true;
         const runName = qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
@@ -7639,17 +7644,6 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
             screenY = 0;
         }
     };
-
-    function formatBytes(bytes, decimals) {
-        if (bytes === 0) {
-            return "0 Bytes";
-        }
-        const k = 1024;
-        const dm = decimals === undefined ? 2 : decimals;
-        const sizes = ["Bytes", "KB", "MB"];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[i];
-    }
 
     const listenImageSelect = () => {
         const imageList = document.getElementById("imageList");

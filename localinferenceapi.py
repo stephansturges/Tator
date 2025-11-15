@@ -19,6 +19,7 @@ from starlette.status import (
     HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_428_PRECONDITION_REQUIRED,
     HTTP_409_CONFLICT,
+    HTTP_500_INTERNAL_SERVER_ERROR,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 from collections import OrderedDict
@@ -1600,6 +1601,21 @@ class ClipDatasetUploadJob:
     completed: bool = False
 
 
+@dataclass
+class QwenDatasetUploadJob:
+    job_id: str
+    root_dir: Path
+    train_dir: Path
+    val_dir: Path
+    train_annotations: Path
+    val_annotations: Path
+    created_at: float = field(default_factory=time.time)
+    run_name: Optional[str] = None
+    train_count: int = 0
+    val_count: int = 0
+    completed: bool = False
+
+
 TRAINING_JOBS: Dict[str, ClipTrainingJob] = {}
 TRAINING_JOBS_LOCK = threading.Lock()
 
@@ -1632,6 +1648,8 @@ CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_DATASET_JOBS: Dict[str, ClipDatasetUploadJob] = {}
 CLIP_DATASET_JOBS_LOCK = threading.Lock()
+QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}
+QWEN_DATASET_JOBS_LOCK = threading.Lock()
 
 MAX_JOB_LOGS = 250
 
@@ -1895,6 +1913,22 @@ def _pop_clip_dataset_job(job_id: str) -> ClipDatasetUploadJob:
     return job
 
 
+def _get_qwen_dataset_job(job_id: str) -> QwenDatasetUploadJob:
+    with QWEN_DATASET_JOBS_LOCK:
+        job = QWEN_DATASET_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
+    return job
+
+
+def _pop_qwen_dataset_job(job_id: str) -> QwenDatasetUploadJob:
+    with QWEN_DATASET_JOBS_LOCK:
+        job = QWEN_DATASET_JOBS.pop(job_id, None)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
+    return job
+
+
 def _get_qwen_job(job_id: str) -> QwenTrainingJob:
     with QWEN_TRAINING_JOBS_LOCK:
         job = QWEN_TRAINING_JOBS.get(job_id)
@@ -1966,6 +2000,108 @@ def clip_dataset_cancel(job_id: str = Form(...)):
     job = None
     with CLIP_DATASET_JOBS_LOCK:
         job = CLIP_DATASET_JOBS.pop(job_id, None)
+    if job:
+        shutil.rmtree(job.root_dir, ignore_errors=True)
+    return {"status": "cancelled"}
+
+
+@app.post("/qwen/dataset/init")
+def qwen_dataset_init(run_name: Optional[str] = Form(None)):
+    job_id = uuid.uuid4().hex
+    staging_dir = (QWEN_DATASET_ROOT / f"staging_{job_id}").resolve()
+    train_dir = staging_dir / "train"
+    val_dir = staging_dir / "val"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    val_dir.mkdir(parents=True, exist_ok=True)
+    train_annotations = train_dir / "annotations.jsonl"
+    val_annotations = val_dir / "annotations.jsonl"
+    train_annotations.touch()
+    val_annotations.touch()
+    job = QwenDatasetUploadJob(
+        job_id=job_id,
+        root_dir=staging_dir,
+        train_dir=train_dir,
+        val_dir=val_dir,
+        train_annotations=train_annotations,
+        val_annotations=val_annotations,
+        run_name=run_name,
+    )
+    with QWEN_DATASET_JOBS_LOCK:
+        QWEN_DATASET_JOBS[job_id] = job
+    return {"job_id": job_id}
+
+
+@app.post("/qwen/dataset/chunk")
+async def qwen_dataset_chunk(
+    job_id: str = Form(...),
+    split: str = Form(...),
+    image_name: Optional[str] = Form(None),
+    annotation_line: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    job = _get_qwen_dataset_job(job_id)
+    if job.completed:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_job_finalized")
+    split_lower = (split or "").strip().lower()
+    if split_lower not in {"train", "val"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_split")
+    target_dir = job.train_dir if split_lower == "train" else job.val_dir
+    target_annotations = job.train_annotations if split_lower == "train" else job.val_annotations
+    name = image_name or file.filename or f"{split_lower}_{uuid.uuid4().hex}"
+    normalised = _normalise_relative_path(name)
+    dest_path = (target_dir / normalised).resolve()
+    if not str(dest_path).startswith(str(job.root_dir)):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+    await _write_upload_file(file, dest_path)
+    line = (annotation_line or "").strip()
+    if not line:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_required")
+    with target_annotations.open("a", encoding="utf-8") as handle:
+        handle.write(line.rstrip("\n") + "\n")
+    with QWEN_DATASET_JOBS_LOCK:
+        if split_lower == "train":
+            job.train_count += 1
+        else:
+            job.val_count += 1
+    return {"status": "ok", "train": job.train_count, "val": job.val_count}
+
+
+@app.post("/qwen/dataset/finalize")
+def qwen_dataset_finalize(
+    job_id: str = Form(...),
+    metadata: str = Form(...),
+    run_name: Optional[str] = Form(None),
+):
+    job = _pop_qwen_dataset_job(job_id)
+    try:
+        meta_obj = json.loads(metadata)
+        if not isinstance(meta_obj, dict):
+            raise ValueError("metadata_not_dict")
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(job.root_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"metadata_invalid:{exc}") from exc
+    meta_path = job.root_dir / "dataset_meta.json"
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(meta_obj, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(job.root_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"metadata_write_failed:{exc}") from exc
+    desired_name = run_name or job.run_name or f"dataset_{job_id}"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", desired_name).strip("_") or f"dataset_{job_id}"
+    dest_dir = (QWEN_DATASET_ROOT / safe_name).resolve()
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir, ignore_errors=True)
+    shutil.move(str(job.root_dir), str(dest_dir))
+    job.completed = True
+    return {"dataset_root": str(dest_dir), "run_name": safe_name}
+
+
+@app.post("/qwen/dataset/cancel")
+def qwen_dataset_cancel(job_id: str = Form(...)):
+    job = None
+    with QWEN_DATASET_JOBS_LOCK:
+        job = QWEN_DATASET_JOBS.pop(job_id, None)
     if job:
         shutil.rmtree(job.root_dir, ignore_errors=True)
     return {"status": "cancelled"}

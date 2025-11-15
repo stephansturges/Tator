@@ -6775,7 +6775,9 @@
                 return;
             }
 
-            if (key === 8 || (key === 46 && event.metaKey === true)) {
+            const plainDeleteHotkey = !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey
+                && (key === 87 || event.key === "w" || event.key === "W");
+            if (key === 8 || (key === 46 && event.metaKey === true) || plainDeleteHotkey) {
                 if (currentBbox !== null) {
                     bboxes[currentImage.name][currentBbox.bbox.class].splice(currentBbox.index, 1);
                     currentBbox = null;

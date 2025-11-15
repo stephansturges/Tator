@@ -1,14 +1,17 @@
-import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys
+from __future__ import annotations
+
+import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re
+from copy import deepcopy
 from pathlib import Path
 import numpy as np
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Literal
 import torch, clip, joblib
 from io import BytesIO
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, root_validator
+from pydantic import BaseModel, root_validator, Field
 import psutil
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
@@ -27,7 +30,67 @@ from dataclasses import dataclass, field, asdict
 
 from tools.clip_training import train_clip_from_yolo, TrainingError, TrainingArtifacts
 
+try:
+    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+    from qwen_vl_utils import process_vision_info
+except Exception as exc:  # noqa: BLE001
+    QWEN_IMPORT_ERROR = exc
+    Qwen2_5_VLForConditionalGeneration = None  # type: ignore[assignment]
+    AutoProcessor = None  # type: ignore[assignment]
+    process_vision_info = None  # type: ignore[assignment]
+else:
+    QWEN_IMPORT_ERROR = None
+
 MAX_PREDICTOR_SLOTS = 3
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen2.5-VL-3B-Instruct")
+QWEN_MIN_PIXELS = _env_int("QWEN_MIN_PIXELS", 256 * 28 * 28)
+QWEN_MAX_PIXELS = _env_int("QWEN_MAX_PIXELS", 1280 * 28 * 28)
+QWEN_MAX_NEW_TOKENS = _env_int("QWEN_MAX_NEW_TOKENS", 1024)
+QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", True)
+QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
+QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
+QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
+
+qwen_model = None
+qwen_processor = None
+qwen_device: Optional[str] = None
+qwen_last_error: Optional[str] = None
+qwen_lock = threading.RLock()
+qwen_config_lock = threading.RLock()
 
 
 def _bytes_to_mb(value: int) -> float:
@@ -439,135 +502,383 @@ def _default_variant(value: Optional[str]) -> str:
     return (value or "sam1").lower()
 
 
-_job_id_counter = itertools.count(1)
+def _resolve_qwen_device() -> str:
+    if QWEN_DEVICE_PREF and QWEN_DEVICE_PREF != "auto":
+        if QWEN_DEVICE_PREF.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("cuda_requested_but_unavailable")
+        if QWEN_DEVICE_PREF.startswith("mps"):
+            mps_backend = getattr(torch.backends, "mps", None)
+            if not mps_backend or not mps_backend.is_available():  # type: ignore[attr-defined]
+                raise RuntimeError("mps_requested_but_unavailable")
+        return QWEN_DEVICE_PREF
+    if torch.cuda.is_available():
+        return "cuda"
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend and mps_backend.is_available():  # type: ignore[attr-defined]
+        return "mps"
+    return "cpu"
 
 
-@dataclass
-class SamPreloadJob:
-    request_id: int
-    variant: str
-    generation: Optional[int]
-    image_token: Optional[str]
-    image_base64: Optional[str]
-    image_name: Optional[str]
-    slot: str
-    event: threading.Event
-    result: Optional['SamPreloadResponse'] = None
-    error: Optional[Exception] = None
+def _get_qwen_prompt_config() -> QwenPromptConfig:
+    with qwen_config_lock:
+        return qwen_prompt_config.copy(deep=True)
 
 
-class SamPreloadManager:
-    def __init__(self):
-        self.queue: "queue.Queue[SamPreloadJob]" = queue.Queue()
-        self.lock = threading.Lock()
-        self.latest_request_id: Dict[str, int] = {}
-        self.latest_generation: Dict[str, int] = {}
-        self.worker = threading.Thread(target=self._worker, name="sam-preload-worker", daemon=True)
-        self.worker.start()
+def _set_qwen_prompt_config(config: QwenPromptConfig) -> None:
+    global qwen_prompt_config
+    with qwen_config_lock:
+        qwen_prompt_config = config.copy(deep=True)
 
-    def submit(
-        self,
-        *,
-        variant: str,
-        generation: Optional[int],
-        image_token: Optional[str],
-        image_base64: Optional[str],
-        image_name: Optional[str],
-        slot: str,
-    ) -> 'SamPreloadResponse':
-        job = SamPreloadJob(
-            request_id=next(_job_id_counter),
-            variant=variant,
-            generation=generation,
-            image_token=image_token,
-            image_base64=image_base64,
-            image_name=image_name,
-            slot=slot,
-            event=threading.Event(),
+
+def _render_qwen_prompt(
+    prompt_type: str,
+    *,
+    items: Optional[str],
+    image_type: Optional[str],
+    extra_context: Optional[str],
+) -> str:
+    if not items:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_items_required")
+    config = _get_qwen_prompt_config()
+    section_name = "bbox" if prompt_type in {"bbox", "bbox_sam"} else prompt_type
+    section = getattr(config, section_name)
+    template = (section.base_prompt or "{items}").strip()
+    image_value = (image_type or section.default_image_type or "image").strip() or "image"
+    extra_value = extra_context if extra_context is not None and extra_context.strip() else section.default_extra_context
+    formatted = template.format(
+        image_type=image_value,
+        items=items.strip(),
+        extra_context=(extra_value or "").strip(),
+    )
+    return formatted.strip()
+
+
+def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    candidates = re.findall(r"```json\s*(.*?)```", text, flags=re.DOTALL)
+    search_space = candidates or [text]
+    for raw in search_space:
+        snippet = raw.strip()
+        if not snippet:
+            continue
+        try:
+            parsed = json.loads(snippet)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            if "detections" in parsed and isinstance(parsed["detections"], list):
+                return snippet, [item for item in parsed["detections"] if isinstance(item, dict)]
+            return snippet, [parsed]
+        if isinstance(parsed, list):
+            return snippet, [item for item in parsed if isinstance(item, dict)]
+    raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_parse_error:no_json_block_found")
+
+
+def _extract_numeric_sequence(value: Any, *, length: int) -> Optional[List[float]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, (list, tuple)) or len(value) < length:
+        return None
+    numbers: List[float] = []
+    for idx in range(length):
+        try:
+            numbers.append(float(value[idx]))
+        except (TypeError, ValueError):
+            return None
+    return numbers
+
+
+def _scale_coord(value: float, src: int, dst: int) -> float:
+    if src <= 0:
+        return float(value)
+    return float(value) * (float(dst) / float(src))
+
+
+def _scale_bbox_to_image(
+    bbox: List[float],
+    proc_w: int,
+    proc_h: int,
+    full_w: int,
+    full_h: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    if len(bbox) < 4:
+        return None
+    left = _scale_coord(bbox[0], proc_w, full_w)
+    top = _scale_coord(bbox[1], proc_h, full_h)
+    right = _scale_coord(bbox[2], proc_w, full_w)
+    bottom = _scale_coord(bbox[3], proc_h, full_h)
+    left_i = max(0, min(full_w, int(round(left))))
+    top_i = max(0, min(full_h, int(round(top))))
+    right_i = max(0, min(full_w, int(round(right))))
+    bottom_i = max(0, min(full_h, int(round(bottom))))
+    if right_i <= left_i or bottom_i <= top_i:
+        return None
+    return left_i, top_i, right_i, bottom_i
+
+
+def _scale_point_to_image(
+    point: List[float],
+    proc_w: int,
+    proc_h: int,
+    full_w: int,
+    full_h: int,
+) -> Optional[Tuple[float, float]]:
+    if len(point) < 2:
+        return None
+    x = _scale_coord(point[0], proc_w, full_w)
+    y = _scale_coord(point[1], proc_h, full_h)
+    x = float(min(max(x, 0.0), float(full_w)))
+    y = float(min(max(y, 0.0), float(full_h)))
+    return x, y
+
+
+def _qwen_items_from_payload(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _qwen_bbox_results(
+    items: List[Dict[str, Any]],
+    proc_w: int,
+    proc_h: int,
+    full_w: int,
+    full_h: int,
+    *,
+    limit: int,
+) -> List['QwenDetection']:
+    results: List[QwenDetection] = []
+    for item in items:
+        bbox = (
+            _extract_numeric_sequence(item.get("bbox_2d"), length=4)
+            or _extract_numeric_sequence(item.get("bbox"), length=4)
+            or _extract_numeric_sequence(item.get("box"), length=4)
         )
-        with self.lock:
-            self.latest_request_id[variant] = job.request_id
-            if generation is not None:
-                prev = self.latest_generation.get(variant)
-                if prev is None or generation > prev:
-                    self.latest_generation[variant] = generation
-        self.queue.put(job)
-        job.event.wait()
-        if job.error:
-            raise job.error
-        return job.result  # type: ignore[return-value]
+        if not bbox:
+            continue
+        scaled = _scale_bbox_to_image(bbox, proc_w, proc_h, full_w, full_h)
+        if not scaled:
+            continue
+        left, top, right, bottom = scaled
+        yolo_box = to_yolo(full_w, full_h, left, top, right, bottom)
+        label = item.get("label") or item.get("class") or item.get("name")
+        results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox"))
+        if len(results) >= limit:
+            break
+    return results
 
-    def _worker(self) -> None:
-        while True:
-            job = self.queue.get()
-            try:
-                if self._is_superseded(job):
-                    job.result = SamPreloadResponse(status="superseded", width=0, height=0, token=job.image_token or "")
-                else:
-                    job.result = self._process_job(job)
-            except Exception as exc:  # noqa: BLE001 - propagate to caller
-                job.error = exc
-            finally:
-                job.event.set()
-                self.queue.task_done()
 
-    def _is_superseded(self, job: SamPreloadJob) -> bool:
-        with self.lock:
-            latest_id = self.latest_request_id.get(job.variant)
-            latest_generation = self.latest_generation.get(job.variant)
-        if latest_id is not None and job.request_id < latest_id:
-            return True
-        if job.generation is not None and latest_generation is not None and job.generation < latest_generation:
-            return True
-        return False
+def _qwen_bbox_sam_results(
+    items: List[Dict[str, Any]],
+    proc_w: int,
+    proc_h: int,
+    pil_img: Image.Image,
+    np_img: np.ndarray,
+    token: Optional[str],
+    variant: str,
+    *,
+    image_name: Optional[str],
+    limit: int,
+) -> List['QwenDetection']:
+    results: List[QwenDetection] = []
+    for item in items:
+        bbox = (
+            _extract_numeric_sequence(item.get("bbox_2d"), length=4)
+            or _extract_numeric_sequence(item.get("bbox"), length=4)
+            or _extract_numeric_sequence(item.get("box"), length=4)
+        )
+        if not bbox:
+            continue
+        scaled = _scale_bbox_to_image(bbox, proc_w, proc_h, pil_img.width, pil_img.height)
+        if not scaled:
+            continue
+        sub_box = np.array(list(scaled), dtype=np.float32)
+        masks, _, _ = _predict_with_cache(
+            np_img,
+            token,
+            variant,
+            image_name=image_name,
+            box=sub_box,
+            multimask_output=False,
+        )
+        mask = masks[0]
+        left, top, right, bottom = mask_to_bounding_box(mask)
+        if right <= left or bottom <= top:
+            continue
+        yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+        label = item.get("label") or item.get("class") or item.get("name")
+        results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox_sam"))
+        if len(results) >= limit:
+            break
+    return results
 
-    def _process_job(self, job: SamPreloadJob) -> 'SamPreloadResponse':
-        variant = job.variant
+
+def _qwen_point_results(
+    items: List[Dict[str, Any]],
+    proc_w: int,
+    proc_h: int,
+    pil_img: Image.Image,
+    np_img: np.ndarray,
+    token: Optional[str],
+    variant: str,
+    *,
+    image_name: Optional[str],
+    limit: int,
+) -> List['QwenDetection']:
+    results: List[QwenDetection] = []
+    for item in items:
+        point = _extract_numeric_sequence(item.get("point_2d") or item.get("point"), length=2)
+        if not point:
+            continue
+        scaled_point = _scale_point_to_image(point, proc_w, proc_h, pil_img.width, pil_img.height)
+        if not scaled_point:
+            continue
+        coords = np.array([[scaled_point[0], scaled_point[1]]], dtype=np.float32)
+        labels = np.array([1], dtype=np.int64)
+        masks, _, _ = _predict_with_cache(
+            np_img,
+            token,
+            variant,
+            image_name=image_name,
+            point_coords=coords,
+            point_labels=labels,
+            multimask_output=False,
+        )
+        mask = masks[0]
+        left, top, right, bottom = mask_to_bounding_box(mask)
+        if right <= left or bottom <= top:
+            continue
+        yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+        label = item.get("label") or item.get("class") or item.get("name")
+        results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="point"))
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _ensure_qwen_ready():
+    global qwen_model, qwen_processor, qwen_device, qwen_last_error
+    if QWEN_IMPORT_ERROR is not None or Qwen2_5_VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
+        detail = f"qwen_dependencies_missing:{QWEN_IMPORT_ERROR}"
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    if qwen_model is not None and qwen_processor is not None:
+        return qwen_model, qwen_processor
+    with qwen_lock:
+        if qwen_model is not None and qwen_processor is not None:
+            return qwen_model, qwen_processor
         try:
-            slot_name = predictor_manager.resolve_slot(job.slot, allow_disabled_fallback=False)
-        except ValueError:
-            return SamPreloadResponse(status="slot_disabled", width=0, height=0, token=job.image_token or "")
-        image_name = job.image_name
-
-        if job.image_token:
-            cached = _fetch_preloaded_image(job.image_token, variant)
-            if cached is not None:
-                if self._is_superseded(job):
-                    return SamPreloadResponse(status="superseded", width=int(cached.shape[1]), height=int(cached.shape[0]), token=job.image_token)
-                predictor_manager.set_slot_with_wait(slot_name, cached, job.image_token, variant, image_name)
-                height, width = cached.shape[:2]
-                return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=job.image_token)
-            if not job.image_base64:
-                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
-
-        if not job.image_base64:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required")
-
-        np_img = self._decode_base64(job.image_base64)
-        token = hashlib.md5(np_img.tobytes()).hexdigest()
-        _store_preloaded_image(token, np_img, variant)
-
-        if self._is_superseded(job):
-            return SamPreloadResponse(status="superseded", width=int(np_img.shape[1]), height=int(np_img.shape[0]), token=token)
-
-        predictor_manager.set_slot_with_wait(slot_name, np_img, token, variant, image_name)
-        height, width = np_img.shape[:2]
-        return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=token)
-
-    @staticmethod
-    def _decode_base64(image_base64: str) -> np.ndarray:
+            device = _resolve_qwen_device()
+        except RuntimeError as exc:  # noqa: BLE001
+            qwen_last_error = str(exc)
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}") from exc
+        use_auto_map = QWEN_DEVICE_PREF == "auto" and device.startswith("cuda") and torch.cuda.is_available()
+        load_kwargs: Dict[str, Any]
+        if use_auto_map:
+            load_kwargs = {
+                "torch_dtype": "auto",
+                "device_map": "auto",
+            }
+        else:
+            dtype = torch.float16 if device.startswith(("cuda", "mps")) else torch.float32
+            load_kwargs = {
+                "torch_dtype": dtype,
+                "low_cpu_mem_usage": True,
+            }
         try:
-            data = base64.b64decode(image_base64)
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                QWEN_MODEL_NAME,
+                **load_kwargs,
+            )
+            if not load_kwargs.get("device_map"):
+                model.to(device)
+            model.eval()
+            processor = AutoProcessor.from_pretrained(
+                QWEN_MODEL_NAME,
+                min_pixels=QWEN_MIN_PIXELS,
+                max_pixels=QWEN_MAX_PIXELS,
+            )
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_base64:{exc}") from exc
+            qwen_last_error = str(exc)
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
+        qwen_model = model
+        qwen_processor = processor
+        qwen_device = device
+        qwen_last_error = None
+        return model, processor
+
+
+def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, int]:
+    """Execute a Qwen 2.5 VL inference following the reference blog recipe."""
+    model, processor = _ensure_qwen_ready()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": pil_img},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    )
+    device = qwen_device or _resolve_qwen_device()
+    inputs = inputs.to(device)
+    gen_kwargs: Dict[str, Any] = {
+        "max_new_tokens": QWEN_MAX_NEW_TOKENS,
+    }
+    if QWEN_DO_SAMPLE:
+        gen_kwargs.update(
+            {
+                "do_sample": True,
+                "temperature": QWEN_TEMPERATURE,
+                "top_p": QWEN_TOP_P,
+            }
+        )
+    else:
+        gen_kwargs["do_sample"] = False
+    with torch.inference_mode():
         try:
-            pil_img = Image.open(BytesIO(data)).convert("RGB")
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_image:{exc}") from exc
-        return np.array(pil_img)
+            generated_ids = model.generate(**inputs, **gen_kwargs)
+        except RuntimeError as exc:
+            if QWEN_DO_SAMPLE and "probability tensor" in str(exc).lower():
+                fallback_kwargs = {**gen_kwargs}
+                fallback_kwargs["do_sample"] = False
+                fallback_kwargs.pop("temperature", None)
+                fallback_kwargs.pop("top_p", None)
+                generated_ids = model.generate(**inputs, **fallback_kwargs)
+            else:
+                raise
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    grid = inputs.get("image_grid_thw")
+    if grid is not None:
+        grid_values = grid[0]
+        input_height = int(grid_values[1].item() * 14)
+        input_width = int(grid_values[2].item() * 14)
+    else:
+        input_height = pil_img.height
+        input_width = pil_img.width
+    return output_text, input_width, input_height
 
 
-def resolve_image_payload(image_base64: Optional[str], image_token: Optional[str], sam_variant: Optional[str]) -> Tuple[Image.Image, np.ndarray, str]:
+def resolve_image_payload(
+    image_base64: Optional[str],
+    image_token: Optional[str],
+    sam_variant: Optional[str],
+) -> Tuple[Image.Image, np.ndarray, str]:
     variant = _default_variant(sam_variant)
     if image_token:
         cached = _fetch_preloaded_image(image_token, variant)
@@ -584,13 +895,16 @@ def resolve_image_payload(image_base64: Optional[str], image_token: Optional[str
     _store_preloaded_image(token, np_img, variant)
     return pil_img, np_img, token
 
+
 class Base64Payload(BaseModel):
     image_base64: str
     uuid: Optional[str] = None
 
+
 class PredictResponse(BaseModel):
     prediction: str
     uuid: Optional[str] = None
+
 
 class BboxModel(BaseModel):
     className: str
@@ -599,13 +913,16 @@ class BboxModel(BaseModel):
     width: float
     height: float
 
+
 class CropImage(BaseModel):
     image_base64: str
     originalName: str
     bboxes: List[BboxModel]
 
+
 class CropZipRequest(BaseModel):
     images: List[CropImage]
+
 
 class PointPrompt(BaseModel):
     image_base64: Optional[str] = None
@@ -617,10 +934,11 @@ class PointPrompt(BaseModel):
     image_name: Optional[str] = None
 
     @root_validator
-    def _ensure_image_payload(cls, values):
+    def _ensure_point_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
         return values
+
 
 class BboxPrompt(BaseModel):
     image_base64: Optional[str] = None
@@ -634,7 +952,7 @@ class BboxPrompt(BaseModel):
     image_name: Optional[str] = None
 
     @root_validator
-    def _ensure_bbox_payload(cls, values):
+    def _ensure_bbox_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
         return values
@@ -649,7 +967,7 @@ class SamPreloadRequest(BaseModel):
     slot: Optional[str] = "current"
 
     @root_validator
-    def _ensure_preload_payload(cls, values):
+    def _ensure_preload_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
         if values.get("slot") and values.get("slot") != "current" and not values.get("image_name"):
@@ -662,9 +980,6 @@ class SamPreloadResponse(BaseModel):
     width: int
     height: int
     token: str
-
-
-sam_preload_manager = SamPreloadManager()
 
 
 class SamSlotStatus(BaseModel):
@@ -717,10 +1032,11 @@ class MultiPointPrompt(BaseModel):
     image_name: Optional[str] = None
 
     @root_validator
-    def _ensure_multi_payload(cls, values):
+    def _ensure_multi_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
         return values
+
 
 class YoloBboxOutput(BaseModel):
     class_id: str
@@ -728,12 +1044,109 @@ class YoloBboxOutput(BaseModel):
     uuid: Optional[str] = None
     image_token: Optional[str] = None
 
+
 class YoloBboxClassOutput(BaseModel):
     class_id: int
     bbox: List[float]
     uuid: Optional[str] = None
     image_token: Optional[str] = None
 
+
+class QwenDetection(BaseModel):
+    bbox: List[float]
+    qwen_label: Optional[str] = None
+    source: Literal["bbox", "point", "bbox_sam"]
+
+
+class QwenInferenceRequest(BaseModel):
+    prompt: Optional[str] = None
+    item_list: Optional[str] = None
+    image_type: Optional[str] = None
+    extra_context: Optional[str] = None
+    prompt_type: Literal["bbox", "point", "bbox_sam"] = "bbox"
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
+    sam_variant: Optional[str] = None
+    image_name: Optional[str] = None
+    max_results: Optional[int] = 8
+
+    @root_validator
+    def _validate_qwen_payload(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_payload_missing")
+        prompt = (values.get("prompt") or "").strip()
+        items = (values.get("item_list") or "").strip()
+        if prompt:
+            values["prompt"] = prompt
+        elif items:
+            values["item_list"] = items
+        else:
+            raise ValueError("prompt_or_items_required")
+        max_results = values.get("max_results")
+        if max_results is not None:
+            try:
+                max_int = int(max_results)
+            except (TypeError, ValueError):
+                max_int = 8
+            values["max_results"] = max(1, min(max_int, 50))
+        else:
+            values["max_results"] = 8
+        return values
+
+
+class QwenInferenceResponse(BaseModel):
+    boxes: List[QwenDetection] = Field(default_factory=list)
+    raw_response: str
+    prompt: str
+    prompt_type: Literal["bbox", "point", "bbox_sam"]
+    warnings: List[str] = Field(default_factory=list)
+    image_token: Optional[str] = None
+
+
+class QwenPromptSection(BaseModel):
+    base_prompt: str
+    default_image_type: str = "image"
+    default_extra_context: str = ""
+
+    @root_validator
+    def _validate_qwen_section(cls, values):  # noqa: N805
+        template = values.get("base_prompt") or ""
+        if "{items}" not in template:
+            raise ValueError("base_prompt_missing_items_placeholder")
+        if "{image_type}" not in template:
+            raise ValueError("base_prompt_missing_image_type_placeholder")
+        if "{extra_context}" not in template:
+            raise ValueError("base_prompt_missing_extra_context_placeholder")
+        return values
+
+
+class QwenPromptConfig(BaseModel):
+    bbox: QwenPromptSection
+    point: QwenPromptSection
+
+
+DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
+    bbox=QwenPromptSection(
+        base_prompt=(
+            "Output a JSON formatted list of very tight bounding boxes with coordinates in format (x1,y1,x2,y2) "
+            "of detections in this {image_type}. Make a single bounding box for each unique instance of the things we want to detect. "
+            "The objects we want to detect are: {items}. {extra_context}"
+        ),
+        default_image_type="image",
+        default_extra_context="Return only JSON, no additional text.",
+    ),
+    point=QwenPromptSection(
+        base_prompt=(
+            "Output a JSON formatted list of positive click points with coordinates in format (x,y) for detections in this {image_type}. "
+            "Each entry must contain \"point_2d\": [x, y] centered on the object so Segment Anything can turn it into a mask/bbox. "
+            "Make one point per object. The objects we want to detect are: {items}. {extra_context}"
+        ),
+        default_image_type="image",
+        default_extra_context="Respond with JSON only.",
+    ),
+)
+
+qwen_prompt_config = DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True)
 
 class ActiveModelRequest(BaseModel):
     classifier_path: Optional[str] = None
@@ -996,6 +1409,25 @@ def to_yolo(w: int, h: int, left: int, top: int, right: int, bottom: int) -> Lis
     ww = w_abs / w
     hh = h_abs / h
     return [cx, cy, ww, hh]
+
+
+def yolo_to_corners(box: List[float], w: int, h: int) -> Tuple[int, int, int, int]:
+    if len(box) < 4:
+        return (0, 0, 0, 0)
+    cx, cy, ww, hh = box[:4]
+    w_abs = max(0.0, float(ww) * w)
+    h_abs = max(0.0, float(hh) * h)
+    cx_abs = float(cx) * w
+    cy_abs = float(cy) * h
+    left = int(round(cx_abs - w_abs / 2))
+    top = int(round(cy_abs - h_abs / 2))
+    right = int(round(cx_abs + w_abs / 2))
+    bottom = int(round(cy_abs + h_abs / 2))
+    left = max(0, min(w, left))
+    top = max(0, min(h, top))
+    right = max(left, min(w, right))
+    bottom = max(top, min(h, bottom))
+    return left, top, right, bottom
 
 @app.post("/predict_base64", response_model=PredictResponse)
 def predict_base64(payload: Base64Payload):
@@ -1534,6 +1966,128 @@ def predict_crop(file: UploadFile = File(...),
     feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
     pred_cls = clf.predict(feats_np)[0]
     return PredictResponse(prediction=pred_cls, uuid=None)
+
+
+@app.get("/qwen/status")
+def qwen_status():
+    dependency_error = str(QWEN_IMPORT_ERROR) if QWEN_IMPORT_ERROR else None
+    device_guess = qwen_device
+    pending_error = qwen_last_error
+    if not device_guess and not dependency_error:
+        try:
+            device_guess = _resolve_qwen_device()
+        except RuntimeError as exc:  # noqa: BLE001
+            pending_error = str(exc)
+            device_guess = None
+    return {
+        "available": dependency_error is None,
+        "loaded": qwen_model is not None,
+        "model_name": QWEN_MODEL_NAME,
+        "device": device_guess,
+        "max_new_tokens": QWEN_MAX_NEW_TOKENS,
+        "min_pixels": QWEN_MIN_PIXELS,
+        "max_pixels": QWEN_MAX_PIXELS,
+        "last_error": pending_error,
+        "dependency_error": dependency_error,
+    }
+
+
+@app.get("/qwen/config", response_model=QwenPromptConfig)
+def qwen_get_config():
+    return _get_qwen_prompt_config()
+
+
+@app.post("/qwen/config", response_model=QwenPromptConfig)
+def qwen_update_config(payload: QwenPromptConfig):
+    _set_qwen_prompt_config(payload)
+    return _get_qwen_prompt_config()
+
+
+@app.post("/qwen/config/reset", response_model=QwenPromptConfig)
+def qwen_reset_config():
+    _set_qwen_prompt_config(DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True))
+    return _get_qwen_prompt_config()
+
+
+@app.post("/qwen/infer", response_model=QwenInferenceResponse)
+def qwen_infer(payload: QwenInferenceRequest):
+    prompt_type = payload.prompt_type.lower()
+    if prompt_type not in {"bbox", "point", "bbox_sam"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_prompt_type")
+    pil_img, np_img, token = resolve_image_payload(
+        payload.image_base64,
+        payload.image_token,
+        getattr(payload, "sam_variant", None),
+    )
+    manual_prompt = (payload.prompt or "").strip()
+    if manual_prompt:
+        final_prompt = manual_prompt
+    else:
+        item_list = (payload.item_list or "").strip()
+        final_prompt = _render_qwen_prompt(
+            prompt_type,
+            items=item_list,
+            image_type=(payload.image_type or "").strip() or None,
+            extra_context=(payload.extra_context or "").strip() or None,
+        )
+    try:
+        qwen_text, proc_w, proc_h = _run_qwen_inference(final_prompt, pil_img)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_inference_failed:{exc}") from exc
+    print("[Qwen prompt]", final_prompt)
+    print("[Qwen raw output]", qwen_text)
+    try:
+        _, items = _extract_qwen_json_block(qwen_text)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        print(f"[Qwen parse error] {detail}; raw text follows:\n{qwen_text}")
+        raise
+    normalized_items = _qwen_items_from_payload(items)
+    if not normalized_items:
+        print("[Qwen parsed but empty list]", qwen_text)
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_empty_payload")
+    variant = _default_variant(getattr(payload, "sam_variant", None))
+    limit = payload.max_results or 8
+    image_name = getattr(payload, "image_name", None)
+    if prompt_type == "bbox":
+        boxes = _qwen_bbox_results(normalized_items, proc_w, proc_h, pil_img.width, pil_img.height, limit=limit)
+    elif prompt_type == "bbox_sam":
+        boxes = _qwen_bbox_sam_results(
+            normalized_items,
+            proc_w,
+            proc_h,
+            pil_img,
+            np_img,
+            token,
+            variant,
+            image_name=image_name,
+            limit=limit,
+        )
+    else:
+        boxes = _qwen_point_results(
+            normalized_items,
+            proc_w,
+            proc_h,
+            pil_img,
+            np_img,
+            token,
+            variant,
+            image_name=image_name,
+            limit=limit,
+        )
+    warnings: List[str] = []
+    if not boxes:
+        warnings.append("no_results")
+    return QwenInferenceResponse(
+        boxes=boxes,
+        raw_response=qwen_text,
+        prompt=final_prompt,
+        prompt_type=prompt_type,  # type: ignore[arg-type]
+        warnings=warnings,
+        image_token=token,
+    )
 
 @app.post("/sam2_point", response_model=YoloBboxOutput)
 def sam2_point(prompt: PointPrompt):

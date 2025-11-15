@@ -47,7 +47,9 @@
             <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
+            <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Config</button>
             <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">Predictors</button>
+            <button class="tab-button" data-tab="settings" id="tabSettingsButton" type="button">Backend</button>
         </div>
         <div class="tab-panels">
             <div class="tab-panel active" id="tabLabeling" data-tab-panel="labeling">
@@ -98,15 +100,35 @@
                                 <div id="samStatusProgressFill"></div>
                             </div>
                             <br />
-                            <!-- Fallback CLIP crop policy -->
-                            <label for="useFallbackDilate">Fallback: Dilate crop on low confidence</label>
-                            <input type="checkbox" id="useFallbackDilate" name="useFallbackDilate" />
-                            <div class="fallback-options">
-                              <label for="minProba">Min proba (0-1):</label>
-                              <input type="number" id="minProba" name="minProba" min="0" max="1" step="0.05" value="0.55" />
-                              <label for="dilateRatio">Dilate ratio:</label>
-                              <input type="number" id="dilateRatio" name="dilateRatio" min="0" max="1" step="0.05" value="0.10" />
-                            </div>
+                            <section class="qwen-panel" aria-labelledby="qwenPanelTitle">
+                                <div class="qwen-panel__header">
+                                    <span id="qwenPanelTitle">Qwen 2.5 Assist</span>
+                                    <span id="qwenStatusLabel" class="qwen-status-label">Checking…</span>
+                                </div>
+                                <label for="qwenItems">Objects / keywords</label>
+                                <textarea id="qwenItems" rows="3" placeholder="List what to detect (comma or line separated)"></textarea>
+                                <button type="button" id="qwenAdvancedToggle" class="qwen-advanced-toggle" aria-expanded="false">Show advanced overrides</button>
+                                <div id="qwenAdvancedPanel" class="qwen-advanced" aria-hidden="true">
+                                    <label for="qwenCustomPrompt">Full prompt override</label>
+                                    <textarea id="qwenCustomPrompt" rows="3" placeholder="Optional: supply the exact prompt to send to Qwen"></textarea>
+                                    <label for="qwenImageType">Image type description</label>
+                                    <input type="text" id="qwenImageType" placeholder="Defaults to Qwen Config tab" />
+                                    <label for="qwenExtraContext">Extra context</label>
+                                    <textarea id="qwenExtraContext" rows="2" placeholder="Optional notes (lighting, camera, etc.)"></textarea>
+                                </div>
+                                <label for="qwenClassSelect">Assign detections to class</label>
+                                <select id="qwenClassSelect"></select>
+                                <label for="qwenPromptType">Prompt output</label>
+                                <select id="qwenPromptType">
+                                    <option value="bbox" selected>Bounding boxes</option>
+                                    <option value="bbox_sam">Bounding boxes → SAM cleanup</option>
+                                    <option value="point">Points → SAM boxes</option>
+                                </select>
+                                <label for="qwenMaxResults">Max detections</label>
+                                <input type="number" id="qwenMaxResults" min="1" max="50" value="8" />
+                                <button type="button" id="qwenRunButton" class="training-button" disabled>Use Qwen</button>
+                                <p class="qwen-hint">Uses the template in the Qwen Config tab; add extra context via the advanced overrides when needed.</p>
+                            </section>
                             <br />
                             <hr />
                             <label for="bboxes">Bboxes:</label>
@@ -325,6 +347,21 @@
                             </div>
                             <div class="active-help">Optional `.pkl`/`.txt` mapping to keep YOLO order.</div>
                         </div>
+                        <div class="active-field active-fallback">
+                            <h3>Fallback: Dilate Crop on Low Confidence</h3>
+                            <p class="active-help">When Auto Class is on, CLIP may occasionally return a low-confidence score for a rough bbox. Enable this fallback to automatically enlarge (dilate) the crop and retry the prediction before surfacing an error.</p>
+                            <label class="active-inline">
+                                <input type="checkbox" id="useFallbackDilate" name="useFallbackDilate" />
+                                Turn on fallback dilation when CLIP probability is below the threshold.
+                            </label>
+                            <div class="fallback-options">
+                                <label for="minProba">Min CLIP confidence (0–1)</label>
+                                <input type="number" id="minProba" name="minProba" min="0" max="1" step="0.05" value="0.55" />
+                                <label for="dilateRatio">Dilate ratio</label>
+                                <input type="number" id="dilateRatio" name="dilateRatio" min="0" max="1" step="0.05" value="0.10" />
+                            </div>
+                            <p class="active-help">Example: a 0.55 threshold + 0.10 ratio expands each low-confidence bbox by 10% in every direction before rerunning CLIP. Leave disabled if you prefer to review low-confidence crops manually.</p>
+                        </div>
                         <div class="active-buttons">
                             <button type="button" class="training-button" id="activateLatestModelBtn" disabled>Activate Latest Training Run</button>
                             <button type="button" class="training-button" id="applyActiveModelBtn">Apply Changes</button>
@@ -333,6 +370,40 @@
                         <input type="file" id="activeClassifierUpload" accept=".pkl" class="file-input-hidden" />
                         <input type="file" id="activeLabelmapUpload" accept=".pkl,.txt" class="file-input-hidden" />
                     </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabQwen" data-tab-panel="qwen">
+                <div class="qwen-config-panel">
+                    <h2>Qwen Prompt Templates</h2>
+                    <p class="qwen-config-help">Each template must include <code>{image_type}</code>, <code>{items}</code>, and <code>{extra_context}</code>. The labeling tab fills those placeholders using the per-image overrides.</p>
+                    <div class="qwen-config-grid">
+                        <section class="qwen-config-section">
+                            <h3>Bounding boxes</h3>
+                            <label for="qwenBboxBase">Base prompt</label>
+                            <textarea id="qwenBboxBase" rows="5"></textarea>
+                            <label for="qwenBboxImageType">Default image type</label>
+                            <input type="text" id="qwenBboxImageType" />
+                            <label for="qwenBboxExtra">Default extra context</label>
+                            <textarea id="qwenBboxExtra" rows="3"></textarea>
+                        </section>
+                        <section class="qwen-config-section">
+                            <h3>Point prompts</h3>
+                            <label for="qwenPointBase">Base prompt</label>
+                            <textarea id="qwenPointBase" rows="5"></textarea>
+                            <label for="qwenPointImageType">Default image type</label>
+                            <input type="text" id="qwenPointImageType" />
+                            <label for="qwenPointExtra">Default extra context</label>
+                            <textarea id="qwenPointExtra" rows="3"></textarea>
+                        </section>
+                    </div>
+                    <div class="qwen-config-actions">
+                        <div class="qwen-config-status" id="qwenConfigStatus" role="status" aria-live="polite"></div>
+                        <div class="qwen-config-buttons">
+                            <button type="button" class="training-button" id="qwenConfigSave">Save Changes</button>
+                            <button type="button" class="training-button" id="qwenConfigReset">Restore Defaults</button>
+                            <button type="button" class="training-button" id="qwenConfigReload">Reload</button>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="tab-panel" id="tabPredictors" data-tab-panel="predictors">
@@ -371,6 +442,20 @@
                             <strong id="predictorSystemFreeRam">--</strong>
                         </div>
                     </div>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabSettings" data-tab-panel="settings">
+                <div class="settings-panel">
+                    <h3>Backend Connection</h3>
+                    <p>The UI talks to the FastAPI server via an HTTP base URL. Enter the URL (including port) below to point the interface at a local or remote backend.</p>
+                    <label for="settingsApiRoot">API base URL</label>
+                    <input type="text" id="settingsApiRoot" placeholder="http://localhost:8000" />
+                    <div class="settings-actions">
+                        <button type="button" id="settingsApply" class="training-button">Save</button>
+                        <button type="button" id="settingsTest" class="training-button">Test Connection</button>
+                    </div>
+                    <div id="settingsStatus" class="settings-status" role="status" aria-live="polite"></div>
+                    <p class="settings-help">Tip: when tunnelling to a remote GPU box (e.g. <code>ssh -L 8000:127.0.0.1:8000 user@gpu-host</code>), set the URL to <code>http://localhost:8000</code> so the browser routes through the tunnel.</p>
                 </div>
             </div>
         </div>

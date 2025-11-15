@@ -190,11 +190,41 @@
         negative: { stroke: "#e74c3c", fill: "rgba(231, 76, 60, 0.35)" },
     };
 
-    const API_ROOT = "http://localhost:8000";
+    const DEFAULT_API_ROOT = "http://localhost:8000";
+    const API_STORAGE_KEY = "tator.apiRoot";
+    let API_ROOT = loadStoredApiRoot();
     const TAB_LABELING = "labeling";
     const TAB_TRAINING = "training";
     const TAB_ACTIVE = "active";
+    const TAB_QWEN = "qwen";
     const TAB_PREDICTORS = "predictors";
+    const TAB_SETTINGS = "settings";
+
+    function loadStoredApiRoot() {
+        try {
+            const saved = localStorage.getItem(API_STORAGE_KEY);
+            const normalized = normalizeApiRoot(saved);
+            return normalized || DEFAULT_API_ROOT;
+        } catch (error) {
+            console.debug("Failed to read stored API root", error);
+            return DEFAULT_API_ROOT;
+        }
+    }
+
+    function normalizeApiRoot(value) {
+        if (!value) {
+            return null;
+        }
+        let trimmed = String(value).trim();
+        if (!trimmed) {
+            return null;
+        }
+        if (!/^https?:\/\//i.test(trimmed)) {
+            trimmed = `http://${trimmed}`;
+        }
+        trimmed = trimmed.replace(/\/+$/, "");
+        return trimmed;
+    }
 
     let activeTab = TAB_LABELING;
     let trainingUiInitialized = false;
@@ -567,11 +597,15 @@
         labelingButton: null,
         trainingButton: null,
         activeButton: null,
+        qwenButton: null,
         predictorsButton: null,
+        settingsButton: null,
         labelingPanel: null,
         trainingPanel: null,
         activePanel: null,
+        qwenPanel: null,
         predictorsPanel: null,
+        settingsPanel: null,
     };
 
 
@@ -585,6 +619,48 @@
         imageRam: null,
         systemFreeRam: null,
     };
+
+    const settingsElements = {
+        apiInput: null,
+        applyButton: null,
+        testButton: null,
+        status: null,
+    };
+
+    const qwenElements = {
+        statusLabel: null,
+        itemsInput: null,
+        manualPrompt: null,
+        imageTypeInput: null,
+        extraContextInput: null,
+        advancedToggle: null,
+        advancedPanel: null,
+        promptType: null,
+        classSelect: null,
+        maxResults: null,
+        runButton: null,
+    };
+    const qwenConfigElements = {
+        bboxBase: null,
+        bboxImageType: null,
+        bboxExtra: null,
+        pointBase: null,
+        pointImageType: null,
+        pointExtra: null,
+        status: null,
+        saveButton: null,
+        resetButton: null,
+        reloadButton: null,
+    };
+    let qwenAvailable = false;
+    let qwenRequestActive = false;
+    let qwenClassOverride = false;
+    let qwenConfigLoaded = false;
+    let qwenConfig = null;
+    let qwenAdvancedVisible = false;
+    let qwenConfigUiInitialized = false;
+
+    let settingsUiInitialized = false;
 
     const trainingElements = {
         clipBackboneSelect: null,
@@ -1809,11 +1885,15 @@
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
+        tabElements.qwenButton = document.getElementById("tabQwenButton");
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
+        tabElements.settingsButton = document.getElementById("tabSettingsButton");
         tabElements.labelingPanel = document.getElementById("tabLabeling");
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.activePanel = document.getElementById("tabActive");
+        tabElements.qwenPanel = document.getElementById("tabQwen");
         tabElements.predictorsPanel = document.getElementById("tabPredictors");
+        tabElements.settingsPanel = document.getElementById("tabSettings");
         if (tabElements.labelingButton) {
             tabElements.labelingButton.addEventListener("click", () => setActiveTab(TAB_LABELING));
         }
@@ -1823,8 +1903,14 @@
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
         }
+        if (tabElements.qwenButton) {
+            tabElements.qwenButton.addEventListener("click", () => setActiveTab(TAB_QWEN));
+        }
         if (tabElements.predictorsButton) {
             tabElements.predictorsButton.addEventListener("click", () => setActiveTab(TAB_PREDICTORS));
+        }
+        if (tabElements.settingsButton) {
+            tabElements.settingsButton.addEventListener("click", () => setActiveTab(TAB_SETTINGS));
         }
         setActiveTab(activeTab);
     }
@@ -1841,8 +1927,14 @@
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
         }
+        if (tabElements.qwenButton) {
+            tabElements.qwenButton.classList.toggle("active", tabName === TAB_QWEN);
+        }
         if (tabElements.predictorsButton) {
             tabElements.predictorsButton.classList.toggle("active", tabName === TAB_PREDICTORS);
+        }
+        if (tabElements.settingsButton) {
+            tabElements.settingsButton.classList.toggle("active", tabName === TAB_SETTINGS);
         }
         if (tabElements.labelingPanel) {
             tabElements.labelingPanel.classList.toggle("active", tabName === TAB_LABELING);
@@ -1853,8 +1945,14 @@
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);
         }
+        if (tabElements.qwenPanel) {
+            tabElements.qwenPanel.classList.toggle("active", tabName === TAB_QWEN);
+        }
         if (tabElements.predictorsPanel) {
             tabElements.predictorsPanel.classList.toggle("active", tabName === TAB_PREDICTORS);
+        }
+        if (tabElements.settingsPanel) {
+            tabElements.settingsPanel.classList.toggle("active", tabName === TAB_SETTINGS);
         }
         if (tabName === TAB_TRAINING && previous !== TAB_TRAINING) {
             initializeTrainingUi();
@@ -1869,11 +1967,17 @@
             populateClipBackbones();
             refreshActiveModelPanel();
         }
+        if (tabName === TAB_QWEN && previous !== TAB_QWEN) {
+            initializeQwenConfigTab();
+        }
         if (tabName === TAB_PREDICTORS && previous !== TAB_PREDICTORS) {
             initializePredictorTab();
             startPredictorRefresh(true);
         } else if (previous === TAB_PREDICTORS && tabName !== TAB_PREDICTORS) {
             stopPredictorRefresh();
+        }
+        if (tabName === TAB_SETTINGS && !settingsUiInitialized) {
+            initializeSettingsUi();
         }
         if (tabName === TAB_LABELING) {
             ensureCanvasDimensions();
@@ -3067,6 +3171,562 @@
         refreshPredictorMetrics({ silent: true });
     }
 
+    function initializeSettingsUi() {
+        if (settingsUiInitialized) {
+            return;
+        }
+        settingsUiInitialized = true;
+        settingsElements.apiInput = document.getElementById("settingsApiRoot");
+        settingsElements.applyButton = document.getElementById("settingsApply");
+        settingsElements.testButton = document.getElementById("settingsTest");
+        settingsElements.status = document.getElementById("settingsStatus");
+        if (settingsElements.apiInput) {
+            settingsElements.apiInput.value = API_ROOT;
+        }
+        setSettingsStatus(`Current backend: ${API_ROOT}`, "info");
+        if (settingsElements.applyButton) {
+            settingsElements.applyButton.addEventListener("click", () => applyApiRootValue(settingsElements.apiInput?.value || ""));
+        }
+        if (settingsElements.testButton) {
+            settingsElements.testButton.addEventListener("click", () => testApiRootCandidate(settingsElements.apiInput?.value || API_ROOT));
+        }
+    }
+
+    function setSettingsStatus(message, variant = "info") {
+        if (!settingsElements.status) {
+            return;
+        }
+        settingsElements.status.textContent = message || "";
+        settingsElements.status.className = variant ? `settings-status ${variant}` : "settings-status";
+    }
+
+    function initQwenPanel() {
+        qwenElements.statusLabel = document.getElementById("qwenStatusLabel");
+        qwenElements.itemsInput = document.getElementById("qwenItems");
+        qwenElements.manualPrompt = document.getElementById("qwenCustomPrompt");
+        qwenElements.imageTypeInput = document.getElementById("qwenImageType");
+        qwenElements.extraContextInput = document.getElementById("qwenExtraContext");
+        qwenElements.advancedToggle = document.getElementById("qwenAdvancedToggle");
+        qwenElements.advancedPanel = document.getElementById("qwenAdvancedPanel");
+        qwenElements.classSelect = document.getElementById("qwenClassSelect");
+        qwenElements.promptType = document.getElementById("qwenPromptType");
+        qwenElements.maxResults = document.getElementById("qwenMaxResults");
+        qwenElements.runButton = document.getElementById("qwenRunButton");
+        if (qwenElements.runButton) {
+            qwenElements.runButton.addEventListener("click", () => {
+                handleQwenRun().catch((error) => {
+                    console.error("Qwen request failed", error);
+                });
+            });
+        }
+        if (qwenElements.classSelect) {
+            qwenElements.classSelect.addEventListener("change", () => {
+                qwenClassOverride = true;
+            });
+        }
+        if (qwenElements.advancedToggle) {
+            qwenElements.advancedToggle.addEventListener("click", () => toggleQwenAdvanced());
+        }
+        toggleQwenAdvanced(false);
+        updateQwenRunButton();
+        updateQwenClassOptions({ resetOverride: true });
+        refreshQwenStatus({ silent: true }).catch((error) => {
+            console.debug("Unable to query Qwen status", error);
+        });
+    }
+
+    function setQwenStatusLabel(message, state = "info") {
+        if (!qwenElements.statusLabel) {
+            return;
+        }
+        qwenElements.statusLabel.textContent = message;
+        qwenElements.statusLabel.classList.remove("qwen-status-label--ready", "qwen-status-label--error");
+        if (state === "ready") {
+            qwenElements.statusLabel.classList.add("qwen-status-label--ready");
+        } else if (state === "error") {
+            qwenElements.statusLabel.classList.add("qwen-status-label--error");
+        }
+    }
+
+    function orderedClassNames() {
+        const entries = Object.entries(classes || {});
+        if (!entries.length) {
+            return [];
+        }
+        return entries
+            .sort((a, b) => a[1] - b[1])
+            .map(([name]) => name);
+    }
+
+    function updateQwenClassOptions({ resetOverride = false, preserveSelection = false } = {}) {
+        if (!qwenElements.classSelect) {
+            return;
+        }
+        const classNames = orderedClassNames();
+        qwenElements.classSelect.innerHTML = "";
+        if (!classNames.length) {
+            const placeholder = document.createElement("option");
+            placeholder.textContent = "Load classes first";
+            placeholder.value = "";
+            qwenElements.classSelect.appendChild(placeholder);
+            qwenElements.classSelect.disabled = true;
+            qwenClassOverride = false;
+            return;
+        }
+        qwenElements.classSelect.disabled = false;
+        const previousValue = preserveSelection ? qwenElements.classSelect.value : null;
+        classNames.forEach((name) => {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name;
+            qwenElements.classSelect.appendChild(option);
+        });
+        let targetValue = null;
+        if (preserveSelection && previousValue && classNames.includes(previousValue)) {
+            targetValue = previousValue;
+        } else if (currentClass && classNames.includes(currentClass)) {
+            targetValue = currentClass;
+        } else {
+            targetValue = classNames[0];
+        }
+        qwenElements.classSelect.value = targetValue;
+        if (resetOverride) {
+            qwenClassOverride = false;
+        }
+    }
+
+    function syncQwenClassToCurrent() {
+        if (!qwenElements.classSelect || qwenClassOverride) {
+            return;
+        }
+        if (currentClass && qwenElements.classSelect.value !== currentClass) {
+            const options = Array.from(qwenElements.classSelect.options).map((opt) => opt.value);
+            if (options.includes(currentClass)) {
+                qwenElements.classSelect.value = currentClass;
+            }
+        }
+    }
+
+    function getQwenTargetClass() {
+        if (qwenElements.classSelect && qwenElements.classSelect.value) {
+            return qwenElements.classSelect.value;
+        }
+        return currentClass;
+    }
+
+    function updateQwenRunButton() {
+        if (!qwenElements.runButton) {
+            return;
+        }
+        qwenElements.runButton.disabled = !qwenAvailable || qwenRequestActive;
+        qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Use Qwen";
+    }
+
+    function toggleQwenAdvanced(forceState = null) {
+        if (!qwenElements.advancedToggle || !qwenElements.advancedPanel) {
+            return;
+        }
+        if (typeof forceState === "boolean") {
+            qwenAdvancedVisible = forceState;
+        } else {
+            qwenAdvancedVisible = !qwenAdvancedVisible;
+        }
+        const expanded = qwenAdvancedVisible;
+        qwenElements.advancedToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        qwenElements.advancedPanel.setAttribute("aria-hidden", expanded ? "false" : "true");
+        qwenElements.advancedToggle.textContent = expanded ? "Hide advanced overrides" : "Show advanced overrides";
+    }
+
+    async function refreshQwenStatus({ silent = false } = {}) {
+        if (!qwenElements.statusLabel) {
+            return;
+        }
+        if (!silent) {
+            setQwenStatusLabel("Checking…", "info");
+        }
+        qwenAvailable = false;
+        updateQwenRunButton();
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 6000);
+            const resp = await fetch(`${API_ROOT}/qwen/status`, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            if (data.available && !data.dependency_error) {
+                qwenAvailable = true;
+                const deviceLabel = data.device ? ` (${data.device})` : "";
+                if (data.loaded) {
+                    setQwenStatusLabel(`Ready${deviceLabel}`, "ready");
+                } else {
+                    setQwenStatusLabel(`Available${deviceLabel}`, "ready");
+                }
+            } else if (data.dependency_error) {
+                setQwenStatusLabel("Unavailable (deps)", "error");
+            } else {
+                setQwenStatusLabel("Disabled", "error");
+            }
+        } catch (error) {
+            setQwenStatusLabel("Unavailable", "error");
+            qwenAvailable = false;
+        } finally {
+            updateQwenRunButton();
+        }
+    }
+
+    function setQwenConfigStatus(message, variant = "info") {
+        if (!qwenConfigElements.status) {
+            return;
+        }
+        qwenConfigElements.status.textContent = message || "";
+        qwenConfigElements.status.className = variant ? `qwen-config-status ${variant}` : "qwen-config-status";
+    }
+
+    async function loadQwenConfig(force = false) {
+        if (qwenConfigLoaded && !force && qwenConfig) {
+            return qwenConfig;
+        }
+        setQwenConfigStatus("Loading templates…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/config`);
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+            qwenConfig = await resp.json();
+            qwenConfigLoaded = true;
+            populateQwenConfigForm(qwenConfig);
+            setQwenConfigStatus("Templates loaded.", "success");
+            return qwenConfig;
+        } catch (error) {
+            qwenConfigLoaded = false;
+            setQwenConfigStatus(`Failed to load templates: ${error.message || error}`, "error");
+            throw error;
+        }
+    }
+
+    function populateQwenConfigForm(config) {
+        if (!config) {
+            return;
+        }
+        if (qwenConfigElements.bboxBase) {
+            qwenConfigElements.bboxBase.value = config?.bbox?.base_prompt || "";
+        }
+        if (qwenConfigElements.bboxImageType) {
+            qwenConfigElements.bboxImageType.value = config?.bbox?.default_image_type || "";
+        }
+        if (qwenConfigElements.bboxExtra) {
+            qwenConfigElements.bboxExtra.value = config?.bbox?.default_extra_context || "";
+        }
+        if (qwenConfigElements.pointBase) {
+            qwenConfigElements.pointBase.value = config?.point?.base_prompt || "";
+        }
+        if (qwenConfigElements.pointImageType) {
+            qwenConfigElements.pointImageType.value = config?.point?.default_image_type || "";
+        }
+        if (qwenConfigElements.pointExtra) {
+            qwenConfigElements.pointExtra.value = config?.point?.default_extra_context || "";
+        }
+    }
+
+    function readQwenConfigForm() {
+        return {
+            bbox: {
+                base_prompt: qwenConfigElements.bboxBase?.value || "",
+                default_image_type: qwenConfigElements.bboxImageType?.value || "",
+                default_extra_context: qwenConfigElements.bboxExtra?.value || "",
+            },
+            point: {
+                base_prompt: qwenConfigElements.pointBase?.value || "",
+                default_image_type: qwenConfigElements.pointImageType?.value || "",
+                default_extra_context: qwenConfigElements.pointExtra?.value || "",
+            },
+        };
+    }
+
+    async function handleQwenConfigSave() {
+        try {
+            setQwenConfigStatus("Saving…", "info");
+            const payload = readQwenConfigForm();
+            const resp = await fetch(`${API_ROOT}/qwen/config`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+            qwenConfig = await resp.json();
+            qwenConfigLoaded = true;
+            populateQwenConfigForm(qwenConfig);
+            setQwenConfigStatus("Templates updated.", "success");
+        } catch (error) {
+            console.error("Failed to save Qwen config", error);
+            setQwenConfigStatus(`Save failed: ${error.message || error}`, "error");
+        }
+    }
+
+    async function handleQwenConfigReset() {
+        try {
+            setQwenConfigStatus("Restoring defaults…", "info");
+            const resp = await fetch(`${API_ROOT}/qwen/config/reset`, { method: "POST" });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+            qwenConfig = await resp.json();
+            qwenConfigLoaded = true;
+            populateQwenConfigForm(qwenConfig);
+            setQwenConfigStatus("Defaults restored.", "success");
+        } catch (error) {
+            console.error("Failed to reset Qwen config", error);
+            setQwenConfigStatus(`Reset failed: ${error.message || error}`, "error");
+        }
+    }
+
+    async function handleQwenConfigReload() {
+        try {
+            await loadQwenConfig(true);
+        } catch (error) {
+            console.error("Failed to reload Qwen config", error);
+        }
+    }
+
+    function initializeQwenConfigTab() {
+        if (!qwenConfigUiInitialized) {
+            qwenConfigUiInitialized = true;
+            qwenConfigElements.bboxBase = document.getElementById("qwenBboxBase");
+            qwenConfigElements.bboxImageType = document.getElementById("qwenBboxImageType");
+            qwenConfigElements.bboxExtra = document.getElementById("qwenBboxExtra");
+            qwenConfigElements.pointBase = document.getElementById("qwenPointBase");
+            qwenConfigElements.pointImageType = document.getElementById("qwenPointImageType");
+            qwenConfigElements.pointExtra = document.getElementById("qwenPointExtra");
+            qwenConfigElements.status = document.getElementById("qwenConfigStatus");
+            qwenConfigElements.saveButton = document.getElementById("qwenConfigSave");
+            qwenConfigElements.resetButton = document.getElementById("qwenConfigReset");
+            qwenConfigElements.reloadButton = document.getElementById("qwenConfigReload");
+            qwenConfigElements.saveButton?.addEventListener("click", handleQwenConfigSave);
+            qwenConfigElements.resetButton?.addEventListener("click", handleQwenConfigReset);
+            qwenConfigElements.reloadButton?.addEventListener("click", handleQwenConfigReload);
+        }
+        loadQwenConfig().catch((error) => {
+            console.debug("Unable to load Qwen config", error);
+        });
+    }
+
+    async function handleQwenRun() {
+        if (qwenRequestActive) {
+            return;
+        }
+        if (!qwenAvailable) {
+            setSamStatus("Qwen backend is unavailable", { variant: "warn", duration: 3500 });
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSamStatus("Load an image before using Qwen", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const targetClass = getQwenTargetClass();
+        if (!targetClass) {
+            setSamStatus("Load classes and pick a target class before using Qwen", { variant: "warn", duration: 3500 });
+            return;
+        }
+        const manualPrompt = (qwenElements.manualPrompt?.value || "").trim();
+        const itemsText = (qwenElements.itemsInput?.value || "").trim();
+        if (!manualPrompt && !itemsText) {
+            setSamStatus("Describe what to detect or supply a custom prompt.", { variant: "warn", duration: 3500 });
+            qwenElements.itemsInput?.focus();
+            return;
+        }
+        const promptType = qwenElements.promptType?.value || "bbox";
+        let maxResults = parseInt(qwenElements.maxResults?.value || "8", 10);
+        if (Number.isNaN(maxResults)) {
+            maxResults = 8;
+        }
+        maxResults = Math.min(Math.max(maxResults, 1), 50);
+        qwenRequestActive = true;
+        updateQwenRunButton();
+        setSamStatus(`Running Qwen (${promptType === "point" ? "points" : "bbox"}) for ${targetClass}…`, { variant: "info", duration: 0 });
+        try {
+            const requestFields = {
+                prompt_type: promptType,
+                max_results: maxResults,
+            };
+            if (manualPrompt) {
+                requestFields.prompt = manualPrompt;
+            } else {
+                requestFields.item_list = itemsText;
+                const imageTypeOverride = (qwenElements.imageTypeInput?.value || "").trim();
+                const extraOverride = (qwenElements.extraContextInput?.value || "").trim();
+                if (imageTypeOverride) {
+                    requestFields.image_type = imageTypeOverride;
+                }
+                if (extraOverride) {
+                    requestFields.extra_context = extraOverride;
+                }
+            }
+            const result = await invokeQwenInfer(requestFields);
+            if (currentImage && result?.image_token) {
+                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            }
+            const added = applyQwenBoxes(result?.boxes || [], targetClass);
+            if (!added) {
+                const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
+                    ? "No regions matched the prompt"
+                    : "Qwen returned no usable boxes";
+                setSamStatus(warning, { variant: "warn", duration: 4000 });
+            }
+        } catch (error) {
+            const message = error?.message || error;
+            setSamStatus(`Qwen error: ${message}`, { variant: "error", duration: 5000 });
+            console.error("Qwen inference failed", error);
+        } finally {
+            qwenRequestActive = false;
+            updateQwenRunButton();
+        }
+    }
+
+    async function invokeQwenInfer(requestFields) {
+        if (!currentImage) {
+            throw new Error("No active image");
+        }
+        const imageNameForRequest = currentImage.name;
+        const variantForRequest = samVariant;
+        const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
+        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        if (imageNameForRequest && !payload.image_name) {
+            payload.image_name = imageNameForRequest;
+        }
+        payload.sam_variant = variantForRequest;
+        let resp = await fetch(`${API_ROOT}/qwen/infer`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...requestFields, ...payload }),
+        });
+        if (resp.status === 428) {
+            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            if (imageNameForRequest && !payload.image_name) {
+                payload.image_name = imageNameForRequest;
+            }
+            payload.sam_variant = variantForRequest;
+            resp = await fetch(`${API_ROOT}/qwen/infer`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...requestFields, ...payload }),
+            });
+        }
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    function addYoloBoxFromQwen(yoloBox, className) {
+        if (!currentImage || !Array.isArray(yoloBox) || yoloBox.length < 4) {
+            return null;
+        }
+        const [cx, cy, wNorm, hNorm] = yoloBox.map(Number);
+        if ([cx, cy, wNorm, hNorm].some((val) => Number.isNaN(val))) {
+            return null;
+        }
+        const absW = wNorm * currentImage.width;
+        const absH = hNorm * currentImage.height;
+        const absX = cx * currentImage.width - absW / 2;
+        const absY = cy * currentImage.height - absH / 2;
+        const bboxRecord = {
+            x: absX,
+            y: absY,
+            width: absW,
+            height: absH,
+            marked: false,
+            class: className,
+            uuid: generateUUID(),
+        };
+        const valid = clampBbox(bboxRecord, currentImage.width, currentImage.height);
+        if (!valid) {
+            return null;
+        }
+        stampBboxCreation(bboxRecord);
+        if (!bboxes[currentImage.name]) {
+            bboxes[currentImage.name] = {};
+        }
+        if (!bboxes[currentImage.name][className]) {
+            bboxes[currentImage.name][className] = [];
+        }
+        bboxes[currentImage.name][className].push(bboxRecord);
+        return bboxRecord;
+    }
+
+    function applyQwenBoxes(boxes, className) {
+        if (!currentImage || !className || !Array.isArray(boxes) || boxes.length === 0) {
+            return 0;
+        }
+        let added = 0;
+        boxes.forEach((entry) => {
+            if (!entry || !entry.bbox) {
+                return;
+            }
+            const created = addYoloBoxFromQwen(entry.bbox, className);
+            if (created) {
+                added += 1;
+            }
+        });
+        if (added > 0) {
+            setSamStatus(`Qwen added ${added} bbox${added === 1 ? "" : "es"} to ${className}`, { variant: "success", duration: 4500 });
+        }
+        return added;
+    }
+
+    function applyApiRootValue(rawValue) {
+        const normalized = normalizeApiRoot(rawValue);
+        if (!normalized) {
+            setSettingsStatus("Enter a valid http(s) URL (e.g. http://localhost:8000)", "error");
+            return;
+        }
+        API_ROOT = normalized;
+        try {
+            localStorage.setItem(API_STORAGE_KEY, normalized);
+        } catch (error) {
+            console.debug("Failed to persist API root", error);
+        }
+        if (settingsElements.apiInput) {
+            settingsElements.apiInput.value = normalized;
+        }
+        setSettingsStatus(`Backend set to ${normalized}`, "success");
+        refreshQwenStatus({ silent: true }).catch((error) => {
+            console.debug("Failed to refresh Qwen status", error);
+        });
+        loadQwenConfig(true).catch((error) => {
+            console.debug("Failed to refresh Qwen config", error);
+        });
+    }
+
+    async function testApiRootCandidate(rawValue) {
+        const normalized = normalizeApiRoot(rawValue);
+        if (!normalized) {
+            setSettingsStatus("Enter a valid http(s) URL before testing", "error");
+            return;
+        }
+        setSettingsStatus("Testing connection…", "info");
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            const resp = await fetch(`${normalized}/sam_slots`, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            setSettingsStatus(`Connected to ${normalized}`, "success");
+        } catch (error) {
+            const detail = error?.name === "AbortError" ? "request timed out" : (error.message || error);
+            setSettingsStatus(`Failed to reach ${normalized}: ${detail}`, "error");
+        }
+    }
+
     function handlePredictorApply(event) {
         if (event) {
             event.preventDefault();
@@ -3743,6 +4403,7 @@
         predictorElements.processRam = document.getElementById("predictorProcessRam");
         predictorElements.imageRam = document.getElementById("predictorImageRam");
         predictorElements.systemFreeRam = document.getElementById("predictorSystemFreeRam");
+        initQwenPanel();
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));
@@ -5777,6 +6438,7 @@
                                 }
                             }
                             setCurrentClass();
+                            updateQwenClassOptions({ resetOverride: true });
                             if (Object.keys(images).length > 0) {
                                 setBboxImportEnabled(true);
                                 document.getElementById("restoreBboxes").disabled = false;
@@ -5796,6 +6458,7 @@
         currentClass = null;
         loadedClassList = [];
         clearMultiPointAnnotations();
+        updateQwenClassOptions({ resetOverride: true });
     };
 
     const setCurrentClass = () => {
@@ -5806,6 +6469,7 @@
             currentBbox = null;
         }
         clearMultiPointAnnotations();
+        syncQwenClassToCurrent();
     };
 
     const listenClassSelect = () => {
@@ -6079,6 +6743,13 @@
 
         document.addEventListener("keydown", (event) => {
             if (activeTab !== TAB_LABELING) {
+                return;
+            }
+            const targetTag = (event.target?.tagName || "").toLowerCase();
+            const inputType = (event.target?.getAttribute && event.target.getAttribute("type")) ? event.target.getAttribute("type").toLowerCase() : "";
+            const isTextualInput = targetTag === "textarea"
+                || (targetTag === "input" && !["checkbox", "radio", "button", "range", "color"].includes(inputType));
+            if (isTextualInput || event.target?.isContentEditable) {
                 return;
             }
             const key = event.keyCode || event.charCode;

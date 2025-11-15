@@ -38,6 +38,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **Model switcher** – activate new CLIP + regression pairs without restarting the server; metadata keeps backbone/labelmap in sync.
 - **Predictor budget control** – dial the number of warm SAM predictors (1–3) and monitor their RAM usage so the UI can stay snappy on machines with more headroom.
 - **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
+- **Qwen 2.5 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. Prompt templates are editable in the dedicated Qwen Config tab so you can tailor instructions per project.
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
@@ -86,14 +87,19 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    SAM2_CONFIG_PATH=/abs/path/to/sam2_config.yaml
    SAM2_CHECKPOINT_PATH=/abs/path/to/sam2_weights.pt
    ENABLE_METRICS=true             # optional Prometheus
+   QWEN_MODEL_NAME=Qwen/Qwen2.5-VL-3B-Instruct
+   QWEN_DEVICE=auto                # cuda, cpu, mps, or auto
+   QWEN_MAX_NEW_TOKENS=768         # clamp generation length if needed
    ```
    You can also point `CLIP_EMBED_CACHE` to customise where training caches embeddings (`./uploads/clip_embeddings` by default).
+   Qwen loads lazily the first time you hit the "Use Qwen" button in the UI. Override `QWEN_MODEL_NAME` to point at a different Hugging Face repo or set `QWEN_DEVICE` to `cuda:1`, `cpu`, etc., if you need to pin the workload to a specific accelerator.
 6. **Run the API**
    ```bash
    python -m uvicorn app:app --host 0.0.0.0 --port 8000
    ```
    Watch the logs for confirmations that CLIP, SAM, and the logistic regression model loaded correctly.
 7. **Open the UI** – load `ybat-master/ybat.html` (locally renamed “Tator 🥔”) in your browser.
+8. **Point the UI at a remote backend (optional)** – open the new **Backend** tab and enter the FastAPI base URL (e.g. `http://localhost:8000` when tunnelling over SSH). The value is saved locally so the browser reconnects automatically next time.
 
 ### Getting Started (First Project)
 1. **Create a workspace folder** on your laptop with subfolders `images/` and `labels/` (YOLO-format `.txt`).
@@ -144,6 +150,7 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 - Load images via the folder picker; per-image CLIP/SAM helpers live in the left rail.
 - Toggle **Preload SAM** to stream the next image into memory; the side progress bar shows status and cancels stale tasks when you move to another image.
 - The **task queue overlay** in the lower-left corner lists every pending SAM preload/activation/tweak so you always know what work is queued up.
+- The **Qwen 2.5 Assist** card now focuses on the object list: drop keywords such as `car, bus, kiosk` and the template (configured in the Qwen Config tab) builds the full prompt. Choose whether the detections stay as raw boxes, go through the new “Bounding boxes → SAM cleanup” mode, or emit SAM-ready points. Expand the advanced overrides to supply a one-off custom prompt, tweak the image-type description, or add extra context for tricky scenes.
 - Press **`X`** with a bbox selected and SAM/CLIP will refine it in place; double-tap `X` to batch-tweak the entire class (the tweak always targets whichever class is currently selected in the sidebar). *(GIF placeholder)*
 - Import YOLO `.txt` folders or zipped annotation bundles via the dedicated buttons—the app now streams bboxes even while images are still ingesting.
 - Auto class, SAM box/point modes, and multi-point masks share a top progress indicator and support keyboard shortcuts documented in the panel footer.
@@ -172,10 +179,21 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 - Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct CLIP backbone and labelmap.
 - Guidance text explains backbone auto-detection when a `.meta.pkl` file accompanies the classifier.
 
+### Qwen Config Tab
+- Edit the base prompts that power the Qwen Assist workflows. Each template must include `{image_type}`, `{items}`, and `{extra_context}` placeholders; the labeling tab fills them with the per-image inputs.
+- Set sensible defaults for the type of imagery you work with (e.g. “overhead drone image”) and add boilerplate context (such as “Respond with JSON only”).
+- Save changes, restore the defaults, or reload the live configuration at any time—handy when you run multiple backends with different prompt needs.
+- The labeling tab exposes per-image overrides (custom prompt, image-type tweak, extra context) that layer on top of whatever defaults you set here.
+
 ### Predictors Tab
 - Choose how many SAM predictors stay resident (current + optional next/previous) so you can preload in whichever direction you travel.
 - See live stats for active/loaded slots, predictor RAM consumption, total FastAPI RAM usage, and free system memory. Values refresh automatically every few seconds while the tab is open.
 - The Label Images tab respects this budget immediately: with 1 predictor only the current image stays hot, with 2 the “next” image preloads, and with 3 you also keep the previous image ready for instant backtracking.
+
+### Backend Tab
+- Configure the base URL that the UI uses for all API calls. Enter `http://host:port` (tunnels supported) and click **Save**; the setting persists in `localStorage` so it survives reloads.
+- Use **Test Connection** to ping `/sam_slots` on the target server and confirm it’s reachable before switching tabs.
+- Handy when you run the FastAPI backend on a remote GPU box and access it over SSH port forwarding.
 
 ## Command-Line Training
 The UI shares its engine with `tools/train_clip_regression_from_YOLO.py`:

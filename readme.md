@@ -38,7 +38,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **Model switcher** – activate new CLIP + regression pairs without restarting the server; metadata keeps backbone/labelmap in sync.
 - **Predictor budget control** – dial the number of warm SAM predictors (1–3) and monitor their RAM usage so the UI can stay snappy on machines with more headroom.
 - **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
-- **Qwen 2.5 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. Prompt templates are editable in the dedicated Qwen Config tab so you can tailor instructions per project.
+- **Qwen 2.5 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. The active model (selected on the Qwen Models tab) always supplies the system prompt and defaults so inference matches training.
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
@@ -150,7 +150,7 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 - Load images via the folder picker; per-image CLIP/SAM helpers live in the left rail.
 - Toggle **Preload SAM** to stream the next image into memory; the side progress bar shows status and cancels stale tasks when you move to another image.
 - The **task queue overlay** in the lower-left corner lists every pending SAM preload/activation/tweak so you always know what work is queued up.
-- The **Qwen 2.5 Assist** card now focuses on the object list: drop keywords such as `car, bus, kiosk` and the template (configured in the Qwen Config tab) builds the full prompt. Choose whether the detections stay as raw boxes, go through the new “Bounding boxes → SAM cleanup” mode, or emit SAM-ready points. Expand the advanced overrides to supply a one-off custom prompt, tweak the image-type description, or add extra context for tricky scenes.
+- The **Qwen 2.5 Assist** card now focuses on the object list: drop keywords such as `car, bus, kiosk` and the template pulled from the active Qwen model builds the full prompt. Choose whether the detections stay as raw boxes, go through the new “Bounding boxes → SAM cleanup” mode, or emit SAM-ready points. Expand the advanced overrides to supply a one-off custom prompt, tweak the image-type description, or add extra context for tricky scenes.
 - Press **`X`** with a bbox selected and SAM/CLIP will refine it in place; double-tap `X` to batch-tweak the entire class (the tweak always targets whichever class is currently selected in the sidebar). *(GIF placeholder)*
 - Import YOLO `.txt` folders or zipped annotation bundles via the dedicated buttons—the app now streams bboxes even while images are still ingesting.
 - Auto class, SAM box/point modes, and multi-point masks share a top progress indicator and support keyboard shortcuts documented in the panel footer.
@@ -180,11 +180,18 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 - Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct CLIP backbone and labelmap.
 - Guidance text explains backbone auto-detection when a `.meta.pkl` file accompanies the classifier.
 
-### Qwen Config Tab
-- Edit the base prompts that power the Qwen Assist workflows. Each template must include `{image_type}`, `{items}`, and `{extra_context}` placeholders; the labeling tab fills them with the per-image inputs.
-- Set sensible defaults for the type of imagery you work with (e.g. “overhead drone image”) and add boilerplate context (such as “Respond with JSON only”).
-- Save changes, restore the defaults, or reload the live configuration at any time—handy when you run multiple backends with different prompt needs.
-- The labeling tab exposes per-image overrides (custom prompt, image-type tweak, extra context) that layer on top of whatever defaults you set here.
+### Train Qwen Tab
+- Converts whatever images + YOLO boxes you loaded in the labeling tab into JSONL + image bundles automatically. The browser shuffles the set, builds an 80/20 train/val split, and streams a zip to `/qwen/train/dataset/upload`—no manual dataset paths required.
+- Describe the imagery ("warehouse CCTV", "aerial rooftops", etc.), pick the base Hugging Face repo, and provide a single system prompt covering both bbox/point outputs. A “prompt noise” field (default 0.05) randomly drops a small percentage of characters so the adapters see slightly perturbed instructions every epoch.
+- At training time each conversation randomly alternates between bbox vs. point outputs **and** between “all classes”, “single class”, and “subset of classes” instructions, so the adapters learn both broad sweeps and class-specific prompts without bloating the dataset on disk.
+- Choose LoRA or QLoRA, tweak batch size/epochs/LR/adapter ranks, and hit **Start Training**. The backend unpacks the dataset under `uploads/qwen_runs/datasets/<run_name>`, launches the Lightning trainer, and streams progress/logs/checkpoints back to the UI.
+- Every run writes a `metadata.json` alongside the checkpoints with the system prompt, dataset context, and class list so you can reload the exact format later from the Qwen Models tab.
+- Job cards show live progress, allow cancellation, and list the checkpoint folders that land under `uploads/qwen_runs/<run_name>/`. Completed runs stick around in the history list so you can re-download or re-run with tweaked prompts later.
+
+### Qwen Models Tab
+- Lists every custom Qwen fine-tune saved under `uploads/qwen_runs/`, plus the built-in base model. Each card shows the dataset description, class list, and stored system prompt so you always know how it was trained.
+- Activate a model to make the Assist panel reuse its exact prompts and defaults; the items/context fields on the labeling tab auto-populate from the active metadata so inference matches training.
+- Use the Train Qwen tab to produce new adapters, then switch between them here without touching the backend.
 
 ### Predictors Tab
 - Choose how many SAM predictors stay resident (current + optional next/previous) so you can preload in whichever direction you travel.
@@ -229,6 +236,12 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 - Landed first-class Qwen 2.5 support: the backend now mirrors the PyImageSearch zero-shot recipe (chat templates + `process_vision_info`) and exposes `/qwen/infer` so the UI can request raw boxes, bbox→SAM cleanups, or SAM-ready click points.
 - Added a **Qwen Config** tab plus an Assist card in the labeling view. You can edit the base `{image_type}/{items}/{extra_context}` templates, override prompts per image, pick output modes, and stream responses directly into YOLO boxes without touching scripts.
 - Introduced a **Backend** tab so the browser can point at any FastAPI root (local or tunneled) without code edits; the README now documents the remote GPU workflow end-to-end, including the new Qwen env vars.
+
+## 2025-11-12 – Qwen Model Manager
+
+- The old Qwen Config editor was replaced with a **Qwen Models** tab that lists every fine-tuned run plus the base model. Each card surfaces the saved system prompt, dataset context, and class list so you always know how the adapters were trained.
+- Active model metadata now drives the Assist panel: the system prompt is injected automatically at inference time and the image/context fields pick up the defaults from the selected run.
+- Backend training writes `metadata.json` next to each checkpoint and new `/qwen/models` + `/qwen/models/activate` endpoints let you hot-swap adapters without touching the CLI.
 - Expanded Quick Start docs and the shortcut list (hello `W` delete hotkey) so every UI change ships with matching guidance.
 
 

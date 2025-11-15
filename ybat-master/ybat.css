@@ -587,72 +587,100 @@ hr {
     color: #475569;
 }
 
-.qwen-config-panel {
-    max-width: 980px;
+.qwen-models-wrapper {
+    max-width: 1100px;
     margin: 0 auto;
-    padding: 24px;
     display: flex;
-    flex-direction: column;
-    gap: 20px;
+    gap: 24px;
+    padding: 20px 24px 32px;
+    box-sizing: border-box;
 }
 
-.qwen-config-help {
-    font-size: 13px;
-    color: #475569;
-}
-
-.qwen-config-grid {
-    display: grid;
-    gap: 20px;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-}
-
-.qwen-config-section {
+.qwen-models-list,
+.qwen-model-details {
     background: #ffffff;
     border-radius: 12px;
-    padding: 16px;
-    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.05);
+    padding: 20px;
+    flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 16px;
 }
 
-.qwen-config-section textarea,
-.qwen-config-section input {
-    width: 100%;
-    border-radius: 6px;
-    border: 1px solid #cbd5f5;
-    padding: 6px 8px;
-    font-family: inherit;
+.qwen-models-help {
     font-size: 13px;
+    color: #475569;
+    margin: 0;
 }
 
-.qwen-config-actions {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 12px;
-}
-
-.qwen-config-buttons {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
-.qwen-config-status {
+.qwen-model-status {
     font-size: 13px;
     color: #475569;
     min-height: 18px;
 }
 
-.qwen-config-status.success {
+.qwen-model-status.success {
     color: #15803d;
 }
 
-.qwen-config-status.error {
+.qwen-model-status.error {
     color: #b91c1c;
+}
+
+.qwen-model-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+}
+
+.qwen-model-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 14px;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.qwen-model-card.active {
+    border-color: #2563eb;
+    background: #eff6ff;
+}
+
+.qwen-model-card h3 {
+    margin: 0;
+    font-size: 15px;
+    color: #0f172a;
+}
+
+.qwen-model-card p {
+    margin: 0;
+    font-size: 12px;
+    color: #475569;
+}
+
+.qwen-model-details__body {
+    font-size: 13px;
+    color: #475569;
+    line-height: 1.5;
+}
+
+.qwen-model-details__body pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    overflow: auto;
+}
+
+.qwen-active-model-label {
+    font-size: 12px;
+    color: #2563eb;
+    margin-left: auto;
+    margin-right: 12px;
 }
 
 .sam-status {
@@ -719,6 +747,64 @@ hr {
     box-sizing: border-box;
     max-width: 1200px;
     margin: 0 auto;
+    align-items: flex-start;
+}
+
+.qwen-train-intro {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #475569;
+}
+
+.qwen-train-callouts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+    gap: 12px;
+    background: #f8fafc;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid #e2e8f0;
+    font-size: 12px;
+    color: #334155;
+}
+
+.qwen-train-callouts strong {
+    display: block;
+    color: #0f172a;
+    margin-bottom: 4px;
+}
+
+.qwen-radio-group {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.qwen-radio {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 12px;
+    color: #475569;
+}
+
+.qwen-radio input {
+    margin-top: 4px;
+}
+
+.qwen-radio span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.qwen-radio strong {
+    font-size: 13px;
+    color: #0f172a;
 }
 
 .training-form-section,
@@ -730,11 +816,37 @@ hr {
     box-sizing: border-box;
 }
 
+.training-status-section {
+    position: relative;
+}
+
 .training-form-section {
     flex: 0 0 360px;
     display: flex;
     flex-direction: column;
     gap: 14px;
+    max-height: calc(100vh - 160px);
+    overflow-y: auto;
+    padding-right: 18px;
+}
+
+.training-form-section::-webkit-scrollbar {
+    width: 8px;
+}
+
+.training-form-section::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.6);
+    border-radius: 4px;
+}
+
+.qwen-train-note {
+    font-size: 12px;
+    line-height: 1.5;
+    color: #475569;
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    border-radius: 10px;
+    padding: 10px 12px;
 }
 
 .training-form-section h2,
@@ -898,6 +1010,106 @@ hr {
 
 .training-message.warn {
     color: #b45309;
+}
+
+.qwen-sample-panel {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 14px;
+    margin: 18px 0;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.qwen-sample-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.qwen-sample-header h3 {
+    margin: 0;
+    font-size: 16px;
+    color: #0f172a;
+}
+
+.qwen-sample-canvas {
+    position: relative;
+    border: 1px dashed #cbd5f5;
+    border-radius: 10px;
+    background: #fff;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 260px;
+    overflow: hidden;
+}
+
+#qwenSampleCanvas {
+    max-width: 100%;
+    height: auto;
+    display: block;
+}
+
+.qwen-sample-status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 16px;
+    text-align: center;
+    font-size: 13px;
+    color: #475569;
+    background: rgba(248, 250, 252, 0.92);
+    transition: opacity 0.2s ease;
+}
+
+.qwen-sample-status.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.qwen-sample-status.error {
+    color: #b91c1c;
+    background: rgba(254, 242, 242, 0.95);
+}
+
+.qwen-sample-status.success {
+    color: #065f46;
+    background: rgba(240, 253, 244, 0.92);
+}
+
+.qwen-sample-details label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1f2937;
+    display: block;
+    margin-bottom: 4px;
+}
+
+.qwen-sample-details pre {
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    max-height: 180px;
+    overflow: auto;
+    margin-bottom: 12px;
+}
+
+.qwen-sample-details pre:last-of-type {
+    margin-bottom: 0;
+}
+
+.qwen-sample-meta {
+    font-size: 12px;
+    color: #475569;
+    min-height: 18px;
 }
 
 .training-toggle-row {

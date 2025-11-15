@@ -46,8 +46,9 @@
         <div class="tab-bar" role="tablist">
             <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
+            <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
-            <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Config</button>
+            <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
             <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">Predictors</button>
             <button class="tab-button" data-tab="settings" id="tabSettingsButton" type="button">Backend</button>
         </div>
@@ -103,6 +104,7 @@
                             <section class="qwen-panel" aria-labelledby="qwenPanelTitle">
                                 <div class="qwen-panel__header">
                                     <span id="qwenPanelTitle">Qwen 2.5 Assist</span>
+                                    <span id="qwenActiveModelLabel" class="qwen-active-model-label"></span>
                                     <span id="qwenStatusLabel" class="qwen-status-label">Checking…</span>
                                 </div>
                                 <label for="qwenItems">Objects / keywords</label>
@@ -112,7 +114,7 @@
                                     <label for="qwenCustomPrompt">Full prompt override</label>
                                     <textarea id="qwenCustomPrompt" rows="3" placeholder="Optional: supply the exact prompt to send to Qwen"></textarea>
                                     <label for="qwenImageType">Image type description</label>
-                                    <input type="text" id="qwenImageType" placeholder="Defaults to Qwen Config tab" />
+                                    <input type="text" id="qwenImageType" placeholder="Pulled from active Qwen model" />
                                     <label for="qwenExtraContext">Extra context</label>
                                     <textarea id="qwenExtraContext" rows="2" placeholder="Optional notes (lighting, camera, etc.)"></textarea>
                                 </div>
@@ -127,7 +129,7 @@
                                 <label for="qwenMaxResults">Max detections</label>
                                 <input type="number" id="qwenMaxResults" min="1" max="50" value="8" />
                                 <button type="button" id="qwenRunButton" class="training-button" disabled>Use Qwen</button>
-                                <p class="qwen-hint">Uses the template in the Qwen Config tab; add extra context via the advanced overrides when needed.</p>
+                                <p class="qwen-hint">Uses the prompts saved with the active Qwen model; add extra context via the advanced overrides when needed.</p>
                             </section>
                             <br />
                             <hr />
@@ -320,6 +322,154 @@
                     </section>
                 </div>
             </div>
+            <div class="tab-panel" id="tabQwenTrain" data-tab-panel="qwen-train">
+                <div class="training-wrapper">
+                    <section class="training-form-section">
+                        <h2>Fine-tune Qwen 2.5 VL</h2>
+                        <p class="qwen-train-intro">
+                            Turn the images + YOLO boxes you have loaded into a Qwen fine-tuning dataset. We will package them automatically and train
+                            Qwen to respond with JSON detections (bbox + point) for every class in your label map.
+                        </p>
+                        <div class="qwen-train-callouts">
+                            <div>
+                                <strong>LoRA</strong>
+                                <p>Trains lightweight adapters on top of the base FP16 model. Fast and easy when you have ≥24&nbsp;GB VRAM.</p>
+                            </div>
+                            <div>
+                                <strong>QLoRA</strong>
+                                <p>Quantizes the base model to 4-bit (NF4) and only trains adapters. Ideal for 18–24&nbsp;GB GPUs and mirrors the blog setup.</p>
+                            </div>
+                        </div>
+                        <p class="qwen-train-note">
+                            Each training sample reuses your description plus the system prompt here. For every epoch we randomly ask Qwen to return
+                            either bounding boxes or click points, and we vary the scope of the request: sometimes all classes, sometimes a single class
+                            that exists in the image, and sometimes a small subset. The targets are filtered to match that instruction so the adapters learn
+                            both broad sweeps and class-specific prompts without duplicating the dataset on disk.
+                        </p>
+                        <div class="training-field">
+                            <label for="qwenTrainRunName">Run name / subfolder</label>
+                            <input type="text" id="qwenTrainRunName" placeholder="Optional; defaults to job id" />
+                            <div class="training-help">Checkpoints land in <code>uploads/qwen_runs/&lt;run_name&gt;</code>.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="qwenTrainContext">Describe these images</label>
+                            <textarea id="qwenTrainContext" rows="2" placeholder="e.g., CCTV footage inside a warehouse"></textarea>
+                            <div class="training-help">Used to enrich the prompt we send for every image.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="qwenTrainModelId">Base model repo</label>
+                            <input type="text" id="qwenTrainModelId" value="Qwen/Qwen2.5-VL-3B-Instruct" />
+                        </div>
+                        <div class="training-field">
+                            <label for="qwenTrainSystemPrompt">System prompt</label>
+                            <textarea id="qwenTrainSystemPrompt" rows="3">You are an annotation assistant that only returns JSON shaped like {"detections":[{"label":"class","bbox":[x1,y1,x2,y2]} or {"label":"class","point":[x,y]}]}. Respond with JSON only.</textarea>
+                            <div class="training-help">Shared system message for every conversation. The user prompt still toggles between bbox vs. point instructions per sample.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="qwenTrainPromptNoise">System prompt noise (0–0.30)</label>
+                            <input type="number" id="qwenTrainPromptNoise" min="0" max="0.3" step="0.01" value="0.05" />
+                            <div class="training-help">We randomly drop this fraction of characters from the system prompt for each sample to make the model more robust.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="qwenTrainAccelerator">Accelerator</label>
+                            <select id="qwenTrainAccelerator">
+                                <option value="gpu" selected>GPU (recommended)</option>
+                                <option value="auto">Auto</option>
+                                <option value="cpu">CPU (debug only)</option>
+                            </select>
+                        </div>
+                        <fieldset class="qwen-radio-group">
+                            <legend>Adapter strategy</legend>
+                            <label class="qwen-radio">
+                                <input type="radio" name="qwenLoraMode" value="qlora" checked />
+                                <span>
+                                    <strong>QLoRA (default)</strong>
+                                    <small>Quantize the backbone to 4-bit NF4 and train adapters. Lower VRAM, same accuracy.</small>
+                                </span>
+                            </label>
+                            <label class="qwen-radio">
+                                <input type="radio" name="qwenLoraMode" value="lora" />
+                                <span>
+                                    <strong>LoRA</strong>
+                                    <small>Keep the base model in FP16/BF16 and only train adapters. Requires more VRAM but slightly simpler.</small>
+                                </span>
+                            </label>
+                        </fieldset>
+                        <div class="training-advanced-grid">
+                            <div>
+                                <label for="qwenTrainBatchSize">Batch size</label>
+                                <input type="number" id="qwenTrainBatchSize" value="1" min="1" />
+                            </div>
+                            <div>
+                                <label for="qwenTrainEpochs">Max epochs</label>
+                                <input type="number" id="qwenTrainEpochs" value="10" min="1" />
+                            </div>
+                            <div>
+                                <label for="qwenTrainLR">Learning rate</label>
+                                <input type="number" step="0.00001" id="qwenTrainLR" value="0.0002" />
+                            </div>
+                            <div>
+                                <label for="qwenTrainAccumulate">Gradient accumulation</label>
+                                <input type="number" id="qwenTrainAccumulate" value="8" min="1" />
+                            </div>
+                            <div>
+                                <label for="qwenTrainLoraRank">LoRA rank</label>
+                                <input type="number" id="qwenTrainLoraRank" value="8" min="1" />
+                            </div>
+                            <div>
+                                <label for="qwenTrainLoraAlpha">LoRA alpha</label>
+                                <input type="number" id="qwenTrainLoraAlpha" value="16" min="1" />
+                            </div>
+                            <div>
+                                <label for="qwenTrainLoraDropout">LoRA dropout</label>
+                                <input type="number" id="qwenTrainLoraDropout" value="0.05" step="0.01" min="0" max="1" />
+                            </div>
+                            <div>
+                                <label for="qwenTrainPatience">Early stop patience</label>
+                                <input type="number" id="qwenTrainPatience" value="3" min="1" />
+                            </div>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="qwenTrainStartBtn">Start Training</button>
+                            <button type="button" class="training-button training-button-danger" id="qwenTrainCancelBtn" disabled>Cancel Job</button>
+                        </div>
+                        <div class="training-message" id="qwenTrainMessage" role="status"></div>
+                    </section>
+                    <section class="training-status-section">
+                        <h2>Qwen Training Status</h2>
+                        <div class="training-progress" id="qwenTrainProgressBar">
+                            <div class="training-progress-fill" id="qwenTrainProgressFill"></div>
+                        </div>
+                        <div class="training-status-text" id="qwenTrainStatusText">Idle</div>
+                        <div class="qwen-sample-panel">
+                            <div class="qwen-sample-header">
+                                <h3>Random Training Sample</h3>
+                                <button type="button" class="training-button" id="qwenSampleBtn">Generate random Qwen data sample</button>
+                            </div>
+                            <div class="qwen-sample-canvas">
+                                <canvas id="qwenSampleCanvas" width="320" height="240"></canvas>
+                                <div class="qwen-sample-status" id="qwenSampleMessage">Load images + label map, then click the button to preview how a training conversation is constructed.</div>
+                            </div>
+                            <div class="qwen-sample-meta" id="qwenSampleMeta"></div>
+                            <div class="qwen-sample-details">
+                                <label>Prompt sent to Qwen</label>
+                                <pre id="qwenSamplePrompt"></pre>
+                                <label>Expected JSON response</label>
+                                <pre id="qwenSampleExpected"></pre>
+                            </div>
+                        </div>
+                        <div class="training-summary" id="qwenTrainSummary"></div>
+                        <div class="training-logs">
+                            <h3>Logs</h3>
+                            <pre id="qwenTrainLog"></pre>
+                        </div>
+                        <div class="training-history">
+                            <h3>Recent Qwen Jobs</h3>
+                            <div id="qwenTrainHistory"></div>
+                        </div>
+                    </section>
+                </div>
+            </div>
             <div class="tab-panel" id="tabActive" data-tab-panel="active">
                 <div class="active-wrapper">
                     <section class="active-controls">
@@ -373,37 +523,17 @@
                 </div>
             </div>
             <div class="tab-panel" id="tabQwen" data-tab-panel="qwen">
-                <div class="qwen-config-panel">
-                    <h2>Qwen Prompt Templates</h2>
-                    <p class="qwen-config-help">Each template must include <code>{image_type}</code>, <code>{items}</code>, and <code>{extra_context}</code>. The labeling tab fills those placeholders using the per-image overrides.</p>
-                    <div class="qwen-config-grid">
-                        <section class="qwen-config-section">
-                            <h3>Bounding boxes</h3>
-                            <label for="qwenBboxBase">Base prompt</label>
-                            <textarea id="qwenBboxBase" rows="5"></textarea>
-                            <label for="qwenBboxImageType">Default image type</label>
-                            <input type="text" id="qwenBboxImageType" />
-                            <label for="qwenBboxExtra">Default extra context</label>
-                            <textarea id="qwenBboxExtra" rows="3"></textarea>
-                        </section>
-                        <section class="qwen-config-section">
-                            <h3>Point prompts</h3>
-                            <label for="qwenPointBase">Base prompt</label>
-                            <textarea id="qwenPointBase" rows="5"></textarea>
-                            <label for="qwenPointImageType">Default image type</label>
-                            <input type="text" id="qwenPointImageType" />
-                            <label for="qwenPointExtra">Default extra context</label>
-                            <textarea id="qwenPointExtra" rows="3"></textarea>
-                        </section>
-                    </div>
-                    <div class="qwen-config-actions">
-                        <div class="qwen-config-status" id="qwenConfigStatus" role="status" aria-live="polite"></div>
-                        <div class="qwen-config-buttons">
-                            <button type="button" class="training-button" id="qwenConfigSave">Save Changes</button>
-                            <button type="button" class="training-button" id="qwenConfigReset">Restore Defaults</button>
-                            <button type="button" class="training-button" id="qwenConfigReload">Reload</button>
-                        </div>
-                    </div>
+                <div class="qwen-models-wrapper">
+                    <section class="qwen-models-list">
+                        <h2>Qwen Models</h2>
+                        <p class="qwen-models-help">Pick which fine-tuned adapters should power the Assist panel. Each run stores the exact prompts, context, and class list it learned from.</p>
+                        <div class="qwen-model-status" id="qwenModelStatus">Loading…</div>
+                        <div class="qwen-model-grid" id="qwenModelList"></div>
+                    </section>
+                    <section class="qwen-model-details">
+                        <h2>Active Model Details</h2>
+                        <div id="qwenModelDetails" class="qwen-model-details__body"></div>
+                    </section>
                 </div>
             </div>
             <div class="tab-panel" id="tabPredictors" data-tab-panel="predictors">

@@ -29,6 +29,26 @@ import itertools
 from dataclasses import dataclass, field, asdict
 
 from tools.clip_training import train_clip_from_yolo, TrainingError, TrainingArtifacts
+try:
+    from tools.qwen_training import (
+        QwenTrainingConfig,
+        QwenTrainingResult,
+        train_qwen_model,
+        TrainingError as QwenTrainingError,
+        DEFAULT_SYSTEM_PROMPT,
+    )
+except Exception as exc:  # noqa: BLE001
+    QWEN_TRAINING_IMPORT_ERROR = exc
+    QwenTrainingConfig = None  # type: ignore[assignment]
+    QwenTrainingResult = None  # type: ignore[assignment]
+    train_qwen_model = None  # type: ignore[assignment]
+    QwenTrainingError = TrainingError  # type: ignore[assignment]
+    DEFAULT_SYSTEM_PROMPT = (
+        "You are an annotation assistant that only returns JSON objects shaped like {\"detections\":[{\"label\":\"class\","
+        "\"bbox\":[x1,y1,x2,y2]} or {\"label\":\"class\",\"point\":[x,y]}]}"
+    )
+else:
+    QWEN_TRAINING_IMPORT_ERROR = None
 
 try:
     from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
@@ -91,6 +111,57 @@ qwen_device: Optional[str] = None
 qwen_last_error: Optional[str] = None
 qwen_lock = threading.RLock()
 qwen_config_lock = threading.RLock()
+
+QWEN_METADATA_FILENAME = "metadata.json"
+
+
+def _default_qwen_metadata() -> Dict[str, Any]:
+    return {
+        "id": "default",
+        "label": "Base Qwen 2.5",
+        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+        "dataset_context": "",
+        "classes": [],
+        "model_id": QWEN_MODEL_NAME,
+        "source": "huggingface",
+    }
+
+
+active_qwen_model_id = "default"
+active_qwen_model_path: Optional[Path] = None
+active_qwen_metadata: Dict[str, Any] = _default_qwen_metadata()
+loaded_qwen_model_id: Optional[str] = None
+
+
+def _reset_qwen_runtime() -> None:
+    global qwen_model, qwen_processor, qwen_last_error, loaded_qwen_model_id, qwen_device
+    qwen_model = None
+    qwen_processor = None
+    qwen_device = None
+    loaded_qwen_model_id = None
+    qwen_last_error = None
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _set_active_qwen_model_default() -> None:
+    global active_qwen_model_id, active_qwen_model_path, active_qwen_metadata
+    active_qwen_model_id = "default"
+    active_qwen_model_path = None
+    active_qwen_metadata = _default_qwen_metadata()
+    _reset_qwen_runtime()
+
+
+def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict[str, Any]) -> None:
+    global active_qwen_model_id, active_qwen_model_path, active_qwen_metadata
+    active_qwen_model_id = model_id
+    active_qwen_model_path = ckpt_path
+    active_qwen_metadata = metadata or {}
+    active_qwen_metadata.setdefault("id", model_id)
+    _reset_qwen_runtime()
 
 
 def _bytes_to_mb(value: int) -> float:
@@ -502,6 +573,139 @@ def _default_variant(value: Optional[str]) -> str:
     return (value or "sam1").lower()
 
 
+_job_id_counter = itertools.count(1)
+
+
+@dataclass
+class SamPreloadJob:
+    request_id: int
+    variant: str
+    generation: Optional[int]
+    image_token: Optional[str]
+    image_base64: Optional[str]
+    image_name: Optional[str]
+    slot: str
+    event: threading.Event
+    result: Optional['SamPreloadResponse'] = None
+    error: Optional[Exception] = None
+
+
+class SamPreloadManager:
+    def __init__(self):
+        self.queue: "queue.Queue[SamPreloadJob]" = queue.Queue()
+        self.lock = threading.Lock()
+        self.latest_request_id: Dict[str, int] = {}
+        self.latest_generation: Dict[str, int] = {}
+        self.worker = threading.Thread(target=self._worker, name="sam-preload-worker", daemon=True)
+        self.worker.start()
+
+    def submit(
+        self,
+        *,
+        variant: str,
+        generation: Optional[int],
+        image_token: Optional[str],
+        image_base64: Optional[str],
+        image_name: Optional[str],
+        slot: str,
+    ) -> 'SamPreloadResponse':
+        job = SamPreloadJob(
+            request_id=next(_job_id_counter),
+            variant=variant,
+            generation=generation,
+            image_token=image_token,
+            image_base64=image_base64,
+            image_name=image_name,
+            slot=slot,
+            event=threading.Event(),
+        )
+        with self.lock:
+            self.latest_request_id[variant] = job.request_id
+            if generation is not None:
+                prev = self.latest_generation.get(variant)
+                if prev is None or generation > prev:
+                    self.latest_generation[variant] = generation
+        self.queue.put(job)
+        job.event.wait()
+        if job.error:
+            raise job.error
+        return job.result  # type: ignore[return-value]
+
+    def _worker(self) -> None:
+        while True:
+            job = self.queue.get()
+            try:
+                if self._is_superseded(job):
+                    job.result = SamPreloadResponse(status="superseded", width=0, height=0, token=job.image_token or "")
+                else:
+                    job.result = self._process_job(job)
+            except Exception as exc:  # noqa: BLE001 - propagate to caller
+                job.error = exc
+            finally:
+                job.event.set()
+                self.queue.task_done()
+
+    def _is_superseded(self, job: SamPreloadJob) -> bool:
+        with self.lock:
+            latest_id = self.latest_request_id.get(job.variant)
+            latest_generation = self.latest_generation.get(job.variant)
+        if latest_id is not None and job.request_id < latest_id:
+            return True
+        if job.generation is not None and latest_generation is not None and job.generation < latest_generation:
+            return True
+        return False
+
+    def _process_job(self, job: SamPreloadJob) -> 'SamPreloadResponse':
+        variant = job.variant
+        try:
+            slot_name = predictor_manager.resolve_slot(job.slot, allow_disabled_fallback=False)
+        except ValueError:
+            return SamPreloadResponse(status="slot_disabled", width=0, height=0, token=job.image_token or "")
+        image_name = job.image_name
+
+        if job.image_token:
+            cached = _fetch_preloaded_image(job.image_token, variant)
+            if cached is not None:
+                if self._is_superseded(job):
+                    return SamPreloadResponse(
+                        status="superseded",
+                        width=int(cached.shape[1]),
+                        height=int(cached.shape[0]),
+                        token=job.image_token,
+                    )
+                predictor_manager.set_slot_with_wait(slot_name, cached, job.image_token, variant, image_name)
+                height, width = cached.shape[:2]
+                return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=job.image_token)
+            if not job.image_base64:
+                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
+
+        if not job.image_base64:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required")
+
+        np_img = self._decode_base64(job.image_base64)
+        token = hashlib.md5(np_img.tobytes()).hexdigest()
+        _store_preloaded_image(token, np_img, variant)
+
+        if self._is_superseded(job):
+            return SamPreloadResponse(status="superseded", width=int(np_img.shape[1]), height=int(np_img.shape[0]), token=token)
+
+        predictor_manager.set_slot_with_wait(slot_name, np_img, token, variant, image_name)
+        height, width = np_img.shape[:2]
+        return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=token)
+
+    @staticmethod
+    def _decode_base64(image_base64: str) -> np.ndarray:
+        try:
+            data = base64.b64decode(image_base64)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_base64:{exc}") from exc
+        try:
+            pil_img = Image.open(BytesIO(data)).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_image:{exc}") from exc
+        return np.array(pil_img)
+
+
 def _resolve_qwen_device() -> str:
     if QWEN_DEVICE_PREF and QWEN_DEVICE_PREF != "auto":
         if QWEN_DEVICE_PREF.startswith("cuda") and not torch.cuda.is_available():
@@ -757,14 +961,22 @@ def _qwen_point_results(
 
 
 def _ensure_qwen_ready():
-    global qwen_model, qwen_processor, qwen_device, qwen_last_error
+    global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
     if QWEN_IMPORT_ERROR is not None or Qwen2_5_VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
         detail = f"qwen_dependencies_missing:{QWEN_IMPORT_ERROR}"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
-    if qwen_model is not None and qwen_processor is not None:
+    if (
+        qwen_model is not None
+        and qwen_processor is not None
+        and loaded_qwen_model_id == active_qwen_model_id
+    ):
         return qwen_model, qwen_processor
     with qwen_lock:
-        if qwen_model is not None and qwen_processor is not None:
+        if (
+            qwen_model is not None
+            and qwen_processor is not None
+            and loaded_qwen_model_id == active_qwen_model_id
+        ):
             return qwen_model, qwen_processor
         try:
             device = _resolve_qwen_device()
@@ -785,18 +997,26 @@ def _ensure_qwen_ready():
                 "low_cpu_mem_usage": True,
             }
         try:
+            source = active_qwen_model_path if active_qwen_model_path else QWEN_MODEL_NAME
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                QWEN_MODEL_NAME,
+                str(source),
                 **load_kwargs,
             )
             if not load_kwargs.get("device_map"):
                 model.to(device)
             model.eval()
-            processor = AutoProcessor.from_pretrained(
-                QWEN_MODEL_NAME,
-                min_pixels=QWEN_MIN_PIXELS,
-                max_pixels=QWEN_MAX_PIXELS,
-            )
+            if active_qwen_model_path:
+                processor = Qwen2_5_VLProcessor.from_pretrained(
+                    str(source),
+                    min_pixels=QWEN_MIN_PIXELS,
+                    max_pixels=QWEN_MAX_PIXELS,
+                )
+            else:
+                processor = AutoProcessor.from_pretrained(
+                    QWEN_MODEL_NAME,
+                    min_pixels=QWEN_MIN_PIXELS,
+                    max_pixels=QWEN_MAX_PIXELS,
+                )
         except Exception as exc:  # noqa: BLE001
             qwen_last_error = str(exc)
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
@@ -804,13 +1024,23 @@ def _ensure_qwen_ready():
         qwen_processor = processor
         qwen_device = device
         qwen_last_error = None
+        loaded_qwen_model_id = active_qwen_model_id
         return model, processor
 
 
 def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, int]:
     """Execute a Qwen 2.5 VL inference following the reference blog recipe."""
     model, processor = _ensure_qwen_ready()
-    messages = [
+    messages: List[Dict[str, Any]] = []
+    sys_prompt = (active_qwen_metadata or {}).get("system_prompt")
+    if sys_prompt:
+        messages.append(
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": sys_prompt}],
+            }
+        )
+    messages.append(
         {
             "role": "user",
             "content": [
@@ -818,7 +1048,7 @@ def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, in
                 {"type": "text", "text": prompt},
             ],
         }
-    ]
+    )
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
     inputs = processor(
@@ -980,6 +1210,9 @@ class SamPreloadResponse(BaseModel):
     width: int
     height: int
     token: str
+
+
+sam_preload_manager = SamPreloadManager()
 
 
 class SamSlotStatus(BaseModel):
@@ -1148,6 +1381,33 @@ DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
 
 qwen_prompt_config = DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True)
 
+
+class QwenTrainRequest(BaseModel):
+    dataset_root: str
+    run_name: Optional[str] = None
+    model_id: Optional[str] = None
+    system_prompt: Optional[str] = None
+    system_prompt_noise: Optional[float] = None
+    batch_size: Optional[int] = None
+    max_epochs: Optional[int] = None
+    lr: Optional[float] = None
+    accumulate_grad_batches: Optional[int] = None
+    check_val_every_n_epoch: Optional[int] = None
+    gradient_clip_val: Optional[float] = None
+    warmup_steps: Optional[int] = None
+    num_workers: Optional[int] = None
+    use_qlora: Optional[bool] = None
+    lora_rank: Optional[int] = None
+    lora_alpha: Optional[int] = None
+    lora_dropout: Optional[float] = None
+    patience: Optional[int] = None
+    accelerator: Optional[str] = None
+    devices: Optional[List[int]] = None
+
+
+class QwenModelActivateRequest(BaseModel):
+    model_id: str
+
 class ActiveModelRequest(BaseModel):
     classifier_path: Optional[str] = None
     labelmap_path: Optional[str] = None
@@ -1182,6 +1442,30 @@ class ClipTrainingJob:
 
 TRAINING_JOBS: Dict[str, ClipTrainingJob] = {}
 TRAINING_JOBS_LOCK = threading.Lock()
+
+QWEN_JOB_ROOT = Path(os.environ.get("QWEN_TRAINING_ROOT", "./uploads/qwen_runs"))
+QWEN_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_DATASET_ROOT = QWEN_JOB_ROOT / "datasets"
+QWEN_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+@dataclass
+class QwenTrainingJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    config: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
+QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 
@@ -1217,6 +1501,43 @@ def _job_update(job: ClipTrainingJob, *, status: Optional[str] = None, message: 
         job.error = error
     if artifacts is not None:
         job.artifacts = artifacts
+
+
+def _qwen_job_log(job: QwenTrainingJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > MAX_JOB_LOGS:
+        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+    job.updated_at = time.time()
+    try:
+        logger.info("[qwen-train %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _qwen_job_update(
+    job: QwenTrainingJob,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
+    if status is not None:
+        job.status = status
+    if message is not None:
+        if message != job.message:
+            job.message = message
+            _qwen_job_log(job, message)
+        else:
+            job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
     job.updated_at = time.time()
 
 
@@ -1234,6 +1555,150 @@ def _serialize_job(job: ClipTrainingJob) -> Dict[str, Any]:
     }
 
 
+def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "logs": job.logs,
+        "result": job.result,
+        "error": job.error,
+        "config": job.config,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _persist_qwen_run_metadata(
+    result_path: Path,
+    config: QwenTrainingConfig,
+    training_result: QwenTrainingResult,
+) -> Dict[str, Any]:
+    dataset_meta = training_result.metadata or {}
+    metadata = {
+        "id": config.run_name or result_path.name,
+        "label": config.run_name or result_path.name,
+        "system_prompt": config.system_prompt,
+        "system_prompt_noise": config.system_prompt_noise,
+        "dataset_context": dataset_meta.get("context", ""),
+        "classes": dataset_meta.get("classes", []) or [],
+        "model_id": config.model_id,
+        "use_qlora": config.use_qlora,
+        "created_at": time.time(),
+        "latest_checkpoint": training_result.latest_checkpoint,
+        "source_dataset": config.dataset_root,
+    }
+    meta_path = result_path / QWEN_METADATA_FILENAME
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write Qwen metadata for %s: %s", result_path, exc)
+    return metadata
+
+
+def _load_qwen_run_metadata(run_dir: Path) -> Optional[Dict[str, Any]]:
+    meta_path = run_dir / QWEN_METADATA_FILENAME
+    if not meta_path.exists():
+        return None
+    try:
+        with meta_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                data.setdefault("id", run_dir.name)
+                return data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read Qwen metadata from %s: %s", meta_path, exc)
+    return None
+
+
+def _list_qwen_model_entries() -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for path in QWEN_JOB_ROOT.iterdir():
+        if not path.is_dir() or path.name == QWEN_DATASET_ROOT.name:
+            continue
+        metadata = _load_qwen_run_metadata(path)
+        if not metadata:
+            continue
+        latest = path / "latest"
+        if not latest.exists():
+            continue
+        entries.append(
+            {
+                "id": metadata.get("id") or path.name,
+                "label": metadata.get("label") or metadata.get("run_name") or path.name,
+                "path": str(latest),
+                "created_at": metadata.get("created_at"),
+                "metadata": metadata,
+                "type": "trained",
+            }
+        )
+    entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return entries
+
+
+def _get_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
+    for entry in _list_qwen_model_entries():
+        if entry.get("id") == model_id:
+            return entry
+    return None
+
+
+def _build_qwen_config(payload: QwenTrainRequest, job_id: str) -> QwenTrainingConfig:
+    if QWEN_TRAINING_IMPORT_ERROR is not None or QwenTrainingConfig is None:
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"qwen_training_unavailable:{QWEN_TRAINING_IMPORT_ERROR}",
+        )
+    dataset_root = os.path.abspath(payload.dataset_root)
+    if not os.path.isdir(dataset_root):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_not_found")
+    train_dir = os.path.join(dataset_root, "train")
+    val_dir = os.path.join(dataset_root, "val")
+    if not os.path.isdir(train_dir) or not os.path.isdir(val_dir):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_missing_train_val")
+    run_name = payload.run_name or f"qwen_run_{job_id}"
+    result_path = (QWEN_JOB_ROOT / run_name).resolve()
+    system_prompt = (payload.system_prompt or DEFAULT_SYSTEM_PROMPT).strip() or DEFAULT_SYSTEM_PROMPT
+    cfg_kwargs: Dict[str, Any] = {
+        "dataset_root": dataset_root,
+        "result_path": str(result_path),
+        "model_id": payload.model_id or "Qwen/Qwen2.5-VL-3B-Instruct",
+        "run_name": run_name,
+        "system_prompt": system_prompt,
+    }
+    defaults = {
+        "batch_size": payload.batch_size,
+        "max_epochs": payload.max_epochs,
+        "lr": payload.lr,
+        "accumulate_grad_batches": payload.accumulate_grad_batches,
+        "check_val_every_n_epoch": payload.check_val_every_n_epoch,
+        "gradient_clip_val": payload.gradient_clip_val,
+        "warmup_steps": payload.warmup_steps,
+        "num_workers": payload.num_workers,
+        "lora_rank": payload.lora_rank,
+        "lora_alpha": payload.lora_alpha,
+        "lora_dropout": payload.lora_dropout,
+        "patience": payload.patience,
+        "accelerator": payload.accelerator,
+    }
+    for key, value in defaults.items():
+        if value is not None:
+            cfg_kwargs[key] = value
+    if payload.devices is not None:
+        cfg_kwargs["devices"] = payload.devices
+    if payload.use_qlora is not None:
+        cfg_kwargs["use_qlora"] = payload.use_qlora
+    if payload.system_prompt_noise is not None:
+        try:
+            noise_val = float(payload.system_prompt_noise)
+        except (TypeError, ValueError):
+            noise_val = 0.05
+        cfg_kwargs["system_prompt_noise"] = max(0.0, min(noise_val, 0.3))
+    return QwenTrainingConfig(**cfg_kwargs)
+
+
 def _normalise_relative_path(name: Optional[str]) -> Path:
     candidate = (name or "").replace("\\", "/")
     path = Path(candidate)
@@ -1248,6 +1713,43 @@ def _normalise_relative_path(name: Optional[str]) -> Path:
         fallback = Path(candidate).name or f"file_{uuid.uuid4().hex}"
         parts = [fallback]
     return Path(*parts)
+
+
+def _get_qwen_job(job_id: str) -> QwenTrainingJob:
+    with QWEN_TRAINING_JOBS_LOCK:
+        job = QWEN_TRAINING_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_job_not_found")
+        return job
+
+
+@app.post("/qwen/train/dataset/upload")
+async def upload_qwen_dataset(file: UploadFile = File(...), run_name: Optional[str] = Form(None)):
+    if not file.filename:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_file_required")
+    dataset_token = run_name or f"dataset_{uuid.uuid4().hex}"
+    safe_token = re.sub(r"[^A-Za-z0-9._-]", "_", dataset_token)
+    dest_dir = QWEN_DATASET_ROOT / safe_token
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir, ignore_errors=True)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        contents = await file.read()
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dataset_read_failed:{exc}") from exc
+    try:
+        with zipfile.ZipFile(io.BytesIO(contents)) as archive:
+            archive.extractall(dest_dir)
+    except zipfile.BadZipFile as exc:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dataset_invalid_zip:{exc}") from exc
+    for split in ("train", "val"):
+        annotations = dest_dir / split / "annotations.jsonl"
+        if not annotations.exists():
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dataset_missing_annotations:{split}")
+    return {"dataset_root": str(dest_dir), "run_name": safe_token}
 
 
 async def _save_upload_file(upload: UploadFile, root: Path) -> Path:
@@ -1752,6 +2254,48 @@ async def start_clip_training(
     return {"job_id": job_id}
 
 
+def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig) -> None:
+
+    def progress_cb(value: float, message: str) -> None:
+        with QWEN_TRAINING_JOBS_LOCK:
+            if job.cancel_event.is_set() and job.status not in {"cancelled", "failed"}:
+                _qwen_job_update(job, status="cancelling", message="Cancelling ...", progress=value)
+                return
+            _qwen_job_update(job, status="running", message=message, progress=value)
+
+    def cancel_cb() -> bool:
+        return job.cancel_event.is_set()
+
+    def worker() -> None:
+        try:
+            with QWEN_TRAINING_JOBS_LOCK:
+                if job.cancel_event.is_set():
+                    _qwen_job_update(job, status="cancelled", message="Cancelled before start.")
+                    return
+                _qwen_job_update(job, status="running", progress=0.01, message="Preparing Qwen training job ...")
+            result = train_qwen_model(config, progress_cb=progress_cb, cancel_cb=cancel_cb)
+            run_metadata = _persist_qwen_run_metadata(result_path, config, result)
+            payload = {
+                "checkpoints": result.checkpoints,
+                "latest": result.latest_checkpoint,
+                "epochs_ran": result.epochs_ran,
+                "metadata": run_metadata,
+            }
+            with QWEN_TRAINING_JOBS_LOCK:
+                _qwen_job_update(job, status="succeeded", progress=1.0, message="Training complete", result=payload)
+        except QwenTrainingError as exc:
+            with QWEN_TRAINING_JOBS_LOCK:
+                status = "cancelled" if job.cancel_event.is_set() else "failed"
+                _qwen_job_update(job, status=status, message=str(exc), error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            with QWEN_TRAINING_JOBS_LOCK:
+                _qwen_job_update(job, status="failed", message="Unexpected error", error=str(exc))
+
+    thread = threading.Thread(target=worker, name=f"qwen-train-{job.job_id}", daemon=True)
+    thread.start()
+
+
+
 @app.get("/clip/train")
 def list_training_jobs():
     with TRAINING_JOBS_LOCK:
@@ -1778,6 +2322,96 @@ def cancel_training_job(job_id: str):
         next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
         _job_update(job, status=next_status, message="Cancellation requested ...")
     return {"status": next_status}
+
+
+@app.post("/qwen/train/jobs")
+def create_qwen_training_job(payload: QwenTrainRequest):
+    if QWEN_TRAINING_IMPORT_ERROR is not None or train_qwen_model is None:
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"qwen_training_unavailable:{QWEN_TRAINING_IMPORT_ERROR}",
+        )
+    if not payload.dataset_root:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_root_required")
+    job_id = uuid.uuid4().hex
+    config = _build_qwen_config(payload, job_id)
+    config_dict = asdict(config)
+    job = QwenTrainingJob(job_id=job_id, config=config_dict)
+    with QWEN_TRAINING_JOBS_LOCK:
+        QWEN_TRAINING_JOBS[job_id] = job
+        _qwen_job_log(job, "Job queued")
+    _start_qwen_training_worker(job, config)
+    return {"job_id": job_id}
+
+
+@app.get("/qwen/train/jobs")
+def list_qwen_training_jobs():
+    with QWEN_TRAINING_JOBS_LOCK:
+        jobs = sorted(QWEN_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+        return [_serialize_qwen_job(job) for job in jobs]
+
+
+@app.get("/qwen/train/jobs/{job_id}")
+def get_qwen_training_job(job_id: str):
+    job = _get_qwen_job(job_id)
+    return _serialize_qwen_job(job)
+
+
+@app.post("/qwen/train/jobs/{job_id}/cancel")
+def cancel_qwen_training_job(job_id: str):
+    job = _get_qwen_job(job_id)
+    with QWEN_TRAINING_JOBS_LOCK:
+        if job.status in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        if job.cancel_event.is_set():
+            return {"status": job.status}
+        job.cancel_event.set()
+        next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
+        _qwen_job_update(job, status=next_status, message="Cancellation requested ...")
+        return {"status": next_status}
+
+
+@app.get("/qwen/models")
+def list_qwen_models():
+    default_entry = {
+        "id": "default",
+        "label": "Base Qwen 2.5",
+        "type": "builtin",
+        "metadata": _default_qwen_metadata(),
+        "path": None,
+        "created_at": None,
+        "active": active_qwen_model_id == "default",
+    }
+    entries = _list_qwen_model_entries()
+    data = [default_entry]
+    for entry in entries:
+        entry["active"] = entry.get("id") == active_qwen_model_id
+        data.append(entry)
+    return {
+        "active": active_qwen_model_id,
+        "models": data,
+    }
+
+
+@app.post("/qwen/models/activate")
+def activate_qwen_model(payload: QwenModelActivateRequest):
+    model_id = (payload.model_id or "").strip()
+    if not model_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="model_id_required")
+    if model_id == "default":
+        _set_active_qwen_model_default()
+    else:
+        entry = _get_qwen_model_entry(model_id)
+        if not entry:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_model_not_found")
+        latest = entry.get("path")
+        if not latest or not Path(latest).exists():
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_model_missing_checkpoint")
+        _set_active_qwen_model_custom(model_id, Path(latest), entry.get("metadata") or {})
+    return {
+        "active": active_qwen_model_id,
+        "metadata": active_qwen_metadata,
+    }
 
 
 @app.get("/clip/active_model", response_model=ActiveModelResponse)
@@ -1989,6 +2623,8 @@ def qwen_status():
         "max_pixels": QWEN_MAX_PIXELS,
         "last_error": pending_error,
         "dependency_error": dependency_error,
+        "active_model": active_qwen_model_id,
+        "active_metadata": active_qwen_metadata,
     }
 
 

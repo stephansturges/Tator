@@ -184,6 +184,12 @@ body {
     line-height: 1.4;
 }
 
+.training-packaging__progress {
+    margin: 0.25rem 0 0.5rem;
+    font-weight: 500;
+    color: #0f172a;
+}
+
 .training-packaging__hint {
     font-size: 0.9rem;
 }
@@ -198,9 +204,14 @@ body {
 }
 
 .training-packaging-progress__fill {
-    width: 200%;
+    width: 0%;
     height: 100%;
     background: linear-gradient(90deg, #4c6ef5, #14b8a6, #4c6ef5);
+    transition: width 0.2s ease;
+}
+
+.training-packaging-progress__fill.is-indeterminate {
+    width: 200%;
     animation: training-packaging-stripes 1.2s linear infinite;
 }
 

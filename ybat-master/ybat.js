@@ -370,6 +370,8 @@
         trainingPackagingModal.etaEl = document.getElementById("trainingPackagingEta");
         trainingPackagingModal.elapsedEl = document.getElementById("trainingPackagingElapsed");
         trainingPackagingModal.hintEl = document.getElementById("trainingPackagingHint");
+        trainingPackagingModal.progressLabel = document.getElementById("trainingPackagingProgressText");
+        trainingPackagingModal.progressFill = document.getElementById("trainingPackagingProgressFill");
         trainingPackagingModal.dismissBtn = document.getElementById("trainingPackagingDismiss");
         if (trainingPackagingModal.dismissBtn) {
             trainingPackagingModal.dismissBtn.addEventListener("click", () => hideTrainingPackagingModal());
@@ -380,7 +382,7 @@
         }
     }
 
-    function showTrainingPackagingModal(stats) {
+    function showTrainingPackagingModal(stats, options = {}) {
         ensureTrainingPackagingElements();
         if (!trainingPackagingModal.element) {
             return;
@@ -389,6 +391,11 @@
             clearInterval(trainingPackagingModal.timerId);
             trainingPackagingModal.timerId = null;
         }
+        const {
+            hintText = null,
+            progressText = "Preparing files…",
+            indeterminate = true,
+        } = options;
         const imageSummary = stats
             ? `${stats.imageCount} image${stats.imageCount === 1 ? "" : "s"} (${formatBytes(stats.imageBytes)})`
             : "";
@@ -410,8 +417,21 @@
                 trainingPackagingModal.etaEl.textContent = "Estimating upload time…";
             }
         }
+        if (trainingPackagingModal.progressLabel) {
+            trainingPackagingModal.progressLabel.textContent = progressText;
+        }
+        if (trainingPackagingModal.progressFill) {
+            trainingPackagingModal.progressFill.style.width = indeterminate ? "200%" : "0%";
+            trainingPackagingModal.progressFill.classList.toggle("is-indeterminate", indeterminate);
+        }
+        trainingPackagingModal.indeterminate = indeterminate;
         if (trainingPackagingModal.elapsedEl) {
             trainingPackagingModal.elapsedEl.textContent = "Elapsed: 0s";
+        }
+        if (trainingPackagingModal.hintEl && hintText) {
+            trainingPackagingModal.hintEl.textContent = hintText;
+        } else if (trainingPackagingModal.hintEl && !hintText) {
+            trainingPackagingModal.hintEl.textContent = "Keep this tab open while we stage files and upload them to the server. Larger datasets can take a few minutes.";
         }
         trainingPackagingModal.startedAt = performance.now();
         trainingPackagingModal.visible = true;
@@ -430,6 +450,22 @@
         trainingPackagingModal.elapsedEl.textContent = `Elapsed: ${formatDurationPrecise(elapsedSeconds)}`;
     }
 
+    function updateTrainingPackagingProgress(percent, text) {
+        ensureTrainingPackagingElements();
+        if (!trainingPackagingModal.visible) {
+            return;
+        }
+        if (typeof percent === "number" && trainingPackagingModal.progressFill) {
+            const clamped = Math.max(0, Math.min(100, percent));
+            trainingPackagingModal.progressFill.classList.remove("is-indeterminate");
+            trainingPackagingModal.progressFill.style.width = `${clamped}%`;
+            trainingPackagingModal.indeterminate = false;
+        }
+        if (text && trainingPackagingModal.progressLabel) {
+            trainingPackagingModal.progressLabel.textContent = text;
+        }
+    }
+
     function hideTrainingPackagingModal() {
         if (!trainingPackagingModal.element) {
             return;
@@ -440,6 +476,13 @@
         if (trainingPackagingModal.timerId) {
             clearInterval(trainingPackagingModal.timerId);
             trainingPackagingModal.timerId = null;
+        }
+        if (trainingPackagingModal.progressFill) {
+            trainingPackagingModal.progressFill.classList.add("is-indeterminate");
+            trainingPackagingModal.progressFill.style.width = "200%";
+        }
+        if (trainingPackagingModal.progressLabel) {
+            trainingPackagingModal.progressLabel.textContent = "Preparing…";
         }
     }
 
@@ -657,10 +700,13 @@
         etaEl: null,
         elapsedEl: null,
         hintEl: null,
+        progressLabel: null,
+        progressFill: null,
         dismissBtn: null,
         visible: false,
         startedAt: 0,
         timerId: null,
+        indeterminate: true,
     };
     const taskQueueState = {
         element: null,
@@ -1711,7 +1757,8 @@ function buildQwenSampleUserPrompt(context, labels, mode, type) {
     return parts.filter(Boolean).join(" ").trim();
 }
 
-async function buildQwenDatasetZip() {
+async function buildQwenDatasetZip(options = {}) {
+    const { onProgress } = options;
     const imageNames = Object.keys(images);
     if (!imageNames.length) {
         throw new Error("Load images before starting Qwen training.");
@@ -1736,6 +1783,8 @@ async function buildQwenDatasetZip() {
     const valRecords = [];
     let totalBoxes = 0;
 
+    const totalImages = imageNames.length;
+    let processedImages = 0;
     for (const imageKey of imageNames) {
         const imageRecord = images[imageKey];
         if (!imageRecord || !imageRecord.meta) {
@@ -1756,6 +1805,12 @@ async function buildQwenDatasetZip() {
             valRecords.push(entry);
         } else {
             trainRecords.push(entry);
+        }
+        processedImages += 1;
+        if (typeof onProgress === "function" && totalImages > 0) {
+            const gatherPercent = Math.min(50, (processedImages / totalImages) * 50);
+            const label = `Collecting annotations… ${Math.round((processedImages / totalImages) * 100)}%`;
+            onProgress({ phase: "gather", percent: gatherPercent, label });
         }
     }
 
@@ -1787,7 +1842,20 @@ async function buildQwenDatasetZip() {
     };
     zip.file("dataset_meta.json", JSON.stringify(datasetMeta, null, 2));
 
-    const blob = await zip.generateAsync({ type: "blob" });
+    const blob = await zip.generateAsync(
+        { type: "blob" },
+        (metadata) => {
+            if (typeof onProgress === "function") {
+                const base = totalImages > 0 ? 50 : 0;
+                const percent = base + Math.min(50, (metadata.percent || 0) * 0.5);
+                const label = `Compressing dataset… ${metadata.percent.toFixed(1)}%`;
+                onProgress({ phase: "zip", percent, label });
+            }
+        },
+    );
+    if (typeof onProgress === "function") {
+        onProgress({ phase: "done", percent: 100, label: "Dataset packaged" });
+    }
     const preferredName = qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
     const safeDataset = preferredName.replace(/[^A-Za-z0-9._-]/g, "_") || "qwen_dataset";
     return {
@@ -1798,23 +1866,52 @@ async function buildQwenDatasetZip() {
 }
 
 async function uploadQwenDatasetZip() {
-    setQwenTrainMessage("Packaging dataset…");
-    const { blob, fileName, suggestedRunName } = await buildQwenDatasetZip();
-    setQwenTrainMessage("Uploading dataset…");
-    const formData = new FormData();
-    formData.append("file", blob, fileName);
-    if (suggestedRunName) {
-        formData.append("run_name", suggestedRunName);
+    const imageKeys = Object.keys(images);
+    const stats = computeQwenDatasetStats(imageKeys);
+    let packagingModalVisible = false;
+    try {
+        if (stats.imageCount > 0) {
+            showTrainingPackagingModal(stats, {
+                indeterminate: false,
+                progressText: "Preparing dataset…",
+                hintText: "Keep this tab open while we package the dataset for Qwen training.",
+            });
+            packagingModalVisible = true;
+        }
+        setQwenTrainMessage("Packaging dataset…");
+        const { blob, fileName, suggestedRunName } = await buildQwenDatasetZip({
+            onProgress: (payload) => {
+                if (payload && typeof payload.percent === "number") {
+                    updateTrainingPackagingProgress(payload.percent, payload.label || "Packaging dataset…");
+                } else if (payload?.label) {
+                    updateTrainingPackagingProgress(undefined, payload.label);
+                }
+            },
+        });
+        if (packagingModalVisible) {
+            hideTrainingPackagingModal();
+            packagingModalVisible = false;
+        }
+        setQwenTrainMessage("Uploading dataset…");
+        const formData = new FormData();
+        formData.append("file", blob, fileName);
+        if (suggestedRunName) {
+            formData.append("run_name", suggestedRunName);
+        }
+        const resp = await fetch(`${API_ROOT}/qwen/train/dataset/upload`, {
+            method: "POST",
+            body: formData,
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || `Dataset upload failed (${resp.status})`);
+        }
+        return resp.json();
+    } finally {
+        if (packagingModalVisible) {
+            hideTrainingPackagingModal();
+        }
     }
-    const resp = await fetch(`${API_ROOT}/qwen/train/dataset/upload`, {
-        method: "POST",
-        body: formData,
-    });
-    if (!resp.ok) {
-        const detail = await resp.text();
-        throw new Error(detail || `Dataset upload failed (${resp.status})`);
-    }
-    return resp.json();
 }
 
 function buildQwenTrainingPayload(datasetRoot, datasetRunName) {
@@ -2544,6 +2641,29 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
             totalFiles,
             imageBytes,
             labelBytes,
+            totalBytes,
+            estimatedSeconds,
+        };
+    }
+
+    function computeQwenDatasetStats(imageKeys) {
+        let totalBytes = 0;
+        imageKeys.forEach((key) => {
+            const record = images[key];
+            const file = record?.meta;
+            if (file && typeof file.size === "number") {
+                totalBytes += file.size;
+            }
+        });
+        const estimatedSeconds = totalBytes > 0
+            ? totalBytes / (PACKAGING_REFERENCE_MBPS * 1024 * 1024)
+            : null;
+        return {
+            imageCount: imageKeys.length,
+            labelCount: 0,
+            totalFiles: imageKeys.length,
+            imageBytes: totalBytes,
+            labelBytes: 0,
             totalBytes,
             estimatedSeconds,
         };

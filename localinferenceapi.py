@@ -100,7 +100,7 @@ QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen2.5-VL-3B-Instruct
 QWEN_MIN_PIXELS = _env_int("QWEN_MIN_PIXELS", 256 * 28 * 28)
 QWEN_MAX_PIXELS = _env_int("QWEN_MAX_PIXELS", 1280 * 28 * 28)
 QWEN_MAX_NEW_TOKENS = _env_int("QWEN_MAX_NEW_TOKENS", 1024)
-QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", True)
+QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", False)
 QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
 QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
 QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
@@ -556,6 +556,154 @@ def _fetch_preloaded_image(token: str, variant: str) -> Optional[np.ndarray]:
             return None
         sam_preload_cache.move_to_end(token)
         return arr
+
+
+_job_id_counter = itertools.count(1)
+
+
+@dataclass
+class SamPreloadJob:
+    request_id: int
+    variant: str
+    slot: str
+    generation: Optional[int]
+    image_token: Optional[str]
+    image_base64: Optional[str]
+    image_name: Optional[str]
+    event: threading.Event
+    result: Optional[SamPreloadResponse] = None
+    error: Optional[Exception] = None
+
+
+class SamPreloadManager:
+    def __init__(self):
+        self.queue: "queue.Queue[SamPreloadJob]" = queue.Queue()
+        self.lock = threading.Lock()
+        self.latest_request_id: Dict[Tuple[str, str], int] = {}
+        self.latest_generation: Dict[Tuple[str, str], int] = {}
+        self.worker = threading.Thread(target=self._worker, name="sam-preload-worker", daemon=True)
+        self.worker.start()
+
+    def submit(
+        self,
+        *,
+        variant: str,
+        slot: str,
+        generation: Optional[int],
+        image_token: Optional[str],
+        image_base64: Optional[str],
+        image_name: Optional[str],
+    ) -> SamPreloadResponse:
+        job = SamPreloadJob(
+            request_id=next(_job_id_counter),
+            variant=variant,
+            slot=slot,
+            generation=generation,
+            image_token=image_token,
+            image_base64=image_base64,
+            image_name=image_name,
+            event=threading.Event(),
+        )
+        key = (variant, slot)
+        with self.lock:
+            self.latest_request_id[key] = job.request_id
+            if generation is not None:
+                prev = self.latest_generation.get(key)
+                if prev is None or generation > prev:
+                    self.latest_generation[key] = generation
+        self.queue.put(job)
+        job.event.wait()
+        if job.error:
+            raise job.error
+        return job.result  # type: ignore[return-value]
+
+    def _worker(self) -> None:
+        while True:
+            job = self.queue.get()
+            try:
+                if self._is_superseded(job):
+                    job.result = self._superseded_response(job)
+                else:
+                    job.result = self._process_job(job)
+            except Exception as exc:  # noqa: BLE001
+                job.error = exc
+            finally:
+                job.event.set()
+                self.queue.task_done()
+
+    def _key(self, job: SamPreloadJob) -> Tuple[str, str]:
+        return (job.variant, job.slot)
+
+    def _is_superseded(self, job: SamPreloadJob) -> bool:
+        with self.lock:
+            latest_id = self.latest_request_id.get(self._key(job))
+            latest_generation = self.latest_generation.get(self._key(job))
+        if latest_id is not None and job.request_id < latest_id:
+            return True
+        if job.generation is not None and latest_generation is not None and job.generation < latest_generation:
+            return True
+        return False
+
+    def _superseded_response(self, job: SamPreloadJob) -> SamPreloadResponse:
+        width = 0
+        height = 0
+        if job.image_token:
+            cached = _fetch_preloaded_image(job.image_token, job.variant)
+            if cached is not None:
+                height, width = cached.shape[:2]
+        return SamPreloadResponse(status="superseded", width=int(width), height=int(height), token=job.image_token or "")
+
+    def _process_job(self, job: SamPreloadJob) -> SamPreloadResponse:
+        variant = job.variant
+        slot = job.slot
+        image_name = job.image_name
+
+        if job.image_token:
+            cached = _fetch_preloaded_image(job.image_token, variant)
+            if cached is not None:
+                if self._is_superseded(job):
+                    height, width = cached.shape[:2]
+                    return SamPreloadResponse(
+                        status="superseded",
+                        width=int(width),
+                        height=int(height),
+                        token=job.image_token,
+                    )
+                predictor_manager.set_slot_with_wait(slot, cached, job.image_token, variant, image_name)
+                height, width = cached.shape[:2]
+                return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=job.image_token)
+            if not job.image_base64:
+                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
+
+        if not job.image_base64:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required")
+
+        np_img = self._decode_base64(job.image_base64)
+        token = hashlib.md5(np_img.tobytes()).hexdigest()
+        _store_preloaded_image(token, np_img, variant)
+
+        if self._is_superseded(job):
+            height, width = np_img.shape[:2]
+            return SamPreloadResponse(status="superseded", width=int(width), height=int(height), token=token)
+
+        predictor_manager.set_slot_with_wait(slot, np_img, token, variant, image_name)
+        height, width = np_img.shape[:2]
+        return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=token)
+
+    @staticmethod
+    def _decode_base64(image_base64: str) -> np.ndarray:
+        try:
+            data = base64.b64decode(image_base64)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_base64:{exc}") from exc
+        try:
+            pil_img = Image.open(BytesIO(data)).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_image:{exc}") from exc
+        return np.array(pil_img)
+
+
+sam_preload_manager = SamPreloadManager()
 
 
 def _predict_with_cache(

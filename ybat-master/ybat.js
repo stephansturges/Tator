@@ -361,6 +361,88 @@
         backgroundLoadModal.element.setAttribute("aria-hidden", "true");
     }
 
+    function ensureTrainingPackagingElements() {
+        if (trainingPackagingModal.element) {
+            return;
+        }
+        trainingPackagingModal.element = document.getElementById("trainingPackagingModal");
+        trainingPackagingModal.summaryEl = document.getElementById("trainingPackagingStats");
+        trainingPackagingModal.etaEl = document.getElementById("trainingPackagingEta");
+        trainingPackagingModal.elapsedEl = document.getElementById("trainingPackagingElapsed");
+        trainingPackagingModal.hintEl = document.getElementById("trainingPackagingHint");
+        trainingPackagingModal.dismissBtn = document.getElementById("trainingPackagingDismiss");
+        if (trainingPackagingModal.dismissBtn) {
+            trainingPackagingModal.dismissBtn.addEventListener("click", () => hideTrainingPackagingModal());
+        }
+        const backdrop = trainingPackagingModal.element?.querySelector(".modal__backdrop");
+        if (backdrop) {
+            backdrop.addEventListener("click", () => hideTrainingPackagingModal());
+        }
+    }
+
+    function showTrainingPackagingModal(stats) {
+        ensureTrainingPackagingElements();
+        if (!trainingPackagingModal.element) {
+            return;
+        }
+        if (trainingPackagingModal.timerId) {
+            clearInterval(trainingPackagingModal.timerId);
+            trainingPackagingModal.timerId = null;
+        }
+        const imageSummary = stats
+            ? `${stats.imageCount} image${stats.imageCount === 1 ? "" : "s"} (${formatBytes(stats.imageBytes)})`
+            : "";
+        const labelSummary = stats
+            ? `${stats.labelCount} label file${stats.labelCount === 1 ? "" : "s"} (${formatBytes(stats.labelBytes)})`
+            : "";
+        const totalSummary = stats ? `${stats.totalFiles} files ≈ ${formatBytes(stats.totalBytes)}` : null;
+        if (trainingPackagingModal.summaryEl) {
+            if (stats) {
+                trainingPackagingModal.summaryEl.textContent = `${imageSummary} + ${labelSummary} (${totalSummary})`;
+            } else {
+                trainingPackagingModal.summaryEl.textContent = "Packaging dataset…";
+            }
+        }
+        if (trainingPackagingModal.etaEl) {
+            if (stats && Number.isFinite(stats.estimatedSeconds) && stats.estimatedSeconds > 0) {
+                trainingPackagingModal.etaEl.textContent = `Estimated upload: ${formatDurationPrecise(stats.estimatedSeconds)} (${describeDurationRange(stats.estimatedSeconds)})`;
+            } else {
+                trainingPackagingModal.etaEl.textContent = "Estimating upload time…";
+            }
+        }
+        if (trainingPackagingModal.elapsedEl) {
+            trainingPackagingModal.elapsedEl.textContent = "Elapsed: 0s";
+        }
+        trainingPackagingModal.startedAt = performance.now();
+        trainingPackagingModal.visible = true;
+        trainingPackagingModal.element.classList.add("visible");
+        trainingPackagingModal.element.setAttribute("aria-hidden", "false");
+        trainingPackagingModal.timerId = window.setInterval(() => {
+            updateTrainingPackagingElapsed();
+        }, 500);
+    }
+
+    function updateTrainingPackagingElapsed() {
+        if (!trainingPackagingModal.visible || !trainingPackagingModal.elapsedEl) {
+            return;
+        }
+        const elapsedSeconds = Math.max(0, (performance.now() - trainingPackagingModal.startedAt) / 1000);
+        trainingPackagingModal.elapsedEl.textContent = `Elapsed: ${formatDurationPrecise(elapsedSeconds)}`;
+    }
+
+    function hideTrainingPackagingModal() {
+        if (!trainingPackagingModal.element) {
+            return;
+        }
+        trainingPackagingModal.visible = false;
+        trainingPackagingModal.element.classList.remove("visible");
+        trainingPackagingModal.element.setAttribute("aria-hidden", "true");
+        if (trainingPackagingModal.timerId) {
+            clearInterval(trainingPackagingModal.timerId);
+            trainingPackagingModal.timerId = null;
+        }
+    }
+
     function ensureTaskQueueElement() {
         if (!taskQueueState.element) {
             taskQueueState.element = document.getElementById("taskQueue");
@@ -568,6 +650,17 @@
         visible: false,
         decimalsTotal: 0,
         decimalsDone: 0,
+    };
+    const trainingPackagingModal = {
+        element: null,
+        summaryEl: null,
+        etaEl: null,
+        elapsedEl: null,
+        hintEl: null,
+        dismissBtn: null,
+        visible: false,
+        startedAt: 0,
+        timerId: null,
     };
     const taskQueueState = {
         element: null,
@@ -796,6 +889,62 @@
             return "—";
         }
         return Number(value).toFixed(digits);
+    }
+
+    function formatBytes(bytes, digits = 1) {
+        if (!Number.isFinite(bytes) || bytes <= 0) {
+            return "0 B";
+        }
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let value = bytes;
+        let unitIndex = 0;
+        while (value >= 1024 && unitIndex < units.length - 1) {
+            value /= 1024;
+            unitIndex += 1;
+        }
+        const precision = value >= 100 ? 0 : digits;
+        return `${value.toFixed(precision)} ${units[unitIndex]}`;
+    }
+
+    function formatDurationPrecise(seconds) {
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+            return "0s";
+        }
+        const totalSeconds = Math.floor(seconds);
+        const mins = Math.floor(totalSeconds / 60);
+        const hrs = Math.floor(mins / 60);
+        const secs = totalSeconds % 60;
+        const minutesPart = mins % 60;
+        const parts = [];
+        if (hrs > 0) {
+            parts.push(`${hrs}h`);
+        }
+        if (minutesPart > 0 || hrs > 0) {
+            parts.push(`${minutesPart}m`);
+        }
+        parts.push(`${secs}s`);
+        return parts.join(" ");
+    }
+
+    function describeDurationRange(seconds) {
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+            return "under a minute";
+        }
+        if (seconds < 60) {
+            return "under a minute";
+        }
+        if (seconds < 180) {
+            return "a few minutes";
+        }
+        if (seconds < 3600) {
+            const mins = Math.round(seconds / 60);
+            return `${mins} minute${mins === 1 ? "" : "s"}`;
+        }
+        const hours = seconds / 3600;
+        if (hours < 10) {
+            return `${hours.toFixed(1)} hours`;
+        }
+        return `${Math.round(hours)} hours`;
     }
 
     function renderConvergenceTable(trace) {
@@ -2378,6 +2527,28 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         }
     }
 
+    const PACKAGING_REFERENCE_MBPS = 35;
+
+    function computeDatasetStats(imageEntries, labelEntries) {
+        const sumBytes = (entries) => entries.reduce((acc, entry) => acc + Math.max(0, entry.file?.size || 0), 0);
+        const imageBytes = sumBytes(imageEntries);
+        const labelBytes = sumBytes(labelEntries);
+        const totalBytes = imageBytes + labelBytes;
+        const totalFiles = imageEntries.length + labelEntries.length;
+        const estimatedSeconds = totalBytes > 0
+            ? totalBytes / (PACKAGING_REFERENCE_MBPS * 1024 * 1024)
+            : null;
+        return {
+            imageCount: imageEntries.length,
+            labelCount: labelEntries.length,
+            totalFiles,
+            imageBytes,
+            labelBytes,
+            totalBytes,
+            estimatedSeconds,
+        };
+    }
+
     function gatherTrainingFormData() {
         if (!trainingElements.imagesInput || !trainingElements.labelsInput) {
             throw new Error("Training form not ready");
@@ -2389,7 +2560,8 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         }
         let imageEntries = [];
         let labelEntries = [];
-        if (!usingNativeImages) {
+        const usingUploads = !usingNativeImages;
+        if (usingUploads) {
             imageEntries = getStoredEntries("images");
             if (!imageEntries.length) {
                 throw new Error("Select an images folder that contains supported image files.");
@@ -2400,7 +2572,7 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
             }
         }
         const formData = new FormData();
-        if (usingNativeImages) {
+        if (!usingUploads) {
             formData.append("images_path_native", trainingState.nativeImagesPath);
             formData.append("labels_path_native", trainingState.nativeLabelsPath);
         } else {
@@ -2475,18 +2647,27 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         if (trainingElements.hardMiningCheckbox && trainingElements.hardMiningCheckbox.checked) {
             formData.append("hard_example_mining", "true");
         }
-        return formData;
+        const datasetStats = usingUploads ? computeDatasetStats(imageEntries, labelEntries) : null;
+        return { formData, usingUploads, datasetStats };
     }
 
     async function handleStartTrainingClick() {
         if (!trainingElements.startButton) {
             return;
         }
+        let packagingModalVisible = false;
         try {
-            const formData = gatherTrainingFormData();
+            const { formData, usingUploads, datasetStats } = gatherTrainingFormData();
             trainingElements.startButton.disabled = true;
-            setTrainingMessage("Submitting training job…", null);
-            setActiveMessage("Submitting training job…", null);
+            const preppingMessage = usingUploads && datasetStats
+                ? `Packaging dataset (${datasetStats.totalFiles} files ≈ ${formatBytes(datasetStats.totalBytes)}).`
+                : "Submitting training job…";
+            setTrainingMessage(preppingMessage, null);
+            setActiveMessage(preppingMessage, null);
+            if (usingUploads && datasetStats && datasetStats.totalFiles > 0) {
+                showTrainingPackagingModal(datasetStats);
+                packagingModalVisible = true;
+            }
             if (trainingElements.summary) {
                 trainingElements.summary.textContent = "";
             }
@@ -2530,6 +2711,9 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
             setTrainingMessage(msg, "error");
             setActiveMessage(msg, "error");
         } finally {
+            if (packagingModalVisible) {
+                hideTrainingPackagingModal();
+            }
             if (trainingElements.startButton) {
                 trainingElements.startButton.disabled = false;
             }

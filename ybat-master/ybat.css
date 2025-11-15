@@ -170,6 +170,56 @@ body {
     cursor: not-allowed;
 }
 
+.settings-panel {
+    max-width: 520px;
+    margin: 30px auto;
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+    border: 1px solid #e2e8f0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.settings-panel input[type="text"] {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid #cbd5f5;
+    font-size: 14px;
+}
+
+.settings-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.settings-status {
+    min-height: 20px;
+    font-size: 13px;
+    color: #0f172a;
+}
+
+.settings-status.info {
+    color: #2563eb;
+}
+
+.settings-status.success {
+    color: #0f9d58;
+}
+
+.settings-status.error {
+    color: #dc2626;
+}
+
+.settings-help {
+    font-size: 13px;
+    color: #475569;
+}
+
 .tab-shell {
     display: flex;
     flex-direction: column;
@@ -249,7 +299,7 @@ hr {
 }
 
 .left {
-    width: calc(30% - 10px);
+    width: calc(24% - 10px);
     position: absolute;
     left: 0;
     top: 0;
@@ -263,7 +313,7 @@ hr {
 
 .right {
     border-left: 1px solid gray;
-    margin: 10px 10px 10px calc(30% + 10px);
+    margin: 10px 10px 10px calc(24% + 10px);
     padding-left: 10px;
     position: relative;
 }
@@ -448,6 +498,161 @@ hr {
 
 .fallback-options input {
     width: 100%;
+}
+
+.qwen-panel {
+    border: 1px solid #dbeafe;
+    background: #f8fbff;
+    border-radius: 12px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.qwen-panel__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.qwen-status-label {
+    font-size: 12px;
+    color: #475569;
+}
+
+.qwen-status-label--ready {
+    color: #15803d;
+}
+
+.qwen-status-label--error {
+    color: #b91c1c;
+}
+
+.qwen-panel textarea,
+.qwen-panel select,
+.qwen-panel input[type="number"] {
+    width: 100%;
+    border-radius: 6px;
+    border: 1px solid #cbd5f5;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 13px;
+}
+
+.qwen-panel textarea {
+    resize: vertical;
+    min-height: 60px;
+}
+
+.qwen-panel button {
+    width: 100%;
+}
+
+.qwen-panel button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.qwen-advanced-toggle {
+    width: 100%;
+    border: 1px solid #bfdbfe;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-weight: 600;
+}
+
+.qwen-advanced {
+    display: none;
+    border: 1px dashed #cbd5f5;
+    border-radius: 10px;
+    padding: 10px;
+    background: #fff;
+    gap: 6px;
+    flex-direction: column;
+    margin-top: 8px;
+}
+
+.qwen-advanced[aria-hidden="false"] {
+    display: flex;
+}
+
+.qwen-hint {
+    margin: 0;
+    font-size: 12px;
+    color: #475569;
+}
+
+.qwen-config-panel {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.qwen-config-help {
+    font-size: 13px;
+    color: #475569;
+}
+
+.qwen-config-grid {
+    display: grid;
+    gap: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.qwen-config-section {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.qwen-config-section textarea,
+.qwen-config-section input {
+    width: 100%;
+    border-radius: 6px;
+    border: 1px solid #cbd5f5;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 13px;
+}
+
+.qwen-config-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.qwen-config-buttons {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.qwen-config-status {
+    font-size: 13px;
+    color: #475569;
+    min-height: 18px;
+}
+
+.qwen-config-status.success {
+    color: #15803d;
+}
+
+.qwen-config-status.error {
+    color: #b91c1c;
 }
 
 .sam-status {
@@ -1080,6 +1285,18 @@ hr {
     display: flex;
     flex-direction: column;
     gap: 6px;
+}
+
+.active-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #0f172a;
+}
+
+.active-inline input[type="checkbox"] {
+    margin: 0;
 }
 
 .active-help {

@@ -1757,8 +1757,97 @@ function buildQwenSampleUserPrompt(context, labels, mode, type) {
     return parts.filter(Boolean).join(" ").trim();
 }
 
-async function buildQwenDatasetZip(options = {}) {
-    const { onProgress } = options;
+function pickQwenValidationSet(imageNames) {
+    const shuffled = shuffleArray(imageNames);
+    if (!shuffled.length) {
+        return new Set();
+    }
+    let valCount = Math.max(1, Math.round(shuffled.length * 0.2));
+    if (valCount >= shuffled.length && shuffled.length > 1) {
+        valCount = Math.max(1, shuffled.length - 1);
+    }
+    if (shuffled.length === 1) {
+        valCount = 1;
+    }
+    const valSet = new Set(shuffled.slice(0, valCount));
+    if (valSet.size === 0 && shuffled.length) {
+        valSet.add(shuffled[0]);
+    }
+    if (valSet.size === shuffled.length && shuffled.length > 1) {
+        valSet.delete(shuffled[shuffled.length - 1]);
+    }
+    return valSet;
+}
+
+async function initQwenDatasetUpload(runName) {
+    const formData = new FormData();
+    if (runName) {
+        formData.append("run_name", runName);
+    }
+    const resp = await fetch(`${API_ROOT}/qwen/dataset/init`, {
+        method: "POST",
+        body: formData,
+    });
+    if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || "Failed to initialize Qwen dataset upload.");
+    }
+    return resp.json();
+}
+
+async function uploadQwenDatasetChunk(jobId, split, record) {
+    const formData = new FormData();
+    formData.append("job_id", jobId);
+    formData.append("split", split);
+    formData.append("image_name", record.imageName);
+    formData.append("annotation_line", record.annotation);
+    formData.append("file", record.file, record.file?.name || record.imageName);
+    const resp = await fetch(`${API_ROOT}/qwen/dataset/chunk`, {
+        method: "POST",
+        body: formData,
+    });
+    if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `Failed to upload ${split} chunk (${resp.status})`);
+    }
+    return resp.json();
+}
+
+async function finalizeQwenDatasetUpload(jobId, metadata, runName) {
+    const formData = new FormData();
+    formData.append("job_id", jobId);
+    formData.append("metadata", JSON.stringify(metadata || {}));
+    if (runName) {
+        formData.append("run_name", runName);
+    }
+    const resp = await fetch(`${API_ROOT}/qwen/dataset/finalize`, {
+        method: "POST",
+        body: formData,
+    });
+    if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `Dataset finalize failed (${resp.status})`);
+    }
+    return resp.json();
+}
+
+async function cancelQwenDatasetUpload(jobId) {
+    if (!jobId) {
+        return;
+    }
+    try {
+        const formData = new FormData();
+        formData.append("job_id", jobId);
+        await fetch(`${API_ROOT}/qwen/dataset/cancel`, {
+            method: "POST",
+            body: formData,
+        });
+    } catch (error) {
+        console.debug("Failed to cancel Qwen dataset upload", error);
+    }
+}
+
+async function uploadQwenDatasetStream() {
     const imageNames = Object.keys(images);
     if (!imageNames.length) {
         throw new Error("Load images before starting Qwen training.");
@@ -1769,148 +1858,91 @@ async function buildQwenDatasetZip(options = {}) {
     }
     const contextText = qwenTrainElements.contextInput?.value?.trim() || "";
     const instruction = buildQwenInstruction(contextText, classNames);
-    const shuffled = shuffleArray(imageNames);
-    let valCount = Math.max(1, Math.round(shuffled.length * 0.2));
-    if (valCount >= shuffled.length && shuffled.length > 1) {
-        valCount = Math.max(1, shuffled.length - 1);
-    }
-    if (shuffled.length === 1) {
-        valCount = 1;
-    }
-    const valSet = new Set(shuffled.slice(0, valCount));
-    const usedNames = new Map();
-    const trainRecords = [];
-    const valRecords = [];
-    let totalBoxes = 0;
-
-    const totalImages = imageNames.length;
-    let processedImages = 0;
-    for (const imageKey of imageNames) {
-        const imageRecord = images[imageKey];
-        if (!imageRecord || !imageRecord.meta) {
-            throw new Error(`Missing original file for ${imageKey}. Re-import the images and try again.`);
-        }
-        await ensureImageDimensions(imageRecord);
-        const baseName = imageRecord.meta.name || imageKey;
-        const safeName = makeUniqueFilename(baseName, usedNames);
-        const detections = buildDetectionRecords(imageKey, imageRecord);
-        totalBoxes += detections.length;
-        const annotation = JSON.stringify({
-            image: safeName,
-            context: instruction,
-            detections,
-        });
-        const entry = { annotation, imageName: safeName, file: imageRecord.meta };
-        if (valSet.has(imageKey)) {
-            valRecords.push(entry);
-        } else {
-            trainRecords.push(entry);
-        }
-        processedImages += 1;
-        if (typeof onProgress === "function" && totalImages > 0) {
-            const gatherPercent = Math.min(50, (processedImages / totalImages) * 50);
-            const label = `Collecting annotations… ${Math.round((processedImages / totalImages) * 100)}%`;
-            onProgress({ phase: "gather", percent: gatherPercent, label });
-        }
-    }
-
-    if (!trainRecords.length && valRecords.length) {
-        trainRecords.push(valRecords[0]);
-    }
-    if (!valRecords.length && trainRecords.length) {
-        valRecords.push(trainRecords[0]);
-    }
-    if (totalBoxes === 0) {
-        throw new Error("No bounding boxes available. Draw bboxes before training.");
-    }
-
-    const zip = new JSZip();
-    const trainFolder = zip.folder("train");
-    const valFolder = zip.folder("val");
-    trainRecords.forEach((record) => {
-        trainFolder.file(record.imageName, record.file);
-    });
-    valRecords.forEach((record) => {
-        valFolder.file(record.imageName, record.file);
-    });
-    trainFolder.file("annotations.jsonl", trainRecords.map((r) => r.annotation).join("\n") + "\n");
-    valFolder.file("annotations.jsonl", valRecords.map((r) => r.annotation).join("\n") + "\n");
-    const datasetMeta = {
-        context: contextText,
-        classes: classNames,
-        created_at: Date.now(),
-    };
-    zip.file("dataset_meta.json", JSON.stringify(datasetMeta, null, 2));
-
-    const blob = await zip.generateAsync(
-        { type: "blob" },
-        (metadata) => {
-            if (typeof onProgress === "function") {
-                const base = totalImages > 0 ? 50 : 0;
-                let zipPercent = Number(metadata.percent) || 0;
-                if (zipPercent <= 1) {
-                    zipPercent *= 100;
-                }
-                const percent = base + Math.min(50, zipPercent * 0.5);
-                const label = `Compressing dataset… ${zipPercent.toFixed(1)}%`;
-                onProgress({ phase: "zip", percent, label });
-            }
-        },
-    );
-    if (typeof onProgress === "function") {
-        onProgress({ phase: "done", percent: 100, label: "Dataset packaged" });
-    }
-    const preferredName = qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
-    const safeDataset = preferredName.replace(/[^A-Za-z0-9._-]/g, "_") || "qwen_dataset";
-    return {
-        blob,
-        fileName: `${safeDataset}.zip`,
-        suggestedRunName: preferredName,
-    };
-}
-
-async function uploadQwenDatasetZip() {
-    const imageKeys = Object.keys(images);
-    const stats = computeQwenDatasetStats(imageKeys);
+    const stats = computeQwenDatasetStats(imageNames);
     let packagingModalVisible = false;
+    let jobId = null;
     try {
-        if (stats.imageCount > 0) {
-            showTrainingPackagingModal(stats, {
-                indeterminate: false,
-                progressText: "Preparing dataset…",
-                hintText: "Keep this tab open while we package the dataset for Qwen training.",
+        showTrainingPackagingModal(stats, {
+            indeterminate: false,
+            progressText: "Preparing dataset…",
+            hintText: "Keep this tab open while we package the dataset for Qwen training.",
+        });
+        packagingModalVisible = true;
+        const runName = qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
+        const initInfo = await initQwenDatasetUpload(runName);
+        jobId = initInfo?.job_id;
+        if (!jobId) {
+            throw new Error("Dataset upload job id missing in response.");
+        }
+        const usedNames = new Map();
+        const valSet = pickQwenValidationSet(imageNames);
+        let processed = 0;
+        let totalBoxes = 0;
+        let uploadedTrain = 0;
+        let uploadedVal = 0;
+        let firstTrainRecord = null;
+        let firstValRecord = null;
+        for (const imageKey of imageNames) {
+            const imageRecord = images[imageKey];
+            if (!imageRecord || !imageRecord.meta) {
+                throw new Error(`Missing original file for ${imageKey}. Re-import the images and try again.`);
+            }
+            await ensureImageDimensions(imageRecord);
+            const baseName = imageRecord.meta.name || imageKey;
+            const safeName = makeUniqueFilename(baseName, usedNames);
+            const detections = buildDetectionRecords(imageKey, imageRecord);
+            totalBoxes += detections.length;
+            const annotation = JSON.stringify({
+                image: safeName,
+                context: instruction,
+                detections,
             });
-            packagingModalVisible = true;
-        }
-        setQwenTrainMessage("Packaging dataset…");
-        const { blob, fileName, suggestedRunName } = await buildQwenDatasetZip({
-            onProgress: (payload) => {
-                if (payload && typeof payload.percent === "number") {
-                    updateTrainingPackagingProgress(payload.percent, payload.label || "Packaging dataset…");
-                } else if (payload?.label) {
-                    updateTrainingPackagingProgress(undefined, payload.label);
+            const split = valSet.has(imageKey) ? "val" : "train";
+            const recordPayload = {
+                imageName: safeName,
+                annotation,
+                file: imageRecord.meta,
+            };
+            await uploadQwenDatasetChunk(jobId, split, recordPayload);
+            if (split === "train") {
+                uploadedTrain += 1;
+                if (!firstTrainRecord) {
+                    firstTrainRecord = recordPayload;
                 }
-            },
-        });
-        if (packagingModalVisible) {
-            hideTrainingPackagingModal();
-            packagingModalVisible = false;
+            } else {
+                uploadedVal += 1;
+                if (!firstValRecord) {
+                    firstValRecord = recordPayload;
+                }
+            }
+            processed += 1;
+            if (stats.imageCount > 0) {
+                const percent = Math.min(95, Math.round((processed / stats.imageCount) * 90));
+                updateTrainingPackagingProgress(percent, `Uploading dataset… ${percent}%`);
+            }
         }
-        setQwenTrainMessage("Uploading dataset…");
-        const formData = new FormData();
-        formData.append("file", blob, fileName);
-        if (suggestedRunName) {
-            formData.append("run_name", suggestedRunName);
+        if (uploadedTrain === 0 && firstValRecord) {
+            await uploadQwenDatasetChunk(jobId, "train", firstValRecord);
+            uploadedTrain += 1;
         }
-        const resp = await fetch(`${API_ROOT}/qwen/train/dataset/upload`, {
-            method: "POST",
-            body: formData,
-        });
-        if (!resp.ok) {
-            const detail = await resp.text();
-            throw new Error(detail || `Dataset upload failed (${resp.status})`);
+        if (uploadedVal === 0 && firstTrainRecord) {
+            await uploadQwenDatasetChunk(jobId, "val", firstTrainRecord);
+            uploadedVal += 1;
         }
-        return resp.json();
+        if (totalBoxes === 0) {
+            throw new Error("No bounding boxes available. Draw bboxes before training.");
+        }
+        const datasetMeta = {
+            context: contextText,
+            classes: classNames,
+            created_at: Date.now(),
+        };
+        const finalizeInfo = await finalizeQwenDatasetUpload(jobId, datasetMeta, runName);
+        updateTrainingPackagingProgress(100, "Dataset staged");
+        return finalizeInfo;
+    } catch (error) {
+        await cancelQwenDatasetUpload(jobId);
+        throw error;
     } finally {
         if (packagingModalVisible) {
             hideTrainingPackagingModal();
@@ -2128,7 +2160,7 @@ async function handleStartQwenTraining() {
         qwenTrainElements.startButton.disabled = true;
     }
     try {
-        const datasetInfo = await uploadQwenDatasetZip();
+        const datasetInfo = await uploadQwenDatasetStream();
         setQwenTrainMessage("Starting training job…");
         const payload = buildQwenTrainingPayload(datasetInfo.dataset_root, datasetInfo.run_name);
         const resp = await fetch(`${API_ROOT}/qwen/train/jobs`, {

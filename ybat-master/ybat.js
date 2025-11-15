@@ -2760,21 +2760,22 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
                 throw new Error("Select an images folder that contains supported image files.");
             }
             labelEntries = getStoredEntries("labels");
-            if (!labelEntries.length) {
-                throw new Error("Select a labels folder that contains YOLO .txt files.");
+        }
+        let labelFallback = false;
+        if (usingUploads && !labelEntries.length) {
+            const synthetic = synthesiseLabelEntriesFromBboxes(imageEntries);
+            if (synthetic.length) {
+                labelEntries = synthetic;
+                labelFallback = true;
             }
+        }
+        if (usingUploads && (!imageEntries.length || !labelEntries.length)) {
+            throw new Error("Select an images folder and ensure label files or bounding boxes are available.");
         }
         const formData = new FormData();
         if (!usingUploads) {
             formData.append("images_path_native", trainingState.nativeImagesPath);
             formData.append("labels_path_native", trainingState.nativeLabelsPath);
-        } else {
-            imageEntries.forEach(({ file, relativePath }) => {
-                formData.append("images", file, relativePath || file.name);
-            });
-            labelEntries.forEach(({ file, relativePath }) => {
-                formData.append("labels", file, relativePath || file.name);
-            });
         }
         if (trainingElements.labelmapInput && trainingElements.labelmapInput.files.length === 1) {
             formData.append("labelmap", trainingElements.labelmapInput.files[0]);
@@ -2840,19 +2841,81 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         if (trainingElements.hardMiningCheckbox && trainingElements.hardMiningCheckbox.checked) {
             formData.append("hard_example_mining", "true");
         }
-        let labelFallback = false;
-        if (usingUploads && !labelEntries.length) {
-            const synthetic = synthesiseLabelEntriesFromBboxes(imageEntries);
-            if (synthetic.length) {
-                labelEntries = synthetic;
-                synthetic.forEach(({ file, relativePath }) => {
-                    formData.append("labels", file, relativePath || file.name || "labels.txt");
-                });
-                labelFallback = true;
-            }
-        }
         const datasetStats = usingUploads ? computeDatasetStats(imageEntries, labelEntries) : null;
-        return { formData, usingUploads, datasetStats, labelFallback };
+        return { formData, usingUploads, imageEntries, labelEntries, datasetStats, labelFallback };
+    }
+
+    async function stageClipDatasetUploads(imageEntries, labelEntries) {
+        if (!Array.isArray(imageEntries) || !imageEntries.length) {
+            throw new Error("No images available for upload.");
+        }
+        if (!Array.isArray(labelEntries) || !labelEntries.length) {
+            throw new Error("No label files found for upload.");
+        }
+        const initResp = await fetch(`${API_ROOT}/clip/dataset/init`, { method: "POST" });
+        if (!initResp.ok) {
+            const text = await initResp.text();
+            throw new Error(text || "Failed to initialize dataset upload.");
+        }
+        const initData = await initResp.json();
+        const jobId = initData?.job_id;
+        if (!jobId) {
+            throw new Error("Dataset upload job id missing.");
+        }
+        const totalItems = imageEntries.length + labelEntries.length;
+        let completedItems = 0;
+
+        const uploadEntry = async (entry, kind) => {
+            const uploadForm = new FormData();
+            uploadForm.append("job_id", jobId);
+            uploadForm.append("kind", kind);
+            const relPath = entry.relativePath || entry.file?.name || `${kind}_${completedItems}`;
+            uploadForm.append("relative_path", relPath);
+            uploadForm.append("file", entry.file, entry.file?.name || relPath);
+            const resp = await fetch(`${API_ROOT}/clip/dataset/chunk`, {
+                method: "POST",
+                body: uploadForm,
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `Failed to upload ${kind}`);
+            }
+            completedItems += 1;
+            if (totalItems > 0) {
+                const percent = Math.min(100, Math.round((completedItems / totalItems) * 100));
+                const stageLabel = kind === "image" ? "images" : "labels";
+                updateTrainingPackagingProgress(percent, `Uploading ${stageLabel}… ${percent}%`);
+            }
+        };
+
+        try {
+            for (const entry of imageEntries) {
+                await uploadEntry(entry, "image");
+            }
+            for (const entry of labelEntries) {
+                await uploadEntry(entry, "label");
+            }
+            const finalizeForm = new FormData();
+            finalizeForm.append("job_id", jobId);
+            const finalizeResp = await fetch(`${API_ROOT}/clip/dataset/finalize`, {
+                method: "POST",
+                body: finalizeForm,
+            });
+            if (!finalizeResp.ok) {
+                const detail = await finalizeResp.text();
+                throw new Error(detail || "Failed to finalize dataset upload.");
+            }
+            return finalizeResp.json();
+        } catch (error) {
+            const cancelForm = new FormData();
+            cancelForm.append("job_id", jobId);
+            try {
+                await fetch(`${API_ROOT}/clip/dataset/cancel`, { method: "POST", body: cancelForm });
+            } catch (cancelError) {
+                console.debug("Failed to cancel dataset upload job", cancelError);
+            }
+            throw error;
+        }
     }
 
     async function handleStartTrainingClick() {
@@ -2861,19 +2924,41 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         }
         let packagingModalVisible = false;
         try {
-            const { formData, usingUploads, datasetStats, labelFallback } = gatherTrainingFormData();
+            const { formData, usingUploads, imageEntries, labelEntries, datasetStats, labelFallback } = gatherTrainingFormData();
             trainingElements.startButton.disabled = true;
             const preppingMessage = usingUploads && datasetStats
                 ? `Packaging dataset (${datasetStats.totalFiles} files ≈ ${formatBytes(datasetStats.totalBytes)}).`
                 : "Submitting training job…";
             setTrainingMessage(preppingMessage, null);
             setActiveMessage(preppingMessage, null);
-            if (labelFallback) {
-                setTrainingMessage("No label folder selected; using in-memory annotations.", "warn");
-            }
-            if (usingUploads && datasetStats && datasetStats.totalFiles > 0) {
-                showTrainingPackagingModal(datasetStats);
+            if (usingUploads) {
+                const statsForModal = datasetStats || {
+                    imageCount: imageEntries.length,
+                    labelCount: labelEntries.length,
+                    totalFiles: imageEntries.length + labelEntries.length,
+                    imageBytes: 0,
+                    labelBytes: 0,
+                    totalBytes: 0,
+                };
+                showTrainingPackagingModal(statsForModal, { indeterminate: false, progressText: "Uploading dataset…" });
                 packagingModalVisible = true;
+                try {
+                    updateTrainingPackagingProgress(0, "Uploading images… 0%");
+                    const stagingResult = await stageClipDatasetUploads(imageEntries, labelEntries);
+                    formData.append("images_path_native", stagingResult.images_path);
+                    formData.append("labels_path_native", stagingResult.labels_path);
+                    if (stagingResult.temp_dir) {
+                        formData.append("staged_temp_dir", stagingResult.temp_dir);
+                    }
+                } finally {
+                    if (packagingModalVisible) {
+                        hideTrainingPackagingModal();
+                        packagingModalVisible = false;
+                    }
+                }
+                if (labelFallback) {
+                    setTrainingMessage("No label folder selected; using in-memory annotations.", "warn");
+                }
             }
             if (trainingElements.summary) {
                 trainingElements.summary.textContent = "";

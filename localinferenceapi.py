@@ -1588,6 +1588,18 @@ class ClipTrainingJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class ClipDatasetUploadJob:
+    job_id: str
+    root_dir: Path
+    images_dir: Path
+    labels_dir: Path
+    created_at: float = field(default_factory=time.time)
+    image_count: int = 0
+    label_count: int = 0
+    completed: bool = False
+
+
 TRAINING_JOBS: Dict[str, ClipTrainingJob] = {}
 TRAINING_JOBS_LOCK = threading.Lock()
 
@@ -1616,6 +1628,10 @@ QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
+CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
+CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+CLIP_DATASET_JOBS: Dict[str, ClipDatasetUploadJob] = {}
+CLIP_DATASET_JOBS_LOCK = threading.Lock()
 
 MAX_JOB_LOGS = 250
 
@@ -1863,12 +1879,96 @@ def _normalise_relative_path(name: Optional[str]) -> Path:
     return Path(*parts)
 
 
+def _get_clip_dataset_job(job_id: str) -> ClipDatasetUploadJob:
+    with CLIP_DATASET_JOBS_LOCK:
+        job = CLIP_DATASET_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="clip_dataset_job_not_found")
+    return job
+
+
+def _pop_clip_dataset_job(job_id: str) -> ClipDatasetUploadJob:
+    with CLIP_DATASET_JOBS_LOCK:
+        job = CLIP_DATASET_JOBS.pop(job_id, None)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="clip_dataset_job_not_found")
+    return job
+
+
 def _get_qwen_job(job_id: str) -> QwenTrainingJob:
     with QWEN_TRAINING_JOBS_LOCK:
         job = QWEN_TRAINING_JOBS.get(job_id)
         if not job:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_job_not_found")
         return job
+
+
+@app.post("/clip/dataset/init")
+def clip_dataset_init():
+    job_id = uuid.uuid4().hex
+    root = (CLIP_DATASET_UPLOAD_ROOT / job_id).resolve()
+    images_dir = root / "images"
+    labels_dir = root / "labels"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+    job = ClipDatasetUploadJob(job_id=job_id, root_dir=root, images_dir=images_dir, labels_dir=labels_dir)
+    with CLIP_DATASET_JOBS_LOCK:
+        CLIP_DATASET_JOBS[job_id] = job
+    return {"job_id": job_id}
+
+
+@app.post("/clip/dataset/chunk")
+async def clip_dataset_chunk(
+    job_id: str = Form(...),
+    kind: str = Form(...),
+    relative_path: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+):
+    job = _get_clip_dataset_job(job_id)
+    if job.completed:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_dataset_job_finalized")
+    kind_lower = kind.strip().lower()
+    if kind_lower not in {"image", "label"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_chunk_kind")
+    filename = relative_path or file.filename or f"{kind_lower}_{uuid.uuid4().hex}"
+    normalised = _normalise_relative_path(filename)
+    target_dir = job.images_dir if kind_lower == "image" else job.labels_dir
+    dest_path = (target_dir / normalised).resolve()
+    if not str(dest_path).startswith(str(job.root_dir)):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+    await _write_upload_file(file, dest_path)
+    with CLIP_DATASET_JOBS_LOCK:
+        if kind_lower == "image":
+            job.image_count += 1
+        else:
+            job.label_count += 1
+    return {"status": "ok", "images": job.image_count, "labels": job.label_count}
+
+
+@app.post("/clip/dataset/finalize")
+def clip_dataset_finalize(job_id: str = Form(...)):
+    job = _pop_clip_dataset_job(job_id)
+    job.completed = True
+    if job.image_count == 0:
+        shutil.rmtree(job.root_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_images_missing")
+    return {
+        "images_path": str(job.images_dir),
+        "labels_path": str(job.labels_dir),
+        "temp_dir": str(job.root_dir),
+        "images": job.image_count,
+        "labels": job.label_count,
+    }
+
+
+@app.post("/clip/dataset/cancel")
+def clip_dataset_cancel(job_id: str = Form(...)):
+    job = None
+    with CLIP_DATASET_JOBS_LOCK:
+        job = CLIP_DATASET_JOBS.pop(job_id, None)
+    if job:
+        shutil.rmtree(job.root_dir, ignore_errors=True)
+    return {"status": "cancelled"}
 
 
 @app.post("/qwen/train/dataset/upload")
@@ -1927,6 +2027,17 @@ async def _save_asset(upload: UploadFile, *, subdir: str) -> str:
             handle.write(chunk)
     await upload.close()
     return str(dest_path.resolve())
+
+
+async def _write_upload_file(upload: UploadFile, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("wb") as handle:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+    await upload.close()
 
 
 def _artifacts_to_payload(artifacts: TrainingArtifacts) -> Dict[str, Any]:
@@ -2279,6 +2390,7 @@ async def start_clip_training(
     hard_low_conf_threshold: float = Form(0.65),
     hard_margin_threshold: float = Form(0.15),
     convergence_tol: float = Form(1e-4),
+    staged_temp_dir: Optional[str] = Form(None),
 ):
     images_path_native = _normalise_optional_path(images_path_native)
     labels_path_native = _normalise_optional_path(labels_path_native)
@@ -2342,6 +2454,8 @@ async def start_clip_training(
     if images_dir is None or labels_dir is None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_paths_unresolved")
     logger.info("Starting training job %s (clip=%s, native_paths=%s)", job_id[:8], clip_model_name, use_native_paths)
+    if staged_temp_dir:
+        temp_root = os.path.abspath(staged_temp_dir)
     job = ClipTrainingJob(job_id=job_id, temp_dir=temp_root, images_dir=images_dir, labels_dir=labels_dir, labelmap_path=labelmap_path)
     job_message = "Job queued (native paths)" if use_native_paths else "Job queued (upload staging)"
     extras = [solver_name]

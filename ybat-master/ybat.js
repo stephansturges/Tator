@@ -1847,8 +1847,12 @@ async function buildQwenDatasetZip(options = {}) {
         (metadata) => {
             if (typeof onProgress === "function") {
                 const base = totalImages > 0 ? 50 : 0;
-                const percent = base + Math.min(50, (metadata.percent || 0) * 0.5);
-                const label = `Compressing dataset… ${metadata.percent.toFixed(1)}%`;
+                let zipPercent = Number(metadata.percent) || 0;
+                if (zipPercent <= 1) {
+                    zipPercent *= 100;
+                }
+                const percent = base + Math.min(50, zipPercent * 0.5);
+                const label = `Compressing dataset… ${zipPercent.toFixed(1)}%`;
                 onProgress({ phase: "zip", percent, label });
             }
         },
@@ -2646,6 +2650,75 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         };
     }
 
+    function replacePathLeaf(pathValue, replacement) {
+        if (!pathValue) {
+            return replacement;
+        }
+        const parts = pathValue.split(/[/\\]/);
+        parts[parts.length - 1] = replacement;
+        return parts.join("/");
+    }
+
+    function normaliseBaseName(entry) {
+        if (!entry) {
+            return null;
+        }
+        const source = entry.relativePath || entry.file?.name;
+        if (!source) {
+            return null;
+        }
+        const parts = source.split(/[/\\]/);
+        return parts[parts.length - 1] || null;
+    }
+
+    function synthesiseLabelEntriesFromBboxes(imageEntries) {
+        if (!Array.isArray(imageEntries) || !imageEntries.length) {
+            return [];
+        }
+        const synthetic = [];
+        imageEntries.forEach((entry) => {
+            const baseName = normaliseBaseName(entry);
+            if (!baseName) {
+                return;
+            }
+            const bboxByClass = bboxes[baseName];
+            const imageRecord = images[baseName];
+            if (!bboxByClass || !imageRecord || !imageRecord.width || !imageRecord.height) {
+                return;
+            }
+            const lines = [];
+            Object.keys(bboxByClass).forEach((className) => {
+                const classId = classes[className];
+                if (classId === undefined || classId === null) {
+                    return;
+                }
+                const records = bboxByClass[className] || [];
+                records.forEach((bboxRecord) => {
+                    const x = (bboxRecord.x + bboxRecord.width / 2) / imageRecord.width;
+                    const y = (bboxRecord.y + bboxRecord.height / 2) / imageRecord.height;
+                    const w = bboxRecord.width / imageRecord.width;
+                    const h = bboxRecord.height / imageRecord.height;
+                    lines.push(`${classId} ${x} ${y} ${w} ${h}`);
+                });
+            });
+            if (!lines.length) {
+                return;
+            }
+            const labelName = baseName.replace(/\.[^.]+$/, ".txt");
+            const relativePath = entry.relativePath ? replacePathLeaf(entry.relativePath, labelName) : labelName;
+            const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+            let syntheticFile;
+            try {
+                syntheticFile = new File([blob], labelName, { type: "text/plain" });
+            } catch {
+                syntheticFile = blob;
+                syntheticFile.name = labelName;
+            }
+            synthetic.push({ file: syntheticFile, relativePath });
+        });
+        return synthetic;
+    }
+
     function computeQwenDatasetStats(imageKeys) {
         let totalBytes = 0;
         imageKeys.forEach((key) => {
@@ -2767,8 +2840,19 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         if (trainingElements.hardMiningCheckbox && trainingElements.hardMiningCheckbox.checked) {
             formData.append("hard_example_mining", "true");
         }
+        let labelFallback = false;
+        if (usingUploads && !labelEntries.length) {
+            const synthetic = synthesiseLabelEntriesFromBboxes(imageEntries);
+            if (synthetic.length) {
+                labelEntries = synthetic;
+                synthetic.forEach(({ file, relativePath }) => {
+                    formData.append("labels", file, relativePath || file.name || "labels.txt");
+                });
+                labelFallback = true;
+            }
+        }
         const datasetStats = usingUploads ? computeDatasetStats(imageEntries, labelEntries) : null;
-        return { formData, usingUploads, datasetStats };
+        return { formData, usingUploads, datasetStats, labelFallback };
     }
 
     async function handleStartTrainingClick() {
@@ -2777,13 +2861,16 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         }
         let packagingModalVisible = false;
         try {
-            const { formData, usingUploads, datasetStats } = gatherTrainingFormData();
+            const { formData, usingUploads, datasetStats, labelFallback } = gatherTrainingFormData();
             trainingElements.startButton.disabled = true;
             const preppingMessage = usingUploads && datasetStats
                 ? `Packaging dataset (${datasetStats.totalFiles} files ≈ ${formatBytes(datasetStats.totalBytes)}).`
                 : "Submitting training job…";
             setTrainingMessage(preppingMessage, null);
             setActiveMessage(preppingMessage, null);
+            if (labelFallback) {
+                setTrainingMessage("No label folder selected; using in-memory annotations.", "warn");
+            }
             if (usingUploads && datasetStats && datasetStats.totalFiles > 0) {
                 showTrainingPackagingModal(datasetStats);
                 packagingModalVisible = true;

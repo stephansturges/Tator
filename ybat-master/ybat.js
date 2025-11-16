@@ -2682,7 +2682,7 @@ async function refreshQwenTrainingHistory() {
     }
 }
 
-function scheduleQwenJobPoll(jobId, delayMs = 1500) {
+function scheduleQwenJobPoll(jobId, delayMs = 500) {
     if (qwenTrainState.pollHandle) {
         clearTimeout(qwenTrainState.pollHandle);
     }
@@ -2691,32 +2691,29 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
     }, delayMs);
 }
 
-    async function pollQwenTrainingJob(jobId, { force = false } = {}) {
-        if (!jobId) {
-            return;
-        }
-        if (!force && activeTab !== TAB_QWEN_TRAIN) {
-            return;
-        }
-        try {
-            const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${jobId}`);
+async function pollQwenTrainingJob(jobId, { force = false } = {}) {
+    if (!jobId) {
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${jobId}`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
-            const job = await resp.json();
-            qwenTrainState.activeJobId = job.job_id;
-            updateQwenTrainingUI(job);
-            if (job.status === "running" || job.status === "cancelling") {
-                scheduleQwenJobPoll(job.job_id);
-            } else if (qwenTrainState.pollHandle) {
-                clearTimeout(qwenTrainState.pollHandle);
-                qwenTrainState.pollHandle = null;
-            }
-        } catch (error) {
-            console.error("pollQwenTrainingJob error", error);
-            setQwenTrainMessage(error.message || "Unable to load job", "error");
+        const job = await resp.json();
+        qwenTrainState.activeJobId = job.job_id;
+        updateQwenTrainingUI(job);
+        if (job.status === "running" || job.status === "cancelling") {
+            scheduleQwenJobPoll(job.job_id);
+        } else if (qwenTrainState.pollHandle) {
+            clearTimeout(qwenTrainState.pollHandle);
+            qwenTrainState.pollHandle = null;
         }
+    } catch (error) {
+        console.error("pollQwenTrainingJob error", error);
+        setQwenTrainMessage(error.message || "Unable to load job", "error");
     }
+}
 
     function initQwenTrainingTab() {
         if (qwenTrainElements.runNameInput) {

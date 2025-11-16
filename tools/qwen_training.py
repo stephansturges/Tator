@@ -240,7 +240,7 @@ class JSONLDataset(Dataset):
             detections = []
         prompt_labels, label_mode = self._select_label_prompt(detections)
         filtered_detections = self._filter_detections_for_prompt(detections, prompt_labels, label_mode)
-        filtered_detections = self._sample_detections(filtered_detections)
+        filtered_detections = self._apply_detection_budget(filtered_detections)
         use_bbox = self.rng.random() < 0.5
         system_prompt = self._apply_prompt_noise(self.system_prompt)
         if use_bbox:
@@ -360,12 +360,33 @@ class JSONLDataset(Dataset):
             formatted.append({"label": label, "bbox": [x1, y1, x2, y2]})
         return formatted
 
-    def _sample_detections(self, detections: List[Dict[str, object]]) -> List[Dict[str, object]]:
-        limit = self.max_detections
-        if limit <= 0 or len(detections) <= limit:
+    def _apply_detection_budget(self, detections: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        budget = self.max_detections
+        if budget <= 0 or len(detections) <= budget:
             return detections
-        indices = sorted(self.rng.sample(range(len(detections)), limit))
-        return [detections[i] for i in indices]
+        buckets: Dict[str, List[Dict[str, object]]] = {}
+        for det in detections:
+            label = str(det.get("label", "")).strip() or "__unlabeled__"
+            buckets.setdefault(label, []).append(det)
+        items = list(buckets.items())
+        self.rng.shuffle(items)
+        selected: List[Dict[str, object]] = []
+        remaining = budget
+        for label, bucket in items:
+            count = len(bucket)
+            if count <= remaining:
+                selected.extend(bucket)
+                remaining -= count
+            elif not selected:
+                selected.extend(bucket[:remaining])
+                remaining = 0
+            if remaining <= 0:
+                break
+        if not selected:
+            # Fallback to the largest bucket if everything else failed.
+            label, bucket = max(items, key=lambda entry: len(entry[1]))
+            selected.extend(bucket[:budget])
+        return selected
 
     def _format_point_targets(self, detections: List[Dict[str, object]]) -> List[Dict[str, object]]:
         formatted: List[Dict[str, object]] = []

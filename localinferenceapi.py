@@ -165,6 +165,29 @@ def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict
     _reset_qwen_runtime()
 
 
+def _prepare_for_qwen_training() -> None:
+    try:
+        predictor_manager.unload_all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to unload SAM predictors before training: %s", exc)
+    _reset_qwen_runtime()
+    _suspend_clip_backbone()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _finalize_qwen_training_environment() -> None:
+    _resume_clip_backbone()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _bytes_to_mb(value: int) -> float:
     return round(value / (1024 * 1024), 2)
 
@@ -220,6 +243,7 @@ DEFAULT_CLIP_MODEL = SUPPORTED_CLIP_MODELS[0]
 clip_model = None
 clip_preprocess = None
 clip_model_name: Optional[str] = None
+_clip_reload_needed = False
 try:
     print("Loading CLIP model...")
     clip_model, clip_preprocess = clip.load(DEFAULT_CLIP_MODEL, device=device)
@@ -232,6 +256,41 @@ except Exception as e:
 clip_lock = threading.Lock()
 if clip_model is None or clf is None:
     clip_initialized = False
+
+
+def _suspend_clip_backbone() -> None:
+    global clip_model, clip_preprocess, clip_initialized, _clip_reload_needed
+    with clip_lock:
+        if clip_model is None:
+            return
+        logger.info("Suspending CLIP backbone to free GPU memory for training.")
+        clip_model = None
+        clip_preprocess = None
+        clip_initialized = False
+        _clip_reload_needed = True
+
+
+def _resume_clip_backbone() -> None:
+    global clip_model, clip_preprocess, clip_initialized, _clip_reload_needed
+    if not _clip_reload_needed:
+        return
+    with clip_lock:
+        if clip_model is not None:
+            _clip_reload_needed = False
+            clip_initialized = True
+            return
+        clip_name = clip_model_name or DEFAULT_CLIP_MODEL
+        try:
+            clip_model, clip_preprocess = clip.load(clip_name, device=device)
+            clip_initialized = bool(clf is not None and clip_model is not None)
+            logger.info("Reloaded CLIP backbone %s after training.", clip_name)
+        except Exception as exc:  # noqa: BLE001
+            clip_model = None
+            clip_preprocess = None
+            clip_initialized = False
+            logger.warning("Failed to reload CLIP backbone %s: %s", clip_name, exc)
+        finally:
+            _clip_reload_needed = False
 
 # 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = "vit_h"
@@ -255,6 +314,7 @@ class PredictorSlot:
         with self.lock:
             self._busy.set()
             try:
+                self._ensure_predictor()
                 self.predictor.set_image(np_img)
                 self.token = token
                 self.variant = variant
@@ -269,6 +329,7 @@ class PredictorSlot:
         with self.lock:
             self._busy.set()
             try:
+                self._ensure_predictor()
                 return self.predictor.predict(**kwargs)
             finally:
                 self._busy.clear()
@@ -284,6 +345,21 @@ class PredictorSlot:
             self.image_name = None
             self.last_loaded = 0.0
             self.image_memory_bytes = 0
+
+    def unload(self) -> None:
+        with self.lock:
+            self.clear()
+            if self.predictor is not None:
+                try:
+                    del self.predictor
+                except Exception:
+                    pass
+                self.predictor = None
+
+    def _ensure_predictor(self) -> None:
+        if self.predictor is None:
+            model = sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH)
+            self.predictor = SamPredictor(model)
 
 
 class PredictorManager:
@@ -374,6 +450,12 @@ class PredictorManager:
         remove_image_keys = [key for key, value in self.image_index.items() if value is slot]
         for key in remove_image_keys:
             self.image_index.pop(key, None)
+
+    def unload_all(self) -> None:
+        with self.capacity_lock:
+            for slot in self.slots.values():
+                self._clear_slot_refs(slot)
+                slot.unload()
 
     def set_slot(self, slot_name: str, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
         slot_name = self.resolve_slot(slot_name, allow_disabled_fallback=False)
@@ -1766,7 +1848,6 @@ def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> Non
             tracked_fields = {
                 "accelerator": config.get("accelerator"),
                 "devices": config.get("devices"),
-                "device_map": config.get("device_map"),
                 "batch_size": config.get("batch_size"),
                 "accumulate_grad_batches": config.get("accumulate_grad_batches"),
             }
@@ -2863,6 +2944,7 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
 
     def worker() -> None:
         try:
+            _prepare_for_qwen_training()
             with QWEN_TRAINING_JOBS_LOCK:
                 if job.cancel_event.is_set():
                     _qwen_job_update(job, status="cancelled", message="Cancelled before start.")
@@ -2885,6 +2967,8 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
         except Exception as exc:  # noqa: BLE001
             with QWEN_TRAINING_JOBS_LOCK:
                 _qwen_job_update(job, status="failed", message="Unexpected error", error=str(exc))
+        finally:
+            _finalize_qwen_training_environment()
 
     thread = threading.Thread(target=worker, name=f"qwen-train-{job.job_id}", daemon=True)
     thread.start()
@@ -2932,6 +3016,13 @@ def create_qwen_training_job(payload: QwenTrainRequest):
     config = _build_qwen_config(payload, job_id)
     config_dict = asdict(config)
     job = QwenTrainingJob(job_id=job_id, config=config_dict)
+    logger.info(
+        "[qwen-train %s] create job accelerator=%s devices=%s dataset=%s",
+        job_id[:8],
+        payload.accelerator or config_dict.get("accelerator"),
+        payload.devices or config_dict.get("devices"),
+        payload.dataset_root,
+    )
     with QWEN_TRAINING_JOBS_LOCK:
         QWEN_TRAINING_JOBS[job_id] = job
         _qwen_job_log(job, "Job queued")

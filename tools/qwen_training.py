@@ -498,8 +498,8 @@ class ProgressReporter(Callback):
 
     def _recalculate_intervals(self, total_batches: int) -> None:
         self.batches_per_epoch = max(1, total_batches)
-        self.progress_interval = max(1, self.batches_per_epoch // 25)
-        self.metric_interval = max(1, self.batches_per_epoch // 200)
+        self.progress_interval = 1
+        self.metric_interval = 1
 
     def on_train_epoch_start(self, trainer, pl_module):  # noqa: D401
         total_batches = getattr(trainer, "num_training_batches", None)
@@ -514,8 +514,8 @@ class ProgressReporter(Callback):
         global_progress = min(0.99, (epoch_index + epoch_progress) / self.total_epochs)
         metrics = getattr(trainer, "callback_metrics", {}) or {}
         train_loss = _safe_float(metrics.get("train_loss"))
-        emit_progress = (step_in_epoch % self.progress_interval == 0) or step_in_epoch == total_batches
-        emit_metrics = (step_in_epoch % self.metric_interval == 0) or step_in_epoch == total_batches
+        emit_progress = True
+        emit_metrics = True
         message = f"Epoch {epoch_index + 1}/{self.total_epochs} • batch {step_in_epoch}/{total_batches}"
         if train_loss is not None:
             message += f" • loss {train_loss:.4f}"

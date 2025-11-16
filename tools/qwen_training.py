@@ -13,7 +13,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:
     import lightning as L

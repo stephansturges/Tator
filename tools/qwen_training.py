@@ -146,6 +146,7 @@ class QwenTrainingConfig:
     log_every_n_steps: int = 10
     patience: int = 3
     seed: int = 1337
+    max_detections_per_sample: int = 200
 
 
 @dataclass
@@ -175,6 +176,7 @@ class JSONLDataset(Dataset):
         system_prompt: str,
         prompt_noise: float = 0.05,
         seed: Optional[int] = None,
+        max_detections: int = 200,
     ) -> None:
         self.jsonl_path = jsonl_path
         self.image_root = image_root
@@ -183,6 +185,7 @@ class JSONLDataset(Dataset):
         self.prompt_noise = max(0.0, min(float(prompt_noise), 0.3))
         self.entries = self._load_entries()
         self.rng = random.Random(seed)
+        self.max_detections = max(0, int(max_detections))
 
     def _load_entries(self) -> List[Dict[str, object]]:
         if not self.jsonl_path.exists():
@@ -237,6 +240,7 @@ class JSONLDataset(Dataset):
             detections = []
         prompt_labels, label_mode = self._select_label_prompt(detections)
         filtered_detections = self._filter_detections_for_prompt(detections, prompt_labels, label_mode)
+        filtered_detections = self._sample_detections(filtered_detections)
         use_bbox = self.rng.random() < 0.5
         system_prompt = self._apply_prompt_noise(self.system_prompt)
         if use_bbox:
@@ -355,6 +359,13 @@ class JSONLDataset(Dataset):
                 continue
             formatted.append({"label": label, "bbox": [x1, y1, x2, y2]})
         return formatted
+
+    def _sample_detections(self, detections: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        limit = self.max_detections
+        if limit <= 0 or len(detections) <= limit:
+            return detections
+        indices = sorted(self.rng.sample(range(len(detections)), limit))
+        return [detections[i] for i in indices]
 
     def _format_point_targets(self, detections: List[Dict[str, object]]) -> List[Dict[str, object]]:
         formatted: List[Dict[str, object]] = []
@@ -690,8 +701,22 @@ def _prepare_datasets(config: QwenTrainingConfig) -> Tuple[JSONLDataset, JSONLDa
     val_jsonl = dataset_root / "val" / "annotations.jsonl"
     noise = max(0.0, min(float(config.system_prompt_noise), 0.3))
     base_seed = int(config.seed or 0)
-    train_ds = JSONLDataset(train_jsonl, dataset_root / "train", config.system_prompt, noise, seed=base_seed)
-    val_ds = JSONLDataset(val_jsonl, dataset_root / "val", config.system_prompt, noise, seed=base_seed + 1)
+    train_ds = JSONLDataset(
+        train_jsonl,
+        dataset_root / "train",
+        config.system_prompt,
+        noise,
+        seed=base_seed,
+        max_detections=config.max_detections_per_sample,
+    )
+    val_ds = JSONLDataset(
+        val_jsonl,
+        dataset_root / "val",
+        config.system_prompt,
+        noise,
+        seed=base_seed + 1,
+        max_detections=config.max_detections_per_sample,
+    )
     return train_ds, val_ds
 
 

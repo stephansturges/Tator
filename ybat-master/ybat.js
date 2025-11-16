@@ -2682,7 +2682,7 @@ async function refreshQwenTrainingHistory() {
     }
 }
 
-function scheduleQwenJobPoll(jobId, delayMs = 500) {
+function scheduleQwenJobPoll(jobId, delayMs = 5000) {
     if (qwenTrainState.pollHandle) {
         clearTimeout(qwenTrainState.pollHandle);
     }
@@ -2697,13 +2697,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
     try {
         const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${jobId}`);
-            if (!resp.ok) {
-                throw new Error(`HTTP ${resp.status}`);
-            }
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
         const job = await resp.json();
         qwenTrainState.activeJobId = job.job_id;
         updateQwenTrainingUI(job);
-        if (job.status === "running" || job.status === "cancelling") {
+        const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
+        if (!terminalStates.has(job.status)) {
             scheduleQwenJobPoll(job.job_id);
         } else if (qwenTrainState.pollHandle) {
             clearTimeout(qwenTrainState.pollHandle);

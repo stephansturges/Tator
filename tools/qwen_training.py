@@ -55,6 +55,7 @@ if not LIGHTNING_AVAILABLE:
     Callback = _FallbackCallback  # type: ignore[assignment]
     EarlyStopping = _FallbackEarlyStopping  # type: ignore[assignment]
 
+import numpy as np
 import torch
 from peft import LoraConfig, get_peft_model
 from PIL import Image
@@ -87,6 +88,36 @@ class TrainingError(RuntimeError):
     """Raised when the Qwen training pipeline fails in a recoverable way."""
 
 
+def _seed_all(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if hasattr(torch.cuda, "manual_seed"):
+        try:
+            torch.cuda.manual_seed(seed)
+        except Exception:  # noqa: BLE001
+            pass
+    if hasattr(torch.cuda, "manual_seed_all"):
+        try:
+            torch.cuda.manual_seed_all(seed)
+        except Exception:  # noqa: BLE001
+            pass
+    if hasattr(L, "seed_everything"):
+        try:
+            L.seed_everything(seed, workers=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _make_worker_init_fn(base_seed: int) -> Callable[[int], None]:
+    def _worker_init(worker_id: int) -> None:
+        worker_seed = base_seed + worker_id
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    return _worker_init
+
+
 @dataclass
 class QwenTrainingConfig:
     dataset_root: str
@@ -114,6 +145,7 @@ class QwenTrainingConfig:
     limit_val_batches: int = 1
     log_every_n_steps: int = 10
     patience: int = 3
+    seed: int = 1337
 
 
 @dataclass
@@ -142,6 +174,7 @@ class JSONLDataset(Dataset):
         image_root: Path,
         system_prompt: str,
         prompt_noise: float = 0.05,
+        seed: Optional[int] = None,
     ) -> None:
         self.jsonl_path = jsonl_path
         self.image_root = image_root
@@ -149,7 +182,7 @@ class JSONLDataset(Dataset):
         # Cap the noise ratio to avoid destroying the prompt entirely.
         self.prompt_noise = max(0.0, min(float(prompt_noise), 0.3))
         self.entries = self._load_entries()
-        self.rng = random.Random()
+        self.rng = random.Random(seed)
 
     def _load_entries(self) -> List[Dict[str, object]]:
         if not self.jsonl_path.exists():
@@ -646,8 +679,9 @@ def _prepare_datasets(config: QwenTrainingConfig) -> Tuple[JSONLDataset, JSONLDa
     train_jsonl = dataset_root / "train" / "annotations.jsonl"
     val_jsonl = dataset_root / "val" / "annotations.jsonl"
     noise = max(0.0, min(float(config.system_prompt_noise), 0.3))
-    train_ds = JSONLDataset(train_jsonl, dataset_root / "train", config.system_prompt, noise)
-    val_ds = JSONLDataset(val_jsonl, dataset_root / "val", config.system_prompt, noise)
+    base_seed = int(config.seed or 0)
+    train_ds = JSONLDataset(train_jsonl, dataset_root / "train", config.system_prompt, noise, seed=base_seed)
+    val_ds = JSONLDataset(val_jsonl, dataset_root / "val", config.system_prompt, noise, seed=base_seed + 1)
     return train_ds, val_ds
 
 
@@ -669,6 +703,8 @@ def train_qwen_model(
             "nltk_not_installed: install 'nltk' to enable Qwen training (pip install nltk)"
         )
     _ensure_dir(config.result_path)
+    base_seed = int(config.seed or 0)
+    _seed_all(base_seed)
     train_ds, val_ds = _prepare_datasets(config)
     dataset_meta = _load_dataset_metadata(config.dataset_root)
     processor = Qwen2_5_VLProcessor.from_pretrained(
@@ -676,12 +712,20 @@ def train_qwen_model(
         min_pixels=256 * 28 * 28,
         max_pixels=1280 * 28 * 28,
     )
+    train_worker_init = _make_worker_init_fn(base_seed)
+    val_worker_init = _make_worker_init_fn(base_seed + 1)
+    train_generator = torch.Generator()
+    train_generator.manual_seed(base_seed)
+    val_generator = torch.Generator()
+    val_generator.manual_seed(base_seed + 1)
     train_loader = DataLoader(
         train_ds,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
         collate_fn=TrainCollator(processor),
+        worker_init_fn=train_worker_init,
+        generator=train_generator,
     )
     eval_loader = DataLoader(
         val_ds,
@@ -689,6 +733,8 @@ def train_qwen_model(
         shuffle=False,
         num_workers=config.num_workers,
         collate_fn=EvalCollator(processor),
+        worker_init_fn=val_worker_init,
+        generator=val_generator,
     )
 
     model = _load_model(config)
@@ -718,6 +764,7 @@ def train_qwen_model(
         num_sanity_val_steps=0,
         log_every_n_steps=config.log_every_n_steps,
         callbacks=callbacks,
+        deterministic=True,
     )
 
     try:

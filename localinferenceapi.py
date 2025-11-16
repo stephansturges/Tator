@@ -1791,13 +1791,15 @@ def _qwen_job_update(
     progress: Optional[float] = None,
     error: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
+    log_message: bool = True,
 ) -> None:
     if status is not None:
         job.status = status
     if message is not None:
         if message != job.message:
             job.message = message
-            _qwen_job_log(job, message)
+            if log_message:
+                _qwen_job_log(job, message)
         else:
             job.message = message
     if progress is not None:
@@ -2939,7 +2941,7 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
             if isinstance(progress_val, (int, float)):
                 progress = max(0.0, min(float(progress_val), 0.999))
             message = _summarize_qwen_metric(payload)
-            _qwen_job_update(job, status="running", message=message, progress=progress)
+            _qwen_job_update(job, status="running", message=message, progress=progress, log_message=False)
 
     def cancel_cb() -> bool:
         return job.cancel_event.is_set()

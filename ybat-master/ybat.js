@@ -877,10 +877,14 @@
         cancelButton: null,
         progressFill: null,
         statusText: null,
+        epochDetail: null,
         message: null,
         summary: null,
         log: null,
         historyContainer: null,
+        lossCanvas: null,
+        chartStatus: null,
+        chartSmoothing: null,
     };
 
     const activeElements = {
@@ -914,10 +918,12 @@
         nativeLabelsPath: null,
     };
 
-    const qwenTrainState = {
-        activeJobId: null,
-        pollHandle: null,
-    };
+const qwenTrainState = {
+    activeJobId: null,
+    pollHandle: null,
+    chartSmoothing: 15,
+    lastJobSnapshot: null,
+};
 
     const qwenDatasetState = {
         items: [],
@@ -2397,6 +2403,7 @@ function updateQwenTrainingUI(job) {
     if (!job) {
         return;
     }
+    qwenTrainState.lastJobSnapshot = job;
     const pct = Math.round((job.progress || 0) * 100);
     if (qwenTrainElements.progressFill) {
         qwenTrainElements.progressFill.style.width = `${pct}%`;
@@ -2428,6 +2435,200 @@ function updateQwenTrainingUI(job) {
             qwenTrainElements.cancelButton.disabled = true;
         }
     }
+    updateQwenEpochDetail(job);
+    updateQwenLossChart(job);
+}
+
+function findLatestMetric(metrics, predicate) {
+    if (!Array.isArray(metrics)) {
+        return null;
+    }
+    for (let index = metrics.length - 1; index >= 0; index -= 1) {
+        const entry = metrics[index];
+        if (!entry || typeof entry !== "object") {
+            continue;
+        }
+        if (!predicate || predicate(entry)) {
+            return entry;
+        }
+    }
+    return null;
+}
+
+function updateQwenEpochDetail(job) {
+    if (!qwenTrainElements.epochDetail) {
+        return;
+    }
+    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
+    if (!metrics.length) {
+        qwenTrainElements.epochDetail.textContent = "Waiting for telemetry…";
+        return;
+    }
+    const latestTrain = findLatestMetric(metrics, (entry) => entry.phase === "train");
+    const source = latestTrain || findLatestMetric(metrics);
+    if (!source) {
+        qwenTrainElements.epochDetail.textContent = "Waiting for telemetry…";
+        return;
+    }
+    const parts = [];
+    const epoch = Number.isFinite(source.epoch) ? source.epoch : null;
+    const totalEpochs = Number.isFinite(source.total_epochs)
+        ? source.total_epochs
+        : Number.isFinite(job?.config?.max_epochs)
+            ? job.config.max_epochs
+            : null;
+    if (epoch && totalEpochs) {
+        parts.push(`Epoch ${epoch}/${totalEpochs}`);
+    } else if (epoch) {
+        parts.push(`Epoch ${epoch}`);
+    }
+    if (source.phase === "train") {
+        if (Number.isFinite(source.batch) && Number.isFinite(source.batches_per_epoch)) {
+            parts.push(`Batch ${source.batch}/${source.batches_per_epoch}`);
+        }
+        if (typeof source.epoch_progress === "number") {
+            parts.push(`${Math.round(source.epoch_progress * 100)}% of epoch`);
+        }
+        if (typeof source.train_loss === "number") {
+            parts.push(`Loss ${source.train_loss.toFixed(4)}`);
+        }
+    } else if (source.phase === "val") {
+        if (typeof source.value === "number") {
+            const metricLabel =
+                typeof source.metric === "string" && source.metric.length
+                    ? source.metric.replace(/_/g, " ")
+                    : "Validation metric";
+            parts.push(`${metricLabel} ${source.value.toFixed(4)}`);
+        }
+    }
+    qwenTrainElements.epochDetail.textContent = parts.length ? parts.join(" • ") : "Telemetry updating…";
+}
+
+function getQwenLossSeries(job) {
+    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
+    const series = [];
+    metrics.forEach((entry) => {
+        if (!entry || typeof entry !== "object") {
+            return;
+        }
+        if (entry.phase !== "train") {
+            return;
+        }
+        const loss = Number.isFinite(entry.train_loss) ? entry.train_loss : null;
+        if (loss === null) {
+            return;
+        }
+        const step =
+            Number.isFinite(entry.step) && entry.step !== null
+                ? entry.step
+                : Number.isFinite(entry.batch)
+                    ? entry.batch
+                    : series.length + 1;
+        series.push({ x: step, y: loss });
+    });
+    return series;
+}
+
+function smoothLossSeries(points, windowSize) {
+    if (!Number.isFinite(windowSize) || windowSize <= 1) {
+        return points.slice();
+    }
+    const window = [];
+    let sum = 0;
+    return points.map((point) => {
+        window.push(point.y);
+        sum += point.y;
+        if (window.length > windowSize) {
+            sum -= window.shift();
+        }
+        const average = sum / window.length;
+        return { x: point.x, y: average };
+    });
+}
+
+function drawQwenLossChart(points) {
+    const canvas = qwenTrainElements.lossCanvas;
+    if (!canvas) {
+        return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+        return;
+    }
+    const width = Math.max(canvas.clientWidth || 400, 320);
+    const height = Math.max(canvas.clientHeight || 200, 160);
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+    }
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+    const padding = 14;
+    const chartWidth = Math.max(1, width - padding * 2);
+    const chartHeight = Math.max(1, height - padding * 2);
+    const minX = points[0].x;
+    const maxX = points[points.length - 1].x;
+    const minY = points.reduce((value, point) => Math.min(value, point.y), points[0].y);
+    const maxY = points.reduce((value, point) => Math.max(value, point.y), points[0].y);
+    const xRange = maxX - minX || 1;
+    const yRange = maxY - minY || 1;
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i += 1) {
+        const y = padding + (chartHeight * i) / 4;
+        ctx.beginPath();
+        ctx.moveTo(padding, y);
+        ctx.lineTo(width - padding, y);
+        ctx.stroke();
+    }
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    points.forEach((point, index) => {
+        const normX = (point.x - minX) / xRange;
+        const normY = (point.y - minY) / yRange;
+        const xPos = padding + normX * chartWidth;
+        const yPos = padding + (1 - normY) * chartHeight;
+        if (index === 0) {
+            ctx.moveTo(xPos, yPos);
+        } else {
+            ctx.lineTo(xPos, yPos);
+        }
+    });
+    ctx.stroke();
+    ctx.restore();
+}
+
+function resetQwenLossCanvas() {
+    const canvas = qwenTrainElements.lossCanvas;
+    if (!canvas) {
+        return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+        ctx.clearRect(0, 0, canvas.width || 0, canvas.height || 0);
+    }
+}
+
+function updateQwenLossChart(job) {
+    if (!qwenTrainElements.lossCanvas || !qwenTrainElements.chartStatus) {
+        return;
+    }
+    const points = getQwenLossSeries(job);
+    if (!points.length) {
+        resetQwenLossCanvas();
+        qwenTrainElements.chartStatus.textContent = "Loss telemetry will appear while a job is running.";
+        return;
+    }
+    const smoothing = Math.max(1, parseInt(qwenTrainState.chartSmoothing, 10) || 1);
+    const processed = smoothing > 1 ? smoothLossSeries(points, smoothing) : points;
+    drawQwenLossChart(processed);
+    const smoothingLabel = smoothing > 1 ? ` • ${smoothing}-point avg` : "";
+    qwenTrainElements.chartStatus.textContent = `${points.length} samples${smoothingLabel}`;
 }
 
 function renderQwenTrainingHistoryItem(container, job) {
@@ -2551,6 +2752,10 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         qwenTrainElements.cancelButton = document.getElementById("qwenTrainCancelBtn");
         qwenTrainElements.progressFill = document.getElementById("qwenTrainProgressFill");
         qwenTrainElements.statusText = document.getElementById("qwenTrainStatusText");
+        qwenTrainElements.epochDetail = document.getElementById("qwenTrainEpochDetail");
+        qwenTrainElements.lossCanvas = document.getElementById("qwenTrainLossCanvas");
+        qwenTrainElements.chartStatus = document.getElementById("qwenTrainChartStatus");
+        qwenTrainElements.chartSmoothing = document.getElementById("qwenTrainChartSmoothing");
         qwenTrainElements.message = document.getElementById("qwenTrainMessage");
         qwenTrainElements.summary = document.getElementById("qwenTrainSummary");
         qwenTrainElements.log = document.getElementById("qwenTrainLog");
@@ -2599,6 +2804,15 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         if (qwenTrainElements.datasetDelete) {
             qwenTrainElements.datasetDelete.addEventListener("click", () => {
                 handleQwenDatasetDelete().catch((error) => console.error("Failed to delete cached dataset", error));
+            });
+        }
+        if (qwenTrainElements.chartSmoothing) {
+            const initial = parseInt(qwenTrainElements.chartSmoothing.value, 10);
+            qwenTrainState.chartSmoothing = Number.isFinite(initial) && initial > 0 ? initial : 1;
+            qwenTrainElements.chartSmoothing.addEventListener("change", () => {
+                const nextValue = parseInt(qwenTrainElements.chartSmoothing.value, 10);
+                qwenTrainState.chartSmoothing = Number.isFinite(nextValue) && nextValue > 0 ? nextValue : 1;
+                updateQwenLossChart(qwenTrainState.lastJobSnapshot);
             });
         }
         loadQwenDatasetList().catch((error) => console.error("Failed to load cached datasets", error));

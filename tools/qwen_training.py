@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -72,6 +73,7 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float, str], None]
 CancelCallback = Callable[[], bool]
+TelemetryCallback = Callable[[Dict[str, Any]], None]
 
 
 # Default system prompt teaches Qwen to emit JSON detections for either modality.
@@ -462,10 +464,114 @@ class SaveCheckpoint(Callback):
         logger.info("Saved checkpoint to %s", checkpoint_path)
 
 
+def _safe_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if hasattr(value, "item"):
+        try:
+            return float(value.item())
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class ProgressReporter(Callback):
-    def __init__(self, progress_cb: Optional[ProgressCallback], total_epochs: int) -> None:
+    def __init__(
+        self,
+        progress_cb: Optional[ProgressCallback],
+        metrics_cb: Optional[TelemetryCallback],
+        total_epochs: int,
+        batches_per_epoch: int,
+    ) -> None:
         self.progress_cb = progress_cb
+        self.metrics_cb = metrics_cb
         self.total_epochs = max(1, total_epochs)
+        self.batches_per_epoch = max(1, batches_per_epoch)
+        self.progress_interval = 1
+        self.metric_interval = 1
+        self._recalculate_intervals(self.batches_per_epoch)
+
+    def _recalculate_intervals(self, total_batches: int) -> None:
+        self.batches_per_epoch = max(1, total_batches)
+        self.progress_interval = max(1, self.batches_per_epoch // 25)
+        self.metric_interval = max(1, self.batches_per_epoch // 200)
+
+    def on_train_epoch_start(self, trainer, pl_module):  # noqa: D401
+        total_batches = getattr(trainer, "num_training_batches", None)
+        if isinstance(total_batches, int) and total_batches > 0:
+            self._recalculate_intervals(total_batches)
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):  # noqa: D401
+        total_batches = max(1, self.batches_per_epoch)
+        step_in_epoch = min(batch_idx + 1, total_batches)
+        epoch_index = max(0, trainer.current_epoch)
+        epoch_progress = step_in_epoch / total_batches
+        global_progress = min(0.99, (epoch_index + epoch_progress) / self.total_epochs)
+        metrics = getattr(trainer, "callback_metrics", {}) or {}
+        train_loss = _safe_float(metrics.get("train_loss"))
+        emit_progress = (step_in_epoch % self.progress_interval == 0) or step_in_epoch == total_batches
+        emit_metrics = (step_in_epoch % self.metric_interval == 0) or step_in_epoch == total_batches
+        message = f"Epoch {epoch_index + 1}/{self.total_epochs} • batch {step_in_epoch}/{total_batches}"
+        if train_loss is not None:
+            message += f" • loss {train_loss:.4f}"
+        if emit_progress and self.progress_cb:
+            try:
+                self.progress_cb(global_progress, message)
+            except Exception:  # noqa: BLE001
+                pass
+        if emit_metrics and self.metrics_cb and train_loss is not None:
+            payload = {
+                "timestamp": time.time(),
+                "phase": "train",
+                "epoch": epoch_index + 1,
+                "total_epochs": self.total_epochs,
+                "batch": step_in_epoch,
+                "batches_per_epoch": total_batches,
+                "step": int(getattr(trainer, "global_step", 0)),
+                "train_loss": train_loss,
+                "epoch_progress": epoch_progress,
+                "progress": global_progress,
+            }
+            try:
+                self.metrics_cb(payload)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def on_validation_epoch_end(self, trainer, pl_module):  # noqa: D401
+        metrics = getattr(trainer, "callback_metrics", {}) or {}
+        val_metric = _safe_float(metrics.get("val_edit_distance"))
+        epoch_index = max(0, trainer.current_epoch)
+        progress = min(0.99, (epoch_index + 1) / self.total_epochs)
+        if self.metrics_cb and val_metric is not None:
+            payload = {
+                "timestamp": time.time(),
+                "phase": "val",
+                "epoch": epoch_index + 1,
+                "total_epochs": self.total_epochs,
+                "metric": "val_edit_distance",
+                "value": val_metric,
+                "progress": progress,
+                "epoch_progress": 1.0,
+            }
+            try:
+                self.metrics_cb(payload)
+            except Exception:  # noqa: BLE001
+                pass
+        if self.progress_cb:
+            message = (
+                f"Epoch {epoch_index + 1}/{self.total_epochs} validation edit distance {val_metric:.4f}"
+                if val_metric is not None
+                else f"Epoch {epoch_index + 1}/{self.total_epochs} validation complete"
+            )
+            try:
+                self.progress_cb(progress, message)
+            except Exception:  # noqa: BLE001
+                pass
 
     def on_train_epoch_end(self, trainer, pl_module):  # noqa: D401
         if not self.progress_cb:
@@ -550,6 +656,7 @@ def train_qwen_model(
     *,
     progress_cb: Optional[ProgressCallback] = None,
     cancel_cb: Optional[CancelCallback] = None,
+    metrics_cb: Optional[TelemetryCallback] = None,
 ) -> QwenTrainingResult:
     """Fine-tune Qwen 2.5 VL based on the supplied configuration."""
 
@@ -587,9 +694,13 @@ def train_qwen_model(
     model = _load_model(config)
     lightning_module = QwenLightningModule(model, processor, config)
     result_path = Path(config.result_path)
+    try:
+        batches_per_epoch = len(train_loader)
+    except TypeError:
+        batches_per_epoch = 1
     callbacks: List[Callback] = [
         SaveCheckpoint(result_path),
-        ProgressReporter(progress_cb, config.max_epochs),
+        ProgressReporter(progress_cb, metrics_cb, config.max_epochs, batches_per_epoch),
         CancellationWatcher(cancel_cb),
         EarlyStopping(monitor="val_edit_distance", patience=config.patience, mode="min"),
     ]

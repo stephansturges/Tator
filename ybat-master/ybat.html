@@ -476,6 +476,22 @@
                             <div class="training-progress-fill" id="qwenTrainProgressFill"></div>
                         </div>
                         <div class="training-status-text" id="qwenTrainStatusText">Idle</div>
+                        <div class="training-epoch-detail" id="qwenTrainEpochDetail">Waiting for telemetry…</div>
+                        <div class="training-chart">
+                            <div class="training-chart-header">
+                                <h3>Training Loss</h3>
+                                <label class="chart-smoothing">
+                                    Smoothing
+                                    <select id="qwenTrainChartSmoothing">
+                                        <option value="1">None</option>
+                                        <option value="5">5-point</option>
+                                        <option value="15" selected>15-point</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <canvas id="qwenTrainLossCanvas"></canvas>
+                            <div class="training-help" id="qwenTrainChartStatus">Loss telemetry will appear while a job is running.</div>
+                        </div>
                         <div class="qwen-sample-panel">
                             <div class="qwen-sample-header">
                                 <h3>Random Training Sample</h3>

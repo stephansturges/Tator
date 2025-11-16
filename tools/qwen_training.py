@@ -133,7 +133,7 @@ class QwenTrainingConfig:
     check_val_every_n_epoch: int = 2
     gradient_clip_val: float = 1.0
     warmup_steps: int = 50
-    num_workers: int = 2
+    num_workers: int = 0
     use_qlora: bool = True
     lora_rank: int = 8
     lora_alpha: int = 16
@@ -718,24 +718,26 @@ def train_qwen_model(
     train_generator.manual_seed(base_seed)
     val_generator = torch.Generator()
     val_generator.manual_seed(base_seed + 1)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        collate_fn=TrainCollator(processor),
-        worker_init_fn=train_worker_init,
-        generator=train_generator,
-    )
-    eval_loader = DataLoader(
-        val_ds,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        collate_fn=EvalCollator(processor),
-        worker_init_fn=val_worker_init,
-        generator=val_generator,
-    )
+    train_loader_kwargs = {
+        "batch_size": config.batch_size,
+        "shuffle": True,
+        "num_workers": config.num_workers,
+        "collate_fn": TrainCollator(processor),
+        "generator": train_generator,
+    }
+    if config.num_workers > 0:
+        train_loader_kwargs["worker_init_fn"] = train_worker_init
+    train_loader = DataLoader(train_ds, **train_loader_kwargs)
+    eval_loader_kwargs = {
+        "batch_size": config.batch_size,
+        "shuffle": False,
+        "num_workers": config.num_workers,
+        "collate_fn": EvalCollator(processor),
+        "generator": val_generator,
+    }
+    if config.num_workers > 0:
+        eval_loader_kwargs["worker_init_fn"] = val_worker_init
+    eval_loader = DataLoader(val_ds, **eval_loader_kwargs)
 
     model = _load_model(config)
     lightning_module = QwenLightningModule(model, processor, config)

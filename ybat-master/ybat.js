@@ -2687,7 +2687,7 @@ function scheduleQwenJobPoll(jobId, delayMs = 5000) {
         clearTimeout(qwenTrainState.pollHandle);
     }
     qwenTrainState.pollHandle = window.setTimeout(() => {
-        pollQwenTrainingJob(jobId).catch((error) => console.error("Qwen poll failed", error));
+        pollQwenTrainingJob(jobId, { force: true }).catch((error) => console.error("Qwen poll failed", error));
     }, delayMs);
 }
 

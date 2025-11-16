@@ -212,9 +212,9 @@ class JSONLDataset(Dataset):
         image_path = self.image_root / image_rel
         if not image_path.exists():
             raise TrainingError(f"Missing image referenced in annotations: {image_path}")
-        conversation, target_text = self._build_conversation(image_path, entry)
         image = Image.open(image_path).convert("RGB")
         image = self._resize_image_if_needed(image)
+        conversation, target_text = self._build_conversation(image, entry)
         payload = {
             "image": image_rel,
             "suffix": target_text,
@@ -230,7 +230,7 @@ class JSONLDataset(Dataset):
         new_size = (max(1, int(width / ratio)), max(1, int(height / ratio)))
         return image.resize(new_size, Image.BICUBIC)
 
-    def _build_conversation(self, image_path: Path, entry: Dict[str, object]) -> Tuple[List[Dict[str, object]], str]:
+    def _build_conversation(self, image: Image.Image, entry: Dict[str, object]) -> Tuple[List[Dict[str, object]], str]:
         context = str(entry.get("context") or "").strip()
         detections = entry.get("detections") or []
         if not isinstance(detections, list):
@@ -254,7 +254,16 @@ class JSONLDataset(Dataset):
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": str(image_path)},
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_text},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": target_text}],
+            },
+        ]
+        return conversation, target_text
                     {"type": "text", "text": user_text},
                 ],
             },

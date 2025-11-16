@@ -264,15 +264,6 @@ class JSONLDataset(Dataset):
             },
         ]
         return conversation, target_text
-                    {"type": "text", "text": user_text},
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": target_text}],
-            },
-        ]
-        return conversation, target_text
 
     def _build_bbox_prompt(self, context: str, labels: List[str], mode: str) -> str:
         body = (

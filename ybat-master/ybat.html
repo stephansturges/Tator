@@ -448,6 +448,11 @@
                                 <input type="number" id="qwenTrainAccumulate" value="8" min="1" />
                             </div>
                             <div>
+                                <label for="qwenTrainDevices">Device IDs</label>
+                                <input type="text" id="qwenTrainDevices" placeholder="e.g., 0,1" />
+                                <div class="training-help">Leave blank for a single GPU. Enter comma-separated CUDA IDs to train on multiple GPUs.</div>
+                            </div>
+                            <div>
                                 <label for="qwenTrainLoraRank">LoRA rank</label>
                                 <input type="number" id="qwenTrainLoraRank" value="8" min="1" />
                             </div>

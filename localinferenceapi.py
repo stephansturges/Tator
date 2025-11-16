@@ -1636,6 +1636,7 @@ class QwenTrainRequest(BaseModel):
     devices: Optional[List[int]] = None
     device_map: Optional[Any] = None
     seed: Optional[int] = None
+    max_detections_per_sample: Optional[int] = None
 
 
 class QwenModelActivateRequest(BaseModel):
@@ -2083,6 +2084,7 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str) -> QwenTrainingCo
         "accelerator": payload.accelerator,
         "device_map": payload.device_map,
         "seed": payload.seed,
+        "max_detections_per_sample": payload.max_detections_per_sample,
     }
     for key, value in defaults.items():
         if value is not None:

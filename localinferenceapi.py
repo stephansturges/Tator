@@ -4,11 +4,11 @@ import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, log
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
-from typing import Optional, List, Dict, Tuple, Any, Literal
+from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence
 import torch, clip, joblib
 from io import BytesIO
 from PIL import Image
-from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, root_validator, Field
@@ -1745,12 +1745,38 @@ def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
         "progress": job.progress,
         "message": job.message,
         "logs": job.logs,
+        "config": job.config,
         "result": job.result,
         "error": job.error,
-        "config": job.config,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+
+
+def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> None:
+    try:
+        if not jobs:
+            logger.info("[qwen-train] GET %s -> 0 jobs", endpoint)
+            return
+        for job in jobs:
+            config = job.config or {}
+            tracked_fields = {
+                "accelerator": config.get("accelerator"),
+                "devices": config.get("devices"),
+                "device_map": config.get("device_map"),
+                "batch_size": config.get("batch_size"),
+                "accumulate_grad_batches": config.get("accumulate_grad_batches"),
+            }
+            logger.info(
+                "[qwen-train %s] GET %s -> status=%s message=%s config=%s",
+                job.job_id[:8],
+                endpoint,
+                job.status,
+                job.message,
+                json.dumps(tracked_fields, ensure_ascii=False),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to log Qwen GET request for %s", endpoint)
 
 
 def _persist_qwen_run_metadata(
@@ -2080,6 +2106,7 @@ def qwen_dataset_init(run_name: Optional[str] = Form(None)):
     )
     with QWEN_DATASET_JOBS_LOCK:
         QWEN_DATASET_JOBS[job_id] = job
+    logger.info("[qwen-dataset %s] init run_name=%s root=%s", job_id[:8], run_name or "", staging_dir)
     return {"job_id": job_id}
 
 
@@ -2115,7 +2142,23 @@ async def qwen_dataset_chunk(
             job.train_count += 1
         else:
             job.val_count += 1
-    return {"status": "ok", "train": job.train_count, "val": job.val_count}
+        train_count = job.train_count
+        val_count = job.val_count
+    size_bytes = None
+    try:
+        size_bytes = dest_path.stat().st_size
+    except OSError:
+        size_bytes = None
+    logger.info(
+        "[qwen-dataset %s] chunk split=%s image=%s size=%sB train=%d val=%d",
+        job_id[:8],
+        split_lower,
+        normalised,
+        size_bytes if size_bytes is not None else "unknown",
+        train_count,
+        val_count,
+    )
+    return {"status": "ok", "train": train_count, "val": val_count}
 
 
 @app.post("/qwen/dataset/finalize")
@@ -2157,6 +2200,14 @@ def qwen_dataset_finalize(
         "val_count": job.val_count,
     }
     _persist_qwen_dataset_metadata(dest_dir, dataset_meta)
+    logger.info(
+        "[qwen-dataset %s] finalized dataset=%s train=%d val=%d meta=%s",
+        job_id[:8],
+        safe_name,
+        job.train_count,
+        job.val_count,
+        json.dumps(meta_obj, ensure_ascii=False),
+    )
     return {"dataset_root": str(dest_dir), "run_name": safe_name, "metadata": dataset_meta}
 
 
@@ -2167,6 +2218,7 @@ def qwen_dataset_cancel(job_id: str = Form(...)):
         job = QWEN_DATASET_JOBS.pop(job_id, None)
     if job:
         shutil.rmtree(job.root_dir, ignore_errors=True)
+        logger.info("[qwen-dataset %s] cancelled and cleaned up %s", job_id[:8], job.root_dir)
     return {"status": "cancelled"}
 
 
@@ -2820,15 +2872,17 @@ def create_qwen_training_job(payload: QwenTrainRequest):
 
 
 @app.get("/qwen/train/jobs")
-def list_qwen_training_jobs():
+def list_qwen_training_jobs(request: Request):
     with QWEN_TRAINING_JOBS_LOCK:
         jobs = sorted(QWEN_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+        _log_qwen_get_request(str(request.url.path), jobs)
         return [_serialize_qwen_job(job) for job in jobs]
 
 
 @app.get("/qwen/train/jobs/{job_id}")
-def get_qwen_training_job(job_id: str):
+def get_qwen_training_job(job_id: str, request: Request):
     job = _get_qwen_job(job_id)
+    _log_qwen_get_request(str(request.url.path), [job])
     return _serialize_qwen_job(job)
 
 

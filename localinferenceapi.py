@@ -1552,6 +1552,7 @@ class QwenTrainRequest(BaseModel):
     patience: Optional[int] = None
     accelerator: Optional[str] = None
     devices: Optional[List[int]] = None
+    device_map: Optional[Any] = None
 
 
 class QwenModelActivateRequest(BaseModel):
@@ -1780,6 +1781,41 @@ def _persist_qwen_run_metadata(
     return metadata
 
 
+def _persist_qwen_dataset_metadata(dataset_root: Path, metadata: Dict[str, Any]) -> None:
+    meta_path = dataset_root / QWEN_METADATA_FILENAME
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write Qwen dataset metadata for %s: %s", dataset_root, exc)
+
+
+def _list_qwen_dataset_entries() -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    if not QWEN_DATASET_ROOT.exists():
+        return entries
+    for path in QWEN_DATASET_ROOT.iterdir():
+        if not path.is_dir():
+            continue
+        metadata = _load_qwen_dataset_metadata(path)
+        if not metadata:
+            continue
+        entry = {
+            "id": metadata.get("id") or path.name,
+            "label": metadata.get("label") or path.name,
+            "dataset_root": str(path),
+            "created_at": metadata.get("created_at"),
+            "image_count": metadata.get("image_count"),
+            "train_count": metadata.get("train_count"),
+            "val_count": metadata.get("val_count"),
+            "classes": metadata.get("classes", []),
+            "context": metadata.get("context", ""),
+        }
+        entries.append(entry)
+    entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return entries
+
+
 def _load_qwen_run_metadata(run_dir: Path) -> Optional[Dict[str, Any]]:
     meta_path = run_dir / QWEN_METADATA_FILENAME
     if not meta_path.exists():
@@ -1792,6 +1828,21 @@ def _load_qwen_run_metadata(run_dir: Path) -> Optional[Dict[str, Any]]:
                 return data
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to read Qwen metadata from %s: %s", meta_path, exc)
+    return None
+
+
+def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
+    meta_path = dataset_dir / QWEN_METADATA_FILENAME
+    if not meta_path.exists():
+        return None
+    try:
+        with meta_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                data.setdefault("id", dataset_dir.name)
+                return data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read Qwen dataset metadata from %s: %s", meta_path, exc)
     return None
 
 
@@ -1864,6 +1915,7 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str) -> QwenTrainingCo
         "lora_dropout": payload.lora_dropout,
         "patience": payload.patience,
         "accelerator": payload.accelerator,
+        "device_map": payload.device_map,
     }
     for key, value in defaults.items():
         if value is not None:
@@ -2094,7 +2146,18 @@ def qwen_dataset_finalize(
         shutil.rmtree(dest_dir, ignore_errors=True)
     shutil.move(str(job.root_dir), str(dest_dir))
     job.completed = True
-    return {"dataset_root": str(dest_dir), "run_name": safe_name}
+    dataset_meta = {
+        "id": safe_name,
+        "label": meta_obj.get("label") or safe_name,
+        "classes": meta_obj.get("classes") or [],
+        "context": meta_obj.get("context") or "",
+        "created_at": time.time(),
+        "image_count": job.train_count + job.val_count,
+        "train_count": job.train_count,
+        "val_count": job.val_count,
+    }
+    _persist_qwen_dataset_metadata(dest_dir, dataset_meta)
+    return {"dataset_root": str(dest_dir), "run_name": safe_name, "metadata": dataset_meta}
 
 
 @app.post("/qwen/dataset/cancel")
@@ -2105,6 +2168,20 @@ def qwen_dataset_cancel(job_id: str = Form(...)):
     if job:
         shutil.rmtree(job.root_dir, ignore_errors=True)
     return {"status": "cancelled"}
+
+
+@app.get("/qwen/datasets")
+def list_qwen_datasets():
+    return _list_qwen_dataset_entries()
+
+
+@app.delete("/qwen/datasets/{dataset_id}")
+def delete_qwen_dataset(dataset_id: str):
+    target = (QWEN_DATASET_ROOT / dataset_id).resolve()
+    if not str(target).startswith(str(QWEN_DATASET_ROOT.resolve())) or not target.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found")
+    shutil.rmtree(target, ignore_errors=True)
+    return {"status": "deleted"}
 
 
 @app.post("/qwen/train/dataset/upload")

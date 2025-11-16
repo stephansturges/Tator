@@ -108,6 +108,7 @@ class QwenTrainingConfig:
     target_modules: Sequence[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
     accelerator: str = "auto"
     devices: Optional[Sequence[int]] = None
+    device_map: Optional[object] = None
     limit_val_batches: int = 1
     log_every_n_steps: int = 10
     patience: int = 3
@@ -504,9 +505,19 @@ def _load_model(config: QwenTrainingConfig):
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_type=torch.bfloat16,
         )
+    device_map = config.device_map
+    if not device_map:
+        if config.devices and isinstance(config.devices, (tuple, list)) and len(config.devices) > 1:
+            device_map = "auto"
+        elif config.devices and isinstance(config.devices, (tuple, list)):
+            device_map = {"": int(config.devices[0])}
+        elif isinstance(config.devices, int):
+            device_map = {"": int(config.devices)}
+        elif config.use_qlora:
+            device_map = {"": 0}
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         config.model_id,
-        device_map="auto",
+        device_map=device_map,
         quantization_config=quant_config,
         torch_dtype=torch.bfloat16,
     )

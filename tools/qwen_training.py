@@ -214,11 +214,21 @@ class JSONLDataset(Dataset):
             raise TrainingError(f"Missing image referenced in annotations: {image_path}")
         conversation, target_text = self._build_conversation(image_path, entry)
         image = Image.open(image_path).convert("RGB")
+        image = self._resize_image_if_needed(image)
         payload = {
             "image": image_rel,
             "suffix": target_text,
         }
         return image, payload, conversation
+
+    def _resize_image_if_needed(self, image: Image.Image) -> Image.Image:
+        max_dim = 1024
+        width, height = image.size
+        if width <= max_dim and height <= max_dim:
+            return image
+        ratio = max(width / max_dim, height / max_dim)
+        new_size = (max(1, int(width / ratio)), max(1, int(height / ratio)))
+        return image.resize(new_size, Image.BICUBIC)
 
     def _build_conversation(self, image_path: Path, entry: Dict[str, object]) -> Tuple[List[Dict[str, object]], str]:
         context = str(entry.get("context") or "").strip()

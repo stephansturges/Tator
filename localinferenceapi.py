@@ -1634,6 +1634,7 @@ class QwenTrainingJob:
     message: str = "Queued"
     config: Dict[str, Any] = field(default_factory=dict)
     logs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
@@ -1653,6 +1654,7 @@ QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}
 QWEN_DATASET_JOBS_LOCK = threading.Lock()
 
 MAX_JOB_LOGS = 250
+MAX_QWEN_METRIC_POINTS = 2000
 
 
 def _job_log(job: ClipTrainingJob, message: str) -> None:
@@ -1746,6 +1748,7 @@ def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
         "message": job.message,
         "logs": job.logs,
         "config": job.config,
+        "metrics": job.metrics,
         "result": job.result,
         "error": job.error,
         "created_at": job.created_at,
@@ -1777,6 +1780,31 @@ def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> Non
             )
     except Exception:  # noqa: BLE001
         logger.exception("Failed to log Qwen GET request for %s", endpoint)
+
+
+def _coerce_metric_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _coerce_metric_value(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coerce_metric_value(item) for item in value]
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _qwen_job_append_metric(job: QwenTrainingJob, metric: Dict[str, Any]) -> None:
+    if not metric:
+        return
+    sanitized = {str(key): _coerce_metric_value(val) for key, val in metric.items()}
+    job.metrics.append(sanitized)
+    if len(job.metrics) > MAX_QWEN_METRIC_POINTS:
+        job.metrics[:] = job.metrics[-MAX_QWEN_METRIC_POINTS:]
+    job.updated_at = time.time()
 
 
 def _persist_qwen_run_metadata(
@@ -2790,6 +2818,12 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
                 return
             _qwen_job_update(job, status="running", message=message, progress=value)
 
+    def metrics_cb(payload: Dict[str, Any]) -> None:
+        if not payload:
+            return
+        with QWEN_TRAINING_JOBS_LOCK:
+            _qwen_job_append_metric(job, payload)
+
     def cancel_cb() -> bool:
         return job.cancel_event.is_set()
 
@@ -2800,7 +2834,7 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
                     _qwen_job_update(job, status="cancelled", message="Cancelled before start.")
                     return
                 _qwen_job_update(job, status="running", progress=0.01, message="Preparing Qwen training job ...")
-            result = train_qwen_model(config, progress_cb=progress_cb, cancel_cb=cancel_cb)
+            result = train_qwen_model(config, progress_cb=progress_cb, cancel_cb=cancel_cb, metrics_cb=metrics_cb)
             run_metadata = _persist_qwen_run_metadata(result_path, config, result)
             payload = {
                 "checkpoints": result.checkpoints,

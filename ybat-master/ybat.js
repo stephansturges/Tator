@@ -845,7 +845,7 @@
         hardMiningCheckbox: null,
     };
 
-    const qwenTrainElements = {
+const qwenTrainElements = {
         runNameInput: null,
         contextInput: null,
         modelIdInput: null,
@@ -857,6 +857,7 @@
         epochsInput: null,
         lrInput: null,
         accumulateInput: null,
+        devicesInput: null,
         loraRankInput: null,
         loraAlphaInput: null,
         loraDropoutInput: null,
@@ -2731,6 +2732,7 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         qwenTrainElements.epochsInput = document.getElementById("qwenTrainEpochs");
         qwenTrainElements.lrInput = document.getElementById("qwenTrainLR");
         qwenTrainElements.accumulateInput = document.getElementById("qwenTrainAccumulate");
+        qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
         qwenTrainElements.loraRankInput = document.getElementById("qwenTrainLoraRank");
         qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
         qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");

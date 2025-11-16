@@ -1807,6 +1807,34 @@ def _qwen_job_append_metric(job: QwenTrainingJob, metric: Dict[str, Any]) -> Non
     job.updated_at = time.time()
 
 
+def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:
+    phase = (metric.get("phase") or "").lower()
+    epoch = metric.get("epoch")
+    total_epochs = metric.get("total_epochs")
+    parts: List[str] = []
+    if isinstance(epoch, (int, float)):
+        if isinstance(total_epochs, (int, float)) and total_epochs:
+            parts.append(f"Epoch {int(epoch)}/{int(total_epochs)}")
+        else:
+            parts.append(f"Epoch {int(epoch)}")
+    if phase == "train":
+        batch = metric.get("batch")
+        batches_per_epoch = metric.get("batches_per_epoch")
+        if isinstance(batch, (int, float)) and isinstance(batches_per_epoch, (int, float)) and batches_per_epoch:
+            parts.append(f"Batch {int(batch)}/{int(batches_per_epoch)}")
+        train_loss = metric.get("train_loss")
+        if isinstance(train_loss, (int, float)):
+            parts.append(f"Loss {float(train_loss):.4f}")
+    elif phase == "val":
+        value = metric.get("value")
+        metric_name = metric.get("metric") or "validation"
+        if isinstance(value, (int, float)):
+            parts.append(f"{metric_name} {float(value):.4f}")
+    if not parts:
+        return "Training in progress ..."
+    return " • ".join(parts)
+
+
 def _persist_qwen_run_metadata(
     result_path: Path,
     config: QwenTrainingConfig,
@@ -2823,6 +2851,12 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
             return
         with QWEN_TRAINING_JOBS_LOCK:
             _qwen_job_append_metric(job, payload)
+            progress_val = payload.get("progress")
+            progress = None
+            if isinstance(progress_val, (int, float)):
+                progress = max(0.0, min(float(progress_val), 0.999))
+            message = _summarize_qwen_metric(payload)
+            _qwen_job_update(job, status="running", message=message, progress=progress)
 
     def cancel_cb() -> bool:
         return job.cancel_event.is_set()

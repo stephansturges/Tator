@@ -967,6 +967,25 @@ hr {
     color: #64748b;
 }
 
+.qwen-dataset-modes {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.qwen-dataset-cache-controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+}
+
+.qwen-dataset-cache-controls select {
+    min-width: 220px;
+    padding: 6px 8px;
+}
+
 .training-button,
 #startTrainingBtn,
 #activateLatestModelBtn,

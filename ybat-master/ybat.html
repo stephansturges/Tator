@@ -197,6 +197,11 @@
                             <select id="clipBackboneSelect"></select>
                         </div>
                         <div class="training-field">
+                            <label for="qwenTrainDevices">Device IDs</label>
+                            <input type="text" id="qwenTrainDevices" placeholder="e.g., 0,1" />
+                            <div class="training-help">Leave blank to use a single GPU. Enter comma-separated CUDA device indices to split across multiple GPUs.</div>
+                        </div>
+                        <div class="training-field">
                             <label for="trainSolver">Solver</label>
                             <select id="trainSolver">
                                 <option value="saga" selected>SAGA (elastic net-friendly)</option>
@@ -372,6 +377,19 @@
                             <label for="qwenTrainContext">Describe these images</label>
                             <textarea id="qwenTrainContext" rows="2" placeholder="e.g., CCTV footage inside a warehouse"></textarea>
                             <div class="training-help">Used to enrich the prompt we send for every image.</div>
+                        </div>
+                        <div class="training-field">
+                            <label>Dataset source</label>
+                            <div class="qwen-dataset-modes">
+                                <label><input type="radio" name="qwenDatasetMode" id="qwenDatasetModeUpload" value="upload" checked /> Upload current dataset</label>
+                                <label><input type="radio" name="qwenDatasetMode" id="qwenDatasetModeCached" value="cached" /> Reuse cached dataset</label>
+                            </div>
+                            <div class="qwen-dataset-cache-controls">
+                                <select id="qwenDatasetSelect" disabled></select>
+                                <button type="button" class="training-button" id="qwenDatasetRefresh" disabled>Refresh</button>
+                                <button type="button" class="training-button training-button-danger" id="qwenDatasetDelete" disabled>Delete</button>
+                            </div>
+                            <div class="training-help" id="qwenDatasetSummary">We'll package the dataset from the labeling tab and cache it automatically.</div>
                         </div>
                         <div class="training-field">
                             <label for="qwenTrainModelId">Base model repo</label>

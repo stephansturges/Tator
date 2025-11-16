@@ -861,6 +861,12 @@
         loraAlphaInput: null,
         loraDropoutInput: null,
         patienceInput: null,
+        datasetModeUpload: null,
+        datasetModeCached: null,
+        datasetSelect: null,
+        datasetRefresh: null,
+        datasetDelete: null,
+        datasetSummary: null,
         sampleButton: null,
         sampleCanvas: null,
         samplePrompt: null,
@@ -913,6 +919,11 @@
         pollHandle: null,
     };
 
+    const qwenDatasetState = {
+        items: [],
+        selectedId: null,
+    };
+
     function escapeHtml(value) {
         return String(value ?? "")
             .replace(/&/g, "&amp;")
@@ -938,6 +949,147 @@
             return "—";
         }
         return Number(value).toFixed(digits);
+    }
+
+    function useCachedQwenDataset() {
+        return Boolean(qwenTrainElements.datasetModeCached?.checked);
+    }
+
+    function getSelectedQwenDataset() {
+        const id = qwenDatasetState.selectedId;
+        if (!id) {
+            return null;
+        }
+        return qwenDatasetState.items.find((entry) => entry.id === id) || null;
+    }
+
+    function selectQwenDatasetById(datasetId) {
+        if (!datasetId) {
+            return;
+        }
+        qwenDatasetState.selectedId = datasetId;
+        if (qwenTrainElements.datasetSelect) {
+            qwenTrainElements.datasetSelect.value = datasetId;
+        }
+        updateQwenDatasetSummary();
+    }
+
+    function updateQwenDatasetSummary() {
+        const summaryEl = qwenTrainElements.datasetSummary;
+        if (!summaryEl) {
+            return;
+        }
+        if (useCachedQwenDataset()) {
+            const entry = getSelectedQwenDataset();
+            if (entry) {
+                const context = entry.context ? ` Context: ${entry.context}` : "";
+                summaryEl.textContent = `Using cached dataset "${entry.label}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}).${context}`;
+            } else {
+                summaryEl.textContent = "Select a cached dataset or switch back to uploading the current dataset.";
+            }
+        } else {
+            summaryEl.textContent = "We'll upload the dataset from the labeling tab and cache it automatically.";
+        }
+    }
+
+    function setQwenDatasetModeState() {
+        const useCached = useCachedQwenDataset();
+        if (qwenTrainElements.datasetSelect) {
+            qwenTrainElements.datasetSelect.disabled = !useCached || !qwenDatasetState.items.length;
+        }
+        if (qwenTrainElements.datasetRefresh) {
+            qwenTrainElements.datasetRefresh.disabled = !useCached;
+        }
+        if (qwenTrainElements.datasetDelete) {
+            qwenTrainElements.datasetDelete.disabled = !useCached || !qwenDatasetState.items.length;
+        }
+        if (useCached && !qwenDatasetState.items.length) {
+            loadQwenDatasetList(true).catch((error) => console.error("Failed to load cached datasets", error));
+        }
+        updateQwenDatasetSummary();
+    }
+
+    function populateQwenDatasetSelect() {
+        const select = qwenTrainElements.datasetSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!qwenDatasetState.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No cached datasets";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            qwenDatasetState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.id;
+                option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images)`;
+                select.appendChild(option);
+            });
+            if (!qwenDatasetState.selectedId || !qwenDatasetState.items.some((entry) => entry.id === qwenDatasetState.selectedId)) {
+                qwenDatasetState.selectedId = qwenDatasetState.items[0].id;
+            }
+            select.disabled = false;
+            select.value = qwenDatasetState.selectedId;
+        }
+        if (qwenTrainElements.datasetDelete) {
+            qwenTrainElements.datasetDelete.disabled = !useCachedQwenDataset() || !qwenDatasetState.items.length;
+        }
+        if (qwenTrainElements.datasetRefresh) {
+            qwenTrainElements.datasetRefresh.disabled = !useCachedQwenDataset();
+        }
+        updateQwenDatasetSummary();
+    }
+
+    async function loadQwenDatasetList(force = false) {
+        if (!force && qwenDatasetState.items.length) {
+            populateQwenDatasetSelect();
+            return qwenDatasetState.items;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/datasets`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            qwenDatasetState.items = Array.isArray(data) ? data : [];
+            populateQwenDatasetSelect();
+            return qwenDatasetState.items;
+        } catch (error) {
+            console.error("Failed to load cached Qwen datasets", error);
+            if (qwenTrainElements.datasetSummary) {
+                qwenTrainElements.datasetSummary.textContent = `Unable to load cached datasets: ${error.message || error}`;
+            }
+            return [];
+        }
+    }
+
+    async function handleQwenDatasetDelete() {
+        const entry = getSelectedQwenDataset();
+        if (!entry) {
+            setQwenTrainMessage("Select a cached dataset to delete.", "warn");
+            return;
+        }
+        if (!window.confirm(`Delete cached dataset "${entry.label}"? This cannot be undone.`)) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/datasets/${encodeURIComponent(entry.id)}`, {
+                method: "DELETE",
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            setQwenTrainMessage(`Deleted cached dataset "${entry.label}".`, "success");
+            qwenDatasetState.selectedId = null;
+            await loadQwenDatasetList(true);
+        } catch (error) {
+            console.error("Failed to delete Qwen dataset", error);
+            setQwenTrainMessage(error.message || "Failed to delete dataset", "error");
+        }
     }
 
     function formatBytes(bytes, digits = 1) {
@@ -1994,6 +2146,15 @@ function buildQwenTrainingPayload(datasetRoot, datasetRunName) {
             payload[key] = value;
         }
     });
+    if (qwenTrainElements.devicesInput) {
+        const rawDevices = (qwenTrainElements.devicesInput.value || "").trim();
+        if (rawDevices) {
+            const parsed = rawDevices.split(",").map((value) => parseInt(value.trim(), 10)).filter((value) => Number.isFinite(value));
+            if (parsed.length) {
+                payload.devices = parsed;
+            }
+        }
+    }
     return payload;
 }
 
@@ -2165,7 +2326,28 @@ async function handleStartQwenTraining() {
         qwenTrainElements.startButton.disabled = true;
     }
     try {
-        const datasetInfo = await uploadQwenDatasetStream();
+        const useCachedDataset = useCachedQwenDataset();
+        let datasetInfo;
+        if (useCachedDataset) {
+            const cachedEntry = getSelectedQwenDataset();
+            if (!cachedEntry) {
+                setQwenTrainMessage("Select a cached dataset or switch back to uploading the current dataset.", "error");
+                if (qwenTrainElements.startButton) {
+                    qwenTrainElements.startButton.disabled = false;
+                }
+                return;
+            }
+            datasetInfo = {
+                dataset_root: cachedEntry.dataset_root,
+                run_name: qwenTrainElements.runNameInput?.value?.trim() || cachedEntry.id,
+            };
+        } else {
+            datasetInfo = await uploadQwenDatasetStream();
+            await loadQwenDatasetList(true);
+            if (datasetInfo?.run_name) {
+                selectQwenDatasetById(datasetInfo.run_name);
+            }
+        }
         setQwenTrainMessage("Starting training job…");
         const payload = buildQwenTrainingPayload(datasetInfo.dataset_root, datasetInfo.run_name);
         const resp = await fetch(`${API_ROOT}/qwen/train/jobs`, {
@@ -2352,6 +2534,13 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
         qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
         qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
         qwenTrainElements.patienceInput = document.getElementById("qwenTrainPatience");
+        qwenTrainElements.datasetModeUpload = document.getElementById("qwenDatasetModeUpload");
+        qwenTrainElements.datasetModeCached = document.getElementById("qwenDatasetModeCached");
+        qwenTrainElements.datasetSelect = document.getElementById("qwenDatasetSelect");
+        qwenTrainElements.datasetRefresh = document.getElementById("qwenDatasetRefresh");
+        qwenTrainElements.datasetDelete = document.getElementById("qwenDatasetDelete");
+        qwenTrainElements.datasetSummary = document.getElementById("qwenDatasetSummary");
+        qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
         qwenTrainElements.sampleButton = document.getElementById("qwenSampleBtn");
         qwenTrainElements.sampleCanvas = document.getElementById("qwenSampleCanvas");
         qwenTrainElements.samplePrompt = document.getElementById("qwenSamplePrompt");
@@ -2382,6 +2571,38 @@ function scheduleQwenJobPoll(jobId, delayMs = 1500) {
                 generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
             });
         }
+        if (qwenTrainElements.datasetModeUpload) {
+            qwenTrainElements.datasetModeUpload.addEventListener("change", () => {
+                if (qwenTrainElements.datasetModeUpload?.checked) {
+                    setQwenDatasetModeState();
+                }
+            });
+        }
+        if (qwenTrainElements.datasetModeCached) {
+            qwenTrainElements.datasetModeCached.addEventListener("change", () => {
+                if (qwenTrainElements.datasetModeCached?.checked) {
+                    setQwenDatasetModeState();
+                }
+            });
+        }
+        if (qwenTrainElements.datasetSelect) {
+            qwenTrainElements.datasetSelect.addEventListener("change", () => {
+                qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
+                updateQwenDatasetSummary();
+            });
+        }
+        if (qwenTrainElements.datasetRefresh) {
+            qwenTrainElements.datasetRefresh.addEventListener("click", () => {
+                loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh cached datasets", error));
+            });
+        }
+        if (qwenTrainElements.datasetDelete) {
+            qwenTrainElements.datasetDelete.addEventListener("click", () => {
+                handleQwenDatasetDelete().catch((error) => console.error("Failed to delete cached dataset", error));
+            });
+        }
+        loadQwenDatasetList().catch((error) => console.error("Failed to load cached datasets", error));
+        setQwenDatasetModeState();
     }
 
 

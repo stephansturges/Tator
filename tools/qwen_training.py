@@ -147,6 +147,7 @@ class QwenTrainingConfig:
     patience: int = 3
     seed: int = 1337
     max_detections_per_sample: int = 200
+    max_image_dim: int = 1024
 
 
 @dataclass
@@ -177,6 +178,7 @@ class JSONLDataset(Dataset):
         prompt_noise: float = 0.05,
         seed: Optional[int] = None,
         max_detections: int = 200,
+        max_image_dim: int = 1024,
     ) -> None:
         self.jsonl_path = jsonl_path
         self.image_root = image_root
@@ -186,6 +188,11 @@ class JSONLDataset(Dataset):
         self.entries = self._load_entries()
         self.rng = random.Random(seed)
         self.max_detections = max(0, int(max_detections))
+        try:
+            max_dim = int(max_image_dim)
+        except (TypeError, ValueError):
+            max_dim = 1024
+        self.max_image_dim = max(64, min(max_dim, 4096))
 
     def _load_entries(self) -> List[Dict[str, object]]:
         if not self.jsonl_path.exists():
@@ -225,7 +232,7 @@ class JSONLDataset(Dataset):
         return image, payload, conversation
 
     def _resize_image_if_needed(self, image: Image.Image) -> Image.Image:
-        max_dim = 1024
+        max_dim = self.max_image_dim or 1024
         width, height = image.size
         if width <= max_dim and height <= max_dim:
             return image
@@ -729,6 +736,7 @@ def _prepare_datasets(config: QwenTrainingConfig) -> Tuple[JSONLDataset, JSONLDa
         noise,
         seed=base_seed,
         max_detections=config.max_detections_per_sample,
+        max_image_dim=config.max_image_dim,
     )
     val_ds = JSONLDataset(
         val_jsonl,
@@ -737,6 +745,7 @@ def _prepare_datasets(config: QwenTrainingConfig) -> Tuple[JSONLDataset, JSONLDa
         noise,
         seed=base_seed + 1,
         max_detections=config.max_detections_per_sample,
+        max_image_dim=config.max_image_dim,
     )
     return train_ds, val_ds
 

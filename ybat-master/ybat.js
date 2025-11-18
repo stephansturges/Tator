@@ -797,6 +797,7 @@
         status: null,
         list: null,
         details: null,
+        refreshButton: null,
     };
     let qwenAvailable = false;
     let qwenRequestActive = false;
@@ -862,6 +863,8 @@ const qwenTrainElements = {
         loraAlphaInput: null,
         loraDropoutInput: null,
         patienceInput: null,
+        maxImageDimInput: null,
+        maxDetectionsInput: null,
         datasetModeUpload: null,
         datasetModeCached: null,
         datasetSelect: null,
@@ -2153,6 +2156,16 @@ function buildQwenTrainingPayload(datasetRoot, datasetRunName) {
             payload[key] = value;
         }
     });
+    const maxImageDim = readNumberInput(qwenTrainElements.maxImageDimInput, { integer: true });
+    if (maxImageDim !== undefined) {
+        const clampedDim = Math.min(Math.max(maxImageDim, 256), 4096);
+        payload.max_image_dim = clampedDim;
+    }
+    const maxDetections = readNumberInput(qwenTrainElements.maxDetectionsInput, { integer: true });
+    if (maxDetections !== undefined) {
+        const clampedDetections = Math.min(Math.max(maxDetections, 1), 200);
+        payload.max_detections_per_sample = clampedDetections;
+    }
     if (qwenTrainElements.devicesInput) {
         const rawDevices = (qwenTrainElements.devicesInput.value || "").trim();
         if (rawDevices) {
@@ -2566,24 +2579,39 @@ function drawQwenLossChart(points) {
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, width, height);
-    const padding = 14;
-    const chartWidth = Math.max(1, width - padding * 2);
-    const chartHeight = Math.max(1, height - padding * 2);
+    const axisMinY = 0;
+    const axisMaxY = 8;
+    const topPadding = 14;
+    const bottomPadding = 14;
+    const rightPadding = 14;
+    const leftPadding = 44;
+    const chartWidth = Math.max(1, width - leftPadding - rightPadding);
+    const chartHeight = Math.max(1, height - topPadding - bottomPadding);
     const minX = points[0].x;
     const maxX = points[points.length - 1].x;
-    const minY = points.reduce((value, point) => Math.min(value, point.y), points[0].y);
-    const maxY = points.reduce((value, point) => Math.max(value, point.y), points[0].y);
     const xRange = maxX - minX || 1;
-    const yRange = maxY - minY || 1;
+    const yRange = axisMaxY - axisMinY || 1;
+    const clampY = (value) => Math.min(Math.max(value, axisMinY), axisMaxY);
     ctx.strokeStyle = "#e2e8f0";
     ctx.lineWidth = 1;
-    for (let i = 0; i <= 4; i += 1) {
-        const y = padding + (chartHeight * i) / 4;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "12px sans-serif";
+    for (let tick = axisMinY; tick <= axisMaxY; tick += 1) {
+        const norm = (tick - axisMinY) / yRange;
+        const y = topPadding + (1 - norm) * chartHeight;
         ctx.beginPath();
-        ctx.moveTo(padding, y);
-        ctx.lineTo(width - padding, y);
+        ctx.moveTo(leftPadding, y);
+        ctx.lineTo(width - rightPadding, y);
         ctx.stroke();
+        ctx.fillText(String(tick), leftPadding - 6, y);
     }
+    ctx.strokeStyle = "#94a3b8";
+    ctx.beginPath();
+    ctx.moveTo(leftPadding, topPadding);
+    ctx.lineTo(leftPadding, topPadding + chartHeight);
+    ctx.stroke();
     ctx.strokeStyle = "#2563eb";
     ctx.lineWidth = 2;
     ctx.lineJoin = "round";
@@ -2591,9 +2619,9 @@ function drawQwenLossChart(points) {
     ctx.beginPath();
     points.forEach((point, index) => {
         const normX = (point.x - minX) / xRange;
-        const normY = (point.y - minY) / yRange;
-        const xPos = padding + normX * chartWidth;
-        const yPos = padding + (1 - normY) * chartHeight;
+        const normY = (clampY(point.y) - axisMinY) / yRange;
+        const xPos = leftPadding + normX * chartWidth;
+        const yPos = topPadding + (1 - normY) * chartHeight;
         if (index === 0) {
             ctx.moveTo(xPos, yPos);
         } else {
@@ -2735,6 +2763,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
         qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
         qwenTrainElements.patienceInput = document.getElementById("qwenTrainPatience");
+        qwenTrainElements.maxImageDimInput = document.getElementById("qwenTrainMaxImageDim");
+        qwenTrainElements.maxDetectionsInput = document.getElementById("qwenTrainMaxDetections");
         qwenTrainElements.datasetModeUpload = document.getElementById("qwenDatasetModeUpload");
         qwenTrainElements.datasetModeCached = document.getElementById("qwenDatasetModeCached");
         qwenTrainElements.datasetSelect = document.getElementById("qwenDatasetSelect");
@@ -5126,11 +5156,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         const classes = Array.isArray(metadata.classes) ? metadata.classes.join(", ") : "(not specified)";
         const context = metadata.dataset_context || "(not specified)";
+        const maxDimValue = Number(metadata.max_image_dim);
+        const maxDim = Number.isFinite(maxDimValue) && maxDimValue > 0 ? maxDimValue : 1024;
+        const detCapValue = Number(metadata.max_detections_per_sample);
+        const detectionCap = Number.isFinite(detCapValue) && detCapValue > 0 ? detCapValue : 200;
         qwenModelElements.details.innerHTML = `
             <p><strong>Name:</strong> ${metadata.label || metadata.id || "Custom Run"}</p>
             <p><strong>Base model:</strong> ${metadata.model_id || "Qwen/Qwen2.5-VL-3B-Instruct"}</p>
             <p><strong>Context hint:</strong> ${context}</p>
             <p><strong>Classes:</strong> ${classes}</p>
+            <p><strong>Image resize cap:</strong> ${maxDim}px longest side</p>
+            <p><strong>Detections/sample:</strong> ${detectionCap} (per-class budget)</p>
             <label>System prompt</label>
             <pre>${metadata.system_prompt || ""}</pre>
         `;
@@ -5165,6 +5201,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     async function refreshQwenModels() {
         setQwenModelStatus("Loading models…", "info");
+        if (qwenModelElements.refreshButton) {
+            qwenModelElements.refreshButton.disabled = true;
+        }
         try {
             const resp = await fetch(`${API_ROOT}/qwen/models`);
             if (!resp.ok) {
@@ -5182,6 +5221,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         } catch (error) {
             console.error("Failed to load Qwen models", error);
             setQwenModelStatus(`Failed to load models: ${error.message || error}`, "error");
+        } finally {
+            if (qwenModelElements.refreshButton) {
+                qwenModelElements.refreshButton.disabled = false;
+            }
         }
     }
 
@@ -5212,6 +5255,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         qwenModelElements.status = document.getElementById("qwenModelStatus");
         qwenModelElements.list = document.getElementById("qwenModelList");
         qwenModelElements.details = document.getElementById("qwenModelDetails");
+        qwenModelElements.refreshButton = document.getElementById("qwenModelRefreshBtn");
+        if (qwenModelElements.refreshButton) {
+            qwenModelElements.refreshButton.addEventListener("click", () => {
+                refreshQwenModels();
+            });
+        }
         refreshQwenModels();
     }
 

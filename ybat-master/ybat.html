@@ -468,6 +468,16 @@
                                 <label for="qwenTrainPatience">Early stop patience</label>
                                 <input type="number" id="qwenTrainPatience" value="3" min="1" />
                             </div>
+                            <div>
+                                <label for="qwenTrainMaxImageDim">Max image dimension (px)</label>
+                                <input type="number" id="qwenTrainMaxImageDim" value="1024" min="256" max="4096" step="64" />
+                                <div class="training-help">Images larger than this shrink on the longest side before reaching Qwen.</div>
+                            </div>
+                            <div>
+                                <label for="qwenTrainMaxDetections">Max detections per sample</label>
+                                <input type="number" id="qwenTrainMaxDetections" value="200" min="1" max="200" />
+                                <div class="training-help">Uses the same per-class-aware cap from the trainer; drop below 200 to ease VRAM pressure.</div>
+                            </div>
                         </div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="qwenTrainStartBtn">Start Training</button>
@@ -584,6 +594,9 @@
                         <h2>Qwen Models</h2>
                         <p class="qwen-models-help">Pick which fine-tuned adapters should power the Assist panel. Each run stores the exact prompts, context, and class list it learned from.</p>
                         <div class="qwen-model-status" id="qwenModelStatus">Loading…</div>
+                        <div class="qwen-model-toolbar">
+                            <button type="button" class="training-button" id="qwenModelRefreshBtn">Refresh</button>
+                        </div>
                         <div class="qwen-model-grid" id="qwenModelList"></div>
                     </section>
                     <section class="qwen-model-details">

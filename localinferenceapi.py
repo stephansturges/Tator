@@ -52,15 +52,24 @@ else:
     QWEN_TRAINING_IMPORT_ERROR = None
 
 try:
-    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, Qwen2_5_VLProcessor
     from qwen_vl_utils import process_vision_info
 except Exception as exc:  # noqa: BLE001
     QWEN_IMPORT_ERROR = exc
     Qwen2_5_VLForConditionalGeneration = None  # type: ignore[assignment]
     AutoProcessor = None  # type: ignore[assignment]
+    Qwen2_5_VLProcessor = None  # type: ignore[assignment]
     process_vision_info = None  # type: ignore[assignment]
 else:
     QWEN_IMPORT_ERROR = None
+
+try:
+    from peft import PeftModel
+except Exception as exc:  # noqa: BLE001
+    PEFT_IMPORT_ERROR = exc
+    PeftModel = None  # type: ignore[assignment]
+else:
+    PEFT_IMPORT_ERROR = None
 
 MAX_PREDICTOR_SLOTS = 3
 
@@ -125,6 +134,8 @@ def _default_qwen_metadata() -> Dict[str, Any]:
         "classes": [],
         "model_id": QWEN_MODEL_NAME,
         "source": "huggingface",
+        "max_image_dim": 1024,
+        "max_detections_per_sample": 200,
     }
 
 
@@ -1227,24 +1238,34 @@ def _ensure_qwen_ready():
                 "torch_dtype": dtype,
                 "low_cpu_mem_usage": True,
             }
+        adapter_path = active_qwen_model_path
+        metadata = active_qwen_metadata or {}
+        base_model_id = metadata.get("model_id") or QWEN_MODEL_NAME
+        if adapter_path and PeftModel is None:
+            detail = "qwen_peft_missing"
+            if PEFT_IMPORT_ERROR is not None:
+                detail = f"{detail}:{PEFT_IMPORT_ERROR}"
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         try:
-            source = active_qwen_model_path if active_qwen_model_path else QWEN_MODEL_NAME
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                str(source),
+                str(base_model_id),
                 **load_kwargs,
             )
+            if adapter_path:
+                model = PeftModel.from_pretrained(model, str(adapter_path))
             if not load_kwargs.get("device_map"):
                 model.to(device)
             model.eval()
-            if active_qwen_model_path:
+            processor_source = str(adapter_path) if adapter_path else str(base_model_id)
+            if adapter_path and Qwen2_5_VLProcessor is not None:
                 processor = Qwen2_5_VLProcessor.from_pretrained(
-                    str(source),
+                    processor_source,
                     min_pixels=QWEN_MIN_PIXELS,
                     max_pixels=QWEN_MAX_PIXELS,
                 )
             else:
                 processor = AutoProcessor.from_pretrained(
-                    QWEN_MODEL_NAME,
+                    processor_source,
                     min_pixels=QWEN_MIN_PIXELS,
                     max_pixels=QWEN_MAX_PIXELS,
                 )
@@ -1637,6 +1658,7 @@ class QwenTrainRequest(BaseModel):
     device_map: Optional[Any] = None
     seed: Optional[int] = None
     max_detections_per_sample: Optional[int] = None
+    max_image_dim: Optional[int] = None
 
 
 class QwenModelActivateRequest(BaseModel):
@@ -1738,7 +1760,7 @@ QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}
 QWEN_DATASET_JOBS_LOCK = threading.Lock()
 
 MAX_JOB_LOGS = 250
-MAX_QWEN_METRIC_POINTS = 2000
+MAX_QWEN_METRIC_POINTS: Optional[int] = None
 
 
 def _job_log(job: ClipTrainingJob, message: str) -> None:
@@ -1887,8 +1909,9 @@ def _qwen_job_append_metric(job: QwenTrainingJob, metric: Dict[str, Any]) -> Non
         return
     sanitized = {str(key): _coerce_metric_value(val) for key, val in metric.items()}
     job.metrics.append(sanitized)
-    if len(job.metrics) > MAX_QWEN_METRIC_POINTS:
-        job.metrics[:] = job.metrics[-MAX_QWEN_METRIC_POINTS:]
+    limit = MAX_QWEN_METRIC_POINTS
+    if isinstance(limit, int) and limit > 0 and len(job.metrics) > limit:
+        job.metrics[:] = job.metrics[-limit:]
     job.updated_at = time.time()
 
 
@@ -1920,6 +1943,14 @@ def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:
     return " • ".join(parts)
 
 
+def _write_qwen_metadata(meta_path: Path, metadata: Dict[str, Any]) -> None:
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write Qwen metadata for %s: %s", meta_path.parent, exc)
+
+
 def _persist_qwen_run_metadata(
     result_path: Path,
     config: QwenTrainingConfig,
@@ -1935,16 +1966,13 @@ def _persist_qwen_run_metadata(
         "classes": dataset_meta.get("classes", []) or [],
         "model_id": config.model_id,
         "use_qlora": config.use_qlora,
+        "max_image_dim": config.max_image_dim,
+        "max_detections_per_sample": config.max_detections_per_sample,
         "created_at": time.time(),
         "latest_checkpoint": training_result.latest_checkpoint,
         "source_dataset": config.dataset_root,
     }
-    meta_path = result_path / QWEN_METADATA_FILENAME
-    try:
-        with meta_path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to write Qwen metadata for %s: %s", result_path, exc)
+    _write_qwen_metadata(result_path / QWEN_METADATA_FILENAME, metadata)
     return metadata
 
 
@@ -1998,6 +2026,53 @@ def _load_qwen_run_metadata(run_dir: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _infer_qwen_run_metadata_from_artifacts(run_dir: Path) -> Optional[Dict[str, Any]]:
+    latest_dir = run_dir / "latest"
+    if not latest_dir.exists():
+        return None
+    dataset_dir = QWEN_DATASET_ROOT / run_dir.name
+    dataset_meta = _load_qwen_dataset_metadata(dataset_dir) or {}
+    adapter_config_path = latest_dir / "adapter_config.json"
+    adapter_meta: Dict[str, Any] = {}
+    if adapter_config_path.exists():
+        try:
+            with adapter_config_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+                if isinstance(data, dict):
+                    adapter_meta = data
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to read adapter config for %s: %s", adapter_config_path, exc)
+    base_model_id = (
+        adapter_meta.get("base_model_name_or_path")
+        or dataset_meta.get("model_id")
+        or QWEN_MODEL_NAME
+    )
+    metadata = {
+        "id": run_dir.name,
+        "label": dataset_meta.get("label") or dataset_meta.get("id") or run_dir.name,
+        "system_prompt": dataset_meta.get("system_prompt", ""),
+        "system_prompt_noise": dataset_meta.get("system_prompt_noise", 0.05),
+        "dataset_context": dataset_meta.get("context", ""),
+        "classes": dataset_meta.get("classes", []) or [],
+        "model_id": base_model_id,
+        "use_qlora": dataset_meta.get("use_qlora"),
+        "created_at": dataset_meta.get("created_at") or run_dir.stat().st_mtime,
+        "latest_checkpoint": str(latest_dir),
+        "source_dataset": str(dataset_dir) if dataset_dir.exists() else None,
+    }
+    return metadata
+
+
+def _load_or_repair_qwen_run_metadata(run_dir: Path) -> Optional[Dict[str, Any]]:
+    metadata = _load_qwen_run_metadata(run_dir)
+    if metadata:
+        return metadata
+    inferred = _infer_qwen_run_metadata_from_artifacts(run_dir)
+    if inferred:
+        _write_qwen_metadata(run_dir / QWEN_METADATA_FILENAME, inferred)
+    return inferred
+
+
 def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     meta_path = dataset_dir / QWEN_METADATA_FILENAME
     if not meta_path.exists():
@@ -2018,11 +2093,11 @@ def _list_qwen_model_entries() -> List[Dict[str, Any]]:
     for path in QWEN_JOB_ROOT.iterdir():
         if not path.is_dir() or path.name == QWEN_DATASET_ROOT.name:
             continue
-        metadata = _load_qwen_run_metadata(path)
-        if not metadata:
-            continue
         latest = path / "latest"
         if not latest.exists():
+            continue
+        metadata = _load_or_repair_qwen_run_metadata(path)
+        if not metadata:
             continue
         entries.append(
             {
@@ -2084,7 +2159,6 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str) -> QwenTrainingCo
         "accelerator": payload.accelerator,
         "device_map": payload.device_map,
         "seed": payload.seed,
-        "max_detections_per_sample": payload.max_detections_per_sample,
     }
     for key, value in defaults.items():
         if value is not None:
@@ -2099,6 +2173,18 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str) -> QwenTrainingCo
         except (TypeError, ValueError):
             noise_val = 0.05
         cfg_kwargs["system_prompt_noise"] = max(0.0, min(noise_val, 0.3))
+    if payload.max_detections_per_sample is not None:
+        try:
+            max_dets = int(payload.max_detections_per_sample)
+        except (TypeError, ValueError):
+            max_dets = 200
+        cfg_kwargs["max_detections_per_sample"] = max(1, min(max_dets, 200))
+    if payload.max_image_dim is not None:
+        try:
+            max_dim = int(payload.max_image_dim)
+        except (TypeError, ValueError):
+            max_dim = 1024
+        cfg_kwargs["max_image_dim"] = max(64, min(max_dim, 4096))
     return QwenTrainingConfig(**cfg_kwargs)
 
 
@@ -2925,6 +3011,7 @@ async def start_clip_training(
 
 
 def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig) -> None:
+    result_path = Path(config.result_path)
 
     def progress_cb(value: float, message: str) -> None:
         with QWEN_TRAINING_JOBS_LOCK:

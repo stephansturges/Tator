@@ -68,24 +68,17 @@ except Exception as exc:  # noqa: BLE001
 else:
     QWEN_IMPORT_ERROR = None
 
+SAM3_TEXT_IMPORT_ERROR: Optional[Exception] = None
 try:
     from transformers import Sam3Model, Sam3Processor
 except Exception as exc:  # noqa: BLE001
     SAM3_TRANSFORMER_IMPORT_ERROR = exc
+    SAM3_TEXT_IMPORT_ERROR = exc
     Sam3Model = None  # type: ignore[assignment]
     Sam3Processor = None  # type: ignore[assignment]
 else:
     SAM3_TRANSFORMER_IMPORT_ERROR = None
-
-try:
-    from sam3.model_builder import build_sam3_image_model
-    from sam3.model.sam3_image_processor import Sam3Processor as NativeSam3ImageProcessor
-except Exception as exc:  # noqa: BLE001
-    SAM3_NATIVE_IMAGE_IMPORT_ERROR = exc
-    build_sam3_image_model = None  # type: ignore[assignment]
-    NativeSam3ImageProcessor = None  # type: ignore[assignment]
-else:
-    SAM3_NATIVE_IMAGE_IMPORT_ERROR = None
+    SAM3_TEXT_IMPORT_ERROR = None
 
 try:
     from peft import PeftModel
@@ -186,7 +179,6 @@ def _reset_qwen_runtime() -> None:
 sam3_text_model = None
 sam3_text_processor = None
 sam3_text_device: Optional[torch.device] = None
-sam3_text_backend: Optional[str] = None
 sam3_text_lock = threading.RLock()
 
 
@@ -469,45 +461,25 @@ def _build_backend_for_variant(variant: str):
 
 
 def _ensure_sam3_text_runtime():
-    global sam3_text_model, sam3_text_processor, sam3_text_device, sam3_text_backend
+    global sam3_text_model, sam3_text_processor, sam3_text_device
     with sam3_text_lock:
         if sam3_text_model is not None and sam3_text_processor is not None and sam3_text_device is not None:
             return sam3_text_model, sam3_text_processor, sam3_text_device
         device = _resolve_sam3_device()
-        if SAM3_TEXT_IMPORT_ERROR is None and Sam3Model is not None and Sam3Processor is not None:
-            model_source = SAM3_CHECKPOINT_PATH or SAM3_MODEL_ID
-            processor_source = SAM3_PROCESSOR_ID or SAM3_MODEL_ID
-            try:
-                model = Sam3Model.from_pretrained(model_source).to(device)
-                processor = Sam3Processor.from_pretrained(processor_source)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
-            sam3_text_model = model
-            sam3_text_processor = processor
-            sam3_text_device = device
-            sam3_text_backend = "transformers"
-            return sam3_text_model, sam3_text_processor, sam3_text_device
-        if (
-            SAM3_NATIVE_IMAGE_IMPORT_ERROR is None
-            and build_sam3_image_model is not None
-            and NativeSam3ImageProcessor is not None
-        ):
-            try:
-                if SAM3_CHECKPOINT_PATH:
-                    model = build_sam3_image_model(checkpoint=SAM3_CHECKPOINT_PATH)
-                else:
-                    model = build_sam3_image_model()
-                model = model.to(device)
-                processor = NativeSam3ImageProcessor(model)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_native_load_failed:{exc}") from exc
-            sam3_text_model = model
-            sam3_text_processor = processor
-            sam3_text_device = device
-            sam3_text_backend = "native"
-            return sam3_text_model, sam3_text_processor, sam3_text_device
-        detail = f"sam3_text_unavailable:{SAM3_TEXT_IMPORT_ERROR or SAM3_NATIVE_IMAGE_IMPORT_ERROR}"
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+        if SAM3_TEXT_IMPORT_ERROR is not None or Sam3Model is None or Sam3Processor is None:
+            detail = f"sam3_text_unavailable:{SAM3_TEXT_IMPORT_ERROR}"
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+        model_source = SAM3_CHECKPOINT_PATH or SAM3_MODEL_ID
+        processor_source = SAM3_PROCESSOR_ID or SAM3_MODEL_ID
+        try:
+            model = Sam3Model.from_pretrained(model_source).to(device)
+            processor = Sam3Processor.from_pretrained(processor_source)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
+        sam3_text_model = model
+        sam3_text_processor = processor
+        sam3_text_device = device
+        return sam3_text_model, sam3_text_processor, sam3_text_device
 
 
 class PredictorSlot:
@@ -1491,11 +1463,6 @@ def _run_sam3_text_inference(
             normalized_limit = max(1, min(int(limit), 100))
         except (TypeError, ValueError):
             normalized_limit = None
-    backend = sam3_text_backend or "transformers"
-    if backend == "native":
-        state = processor.set_image(pil_img)
-        output = processor.set_text_prompt(state=state, prompt=text_prompt)
-        return _sam3_text_detections(pil_img, output, text_prompt, normalized_limit, min_score=float(threshold))
     inputs = processor(images=pil_img, text=text_prompt, return_tensors="pt")
     original_sizes = inputs.get("original_sizes")
     original_sizes_list = original_sizes.tolist() if original_sizes is not None else [[pil_img.height, pil_img.width]]

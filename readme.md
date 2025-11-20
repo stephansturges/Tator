@@ -52,7 +52,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 ## Prerequisites
 - Python 3.10 or newer (3.11+ recommended).
 - Optional GPU with CUDA for faster CLIP/SAM inference.
-- Model weights: `sam_vit_h_4b8939.pth` (SAM1). SAM3 weights/config guidance will land alongside the integration work.
+- Model weights: `sam_vit_h_4b8939.pth` (SAM1). Optional SAM3 checkpoints/configs are supported; see `sam3integration.txt` for sample commands and Hugging Face IDs.
 
 ## Quick Start
 1. **Create an environment**
@@ -71,7 +71,8 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    pre-commit install
    ```
 4. **Fetch model weights**
-   - Place `sam_vit_h_4b8939.pth` in the repo root (additional variants like SAM3 will be documented once available).
+   - Place `sam_vit_h_4b8939.pth` in the repo root.
+   - (Optional) set up SAM3 support (see below) so the new SAM3 text prompts have weights available.
 5. **Configure the backend**
    ```bash
    cp .env.example .env
@@ -83,6 +84,10 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    CLIP_MODEL_NAME=ViT-B/32
    SAM_VARIANT=sam1
    SAM_CHECKPOINT_PATH=./sam_vit_h_4b8939.pth
+   SAM3_MODEL_ID=facebook/sam3
+   SAM3_PROCESSOR_ID=facebook/sam3
+   SAM3_CHECKPOINT_PATH=
+   SAM3_DEVICE=
    ENABLE_METRICS=true             # optional Prometheus
    QWEN_MODEL_NAME=Qwen/Qwen2.5-VL-3B-Instruct
    QWEN_DEVICE=auto                # cuda, cpu, mps, or auto
@@ -112,6 +117,26 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    - Import existing YOLO boxes via **Import Bboxes…** — you can point it at a folder of `.txt` files or drop a `.zip` containing them.
    - Enable **SAM Mode** and/or **Auto Class** and start annotating.
 7. **Training loop:** use the Train CLIP tab to train on the same `images/` + `labels/` folders, then activate the resulting `.pkl` via the CLIP Model tab.
+
+### Optional: Setting up SAM3
+SAM3 support is optional but recommended if you plan to use the new text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):
+
+1. **Request checkpoint access** — visit the [facebook/sam3](https://huggingface.co/facebook/sam3) page and request access. You’ll receive an approval email once granted.
+2. **Authenticate with Hugging Face** — install the CLI helpers if you have not already:
+   ```bash
+   pip install --upgrade huggingface_hub
+   hf auth login
+   ```
+   Generate a read token from your Hugging Face settings page, paste it when prompted, and verify with `hf auth whoami`. These credentials allow transformers/sam3 to pull the gated checkpoints.
+3. **Install the SAM3 repo locally**:
+   ```bash
+   git clone https://github.com/facebookresearch/sam3.git
+   cd sam3
+   pip install -e .
+   ```
+   This provides the native `sam3` package so we can fall back to Meta’s processor if your transformers build doesn’t include `Sam3Model/Sam3TrackerModel`.
+4. **(Optional) Pin checkpoints manually** – if you need to place checkpoints somewhere specific, use `huggingface_hub.hf_hub_download` (examples in `sam3integration.txt`) and point `SAM3_CHECKPOINT_PATH` / `SAM3_MODEL_ID` at those files.
+5. **Run the API** — once installed and authenticated, start the backend as usual. Selecting “SAM 3” in the UI enables both the point/bbox flows and the new text prompt panel.
 
 
 ### Running the Backend on a Remote GPU Host

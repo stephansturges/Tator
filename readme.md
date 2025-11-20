@@ -126,7 +126,8 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
    ```bash
    git clone https://github.com/facebookresearch/sam3.git
    cd sam3
-   pip install -e .
+   pip install -e .           # installs the sam3 package
+   pip install einops         # SAM3 depends on einops; install it if not pulled automatically
    ```
 3. **Authenticate with Hugging Face** — run
    ```bash

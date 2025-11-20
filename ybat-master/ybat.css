@@ -610,6 +610,77 @@ hr {
     cursor: not-allowed;
 }
 
+.sam3-text-panel {
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    background: #ffffff;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.sam3-text-panel--disabled {
+    opacity: 0.6;
+}
+
+.sam3-text-panel__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.sam3-text-status {
+    font-size: 12px;
+    min-height: 1.2em;
+    color: #475569;
+}
+
+.sam3-text-status.warn {
+    color: #c2410c;
+}
+
+.sam3-text-status.error {
+    color: #b91c1c;
+}
+
+.sam3-text-status.success {
+    color: #15803d;
+}
+
+.sam3-text-hint {
+    font-size: 12px;
+    color: #475569;
+    margin: 0;
+}
+
+.sam3-text-panel input[type="text"],
+.sam3-text-panel input[type="number"] {
+    width: 100%;
+}
+
+.sam3-text-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 6px 10px;
+}
+
+.sam3-text-grid label {
+    font-size: 12px;
+    color: #475569;
+}
+
+.sam3-text-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.sam3-text-buttons button {
+    flex: 1;
+}
+
 .qwen-advanced-toggle {
     width: 100%;
     border: 1px solid #bfdbfe;
@@ -672,6 +743,12 @@ hr {
     font-size: 13px;
     color: #475569;
     min-height: 18px;
+}
+
+.qwen-model-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
 }
 
 .qwen-model-status.success {

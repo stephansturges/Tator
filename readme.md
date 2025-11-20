@@ -122,11 +122,12 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):
 
 1. **Request checkpoint access** — visit the [facebook/sam3](https://huggingface.co/facebook/sam3) page and request access. Hugging Face will email you once approved.
-2. **Upgrade Transformers + Hugging Face tools** — install the latest wheels so the `Sam3Model/Sam3Processor` classes are available:
+2. **Install the official SAM3 repo** — clone Meta’s implementation and install it in editable mode (this provides the `build_sam3_image_model` + processor used by our backend):
    ```bash
-   pip install --upgrade transformers huggingface_hub accelerate
+   git clone https://github.com/facebookresearch/sam3.git
+   cd sam3
+   pip install -e .
    ```
-   (Use the nightly wheel or `pip install git+https://github.com/huggingface/transformers.git` if your current release doesn’t include the SAM3 APIs yet.)
 3. **Authenticate with Hugging Face** — run
    ```bash
    hf auth login

@@ -69,17 +69,13 @@ else:
     QWEN_IMPORT_ERROR = None
 
 try:
-    from transformers import Sam3TrackerModel, Sam3TrackerProcessor, Sam3Model, Sam3Processor
+    from transformers import Sam3Model, Sam3Processor
 except Exception as exc:  # noqa: BLE001
-    SAM3_TRACKER_IMPORT_ERROR = exc
-    SAM3_TEXT_IMPORT_ERROR = exc
-    Sam3TrackerModel = None  # type: ignore[assignment]
-    Sam3TrackerProcessor = None  # type: ignore[assignment]
+    SAM3_TRANSFORMER_IMPORT_ERROR = exc
     Sam3Model = None  # type: ignore[assignment]
     Sam3Processor = None  # type: ignore[assignment]
 else:
-    SAM3_TRACKER_IMPORT_ERROR = None
-    SAM3_TEXT_IMPORT_ERROR = None
+    SAM3_TRANSFORMER_IMPORT_ERROR = None
 
 try:
     from sam3.model_builder import build_sam3_image_model
@@ -380,17 +376,17 @@ class _Sam1Backend:
         self.predictor = None
 
 
-class _Sam3TrackerBackend:
+class _Sam3ImageBackend:
     def __init__(self):
-        if SAM3_TRACKER_IMPORT_ERROR is not None or Sam3TrackerModel is None or Sam3TrackerProcessor is None:
-            detail = f"sam3_tracker_unavailable:{SAM3_TRACKER_IMPORT_ERROR}"
+        if SAM3_TRANSFORMER_IMPORT_ERROR is not None or Sam3Model is None or Sam3Processor is None:
+            detail = f"sam3_model_unavailable:{SAM3_TRANSFORMER_IMPORT_ERROR}"
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         model_source = SAM3_CHECKPOINT_PATH or SAM3_MODEL_ID
         processor_source = SAM3_PROCESSOR_ID or SAM3_MODEL_ID
         self.device = _resolve_sam3_device()
         try:
-            self.model = Sam3TrackerModel.from_pretrained(model_source).to(self.device)
-            self.processor = Sam3TrackerProcessor.from_pretrained(processor_source)
+            self.model = Sam3Model.from_pretrained(model_source).to(self.device)
+            self.processor = Sam3Processor.from_pretrained(processor_source)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_load_failed:{exc}") from exc
         self.current_image: Optional[Image.Image] = None
@@ -402,30 +398,53 @@ class _Sam3TrackerBackend:
         if self.current_image is None:
             raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="sam3_image_not_loaded")
         processor_kwargs: Dict[str, Any] = {"images": self.current_image}
+        prompt_supplied = False
         if point_coords is not None and point_labels is not None:
             pts = np.asarray(point_coords, dtype=np.float32)
             labs = np.asarray(point_labels, dtype=np.int64)
             pts = pts.reshape(1, 1, pts.shape[0], 2)
             labs = labs.reshape(1, 1, labs.shape[0])
             processor_kwargs["input_points"] = pts.tolist()
-            processor_kwargs["input_labels"] = labs.tolist()
+            processor_kwargs["input_points_labels"] = labs.tolist()
+            prompt_supplied = True
         if box is not None:
             arr = np.asarray(box, dtype=np.float32).reshape(1, 1, 4)
             processor_kwargs["input_boxes"] = arr.tolist()
-        if "input_points" not in processor_kwargs and "input_boxes" not in processor_kwargs:
+            prompt_supplied = True
+        if not prompt_supplied:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_prompt_required")
         inputs = self.processor(return_tensors="pt", **processor_kwargs)
         tensor_inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = self.model(**tensor_inputs, multimask_output=multimask_output)
-        masks = self.processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0]
-        masks_np = masks.squeeze(0).numpy()
+            outputs = self.model(**tensor_inputs)
+        original_sizes = inputs.get("original_sizes")
+        if original_sizes is not None:
+            target_sizes = original_sizes.tolist()
+        else:
+            target_sizes = [[self.current_image.height, self.current_image.width]]
+        processed = self.processor.post_process_instance_segmentation(
+            outputs,
+            threshold=0.0,
+            mask_threshold=0.0,
+            target_sizes=target_sizes,
+        )[0]
+        masks = processed.get("masks")
+        if not isinstance(masks, (list, tuple)) and masks is None:
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_no_mask")
+        masks_np = np.asarray(masks)
         if masks_np.ndim == 2:
             masks_np = masks_np[None, ...]
-        scores = outputs.iou_scores.detach().cpu().numpy().squeeze(0)
-        if scores.ndim == 0:
-            scores = np.array([float(scores)])
-        return masks_np, scores, None
+        scores = processed.get("scores")
+        if scores is not None:
+            scores_arr = np.asarray(scores, dtype=np.float32)
+        else:
+            scores_arr = np.ones(masks_np.shape[0], dtype=np.float32)
+        if not multimask_output and masks_np.shape[0] > 1:
+            # take best scoring mask
+            best_idx = int(np.argmax(scores_arr))
+            masks_np = masks_np[best_idx : best_idx + 1]
+            scores_arr = scores_arr[best_idx : best_idx + 1]
+        return masks_np, scores_arr, None
 
     def unload(self) -> None:
         try:
@@ -444,7 +463,7 @@ class _Sam3TrackerBackend:
 def _build_backend_for_variant(variant: str):
     normalized = (variant or "sam1").lower()
     if normalized == "sam3":
-        return _Sam3TrackerBackend()
+        return _Sam3ImageBackend()
     # default to classic SAM1 backend
     return _Sam1Backend()
 

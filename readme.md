@@ -52,7 +52,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 ## Prerequisites
 - Python 3.10 or newer (3.11+ recommended).
 - Optional GPU with CUDA for faster CLIP/SAM inference.
-- Model weights: `sam_vit_h_4b8939.pth` (SAM1) plus any desired SAM2 checkpoints/configs.
+- Model weights: `sam_vit_h_4b8939.pth` (SAM1). SAM3 weights/config guidance will land alongside the integration work.
 
 ## Quick Start
 1. **Create an environment**
@@ -71,8 +71,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    pre-commit install
    ```
 4. **Fetch model weights**
-   - Place `sam_vit_h_4b8939.pth` in the repo root.
-   - For SAM2, download a config + checkpoint pair (e.g. `sam2_hiera_large.yaml`, `sam2_hiera_large.pt`). Keep absolute paths handy.
+   - Place `sam_vit_h_4b8939.pth` in the repo root (additional variants like SAM3 will be documented once available).
 5. **Configure the backend**
    ```bash
    cp .env.example .env
@@ -82,10 +81,8 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    LOGREG_PATH=./my_logreg_model.pkl
    LABELMAP_PATH=./my_label_list.pkl
    CLIP_MODEL_NAME=ViT-B/32
-   SAM_VARIANT=sam1                # or sam2
+   SAM_VARIANT=sam1
    SAM_CHECKPOINT_PATH=./sam_vit_h_4b8939.pth
-   SAM2_CONFIG_PATH=/abs/path/to/sam2_config.yaml
-   SAM2_CHECKPOINT_PATH=/abs/path/to/sam2_weights.pt
    ENABLE_METRICS=true             # optional Prometheus
    QWEN_MODEL_NAME=Qwen/Qwen2.5-VL-3B-Instruct
    QWEN_DEVICE=auto                # cuda, cpu, mps, or auto
@@ -106,7 +103,6 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 2. **Collect a labelmap:** create `my_label_list.txt` with one class per line or export it from YOLO training runs.
 3. **Download model weights:**
    - Place `sam_vit_h_4b8939.pth` in the repo root.
-   - (Optional) add SAM2 configs/checkpoints and point them via `.env`.
    - CLIP weights are auto-downloaded by `pip install -r requirements.txt` the first time.
 4. **Install dependencies & copy `.env`:** see steps above (`python3 -m venv`, `pip install -r requirements.txt`, `cp .env.example .env`).
 5. **Start the backend** (`python -m uvicorn app:app --host 0.0.0.0 --port 8000`).
@@ -224,12 +220,12 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 
 ## Troubleshooting
 - **Torch install errors** – install the wheel that matches your platform (`pip install torch==<version>+cu118 ...`).
-- **SAM weights missing** – confirm paths in `.env`. SAM2 requires both config and checkpoint.
+- **SAM weights missing** – confirm paths in `.env`. Ensure `SAM_CHECKPOINT_PATH` points at the desired `.pth`.
 - **Large datasets** – enable caching (default) to avoid recomputing embeddings; caches are safe to prune manually.
 - **Prometheus scraper fails** – ensure `/metrics` is enabled and FastAPI is reachable; the endpoint now serves plaintext output compatible with Prometheus.
 
 ## Credits
-Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything) / [SAM2](https://github.com/facebookresearch/sam2). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
+Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
 
 
 ## 2025-11-10 – Qwen Assist & Backend Controls
@@ -261,7 +257,7 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 
 
 ## LOP
-1. **[planned]** SAM2 implementation is not properly tested yet - it's likely there are some issues to be cleaned up!
+1. **[planned]** SAM3 integration is underway; until then only SAM1 checkpoints are fully supported.
 2. **[planned]** CLIP regression / training is in early stages - it works but it's likely we can develop some better default recipes
 3. **[up for grabs]** We should add OBB support, it would be pretty simple to do in terms of UX and can really leverage SAM refinement
 4. **[up for grabs]** Tracking / video sequence-annotation would be a cool longer-term objective. 

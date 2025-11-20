@@ -5614,9 +5614,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         });
         try {
             if (job.auto) {
-                await sam2PointMultiAutoPrompt(job, jobHandle);
+                await samPointMultiAutoPrompt(job, jobHandle);
             } else {
-                await sam2PointMultiPrompt(job, jobHandle);
+                await samPointMultiPrompt(job, jobHandle);
             }
         } finally {
             completeSamJob(jobHandle.id);
@@ -6276,7 +6276,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     /*****************************************************
      * Existing SAM / CLIP calls
      *****************************************************/
-    async function sam2BboxPrompt(bbox) {
+    async function samBboxPrompt(bbox) {
         const statusToken = beginSamActionStatus("Running SAM box prompt…");
         const imageName = currentImage ? currentImage.name : null;
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
@@ -6298,7 +6298,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 uuid: bbox.uuid,
                 sam_variant: samVariant,
             };
-            let resp = await postSamEndpoint(`${API_ROOT}/sam2_bbox`, bodyFields);
+            let resp = await postSamEndpoint(`${API_ROOT}/sam_bbox`, bodyFields);
             if (!resp.ok) {
                 throw new Error("Response not OK: " + resp.statusText);
             }
@@ -6342,7 +6342,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 updateBboxAfterTransform();
                 console.log("Updated SAM bounding box:", absX, absY, absW, absH);
             } else {
-                console.warn("No 'bbox' field returned from sam2_bbox. Full response:", result);
+                console.warn("No 'bbox' field returned from sam_bbox. Full response:", result);
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
@@ -6350,8 +6350,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
             delete pendingApiBboxes[returnedUUID];
         } catch (err) {
-            console.error("sam2_bbox error:", err);
-            alert("sam2_bbox call failed: " + err);
+            console.error("sam_bbox error:", err);
+            alert("sam_bbox call failed: " + err);
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
@@ -6361,7 +6361,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function sam2PointPrompt(px, py) {
+    async function samPointPrompt(px, py) {
         const statusToken = beginSamActionStatus("Running SAM point prompt…");
         const imageName = currentImage ? currentImage.name : null;
         const placeholderContext = currentBbox && currentBbox.bbox ? { uuid: currentBbox.bbox.uuid, imageName } : null;
@@ -6381,9 +6381,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 uuid: currentBbox ? currentBbox.bbox.uuid : null,
                 sam_variant: samVariant,
             };
-            let resp = await postSamEndpoint(`${API_ROOT}/sam2_point`, bodyFields);
+            let resp = await postSamEndpoint(`${API_ROOT}/sam_point`, bodyFields);
             if (!resp.ok) {
-                throw new Error("sam2_point failed: " + resp.statusText);
+                throw new Error("sam_point failed: " + resp.statusText);
             }
             const result = await resp.json();
             if (!isSamJobActive(jobHandle)) {
@@ -6413,7 +6413,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             };
 
             if (!result.bbox) {
-                console.warn("No 'bbox' field in sam2_point response:", result);
+                console.warn("No 'bbox' field in sam_point response:", result);
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
@@ -6432,8 +6432,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             console.log("Updated existing bbox from point mode:", absX, absY, absW, absH);
             delete pendingApiBboxes[returnedUUID];
         } catch (err) {
-            console.error("sam2PointPrompt error:", err);
-            alert("sam2PointPrompt call failed: " + err);
+            console.error("samPointPrompt error:", err);
+            alert("samPointPrompt call failed: " + err);
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
@@ -6521,7 +6521,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function sam2BboxAutoPrompt(bbox) {
+    async function samBboxAutoPrompt(bbox) {
         const statusToken = beginSamActionStatus("Running SAM auto box…");
         const imageName = currentImage ? currentImage.name : null;
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
@@ -6551,12 +6551,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 if (minProbaEl && !isNaN(parseFloat(minProbaEl.value))) bodyData.fallback_min_proba = parseFloat(minProbaEl.value);
                 if (dilateRatioEl && !isNaN(parseFloat(dilateRatioEl.value))) bodyData.fallback_dilate_ratio = parseFloat(dilateRatioEl.value);
             }
-            let resp = await postSamEndpoint(`${API_ROOT}/sam2_bbox_auto`, bodyData);
+            let resp = await postSamEndpoint(`${API_ROOT}/sam_bbox_auto`, bodyData);
             if (!resp.ok) {
-                throw new Error("sam2_bbox_auto failed: " + resp.statusText);
+                throw new Error("sam_bbox_auto failed: " + resp.statusText);
             }
             const result = await resp.json();
-            console.log("sam2_bbox_auto =>", result);
+            console.log("sam_bbox_auto =>", result);
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
@@ -6564,7 +6564,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 rememberSamToken(currentImage.name, samVariant, result.image_token);
             }
             if (!result.uuid || !result.bbox || result.bbox.length < 4) {
-                alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_bbox_auto response.");
+                alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam_bbox_auto response.");
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
@@ -6629,8 +6629,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         updateBboxAfterTransform();
         delete pendingApiBboxes[returnedUUID];
         } catch (err) {
-            console.error("sam2_bbox_auto error:", err);
-            alert("sam2_bbox_auto call failed: " + err);
+            console.error("sam_bbox_auto error:", err);
+            alert("sam_bbox_auto call failed: " + err);
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
@@ -6640,7 +6640,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function sam2PointAutoPrompt(px, py) {
+    async function samPointAutoPrompt(px, py) {
         const statusToken = beginSamActionStatus("Running SAM point+CLIP…");
         const imageName = currentImage ? currentImage.name : null;
         const placeholderContext = currentBbox && currentBbox.bbox ? { uuid: currentBbox.bbox.uuid, imageName } : null;
@@ -6668,12 +6668,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 if (minProbaEl && !isNaN(parseFloat(minProbaEl.value))) bodyData.fallback_min_proba = parseFloat(minProbaEl.value);
                 if (dilateRatioEl && !isNaN(parseFloat(dilateRatioEl.value))) bodyData.fallback_dilate_ratio = parseFloat(dilateRatioEl.value);
             }
-            let resp = await postSamEndpoint(`${API_ROOT}/sam2_point_auto`, bodyData);
+            let resp = await postSamEndpoint(`${API_ROOT}/sam_point_auto`, bodyData);
             if (!resp.ok) {
-                throw new Error("sam2_point_auto failed: " + resp.statusText);
+                throw new Error("sam_point_auto failed: " + resp.statusText);
             }
             const result = await resp.json();
-            console.log("sam2_point_auto =>", result);
+            console.log("sam_point_auto =>", result);
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
@@ -6681,7 +6681,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 rememberSamToken(currentImage.name, samVariant, result.image_token);
             }
             if (!result.uuid || !result.bbox || result.bbox.length < 4) {
-                alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_point_auto response.");
+                alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam_point_auto response.");
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
@@ -6744,8 +6744,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         updateBboxAfterTransform();
         delete pendingApiBboxes[returnedUUID];
         } catch (err) {
-            console.error("sam2_point_auto error:", err);
-            alert("sam2_point_auto call failed: " + err);
+            console.error("sam_point_auto error:", err);
+            alert("sam_point_auto call failed: " + err);
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
@@ -6755,7 +6755,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function sam2PointMultiPrompt(job, jobHandle) {
+    async function samPointMultiPrompt(job, jobHandle) {
         const { positivePoints, negativePoints, requestToken, placeholderContext } = job;
         const statusToken = beginSamActionStatus("Running SAM multi-point…");
         let success = false;
@@ -6766,9 +6766,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 uuid: placeholderContext ? placeholderContext.uuid : null,
                 sam_variant: samVariant,
             };
-            const resp = await postSamEndpoint(`${API_ROOT}/sam2_point_multi`, bodyData);
+            const resp = await postSamEndpoint(`${API_ROOT}/sam_point_multi`, bodyData);
             if (!resp.ok) {
-                throw new Error("sam2_point_multi failed: " + resp.statusText);
+                throw new Error("sam_point_multi failed: " + resp.statusText);
             }
             const result = await resp.json();
             if (!isSamJobActive(jobHandle)) {
@@ -6798,7 +6798,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 resizing: null,
             };
             if (!result.bbox || result.bbox.length < 4) {
-                console.warn("No 'bbox' field in sam2_point_multi response:", result);
+                console.warn("No 'bbox' field in sam_point_multi response:", result);
                 removePendingBbox(placeholderContext);
                 return;
             }
@@ -6818,8 +6818,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 multiPointPendingBboxInfo = null;
             }
         } catch (err) {
-            console.error("sam2_point_multi error:", err);
-            alert("sam2_point_multi call failed: " + err);
+            console.error("sam_point_multi error:", err);
+            alert("sam_point_multi call failed: " + err);
             removePendingBbox(placeholderContext);
         } finally {
             endSamActionStatus(statusToken);
@@ -6831,7 +6831,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function sam2PointMultiAutoPrompt(job, jobHandle) {
+    async function samPointMultiAutoPrompt(job, jobHandle) {
         const { positivePoints, negativePoints, requestToken, placeholderContext } = job;
         const statusToken = beginSamActionStatus("Running SAM multi-point auto…");
         let success = false;
@@ -6854,12 +6854,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     bodyData.fallback_dilate_ratio = parseFloat(dilateRatioEl.value);
                 }
             }
-            const resp = await postSamEndpoint(`${API_ROOT}/sam2_point_multi_auto`, bodyData);
+            const resp = await postSamEndpoint(`${API_ROOT}/sam_point_multi_auto`, bodyData);
             if (!resp.ok) {
-                throw new Error("sam2_point_multi_auto failed: " + resp.statusText);
+                throw new Error("sam_point_multi_auto failed: " + resp.statusText);
             }
             const result = await resp.json();
-            console.log("sam2_point_multi_auto =>", result);
+            console.log("sam_point_multi_auto =>", result);
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
@@ -6870,7 +6870,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 rememberSamToken(currentImage.name, samVariant, result.image_token);
             }
             if (!result.uuid || !result.bbox || result.bbox.length < 4) {
-                alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam2_point_multi_auto response.");
+                alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam_point_multi_auto response.");
                 removePendingBbox(placeholderContext);
                 return;
             }
@@ -6933,8 +6933,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 multiPointPendingBboxInfo = null;
             }
         } catch (err) {
-            console.error("sam2_point_multi_auto error:", err);
-            alert("sam2_point_multi_auto call failed: " + err);
+            console.error("sam_point_multi_auto error:", err);
+            alert("sam_point_multi_auto call failed: " + err);
             removePendingBbox(placeholderContext);
         } finally {
             endSamActionStatus(statusToken);
@@ -7443,9 +7443,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     mouse.buttonL = false;
                     mouse.buttonR = false;
                     if (samPointAutoMode) {
-                        await sam2PointAutoPrompt(mouse.realX, mouse.realY);
+                        await samPointAutoPrompt(mouse.realX, mouse.realY);
                     } else {
-                        await sam2PointPrompt(mouse.realX, mouse.realY);
+                        await samPointPrompt(mouse.realX, mouse.realY);
                     }
                     setBboxMarkedState();
                     if (currentBbox) {
@@ -7461,13 +7461,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                             mouse.buttonL = false;
                             mouse.buttonR = false;
                             if (samMode && autoMode) {
-                                await sam2BboxAutoPrompt(currentBbox.bbox);
+                                await samBboxAutoPrompt(currentBbox.bbox);
                             }
                             else if (autoMode) {
                                 await autoPredictNewCrop(currentBbox.bbox);
                             }
                             else if (samMode) {
-                                await sam2BboxPrompt(currentBbox.bbox);
+                                await samBboxPrompt(currentBbox.bbox);
                             }
                             else {
                                 setBboxMarkedState();
@@ -7630,9 +7630,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tweakPreserveSet.add(targetBbox.uuid);
         try {
             if (samMode && autoMode) {
-                await sam2BboxAutoPrompt(targetBbox);
+                await samBboxAutoPrompt(targetBbox);
             } else if (samMode) {
-                await sam2BboxPrompt(targetBbox);
+                await samBboxPrompt(targetBbox);
             } else if (autoMode) {
                 await autoPredictNewCrop(targetBbox);
             }

@@ -27,6 +27,6 @@
 - PRs should explain motivation, summarize changes, list run steps, and include screenshots/GIFs for UI updates. Link issues, call out risk areas, and update `readme.md` when behavior changes.
 
 ## Security & Configuration Tips
-- Configure runtime through `.env` (see `.env.example`). Set `ENABLE_METRICS=true` to expose `/metrics` to Prometheus. Use `SAM_VARIANT` (`sam1` or `sam2`) plus `SAM2_CONFIG_PATH` / `SAM2_CHECKPOINT_PATH` when enabling SAM2.
+- Configure runtime through `.env` (see `.env.example`). Set `ENABLE_METRICS=true` to expose `/metrics` to Prometheus. Use `SAM_VARIANT` (currently `sam1`; `sam3` support is in progress) and point `SAM_CHECKPOINT_PATH` at the desired weights.
 - The API enables wide-open CORS and lacks auth—do not expose publicly. Keep model weights (`sam_vit_h_4b8939.pth`) and regression artifacts local.
 - GPU acceleration is optional; the app auto-detects CUDA. Ensure required weight files exist before launching the server.

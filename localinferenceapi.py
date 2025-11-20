@@ -3506,8 +3506,9 @@ def qwen_infer(payload: QwenInferenceRequest):
         image_token=token,
     )
 
-@app.post("/sam2_point", response_model=YoloBboxOutput)
-def sam2_point(prompt: PointPrompt):
+
+@app.post("/sam_point", response_model=YoloBboxOutput)
+def sam_point(prompt: PointPrompt):
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
         getattr(prompt, "image_token", None),
@@ -3516,7 +3517,7 @@ def sam2_point(prompt: PointPrompt):
     coords = np.array([[prompt.point_x, prompt.point_y]])
     labels = np.array([1])
     variant = _default_variant(getattr(prompt, "sam_variant", None))
-    masks, scores, logits = _predict_with_cache(
+    masks, _, _ = _predict_with_cache(
         np_img,
         token,
         variant,
@@ -3530,6 +3531,7 @@ def sam2_point(prompt: PointPrompt):
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
     return YoloBboxOutput(class_id="0", bbox=yolo_box, uuid=prompt.uuid, image_token=token)
 
+
 class SamPointAutoResponse(BaseModel):
     prediction: Optional[str] = None
     proba: Optional[float] = None
@@ -3538,8 +3540,9 @@ class SamPointAutoResponse(BaseModel):
     error: Optional[str] = None
     image_token: Optional[str] = None
 
-@app.post("/sam2_bbox_auto", response_model=SamPointAutoResponse)
-def sam2_bbox_auto(prompt: BboxPrompt):
+
+@app.post("/sam_bbox_auto", response_model=SamPointAutoResponse)
+def sam_bbox_auto(prompt: BboxPrompt):
     if not clip_initialized:
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
 
@@ -3601,8 +3604,9 @@ def sam2_bbox_auto(prompt: BboxPrompt):
         image_token=token,
     )
 
-@app.post("/sam2_point_auto", response_model=SamPointAutoResponse)
-def sam2_point_auto(prompt: PointPrompt):
+
+@app.post("/sam_point_auto", response_model=SamPointAutoResponse)
+def sam_point_auto(prompt: PointPrompt):
     if not clip_initialized:
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
 
@@ -3626,11 +3630,11 @@ def sam2_point_auto(prompt: PointPrompt):
     mask = masks[0]
     left, top, right, bottom = mask_to_bounding_box(mask)
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
-    li = max(0,int(left))
-    ti = max(0,int(top))
-    ri = min(pil_img.width,int(right))
-    bi = min(pil_img.height,int(bottom))
-    if ri<=li or bi<=ti:
+    li = max(0, int(left))
+    ti = max(0, int(top))
+    ri = min(pil_img.width, int(right))
+    bi = min(pil_img.height, int(bottom))
+    if ri <= li or bi <= ti:
         return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="empty_mask", image_token=token)
     subarr = np_img[ti:bi, li:ri, :]
     final_pil = Image.fromarray(subarr)
@@ -3642,8 +3646,9 @@ def sam2_point_auto(prompt: PointPrompt):
     pred_cls = clf.predict(feats_np)[0]
     return SamPointAutoResponse(prediction=str(pred_cls), bbox=yolo_box, uuid=prompt.uuid, image_token=token)
 
-@app.post("/sam2_point_multi", response_model=YoloBboxOutput)
-def sam2_point_multi(prompt: MultiPointPrompt):
+
+@app.post("/sam_point_multi", response_model=YoloBboxOutput)
+def sam_point_multi(prompt: MultiPointPrompt):
     positive = prompt.positive_points or []
     negative = prompt.negative_points or []
     if len(positive) == 0:
@@ -3671,8 +3676,9 @@ def sam2_point_multi(prompt: MultiPointPrompt):
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
     return YoloBboxOutput(class_id="0", bbox=yolo_box, uuid=prompt.uuid, image_token=token)
 
-@app.post("/sam2_point_multi_auto", response_model=SamPointAutoResponse)
-def sam2_point_multi_auto(prompt: MultiPointPrompt):
+
+@app.post("/sam_point_multi_auto", response_model=SamPointAutoResponse)
+def sam_point_multi_auto(prompt: MultiPointPrompt):
     if not clip_initialized:
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
 
@@ -3717,8 +3723,9 @@ def sam2_point_multi_auto(prompt: MultiPointPrompt):
     pred_cls = clf.predict(feats_np)[0]
     return SamPointAutoResponse(prediction=str(pred_cls), bbox=yolo_box, uuid=prompt.uuid, image_token=token)
 
-@app.post("/sam2_bbox", response_model=YoloBboxOutput)
-def sam2_bbox(prompt: BboxPrompt):
+
+@app.post("/sam_bbox", response_model=YoloBboxOutput)
+def sam_bbox(prompt: BboxPrompt):
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
         getattr(prompt, "image_token", None),
@@ -3766,8 +3773,9 @@ def sam2_bbox(prompt: BboxPrompt):
         image_token=token,
     )
 
-@app.post("/sam2_bbox_auto", response_model=YoloBboxClassOutput)
-def sam2_bbox_auto(prompt: BboxPrompt):
+
+@app.post("/sam_bbox_auto_class", response_model=YoloBboxClassOutput)
+def sam_bbox_auto_class(prompt: BboxPrompt):
     if not clip_initialized:
         return YoloBboxClassOutput(class_id=ERROR_MESSAGE, bbox=[], uuid=None)
 

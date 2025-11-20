@@ -119,24 +119,21 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 7. **Training loop:** use the Train CLIP tab to train on the same `images/` + `labels/` folders, then activate the resulting `.pkl` via the CLIP Model tab.
 
 ### Optional: Setting up SAM3
-SAM3 support is optional but recommended if you plan to use the new text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):
+SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):
 
-1. **Request checkpoint access** — visit the [facebook/sam3](https://huggingface.co/facebook/sam3) page and request access. You’ll receive an approval email once granted.
-2. **Authenticate with Hugging Face** — install the CLI helpers if you have not already:
+1. **Request checkpoint access** — visit the [facebook/sam3](https://huggingface.co/facebook/sam3) page and request access. Hugging Face will email you once approved.
+2. **Upgrade Transformers + Hugging Face tools** — install the latest wheels so the `Sam3Model/Sam3Processor` classes are available:
    ```bash
-   pip install --upgrade huggingface_hub
+   pip install --upgrade transformers huggingface_hub accelerate
+   ```
+   (Use the nightly wheel or `pip install git+https://github.com/huggingface/transformers.git` if your current release doesn’t include the SAM3 APIs yet.)
+3. **Authenticate with Hugging Face** — run
+   ```bash
    hf auth login
    ```
-   Generate a read token from your Hugging Face settings page, paste it when prompted, and verify with `hf auth whoami`. These credentials allow transformers/sam3 to pull the gated checkpoints.
-3. **Install the SAM3 repo locally**:
-   ```bash
-   git clone https://github.com/facebookresearch/sam3.git
-   cd sam3
-   pip install -e .
-   ```
-   This provides the native `sam3` package so we can fall back to Meta’s processor if your transformers build doesn’t include `Sam3Model/Sam3TrackerModel`.
-4. **(Optional) Pin checkpoints manually** – if you need to place checkpoints somewhere specific, use `huggingface_hub.hf_hub_download` (examples in `sam3integration.txt`) and point `SAM3_CHECKPOINT_PATH` / `SAM3_MODEL_ID` at those files.
-5. **Run the API** — once installed and authenticated, start the backend as usual. Selecting “SAM 3” in the UI enables both the point/bbox flows and the new text prompt panel.
+   Generate a read token from your Hugging Face settings, paste it when prompted, and verify with `hf auth whoami`. This allows Transformers to download the gated checkpoints automatically.
+4. **(Optional) Pin checkpoints manually** – if you want deterministic paths, call `huggingface_hub.hf_hub_download` (examples in `sam3integration.txt`) and set `SAM3_CHECKPOINT_PATH` / `SAM3_MODEL_ID` to the downloaded files.
+5. **Run the API** — once authenticated, start the backend as usual. Selecting “SAM 3” in the UI enables both the point/bbox flows and the new text prompt panel.
 
 
 ### Running the Backend on a Remote GPU Host

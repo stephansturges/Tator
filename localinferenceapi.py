@@ -82,6 +82,16 @@ else:
     SAM3_TEXT_IMPORT_ERROR = None
 
 try:
+    from sam3.model_builder import build_sam3_image_model
+    from sam3.model.sam3_image_processor import Sam3Processor as NativeSam3ImageProcessor
+except Exception as exc:  # noqa: BLE001
+    SAM3_NATIVE_IMAGE_IMPORT_ERROR = exc
+    build_sam3_image_model = None  # type: ignore[assignment]
+    NativeSam3ImageProcessor = None  # type: ignore[assignment]
+else:
+    SAM3_NATIVE_IMAGE_IMPORT_ERROR = None
+
+try:
     from peft import PeftModel
 except Exception as exc:  # noqa: BLE001
     PEFT_IMPORT_ERROR = exc
@@ -180,6 +190,7 @@ def _reset_qwen_runtime() -> None:
 sam3_text_model = None
 sam3_text_processor = None
 sam3_text_device: Optional[torch.device] = None
+sam3_text_backend: Optional[str] = None
 sam3_text_lock = threading.RLock()
 
 
@@ -439,25 +450,45 @@ def _build_backend_for_variant(variant: str):
 
 
 def _ensure_sam3_text_runtime():
-    global sam3_text_model, sam3_text_processor, sam3_text_device
-    if SAM3_TEXT_IMPORT_ERROR is not None or Sam3Model is None or Sam3Processor is None:
-        detail = f"sam3_text_unavailable:{SAM3_TEXT_IMPORT_ERROR}"
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    global sam3_text_model, sam3_text_processor, sam3_text_device, sam3_text_backend
     with sam3_text_lock:
         if sam3_text_model is not None and sam3_text_processor is not None and sam3_text_device is not None:
             return sam3_text_model, sam3_text_processor, sam3_text_device
-        model_source = SAM3_CHECKPOINT_PATH or SAM3_MODEL_ID
-        processor_source = SAM3_PROCESSOR_ID or SAM3_MODEL_ID
         device = _resolve_sam3_device()
-        try:
-            model = Sam3Model.from_pretrained(model_source).to(device)
-            processor = Sam3Processor.from_pretrained(processor_source)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
-        sam3_text_model = model
-        sam3_text_processor = processor
-        sam3_text_device = device
-        return sam3_text_model, sam3_text_processor, sam3_text_device
+        if SAM3_TEXT_IMPORT_ERROR is None and Sam3Model is not None and Sam3Processor is not None:
+            model_source = SAM3_CHECKPOINT_PATH or SAM3_MODEL_ID
+            processor_source = SAM3_PROCESSOR_ID or SAM3_MODEL_ID
+            try:
+                model = Sam3Model.from_pretrained(model_source).to(device)
+                processor = Sam3Processor.from_pretrained(processor_source)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
+            sam3_text_model = model
+            sam3_text_processor = processor
+            sam3_text_device = device
+            sam3_text_backend = "transformers"
+            return sam3_text_model, sam3_text_processor, sam3_text_device
+        if (
+            SAM3_NATIVE_IMAGE_IMPORT_ERROR is None
+            and build_sam3_image_model is not None
+            and NativeSam3ImageProcessor is not None
+        ):
+            try:
+                if SAM3_CHECKPOINT_PATH:
+                    model = build_sam3_image_model(checkpoint=SAM3_CHECKPOINT_PATH)
+                else:
+                    model = build_sam3_image_model()
+                model = model.to(device)
+                processor = NativeSam3ImageProcessor(model)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_native_load_failed:{exc}") from exc
+            sam3_text_model = model
+            sam3_text_processor = processor
+            sam3_text_device = device
+            sam3_text_backend = "native"
+            return sam3_text_model, sam3_text_processor, sam3_text_device
+        detail = f"sam3_text_unavailable:{SAM3_TEXT_IMPORT_ERROR or SAM3_NATIVE_IMAGE_IMPORT_ERROR}"
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
 
 
 class PredictorSlot:
@@ -1362,6 +1393,8 @@ def _sam3_text_detections(
     payload: Dict[str, Any],
     text_prompt: str,
     limit: Optional[int],
+    *,
+    min_score: Optional[float] = None,
 ) -> List[QwenDetection]:
     width, height = pil_img.width, pil_img.height
     boxes = payload.get("boxes") or []
@@ -1397,6 +1430,8 @@ def _sam3_text_detections(
                 score_val = float(scores_iter[idx])
             except (TypeError, ValueError):
                 score_val = None
+        if min_score is not None and score_val is not None and score_val < min_score:
+            continue
         detections.append(QwenDetection(bbox=yolo_box, qwen_label=text_prompt, source="sam3_text", score=score_val))
         if numeric_limit and len(detections) >= numeric_limit:
             break
@@ -1413,6 +1448,8 @@ def _sam3_text_detections(
                 score_val = float(scores_iter[idx])
             except (TypeError, ValueError):
                 score_val = None
+        if min_score is not None and score_val is not None and score_val < min_score:
+            continue
         detections.append(QwenDetection(bbox=yolo_box, qwen_label=text_prompt, source="sam3_text", score=score_val))
         if numeric_limit and len(detections) >= numeric_limit:
             break
@@ -1427,6 +1464,19 @@ def _run_sam3_text_inference(
     limit: Optional[int],
 ) -> List[QwenDetection]:
     model, processor, device = _ensure_sam3_text_runtime()
+    normalized_limit: Optional[int]
+    if limit is None:
+        normalized_limit = None
+    else:
+        try:
+            normalized_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            normalized_limit = None
+    backend = sam3_text_backend or "transformers"
+    if backend == "native":
+        state = processor.set_image(pil_img)
+        output = processor.set_text_prompt(state=state, prompt=text_prompt)
+        return _sam3_text_detections(pil_img, output, text_prompt, normalized_limit, min_score=float(threshold))
     inputs = processor(images=pil_img, text=text_prompt, return_tensors="pt")
     original_sizes = inputs.get("original_sizes")
     original_sizes_list = original_sizes.tolist() if original_sizes is not None else [[pil_img.height, pil_img.width]]
@@ -1441,15 +1491,7 @@ def _run_sam3_text_inference(
         mask_threshold=float(mask_threshold),
         target_sizes=original_sizes_list,
     )[0]
-    normalized_limit: Optional[int]
-    if limit is None:
-        normalized_limit = None
-    else:
-        try:
-            normalized_limit = max(1, min(int(limit), 100))
-        except (TypeError, ValueError):
-            normalized_limit = None
-    return _sam3_text_detections(pil_img, processed, text_prompt, normalized_limit)
+    return _sam3_text_detections(pil_img, processed, text_prompt, normalized_limit, min_score=float(threshold))
 
 
 def _ensure_qwen_ready():

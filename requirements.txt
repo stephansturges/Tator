@@ -35,9 +35,6 @@ lightning>=2.4,<3.0
 nltk>=3.8,<4.0
 decord>=0.6,<1.0
 
-# Segment Anything 2 (SAM2) — optional, enable if you plan to use SAM2
-# git+https://github.com/facebookresearch/sam2.git
-
 # Optional extras for advanced training
 # timm                # for DINOv2 encoders
 # opencv-python       # common image ops (not strictly required)

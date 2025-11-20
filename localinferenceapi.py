@@ -1303,17 +1303,21 @@ def _sam3_text_detections(
     min_score: Optional[float] = None,
 ) -> List[QwenDetection]:
     width, height = pil_img.width, pil_img.height
-    boxes = payload.get("boxes") or []
-    scores = payload.get("scores") or []
+    boxes_source = payload.get("boxes")
+    scores_source = payload.get("scores")
     masks = payload.get("masks")
-    if isinstance(boxes, torch.Tensor):
-        boxes_iter: Sequence[Any] = boxes.cpu().numpy()
+    if isinstance(boxes_source, torch.Tensor):
+        boxes_iter: Sequence[Any] = boxes_source.cpu().numpy()
+    elif boxes_source is None:
+        boxes_iter = []
     else:
-        boxes_iter = boxes
-    if isinstance(scores, torch.Tensor):
-        scores_iter: Sequence[Any] = scores.cpu().numpy().tolist()
+        boxes_iter = boxes_source
+    if isinstance(scores_source, torch.Tensor):
+        scores_iter: Sequence[Any] = scores_source.cpu().numpy().tolist()
+    elif scores_source is None:
+        scores_iter = []
     else:
-        scores_iter = scores
+        scores_iter = scores_source
     masks_arr: Optional[np.ndarray] = None
     if masks is not None:
         if isinstance(masks, torch.Tensor):

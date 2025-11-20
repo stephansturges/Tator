@@ -15,6 +15,7 @@ from pydantic import BaseModel, root_validator, Field
 import psutil
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
+    HTTP_412_PRECONDITION_FAILED,
     HTTP_404_NOT_FOUND,
     HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_428_PRECONDITION_REQUIRED,
@@ -52,7 +53,11 @@ else:
     QWEN_TRAINING_IMPORT_ERROR = None
 
 try:
-    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, Qwen2_5_VLProcessor
+    from transformers import (
+        Qwen2_5_VLForConditionalGeneration,
+        AutoProcessor,
+        Qwen2_5_VLProcessor,
+    )
     from qwen_vl_utils import process_vision_info
 except Exception as exc:  # noqa: BLE001
     QWEN_IMPORT_ERROR = exc
@@ -62,6 +67,19 @@ except Exception as exc:  # noqa: BLE001
     process_vision_info = None  # type: ignore[assignment]
 else:
     QWEN_IMPORT_ERROR = None
+
+try:
+    from transformers import Sam3TrackerModel, Sam3TrackerProcessor, Sam3Model, Sam3Processor
+except Exception as exc:  # noqa: BLE001
+    SAM3_TRACKER_IMPORT_ERROR = exc
+    SAM3_TEXT_IMPORT_ERROR = exc
+    Sam3TrackerModel = None  # type: ignore[assignment]
+    Sam3TrackerProcessor = None  # type: ignore[assignment]
+    Sam3Model = None  # type: ignore[assignment]
+    Sam3Processor = None  # type: ignore[assignment]
+else:
+    SAM3_TRACKER_IMPORT_ERROR = None
+    SAM3_TEXT_IMPORT_ERROR = None
 
 try:
     from peft import PeftModel
@@ -159,6 +177,12 @@ def _reset_qwen_runtime() -> None:
             pass
 
 
+sam3_text_model = None
+sam3_text_processor = None
+sam3_text_device: Optional[torch.device] = None
+sam3_text_lock = threading.RLock()
+
+
 def _set_active_qwen_model_default() -> None:
     global active_qwen_model_id, active_qwen_model_path, active_qwen_metadata
     active_qwen_model_id = "default"
@@ -244,6 +268,12 @@ if active_labelmap_path:
 
 # 3) Attempt to load the CLIP model
 device = "cuda" if torch.cuda.is_available() else "cpu"
+if torch.cuda.is_available():
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to enable TF32: %s", exc)
 SUPPORTED_CLIP_MODELS = [
     "ViT-B/32",
     "ViT-B/16",
@@ -304,14 +334,136 @@ def _resume_clip_backbone() -> None:
             _clip_reload_needed = False
 
 # 4) Load the SAM model (segment-anything) as normal:
-MODEL_TYPE = "vit_h"
-CHECKPOINT_PATH = "./sam_vit_h_4b8939.pth"
+MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_h")
+CHECKPOINT_PATH = os.environ.get("SAM_CHECKPOINT_PATH", "./sam_vit_h_4b8939.pth")
+SAM3_MODEL_ID = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
+SAM3_PROCESSOR_ID = os.environ.get("SAM3_PROCESSOR_ID", SAM3_MODEL_ID)
+SAM3_CHECKPOINT_PATH = os.environ.get("SAM3_CHECKPOINT_PATH")
+SAM3_DEVICE_PREF = os.environ.get("SAM3_DEVICE", "auto").strip().lower()
+
+
+def _resolve_sam3_device() -> torch.device:
+    if SAM3_DEVICE_PREF in {"", "auto"}:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        return torch.device(SAM3_DEVICE_PREF)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_sam3_device:{SAM3_DEVICE_PREF}:{exc}") from exc
+
+
+class _Sam1Backend:
+    def __init__(self):
+        self.predictor = SamPredictor(sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH))
+
+    def set_image(self, np_img: np.ndarray) -> None:
+        self.predictor.set_image(np_img)
+
+    def predict(self, **kwargs):
+        return self.predictor.predict(**kwargs)
+
+    def unload(self) -> None:
+        try:
+            del self.predictor
+        except Exception:  # noqa: BLE001
+            pass
+        self.predictor = None
+
+
+class _Sam3TrackerBackend:
+    def __init__(self):
+        if SAM3_TRACKER_IMPORT_ERROR is not None or Sam3TrackerModel is None or Sam3TrackerProcessor is None:
+            detail = f"sam3_tracker_unavailable:{SAM3_TRACKER_IMPORT_ERROR}"
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+        model_source = SAM3_CHECKPOINT_PATH or SAM3_MODEL_ID
+        processor_source = SAM3_PROCESSOR_ID or SAM3_MODEL_ID
+        self.device = _resolve_sam3_device()
+        try:
+            self.model = Sam3TrackerModel.from_pretrained(model_source).to(self.device)
+            self.processor = Sam3TrackerProcessor.from_pretrained(processor_source)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_load_failed:{exc}") from exc
+        self.current_image: Optional[Image.Image] = None
+
+    def set_image(self, np_img: np.ndarray) -> None:
+        self.current_image = Image.fromarray(np_img).convert("RGB")
+
+    def predict(self, *, point_coords=None, point_labels=None, box=None, multimask_output: bool = True, **_: Any):
+        if self.current_image is None:
+            raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="sam3_image_not_loaded")
+        processor_kwargs: Dict[str, Any] = {"images": self.current_image}
+        if point_coords is not None and point_labels is not None:
+            pts = np.asarray(point_coords, dtype=np.float32)
+            labs = np.asarray(point_labels, dtype=np.int64)
+            pts = pts.reshape(1, 1, pts.shape[0], 2)
+            labs = labs.reshape(1, 1, labs.shape[0])
+            processor_kwargs["input_points"] = pts.tolist()
+            processor_kwargs["input_labels"] = labs.tolist()
+        if box is not None:
+            arr = np.asarray(box, dtype=np.float32).reshape(1, 1, 4)
+            processor_kwargs["input_boxes"] = arr.tolist()
+        if "input_points" not in processor_kwargs and "input_boxes" not in processor_kwargs:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_prompt_required")
+        inputs = self.processor(return_tensors="pt", **processor_kwargs)
+        tensor_inputs = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = self.model(**tensor_inputs, multimask_output=multimask_output)
+        masks = self.processor.post_process_masks(outputs.pred_masks.cpu(), inputs["original_sizes"])[0]
+        masks_np = masks.squeeze(0).numpy()
+        if masks_np.ndim == 2:
+            masks_np = masks_np[None, ...]
+        scores = outputs.iou_scores.detach().cpu().numpy().squeeze(0)
+        if scores.ndim == 0:
+            scores = np.array([float(scores)])
+        return masks_np, scores, None
+
+    def unload(self) -> None:
+        try:
+            del self.model
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            del self.processor
+        except Exception:  # noqa: BLE001
+            pass
+        self.model = None
+        self.processor = None
+        self.current_image = None
+
+
+def _build_backend_for_variant(variant: str):
+    normalized = (variant or "sam1").lower()
+    if normalized == "sam3":
+        return _Sam3TrackerBackend()
+    # default to classic SAM1 backend
+    return _Sam1Backend()
+
+
+def _ensure_sam3_text_runtime():
+    global sam3_text_model, sam3_text_processor, sam3_text_device
+    if SAM3_TEXT_IMPORT_ERROR is not None or Sam3Model is None or Sam3Processor is None:
+        detail = f"sam3_text_unavailable:{SAM3_TEXT_IMPORT_ERROR}"
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    with sam3_text_lock:
+        if sam3_text_model is not None and sam3_text_processor is not None and sam3_text_device is not None:
+            return sam3_text_model, sam3_text_processor, sam3_text_device
+        model_source = SAM3_CHECKPOINT_PATH or SAM3_MODEL_ID
+        processor_source = SAM3_PROCESSOR_ID or SAM3_MODEL_ID
+        device = _resolve_sam3_device()
+        try:
+            model = Sam3Model.from_pretrained(model_source).to(device)
+            processor = Sam3Processor.from_pretrained(processor_source)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
+        sam3_text_model = model
+        sam3_text_processor = processor
+        sam3_text_device = device
+        return sam3_text_model, sam3_text_processor, sam3_text_device
 
 
 class PredictorSlot:
     def __init__(self, name: str):
         self.name = name
-        self.predictor = SamPredictor(sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH))
+        self.backends: Dict[str, Any] = {}
         self.token: Optional[str] = None
         self.variant: Optional[str] = None
         self.image_shape: Optional[Tuple[int, int, int]] = None
@@ -322,13 +474,14 @@ class PredictorSlot:
         self.image_memory_bytes: int = 0
 
     def set_image(self, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
+        variant_name = (variant or "sam1").lower()
         with self.lock:
             self._busy.set()
             try:
-                self._ensure_predictor()
-                self.predictor.set_image(np_img)
+                backend = self._ensure_backend(variant_name)
+                backend.set_image(np_img)
                 self.token = token
-                self.variant = variant
+                self.variant = variant_name
                 self.image_shape = np_img.shape
                 self.image_name = image_name
                 self.last_loaded = time.time()
@@ -340,8 +493,8 @@ class PredictorSlot:
         with self.lock:
             self._busy.set()
             try:
-                self._ensure_predictor()
-                return self.predictor.predict(**kwargs)
+                backend = self._ensure_backend((self.variant or "sam1").lower())
+                return backend.predict(**kwargs)
             finally:
                 self._busy.clear()
 
@@ -360,17 +513,19 @@ class PredictorSlot:
     def unload(self) -> None:
         with self.lock:
             self.clear()
-            if self.predictor is not None:
+            for backend in self.backends.values():
                 try:
-                    del self.predictor
-                except Exception:
+                    backend.unload()
+                except Exception:  # noqa: BLE001
                     pass
-                self.predictor = None
+            self.backends.clear()
 
-    def _ensure_predictor(self) -> None:
-        if self.predictor is None:
-            model = sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH)
-            self.predictor = SamPredictor(model)
+    def _ensure_backend(self, variant: str):
+        backend = self.backends.get(variant)
+        if backend is None:
+            backend = _build_backend_for_variant(variant)
+            self.backends[variant] = backend
+        return backend
 
 
 class PredictorManager:
@@ -1202,6 +1357,101 @@ def _qwen_point_results(
     return results
 
 
+def _sam3_text_detections(
+    pil_img: Image.Image,
+    payload: Dict[str, Any],
+    text_prompt: str,
+    limit: Optional[int],
+) -> List[QwenDetection]:
+    width, height = pil_img.width, pil_img.height
+    boxes = payload.get("boxes") or []
+    scores = payload.get("scores") or []
+    masks = payload.get("masks")
+    if isinstance(boxes, torch.Tensor):
+        boxes_iter: Sequence[Any] = boxes.cpu().numpy()
+    else:
+        boxes_iter = boxes
+    if isinstance(scores, torch.Tensor):
+        scores_iter: Sequence[Any] = scores.cpu().numpy().tolist()
+    else:
+        scores_iter = scores
+    masks_arr: Optional[np.ndarray] = None
+    if masks is not None:
+        if isinstance(masks, torch.Tensor):
+            masks_arr = masks.cpu().numpy()
+        else:
+            masks_arr = np.asarray(masks)
+    detections: List[QwenDetection] = []
+    numeric_limit = limit if limit and limit > 0 else None
+    for idx, box in enumerate(boxes_iter):
+        coords = np.asarray(box, dtype=np.float32).tolist()
+        if len(coords) < 4:
+            continue
+        x_min, y_min, x_max, y_max = coords[:4]
+        if x_max <= x_min or y_max <= y_min:
+            continue
+        yolo_box = to_yolo(width, height, x_min, y_min, x_max, y_max)
+        score_val = None
+        if idx < len(scores_iter):
+            try:
+                score_val = float(scores_iter[idx])
+            except (TypeError, ValueError):
+                score_val = None
+        detections.append(QwenDetection(bbox=yolo_box, qwen_label=text_prompt, source="sam3_text", score=score_val))
+        if numeric_limit and len(detections) >= numeric_limit:
+            break
+    if detections or masks_arr is None:
+        return detections
+    for idx, mask in enumerate(masks_arr):
+        x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+        if x_max <= x_min or y_max <= y_min:
+            continue
+        yolo_box = to_yolo(width, height, x_min, y_min, x_max, y_max)
+        score_val = None
+        if idx < len(scores_iter):
+            try:
+                score_val = float(scores_iter[idx])
+            except (TypeError, ValueError):
+                score_val = None
+        detections.append(QwenDetection(bbox=yolo_box, qwen_label=text_prompt, source="sam3_text", score=score_val))
+        if numeric_limit and len(detections) >= numeric_limit:
+            break
+    return detections
+
+
+def _run_sam3_text_inference(
+    pil_img: Image.Image,
+    text_prompt: str,
+    threshold: float,
+    mask_threshold: float,
+    limit: Optional[int],
+) -> List[QwenDetection]:
+    model, processor, device = _ensure_sam3_text_runtime()
+    inputs = processor(images=pil_img, text=text_prompt, return_tensors="pt")
+    original_sizes = inputs.get("original_sizes")
+    original_sizes_list = original_sizes.tolist() if original_sizes is not None else [[pil_img.height, pil_img.width]]
+    tensor_inputs = {
+        key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in inputs.items()
+    }
+    with torch.no_grad():
+        outputs = model(**tensor_inputs)
+    processed = processor.post_process_instance_segmentation(
+        outputs,
+        threshold=float(threshold),
+        mask_threshold=float(mask_threshold),
+        target_sizes=original_sizes_list,
+    )[0]
+    normalized_limit: Optional[int]
+    if limit is None:
+        normalized_limit = None
+    else:
+        try:
+            normalized_limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            normalized_limit = None
+    return _sam3_text_detections(pil_img, processed, text_prompt, normalized_limit)
+
+
 def _ensure_qwen_ready():
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
     if QWEN_IMPORT_ERROR is not None or Qwen2_5_VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
@@ -1537,10 +1787,30 @@ class YoloBboxClassOutput(BaseModel):
     image_token: Optional[str] = None
 
 
+class Sam3TextPrompt(BaseModel):
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
+    text_prompt: str
+    threshold: float = 0.5
+    mask_threshold: float = 0.5
+    sam_variant: Optional[str] = None
+    image_name: Optional[str] = None
+    max_results: Optional[int] = None
+
+    @root_validator
+    def _ensure_text_payload(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_payload_missing")
+        if not values.get("text_prompt"):
+            raise ValueError("text_prompt_required")
+        return values
+
+
 class QwenDetection(BaseModel):
     bbox: List[float]
     qwen_label: Optional[str] = None
-    source: Literal["bbox", "point", "bbox_sam"]
+    source: Literal["bbox", "point", "bbox_sam", "sam3_text"]
+    score: Optional[float] = None
 
 
 class QwenInferenceRequest(BaseModel):
@@ -1584,6 +1854,18 @@ class QwenInferenceResponse(BaseModel):
     raw_response: str
     prompt: str
     prompt_type: Literal["bbox", "point", "bbox_sam"]
+    warnings: List[str] = Field(default_factory=list)
+    image_token: Optional[str] = None
+
+
+class Sam3TextPromptResponse(BaseModel):
+    detections: List[QwenDetection] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    image_token: Optional[str] = None
+
+
+class Sam3TextPromptAutoResponse(BaseModel):
+    detections: List[SamPointAutoResponse] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     image_token: Optional[str] = None
 
@@ -3507,6 +3789,93 @@ def qwen_infer(payload: QwenInferenceRequest):
     )
 
 
+@app.post("/sam3/text_prompt", response_model=Sam3TextPromptResponse)
+def sam3_text_prompt(payload: Sam3TextPrompt):
+    variant = _default_variant(payload.sam_variant or "sam3")
+    if variant != "sam3":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_text_requires_sam3")
+    pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
+    effective_limit = payload.max_results if payload.max_results is not None else 20
+    detections = _run_sam3_text_inference(
+        pil_img,
+        payload.text_prompt,
+        payload.threshold,
+        payload.mask_threshold,
+        effective_limit,
+    )
+    warnings: List[str] = []
+    if not detections:
+        warnings.append("no_results")
+    return Sam3TextPromptResponse(detections=detections, warnings=warnings, image_token=token)
+
+
+@app.post("/sam3/text_prompt_auto", response_model=Sam3TextPromptAutoResponse)
+def sam3_text_prompt_auto(payload: Sam3TextPrompt):
+    variant = _default_variant(payload.sam_variant or "sam3")
+    if variant != "sam3":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_text_requires_sam3")
+    if not clip_initialized or clf is None or clip_model is None or clip_preprocess is None:
+        return Sam3TextPromptAutoResponse(
+            detections=[],
+            warnings=["clip_unavailable"],
+            image_token=None,
+        )
+    pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
+    effective_limit = payload.max_results if payload.max_results is not None else 20
+    detections = _run_sam3_text_inference(
+        pil_img,
+        payload.text_prompt,
+        payload.threshold,
+        payload.mask_threshold,
+        effective_limit,
+    )
+    responses: List[SamPointAutoResponse] = []
+    warnings: List[str] = []
+    if not detections:
+        warnings.append("no_results")
+    for det in detections:
+        x_min, y_min, x_max, y_max = yolo_to_corners(det.bbox, pil_img.width, pil_img.height)
+        li = max(0, int(x_min))
+        ti = max(0, int(y_min))
+        ri = min(pil_img.width, int(x_max))
+        bi = min(pil_img.height, int(y_max))
+        if ri <= li or bi <= ti:
+            responses.append(
+                SamPointAutoResponse(
+                    prediction="unknown",
+                    bbox=det.bbox,
+                    uuid=str(uuid.uuid4()),
+                    error="empty_mask",
+                    image_token=token,
+                    score=det.score,
+                )
+            )
+            continue
+        subarr = np_img[ti:bi, li:ri, :]
+        final_pil = Image.fromarray(subarr)
+        inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
+        with torch.no_grad():
+            feats = clip_model.encode_image(inp)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
+        try:
+            pred_cls = clf.predict(feats_np)[0]
+            prediction = str(pred_cls)
+        except Exception as exc:  # noqa: BLE001
+            prediction = "unknown"
+            warnings.append(f"classifier_error:{exc}")
+        responses.append(
+            SamPointAutoResponse(
+                prediction=prediction,
+                bbox=det.bbox,
+                uuid=str(uuid.uuid4()),
+                image_token=token,
+                score=det.score,
+            )
+        )
+    return Sam3TextPromptAutoResponse(detections=responses, warnings=warnings, image_token=token)
+
+
 @app.post("/sam_point", response_model=YoloBboxOutput)
 def sam_point(prompt: PointPrompt):
     pil_img, np_img, token = resolve_image_payload(
@@ -3539,6 +3908,7 @@ class SamPointAutoResponse(BaseModel):
     uuid: Optional[str] = None
     error: Optional[str] = None
     image_token: Optional[str] = None
+    score: Optional[float] = None
 
 
 @app.post("/sam_bbox_auto", response_model=SamPointAutoResponse)

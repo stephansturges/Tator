@@ -785,6 +785,16 @@
         maxResults: null,
         runButton: null,
     };
+    const sam3TextElements = {
+        panel: null,
+        promptInput: null,
+        thresholdInput: null,
+        maskThresholdInput: null,
+        maxResultsInput: null,
+        runButton: null,
+        autoButton: null,
+        status: null,
+    };
     const DEFAULT_QWEN_METADATA = {
         id: "default",
         label: "Base Qwen",
@@ -801,6 +811,7 @@
     };
     let qwenAvailable = false;
     let qwenRequestActive = false;
+    let sam3TextRequestActive = false;
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
     const qwenModelState = {
@@ -808,6 +819,7 @@
         activeId: "default",
         activeMetadata: DEFAULT_QWEN_METADATA,
     };
+    let sam3TextUiInitialized = false;
 
     let settingsUiInitialized = false;
 
@@ -4976,6 +4988,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         applyActiveQwenMetadata(qwenModelState.activeMetadata);
         updateQwenRunButton();
         updateQwenClassOptions({ resetOverride: true });
+        initSam3TextUi();
+        updateSam3TextButtons();
         refreshQwenStatus({ silent: true }).catch((error) => {
             console.debug("Unable to query Qwen status", error);
         });
@@ -4991,6 +5005,64 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             qwenElements.statusLabel.classList.add("qwen-status-label--ready");
         } else if (state === "error") {
             qwenElements.statusLabel.classList.add("qwen-status-label--error");
+        }
+    }
+
+    function initSam3TextUi() {
+        if (sam3TextUiInitialized) {
+            return;
+        }
+        sam3TextUiInitialized = true;
+        sam3TextElements.panel = document.getElementById("sam3TextPanel");
+        sam3TextElements.promptInput = document.getElementById("sam3TextPrompt");
+        sam3TextElements.thresholdInput = document.getElementById("sam3Threshold");
+        sam3TextElements.maskThresholdInput = document.getElementById("sam3MaskThreshold");
+        sam3TextElements.maxResultsInput = document.getElementById("sam3MaxResults");
+        sam3TextElements.runButton = document.getElementById("sam3RunButton");
+        sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
+        sam3TextElements.status = document.getElementById("sam3TextStatus");
+        if (sam3TextElements.runButton) {
+            sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest({ auto: false }));
+        }
+        if (sam3TextElements.autoButton) {
+            sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
+        }
+        updateSam3TextButtons();
+    }
+
+    function setSam3TextStatus(message, variant = "info") {
+        const statusEl = sam3TextElements.status;
+        if (!statusEl) {
+            return;
+        }
+        statusEl.textContent = message || "";
+        statusEl.classList.remove("warn", "error", "success");
+        if (!message) {
+            return;
+        }
+        if (variant === "warn" || variant === "error" || variant === "success") {
+            statusEl.classList.add(variant);
+        }
+    }
+
+    function updateSam3TextButtons() {
+        const readyForSam3 = samVariant === "sam3";
+        const busy = sam3TextRequestActive;
+        setButtonDisabled(sam3TextElements.runButton, !readyForSam3 || busy);
+        setButtonDisabled(sam3TextElements.autoButton, !readyForSam3 || busy);
+        if (sam3TextElements.runButton) {
+            sam3TextElements.runButton.textContent = busy ? "Running…" : "Run SAM3";
+        }
+        if (sam3TextElements.autoButton) {
+            sam3TextElements.autoButton.textContent = busy ? "Running…" : "Run SAM3 + Auto Class";
+        }
+        if (sam3TextElements.panel) {
+            sam3TextElements.panel.classList.toggle("sam3-text-panel--disabled", !readyForSam3);
+        }
+        if (!readyForSam3) {
+            setSam3TextStatus("Set SAM variant to SAM3 to enable text prompts.", "warn");
+        } else if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
+            setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
         }
     }
 
@@ -5336,6 +5408,92 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
+    async function handleSam3TextRequest({ auto = false } = {}) {
+        if (sam3TextRequestActive) {
+            return;
+        }
+        if (samVariant !== "sam3") {
+            setSam3TextStatus("Set SAM variant to SAM3 first.", "warn");
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSam3TextStatus("Load an image before running SAM3.", "warn");
+            return;
+        }
+        const prompt = (sam3TextElements.promptInput?.value || "").trim();
+        if (!prompt) {
+            setSam3TextStatus("Enter a prompt describing what to segment.", "warn");
+            sam3TextElements.promptInput?.focus();
+            return;
+        }
+        const targetClass = getQwenTargetClass();
+        if (!auto && !targetClass) {
+            setSam3TextStatus("Pick a class to assign boxes to before running SAM3.", "warn");
+            return;
+        }
+        let threshold = parseFloat(sam3TextElements.thresholdInput?.value || "0.5");
+        if (Number.isNaN(threshold)) {
+            threshold = 0.5;
+        }
+        threshold = Math.min(Math.max(threshold, 0), 1);
+        let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
+        if (Number.isNaN(maskThreshold)) {
+            maskThreshold = 0.5;
+        }
+        maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
+        let maxResults = parseInt(sam3TextElements.maxResultsInput?.value || "20", 10);
+        if (Number.isNaN(maxResults)) {
+            maxResults = 20;
+        }
+        maxResults = Math.min(Math.max(maxResults, 1), 100);
+        sam3TextRequestActive = true;
+        updateSam3TextButtons();
+        setSam3TextStatus("Running SAM3…", "info");
+        setSamStatus(`Running SAM3 text prompt${auto ? " (auto class)" : ""}…`, { variant: "info", duration: 0 });
+        try {
+            const result = await invokeSam3TextPrompt(
+                {
+                    text_prompt: prompt,
+                    threshold,
+                    mask_threshold: maskThreshold,
+                    max_results: maxResults,
+                },
+                { auto }
+            );
+            if (currentImage && result?.image_token) {
+                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            }
+            if (auto) {
+                const added = applySam3AutoDetections(result?.detections || [], targetClass);
+                if (added) {
+                    setSam3TextStatus(`SAM3 auto added ${added} bbox${added === 1 ? "" : "es"}.`, "success");
+                } else {
+                    const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
+                        ? "CLIP classifier unavailable; no auto boxes were added."
+                        : "SAM3 auto returned no usable boxes.";
+                    setSam3TextStatus(warning, "warn");
+                }
+            } else {
+                const applied = applyDetectionsToClass(result?.detections || [], targetClass, "SAM3");
+                if (applied) {
+                    setSam3TextStatus(`SAM3 added ${applied} bbox${applied === 1 ? "" : "es"} to ${targetClass}.`, "success");
+                } else {
+                    const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
+                        ? "SAM3 found no matches for that prompt."
+                        : "SAM3 returned no usable detections.";
+                    setSam3TextStatus(warning, "warn");
+                }
+            }
+        } catch (error) {
+            const detail = error?.message || error;
+            setSam3TextStatus(`SAM3 error: ${detail}`, "error");
+            console.error("SAM3 text prompt failed", error);
+        } finally {
+            sam3TextRequestActive = false;
+            updateSam3TextButtons();
+        }
+    }
+
     async function invokeQwenInfer(requestFields) {
         if (!currentImage) {
             throw new Error("No active image");
@@ -5360,6 +5518,42 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
             payload.sam_variant = variantForRequest;
             resp = await fetch(`${API_ROOT}/qwen/infer`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...requestFields, ...payload }),
+            });
+        }
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    async function invokeSam3TextPrompt(requestFields, { auto = false } = {}) {
+        if (!currentImage) {
+            throw new Error("No active image");
+        }
+        const imageNameForRequest = currentImage.name;
+        const variantForRequest = "sam3";
+        const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
+        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        if (imageNameForRequest && !payload.image_name) {
+            payload.image_name = imageNameForRequest;
+        }
+        payload.sam_variant = variantForRequest;
+        let resp = await fetch(`${API_ROOT}${auto ? "/sam3/text_prompt_auto" : "/sam3/text_prompt"}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...requestFields, ...payload }),
+        });
+        if (resp.status === 428) {
+            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            if (imageNameForRequest && !payload.image_name) {
+                payload.image_name = imageNameForRequest;
+            }
+            payload.sam_variant = variantForRequest;
+            resp = await fetch(`${API_ROOT}${auto ? "/sam3/text_prompt_auto" : "/sam3/text_prompt"}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ...requestFields, ...payload }),
@@ -5408,22 +5602,63 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return bboxRecord;
     }
 
-    function applyQwenBoxes(boxes, className) {
-        if (!currentImage || !className || !Array.isArray(boxes) || boxes.length === 0) {
+    function applyDetectionsToClass(entries, className, sourceLabel = "Detector") {
+        if (!currentImage || !className || !Array.isArray(entries) || entries.length === 0) {
             return 0;
         }
         let added = 0;
-        boxes.forEach((entry) => {
+        entries.forEach((entry) => {
             if (!entry || !entry.bbox) {
                 return;
             }
             const created = addYoloBoxFromQwen(entry.bbox, className);
-            if (created) {
-                added += 1;
+            if (!created) {
+                return;
             }
+            if (typeof entry.score === "number") {
+                created.samScore = entry.score;
+            }
+            added += 1;
         });
         if (added > 0) {
-            setSamStatus(`Qwen added ${added} bbox${added === 1 ? "" : "es"} to ${className}`, { variant: "success", duration: 4500 });
+            setSamStatus(`${sourceLabel} added ${added} bbox${added === 1 ? "" : "es"} to ${className}`, { variant: "success", duration: 4500 });
+        }
+        return added;
+    }
+
+    function applyQwenBoxes(boxes, className) {
+        return applyDetectionsToClass(boxes, className, "Qwen");
+    }
+
+    function applySam3AutoDetections(entries, fallbackClass = null) {
+        if (!currentImage || !Array.isArray(entries) || entries.length === 0) {
+            return 0;
+        }
+        let added = 0;
+        entries.forEach((entry) => {
+            if (!entry || !entry.bbox) {
+                return;
+            }
+            let targetClass = null;
+            if (entry.prediction && typeof classes[entry.prediction] !== "undefined") {
+                targetClass = entry.prediction;
+            } else {
+                targetClass = fallbackClass || getQwenTargetClass();
+            }
+            if (!targetClass) {
+                return;
+            }
+            const created = addYoloBoxFromQwen(entry.bbox, targetClass);
+            if (!created) {
+                return;
+            }
+            if (typeof entry.score === "number") {
+                created.samScore = entry.score;
+            }
+            added += 1;
+        });
+        if (added > 0) {
+            setSamStatus(`SAM3 auto added ${added} bbox${added === 1 ? "" : "es"}.`, { variant: "success", duration: 4500 });
         }
         return added;
     }
@@ -6192,6 +6427,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
         if (samVariantSelect) {
             samVariant = samVariantSelect.value || "sam1";
+            updateSam3TextButtons();
             samVariantSelect.addEventListener("change", () => {
                 samVariant = samVariantSelect.value || "sam1";
                 console.log("SAM variant =>", samVariant);
@@ -6202,6 +6438,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 if (samPreloadEnabled && currentImage && currentImage.object) {
                     scheduleSamPreload({ force: true, immediate: true });
                 }
+                updateSam3TextButtons();
             });
         }
 

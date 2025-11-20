@@ -101,6 +101,7 @@
                             <label for="samVariant">SAM Model:</label>
                             <select id="samVariant" name="samVariant">
                                 <option value="sam1" selected>SAM 1</option>
+                                <option value="sam3">SAM 3</option>
                             </select>
                             <br />
                             <label for="samPreload">Preload SAM:</label>
@@ -146,6 +147,27 @@
                                 <input type="number" id="qwenMaxResults" min="1" max="50" value="8" />
                                 <button type="button" id="qwenRunButton" class="training-button" disabled>Use Qwen</button>
                                 <p class="qwen-hint">Uses the prompts saved with the active Qwen model; add extra context via the advanced overrides when needed.</p>
+                                <section class="sam3-text-panel" id="sam3TextPanel" aria-labelledby="sam3TextTitle">
+                                    <div class="sam3-text-panel__header">
+                                        <span id="sam3TextTitle">SAM3 Text Prompt</span>
+                                        <span id="sam3TextStatus" class="sam3-text-status" aria-live="polite"></span>
+                                    </div>
+                                    <p class="sam3-text-hint">Switch the SAM model selector to “SAM 3” to enable text prompts.</p>
+                                    <label for="sam3TextPrompt">Prompt (describe what to segment)</label>
+                                    <input type="text" id="sam3TextPrompt" placeholder="e.g., red helmet" />
+                                    <div class="sam3-text-grid">
+                                        <label for="sam3Threshold">Score threshold</label>
+                                        <input type="number" id="sam3Threshold" step="0.05" min="0" max="1" value="0.5" />
+                                        <label for="sam3MaskThreshold">Mask threshold</label>
+                                        <input type="number" id="sam3MaskThreshold" step="0.05" min="0" max="1" value="0.5" />
+                                        <label for="sam3MaxResults">Max results</label>
+                                        <input type="number" id="sam3MaxResults" min="1" max="100" value="20" />
+                                    </div>
+                                    <div class="sam3-text-buttons">
+                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
+                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
+                                    </div>
+                                </section>
                             </section>
                             <br />
                             <hr />

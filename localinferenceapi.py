@@ -366,10 +366,69 @@ class _Sam1Backend:
         self.predictor = None
 
 
+class _Sam3Backend:
+    def __init__(self):
+        if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None:
+            raise RuntimeError(f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}")
+        self.device = _resolve_sam3_device()
+        device_str = "cuda" if self.device.type == "cuda" else "cpu"
+        try:
+            model = build_sam3_image_model(
+                device=device_str,
+                checkpoint_path=SAM3_CHECKPOINT_PATH,
+                load_from_HF=SAM3_CHECKPOINT_PATH is None,
+                enable_inst_interactivity=True,
+            )
+            if self.device:
+                model = model.to(self.device)
+            predictor = getattr(model, "inst_interactive_predictor", None)
+            if predictor is None:
+                raise RuntimeError("sam3_interactive_predictor_missing")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"sam3_load_failed:{exc}") from exc
+        self.model = model
+        self.predictor = predictor
+
+    def set_image(self, np_img: np.ndarray) -> None:
+        arr = np.ascontiguousarray(np_img)
+        self.predictor.set_image(arr)
+
+    def predict(self, **kwargs):
+        point_coords = kwargs.get("point_coords")
+        point_labels = kwargs.get("point_labels")
+        box = kwargs.get("box")
+        mask_input = kwargs.get("mask_input")
+        multimask_output = kwargs.get("multimask_output", True)
+        return self.predictor.predict(
+            point_coords=point_coords,
+            point_labels=point_labels,
+            box=box,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
+        )
+
+    def unload(self) -> None:
+        try:
+            del self.predictor
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            del self.model
+        except Exception:  # noqa: BLE001
+            pass
+        self.predictor = None
+        self.model = None
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _build_backend_for_variant(variant: str):
     normalized = (variant or "sam1").lower()
     if normalized == "sam3":
-        return _Sam1Backend()
+        return _Sam3Backend()
     # default to classic SAM1 backend
     return _Sam1Backend()
 
@@ -384,10 +443,15 @@ def _ensure_sam3_text_runtime():
             detail = f"sam3_text_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}"
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         try:
+            device_str = "cuda" if device.type == "cuda" else "cpu"
             if SAM3_CHECKPOINT_PATH:
-                model = build_sam3_image_model(checkpoint=SAM3_CHECKPOINT_PATH).to(device)
+                model = build_sam3_image_model(
+                    checkpoint_path=SAM3_CHECKPOINT_PATH,
+                    device=device_str,
+                    load_from_HF=False,
+                ).to(device)
             else:
-                model = build_sam3_image_model().to(device)
+                model = build_sam3_image_model(device=device_str).to(device)
             processor = Sam3ImageProcessor(model)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc

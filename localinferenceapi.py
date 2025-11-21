@@ -384,6 +384,11 @@ class _Sam3Backend:
             predictor = getattr(model, "inst_interactive_predictor", None)
             if predictor is None:
                 raise RuntimeError("sam3_interactive_predictor_missing")
+            tracker = getattr(predictor, "model", None)
+            if tracker is None:
+                raise RuntimeError("sam3_tracker_missing")
+            if getattr(tracker, "backbone", None) is None:
+                tracker.backbone = model.backbone
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"sam3_load_failed:{exc}") from exc
         self.model = model

@@ -6699,14 +6699,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 bbox.width,
                 bbox.height
             );
-            const base64String = offCanvas.toDataURL("image/jpeg");
-            const base64Data = base64String.split(",")[1];
-            const resp = await fetch("http://localhost:8000/predict_base64", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    image_base64: base64Data,
-                    uuid: bbox.uuid
+        const base64String = offCanvas.toDataURL("image/jpeg");
+        const base64Data = base64String.split(",")[1];
+        const resp = await fetch(`${API_ROOT}/predict_base64`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                image_base64: base64Data,
+                uuid: bbox.uuid
                 })
             });
             const data = await resp.json();

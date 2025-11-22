@@ -3915,6 +3915,9 @@ class SamPointAutoResponse(BaseModel):
     score: Optional[float] = None
 
 
+Sam3TextPromptAutoResponse.update_forward_refs(SamPointAutoResponse=SamPointAutoResponse)
+
+
 @app.post("/sam_bbox_auto", response_model=SamPointAutoResponse)
 def sam_bbox_auto(prompt: BboxPrompt):
     if not clip_initialized:

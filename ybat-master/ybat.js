@@ -1740,7 +1740,15 @@ const qwenTrainState = {
             if (trainingElements.clipBackboneSelect && data.clip_model) {
                 trainingElements.clipBackboneSelect.value = data.clip_model;
             }
-            setActiveMessage(data.clip_ready ? "" : "CLIP classifier is not ready. Load a model to enable auto-labeling.", data.clip_ready ? null : "error");
+            if (data.clip_ready) {
+                setActiveMessage("CLIP is ready for auto-labeling.", "success");
+            } else if (data.clip_error && String(data.clip_error).includes("numpy._core")) {
+                setActiveMessage("CLIP classifier failed to load: numpy version mismatch. Please retrain CLIP in this environment or re-export with the current NumPy.", "error");
+            } else if (data.clip_error) {
+                setActiveMessage(`CLIP classifier not ready: ${data.clip_error}`, "error");
+            } else {
+                setActiveMessage("CLIP classifier is not ready. Load a model to enable auto-labeling.", "error");
+            }
         } catch (error) {
             console.warn("Failed to refresh active model", error);
             setActiveMessage(`Unable to read active model: ${error.message || error}`, "error");

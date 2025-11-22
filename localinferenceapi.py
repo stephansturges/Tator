@@ -227,6 +227,7 @@ def _bytes_to_mb(value: int) -> float:
 # 1) Define a global error message and a global load-flag for CLIP
 ERROR_MESSAGE = 0 # messy hack, making this an int because of the way we parse it later... the message has actually just been moved to the JS and appears when bbox uuid is None
 clip_initialized = True
+clip_last_error: Optional[str] = None
 # ----------------------------------------------------------------
 
 # 2) Attempt to load the logistic regression model (.pkl)
@@ -236,12 +237,15 @@ if os.path.exists(MODEL_PATH):
     try:
         print("Loading logistic regression...")
         clf = joblib.load(MODEL_PATH)
+        clip_last_error = None
     except Exception as e:
         print(f"Failed to load logistic regression model: {e}")
         clip_initialized = False
+        clip_last_error = str(e)
 else:
     print(f"File {MODEL_PATH} not found.")
     clip_initialized = False
+    clip_last_error = "classifier_not_found"
 
 LABELMAP_DEFAULT_PATH = "./my_label_list.pkl"
 active_classifier_path: Optional[str] = MODEL_PATH if clf is not None else None
@@ -2871,6 +2875,7 @@ def _current_active_payload() -> Dict[str, Any]:
         "classifier_path": active_classifier_path,
         "labelmap_path": active_labelmap_path,
         "clip_ready": bool(clip_initialized and clf is not None and clip_model is not None),
+        "clip_error": clip_last_error,
         "labelmap_entries": list(active_label_list),
     }
 
@@ -3499,7 +3504,7 @@ def get_active_model():
 @app.post("/clip/active_model", response_model=ActiveModelResponse)
 def set_active_model(payload: ActiveModelRequest):
     global clf, clip_model, clip_preprocess, clip_model_name, clip_initialized
-    global active_classifier_path, active_labelmap_path, active_label_list
+    global active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
 
     classifier_path = _normalise_optional_path(payload.classifier_path) or active_classifier_path
     labelmap_path = _normalise_optional_path(payload.labelmap_path)
@@ -3515,6 +3520,7 @@ def set_active_model(payload: ActiveModelRequest):
     try:
         new_clf = joblib.load(classifier_path_abs)
     except Exception as exc:  # noqa: BLE001
+        clip_last_error = str(exc)
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"classifier_load_failed:{exc}") from exc
 
     meta_clip_model = None
@@ -3572,6 +3578,7 @@ def set_active_model(payload: ActiveModelRequest):
         active_classifier_path = classifier_path_abs
         active_labelmap_path = labelmap_path_abs
         active_label_list = labelmap_entries
+        clip_last_error = None
 
     return _current_active_payload()
 

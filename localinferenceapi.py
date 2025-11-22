@@ -1810,6 +1810,16 @@ class Sam3TextPrompt(BaseModel):
         return values
 
 
+class SamPointAutoResponse(BaseModel):
+    prediction: Optional[str] = None
+    proba: Optional[float] = None
+    bbox: List[float]
+    uuid: Optional[str] = None
+    error: Optional[str] = None
+    image_token: Optional[str] = None
+    score: Optional[float] = None
+
+
 class QwenDetection(BaseModel):
     bbox: List[float]
     qwen_label: Optional[str] = None
@@ -3903,19 +3913,6 @@ def sam_point(prompt: PointPrompt):
     left, top, right, bottom = mask_to_bounding_box(mask)
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
     return YoloBboxOutput(class_id="0", bbox=yolo_box, uuid=prompt.uuid, image_token=token)
-
-
-class SamPointAutoResponse(BaseModel):
-    prediction: Optional[str] = None
-    proba: Optional[float] = None
-    bbox: List[float]
-    uuid: Optional[str] = None
-    error: Optional[str] = None
-    image_token: Optional[str] = None
-    score: Optional[float] = None
-
-
-Sam3TextPromptAutoResponse.update_forward_refs(SamPointAutoResponse=SamPointAutoResponse)
 
 
 @app.post("/sam_bbox_auto", response_model=SamPointAutoResponse)

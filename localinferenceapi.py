@@ -30,14 +30,6 @@ import queue
 import itertools
 from dataclasses import dataclass, field, asdict
 
-# Compatibility shim for older pickled sklearn artifacts that reference numpy._core
-if "numpy._core" not in sys.modules:  # pragma: no cover - import guard
-    try:
-        import numpy.core as _np_core
-        sys.modules["numpy._core"] = _np_core
-    except Exception:
-        pass
-
 from tools.clip_training import train_clip_from_yolo, TrainingError, TrainingArtifacts
 try:
     from tools.qwen_training import (

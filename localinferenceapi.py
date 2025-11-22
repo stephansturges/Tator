@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence
 import torch, clip, joblib
-import types
 from io import BytesIO
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, Request
@@ -34,11 +33,8 @@ from dataclasses import dataclass, field, asdict
 # Compatibility shim for older pickled sklearn artifacts that reference numpy._core
 if "numpy._core" not in sys.modules:  # pragma: no cover - import guard
     try:
-        shim = types.ModuleType("numpy._core")
         import numpy.core as _np_core
-
-        shim.__dict__.update(_np_core.__dict__)
-        sys.modules["numpy._core"] = shim
+        sys.modules["numpy._core"] = _np_core
     except Exception:
         pass
 

@@ -3531,9 +3531,12 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
         try:
             _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
-            cmd = [sys.executable, "-m", "sam3.train.train", "-c", config_name, "--use-cluster", "0"]
+            cmd = [sys.executable, "sam3/train/train.py", "-c", config_name, "--use-cluster", "0"]
             if num_gpus is not None:
                 cmd.extend(["--num-gpus", str(num_gpus)])
+            env = os.environ.copy()
+            existing_py = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = f"{SAM3_REPO_ROOT}:{existing_py}" if existing_py else str(SAM3_REPO_ROOT)
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(SAM3_REPO_ROOT),
@@ -3541,6 +3544,7 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,
             )
             job.process = proc
             _sam3_job_log(job, f"Spawned {' '.join(cmd)}")

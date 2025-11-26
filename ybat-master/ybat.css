@@ -990,7 +990,8 @@ hr {
 
 .training-field,
 .training-field-double,
-.training-advanced-grid {
+.training-advanced-grid,
+.training-grid {
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -1008,10 +1009,17 @@ hr {
     gap: 12px 16px;
 }
 
+.training-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px 16px;
+}
+
 .training-field label,
 .training-field-double label,
 .training-advanced-grid label,
-.training-active-block label {
+.training-active-block label,
+.training-grid label {
     font-size: 13px;
     font-weight: 600;
     color: #334155;
@@ -1025,7 +1033,9 @@ hr {
 .training-advanced-grid select,
 .training-picker input,
 .active-controls input,
-.active-controls select {
+.active-controls select,
+.training-grid input,
+.training-grid select {
     border: 1px solid #cbd5e1;
     border-radius: 8px;
     padding: 8px 10px;
@@ -1733,5 +1743,16 @@ hr {
 }
 
 .active-picker input {
+    flex: 1;
+}
+
+/* SAM3 training */
+.sam3-dataset-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.sam3-dataset-row select {
     flex: 1;
 }

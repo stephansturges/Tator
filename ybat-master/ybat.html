@@ -64,6 +64,7 @@
             <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
+            <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
             <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
             <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">Predictors</button>
@@ -553,6 +554,97 @@
                         <div class="training-history">
                             <h3>Recent Qwen Jobs</h3>
                             <div id="qwenTrainHistory"></div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabSam3Train" data-tab-panel="sam3-train">
+                <div class="training-wrapper">
+                    <section class="training-form-section">
+                        <h2>Train SAM3 (box-only)</h2>
+                        <p class="training-help">Pick a cached dataset (Qwen uploads or YOLO folders). The server converts to COCO and launches SAM3 training locally.</p>
+                        <div class="training-field">
+                            <label>Dataset</label>
+                            <div class="sam3-dataset-row">
+                                <select id="sam3DatasetSelect"></select>
+                                <button type="button" class="training-button" id="sam3DatasetRefresh">Refresh</button>
+                                <button type="button" class="training-button" id="sam3DatasetConvert">Convert</button>
+                            </div>
+                            <div class="training-help" id="sam3DatasetSummary">We’ll auto-convert to COCO when needed.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="sam3RunName">Run name / log dir</label>
+                            <input type="text" id="sam3RunName" placeholder="Optional; defaults to job id" />
+                            <div class="training-help">Logs + checkpoints land in <code>uploads/sam3_runs/&lt;run_name&gt;</code>.</div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="sam3TrainBatch">Train batch size</label>
+                                <input type="number" id="sam3TrainBatch" min="1" value="1" />
+                            </div>
+                            <div>
+                                <label for="sam3ValBatch">Val batch size</label>
+                                <input type="number" id="sam3ValBatch" min="1" value="1" />
+                            </div>
+                            <div>
+                                <label for="sam3TrainWorkers">Train workers</label>
+                                <input type="number" id="sam3TrainWorkers" min="0" value="4" />
+                            </div>
+                            <div>
+                                <label for="sam3ValWorkers">Val workers</label>
+                                <input type="number" id="sam3ValWorkers" min="0" value="2" />
+                            </div>
+                            <div>
+                                <label for="sam3Epochs">Max epochs</label>
+                                <input type="number" id="sam3Epochs" min="1" value="20" />
+                            </div>
+                            <div>
+                                <label for="sam3Resolution">Resolution</label>
+                                <input type="number" id="sam3Resolution" min="256" value="1008" step="16" />
+                            </div>
+                            <div>
+                                <label for="sam3LrScale">LR scale</label>
+                                <input type="number" id="sam3LrScale" step="0.01" value="0.1" />
+                            </div>
+                            <div>
+                                <label for="sam3GradAccum">Grad accumulation</label>
+                                <input type="number" id="sam3GradAccum" min="1" value="1" />
+                            </div>
+                            <div>
+                                <label for="sam3ValFreq">Val every N epochs</label>
+                                <input type="number" id="sam3ValFreq" min="1" value="10" />
+                            </div>
+                            <div>
+                                <label for="sam3TargetEpochSize">Target epoch size</label>
+                                <input type="number" id="sam3TargetEpochSize" min="1" value="1500" />
+                            </div>
+                        </div>
+                        <div class="training-toggle-row">
+                            <label><input type="checkbox" id="sam3InstInteractivity" /> Enable instance interactivity head</label>
+                        </div>
+                        <button type="button" id="sam3StartBtn" class="training-button">Start SAM3 Training</button>
+                        <div class="training-message" id="sam3Message" role="status"></div>
+                    </section>
+                    <section class="training-status-section">
+                        <h2>Training Status</h2>
+                        <div class="training-progress" id="sam3ProgressBar">
+                            <div class="training-progress-fill" id="sam3ProgressFill"></div>
+                        </div>
+                        <div class="training-status-text" id="sam3StatusText">Idle</div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button training-button-danger" id="sam3CancelBtn" disabled>Cancel Job</button>
+                        </div>
+                        <div class="training-summary" id="sam3Summary"></div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="sam3ActivateBtn" disabled>Activate checkpoint</button>
+                        </div>
+                        <div class="training-logs">
+                            <h3>Logs</h3>
+                            <pre id="sam3Log"></pre>
+                        </div>
+                        <div class="training-history">
+                            <h3>Recent SAM3 Jobs</h3>
+                            <div id="sam3TrainingHistory"></div>
                         </div>
                     </section>
                 </div>

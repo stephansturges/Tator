@@ -196,6 +196,7 @@
     const TAB_LABELING = "labeling";
     const TAB_TRAINING = "training";
     const TAB_QWEN_TRAIN = "qwen-train";
+    const TAB_SAM3_TRAIN = "sam3-train";
     const TAB_ACTIVE = "active";
     const TAB_QWEN = "qwen";
     const TAB_PREDICTORS = "predictors";
@@ -229,6 +230,7 @@
 
     let activeTab = TAB_LABELING;
     let trainingUiInitialized = false;
+    let sam3TrainUiInitialized = false;
     let activeUiInitialized = false;
     let loadedClassList = [];
     const INGEST_PHASE_LABELS = {
@@ -740,6 +742,7 @@
         labelingButton: null,
         trainingButton: null,
         qwenTrainButton: null,
+        sam3TrainButton: null,
         activeButton: null,
         qwenButton: null,
         predictorsButton: null,
@@ -747,6 +750,7 @@
         labelingPanel: null,
         trainingPanel: null,
         qwenTrainPanel: null,
+        sam3TrainPanel: null,
         activePanel: null,
         qwenPanel: null,
         predictorsPanel: null,
@@ -944,6 +948,43 @@ const qwenTrainState = {
     const qwenDatasetState = {
         items: [],
         selectedId: null,
+    };
+
+    const sam3TrainElements = {
+        datasetSelect: null,
+        datasetSummary: null,
+        datasetRefresh: null,
+        datasetConvert: null,
+        runName: null,
+        trainBatch: null,
+        valBatch: null,
+        trainWorkers: null,
+        valWorkers: null,
+        epochs: null,
+        resolution: null,
+        lrScale: null,
+        gradAccum: null,
+        valFreq: null,
+        targetEpochSize: null,
+        instInteractivity: null,
+        startButton: null,
+        cancelButton: null,
+        statusText: null,
+        progressFill: null,
+        message: null,
+        summary: null,
+        log: null,
+        history: null,
+        activateButton: null,
+    };
+
+    const sam3TrainState = {
+        datasets: [],
+        selectedId: null,
+        activeJobId: null,
+        pollHandle: null,
+        lastJobSnapshot: null,
+        latestCheckpoint: null,
     };
 
     function escapeHtml(value) {
@@ -2014,6 +2055,331 @@ async function finalizeQwenDatasetUpload(jobId, metadata, runName) {
         throw new Error(detail || `Dataset finalize failed (${resp.status})`);
     }
     return resp.json();
+}
+
+function setSam3Message(text, tone = "info") {
+    if (!sam3TrainElements.message) return;
+    sam3TrainElements.message.textContent = text || "";
+    sam3TrainElements.message.className = `training-message ${tone}`;
+}
+
+function updateSam3DatasetSummary(entry) {
+    if (!sam3TrainElements.datasetSummary) return;
+    if (!entry) {
+        sam3TrainElements.datasetSummary.textContent = "Pick a dataset to train.";
+        return;
+    }
+    const coco = entry.coco_ready ? "COCO ready" : "Convert required";
+    const src = entry.source || "unknown";
+    const counts = [];
+    if (entry.image_count) counts.push(`${entry.image_count} images`);
+    if (entry.train_count) counts.push(`train ${entry.train_count}`);
+    if (entry.val_count) counts.push(`val ${entry.val_count}`);
+    const countText = counts.length ? ` • ${counts.join(" / ")}` : "";
+    sam3TrainElements.datasetSummary.textContent = `${entry.label || entry.id} (${src}, ${coco})${countText}`;
+}
+
+async function loadSam3Datasets() {
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/datasets`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        sam3TrainState.datasets = Array.isArray(data) ? data : [];
+        if (!sam3TrainState.selectedId && sam3TrainState.datasets.length) {
+            sam3TrainState.selectedId = sam3TrainState.datasets[0].id;
+        }
+        if (sam3TrainElements.datasetSelect) {
+            sam3TrainElements.datasetSelect.innerHTML = "";
+            sam3TrainState.datasets.forEach((entry) => {
+                const opt = document.createElement("option");
+                opt.value = entry.id;
+                opt.textContent = `${entry.label || entry.id}${entry.coco_ready ? "" : " (needs convert)"}`;
+                if (entry.id === sam3TrainState.selectedId) {
+                    opt.selected = true;
+                }
+                sam3TrainElements.datasetSelect.appendChild(opt);
+            });
+        }
+        const selected = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId) || sam3TrainState.datasets[0];
+        sam3TrainState.selectedId = selected ? selected.id : null;
+        updateSam3DatasetSummary(selected);
+    } catch (err) {
+        console.error("Failed to load SAM3 datasets", err);
+        setSam3Message(`Failed to load datasets: ${err.message || err}`, "error");
+    }
+}
+
+async function convertSam3Dataset() {
+    const datasetId = sam3TrainState.selectedId;
+    if (!datasetId) {
+        setSam3Message("Select a dataset first.", "warn");
+        return;
+    }
+    setSam3Message("Converting dataset to COCO…", "info");
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(datasetId)}/convert`, { method: "POST" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const meta = await resp.json();
+        setSam3Message("Dataset converted.", "success");
+        await loadSam3Datasets();
+        return meta;
+    } catch (err) {
+        console.error("SAM3 convert failed", err);
+        setSam3Message(`Convert failed: ${err.message || err}`, "error");
+        throw err;
+    }
+}
+
+function renderSam3History(list) {
+    if (!sam3TrainElements.history) return;
+    sam3TrainElements.history.innerHTML = "";
+    if (!Array.isArray(list) || !list.length) {
+        const empty = document.createElement("div");
+        empty.className = "training-history-item";
+        empty.textContent = "No SAM3 training jobs yet.";
+        sam3TrainElements.history.appendChild(empty);
+        return;
+    }
+    list.forEach((job) => {
+        const item = document.createElement("div");
+        item.className = "training-history-item";
+        const left = document.createElement("div");
+        const created = formatTimestamp(job.created_at || 0);
+        left.innerHTML = `<strong>${escapeHtml(job.job_id.slice(0, 8))}</strong><div class="training-help">${escapeHtml(job.status)} • ${escapeHtml(created)}</div>`;
+        item.appendChild(left);
+        item.addEventListener("click", () => {
+            if (job.job_id) {
+                pollSam3TrainingJob(job.job_id, { force: true }).catch((err) => console.error("SAM3 poll history failed", err));
+            }
+        });
+        sam3TrainElements.history.appendChild(item);
+    });
+}
+
+async function refreshSam3History() {
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/train/jobs`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderSam3History(data);
+    } catch (err) {
+        console.error("Failed to load SAM3 training history", err);
+    }
+}
+
+function updateSam3Ui(job) {
+    if (!job || !sam3TrainElements.statusText) return;
+    sam3TrainState.lastJobSnapshot = job;
+    const pct = Math.round((job.progress || 0) * 100);
+    sam3TrainElements.statusText.textContent = `${job.status}${job.message ? ` — ${job.message}` : ""}`;
+    if (sam3TrainElements.progressFill) {
+        sam3TrainElements.progressFill.style.width = `${pct}%`;
+    }
+    if (sam3TrainElements.cancelButton) {
+        sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);
+    }
+    if (sam3TrainElements.log) {
+        const logs = Array.isArray(job.logs) ? job.logs : [];
+        const lines = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
+        sam3TrainElements.log.textContent = lines.slice(-200).join("\n");
+    }
+    if (sam3TrainElements.summary) {
+        if (job.result && job.result.checkpoint) {
+            const ckpt = escapeHtml(job.result.checkpoint);
+            sam3TrainElements.summary.innerHTML = `Checkpoint: <code>${ckpt}</code>`;
+            sam3TrainState.latestCheckpoint = job.result.checkpoint;
+        } else {
+            sam3TrainElements.summary.textContent = "";
+            sam3TrainState.latestCheckpoint = null;
+        }
+    }
+    if (sam3TrainElements.activateButton) {
+        sam3TrainElements.activateButton.disabled = !sam3TrainState.latestCheckpoint;
+    }
+}
+
+async function pollSam3TrainingJob(jobId, options = {}) {
+    if (!jobId) return;
+    sam3TrainState.activeJobId = jobId;
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/train/jobs/${jobId}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const job = await resp.json();
+        updateSam3Ui(job);
+        const running = ["queued", "running", "cancelling"].includes(job.status);
+        if (running || options.force) {
+            if (sam3TrainState.pollHandle) {
+                clearTimeout(sam3TrainState.pollHandle);
+            }
+            sam3TrainState.pollHandle = window.setTimeout(() => {
+                pollSam3TrainingJob(jobId).catch((err) => console.error("SAM3 poll failed", err));
+            }, 1500);
+        } else {
+            sam3TrainState.pollHandle = null;
+            refreshSam3History();
+        }
+    } catch (err) {
+        console.error("SAM3 job poll failed", err);
+        if (!options.silent) {
+            setSam3Message(`Polling failed: ${err.message || err}`, "error");
+        }
+    }
+}
+
+async function startSam3Training() {
+    const datasetId = sam3TrainState.selectedId;
+    if (!datasetId) {
+        setSam3Message("Select a dataset first.", "warn");
+        return;
+    }
+    try {
+        await convertSam3Dataset();
+    } catch {
+        return;
+    }
+    const payload = { dataset_id: datasetId };
+    const maybeNumber = (input) => {
+        if (!input || !input.value) return null;
+        const num = Number(input.value);
+        return Number.isFinite(num) ? num : null;
+    };
+    if (sam3TrainElements.runName && sam3TrainElements.runName.value.trim()) {
+        payload.run_name = sam3TrainElements.runName.value.trim();
+    }
+    const fields = [
+        ["train_batch_size", sam3TrainElements.trainBatch],
+        ["val_batch_size", sam3TrainElements.valBatch],
+        ["num_train_workers", sam3TrainElements.trainWorkers],
+        ["num_val_workers", sam3TrainElements.valWorkers],
+        ["max_epochs", sam3TrainElements.epochs],
+        ["resolution", sam3TrainElements.resolution],
+        ["lr_scale", sam3TrainElements.lrScale],
+        ["gradient_accumulation_steps", sam3TrainElements.gradAccum],
+        ["val_epoch_freq", sam3TrainElements.valFreq],
+        ["target_epoch_size", sam3TrainElements.targetEpochSize],
+    ];
+    fields.forEach(([key, el]) => {
+        const val = maybeNumber(el);
+        if (val !== null) payload[key] = val;
+    });
+    if (sam3TrainElements.instInteractivity) {
+        payload.enable_inst_interactivity = sam3TrainElements.instInteractivity.checked;
+    }
+    setSam3Message("Starting SAM3 training…", "info");
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/train/jobs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(text || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        sam3TrainState.activeJobId = data.job_id;
+        pollSam3TrainingJob(data.job_id, { force: true }).catch((err) => console.error("SAM3 poll start failed", err));
+        setSam3Message("Job queued.", "success");
+        refreshSam3History();
+    } catch (err) {
+        console.error("SAM3 training start failed", err);
+        setSam3Message(err.message || "Failed to start training", "error");
+    }
+}
+
+async function cancelSam3Training() {
+    if (!sam3TrainState.activeJobId) {
+        setSam3Message("No active job.", "warn");
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/train/jobs/${sam3TrainState.activeJobId}/cancel`, { method: "POST" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        setSam3Message("Cancellation requested…", "info");
+    } catch (err) {
+        console.error("SAM3 cancel failed", err);
+        setSam3Message(`Cancel failed: ${err.message || err}`, "error");
+    }
+}
+
+async function activateSam3Checkpoint() {
+    const ckpt = sam3TrainState.latestCheckpoint || (sam3TrainState.lastJobSnapshot && sam3TrainState.lastJobSnapshot.result && sam3TrainState.lastJobSnapshot.result.checkpoint);
+    if (!ckpt) {
+        setSam3Message("No checkpoint to activate.", "warn");
+        return;
+    }
+    const enableSeg = sam3TrainState.lastJobSnapshot && sam3TrainState.lastJobSnapshot.result ? sam3TrainState.lastJobSnapshot.result.enable_segmentation : false;
+    const payload = {
+        checkpoint_path: ckpt,
+        enable_segmentation: enableSeg,
+        label: sam3TrainElements.runName && sam3TrainElements.runName.value.trim() ? sam3TrainElements.runName.value.trim() : undefined,
+    };
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/models/activate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        setSam3Message("Activated SAM3 checkpoint.", "success");
+    } catch (err) {
+        console.error("SAM3 activate failed", err);
+        setSam3Message(`Activate failed: ${err.message || err}`, "error");
+    }
+}
+
+async function initSam3TrainUi() {
+    if (sam3TrainUiInitialized) return;
+    sam3TrainUiInitialized = true;
+    sam3TrainElements.datasetSelect = document.getElementById("sam3DatasetSelect");
+    sam3TrainElements.datasetSummary = document.getElementById("sam3DatasetSummary");
+    sam3TrainElements.datasetRefresh = document.getElementById("sam3DatasetRefresh");
+    sam3TrainElements.datasetConvert = document.getElementById("sam3DatasetConvert");
+    sam3TrainElements.runName = document.getElementById("sam3RunName");
+    sam3TrainElements.trainBatch = document.getElementById("sam3TrainBatch");
+    sam3TrainElements.valBatch = document.getElementById("sam3ValBatch");
+    sam3TrainElements.trainWorkers = document.getElementById("sam3TrainWorkers");
+    sam3TrainElements.valWorkers = document.getElementById("sam3ValWorkers");
+    sam3TrainElements.epochs = document.getElementById("sam3Epochs");
+    sam3TrainElements.resolution = document.getElementById("sam3Resolution");
+    sam3TrainElements.lrScale = document.getElementById("sam3LrScale");
+    sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
+    sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
+    sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
+    sam3TrainElements.instInteractivity = document.getElementById("sam3InstInteractivity");
+    sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
+    sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
+    sam3TrainElements.statusText = document.getElementById("sam3StatusText");
+    sam3TrainElements.progressFill = document.getElementById("sam3ProgressFill");
+    sam3TrainElements.message = document.getElementById("sam3Message");
+    sam3TrainElements.summary = document.getElementById("sam3Summary");
+    sam3TrainElements.log = document.getElementById("sam3Log");
+    sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
+    sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
+    if (sam3TrainElements.datasetSelect) {
+        sam3TrainElements.datasetSelect.addEventListener("change", () => {
+            sam3TrainState.selectedId = sam3TrainElements.datasetSelect.value;
+            const entry = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId);
+            updateSam3DatasetSummary(entry);
+        });
+    }
+    if (sam3TrainElements.datasetRefresh) {
+        sam3TrainElements.datasetRefresh.addEventListener("click", () => loadSam3Datasets());
+    }
+    if (sam3TrainElements.datasetConvert) {
+        sam3TrainElements.datasetConvert.addEventListener("click", () => convertSam3Dataset().catch(() => {}));
+    }
+    if (sam3TrainElements.startButton) {
+        sam3TrainElements.startButton.addEventListener("click", () => startSam3Training());
+    }
+    if (sam3TrainElements.cancelButton) {
+        sam3TrainElements.cancelButton.addEventListener("click", () => cancelSam3Training());
+    }
+    if (sam3TrainElements.activateButton) {
+        sam3TrainElements.activateButton.addEventListener("click", () => activateSam3Checkpoint());
+    }
+    await loadSam3Datasets();
+    await refreshSam3History();
 }
 
 async function cancelQwenDatasetUpload(jobId) {
@@ -3632,6 +3998,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
+        tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
         tabElements.qwenButton = document.getElementById("tabQwenButton");
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
@@ -3639,6 +4006,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.labelingPanel = document.getElementById("tabLabeling");
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
+        tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
         tabElements.activePanel = document.getElementById("tabActive");
         tabElements.qwenPanel = document.getElementById("tabQwen");
         tabElements.predictorsPanel = document.getElementById("tabPredictors");
@@ -3651,6 +4019,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.qwenTrainButton) {
             tabElements.qwenTrainButton.addEventListener("click", () => setActiveTab(TAB_QWEN_TRAIN));
+        }
+        if (tabElements.sam3TrainButton) {
+            tabElements.sam3TrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_TRAIN));
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
@@ -3679,6 +4050,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.qwenTrainButton) {
             tabElements.qwenTrainButton.classList.toggle("active", tabName === TAB_QWEN_TRAIN);
         }
+        if (tabElements.sam3TrainButton) {
+            tabElements.sam3TrainButton.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
+        }
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
         }
@@ -3699,6 +4073,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.qwenTrainPanel) {
             tabElements.qwenTrainPanel.classList.toggle("active", tabName === TAB_QWEN_TRAIN);
+        }
+        if (tabElements.sam3TrainPanel) {
+            tabElements.sam3TrainPanel.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
         }
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);
@@ -3726,6 +4103,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (qwenTrainState.activeJobId) {
                 pollQwenTrainingJob(qwenTrainState.activeJobId, { force: true }).catch((error) => console.error("Qwen job poll failed", error));
             }
+        }
+        if (tabName === TAB_SAM3_TRAIN && previous !== TAB_SAM3_TRAIN) {
+            initSam3TrainUi().catch((err) => console.error("SAM3 UI init failed", err));
         }
         if (tabName === TAB_ACTIVE && previous !== TAB_ACTIVE) {
             initializeActiveModelUi();

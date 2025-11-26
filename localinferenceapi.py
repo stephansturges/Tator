@@ -12,6 +12,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, Reque
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, root_validator, Field
+from omegaconf import OmegaConf
 import psutil
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
@@ -341,6 +342,16 @@ SAM3_MODEL_ID = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
 SAM3_PROCESSOR_ID = os.environ.get("SAM3_PROCESSOR_ID", SAM3_MODEL_ID)
 SAM3_CHECKPOINT_PATH = os.environ.get("SAM3_CHECKPOINT_PATH")
 SAM3_DEVICE_PREF = os.environ.get("SAM3_DEVICE", "auto").strip().lower()
+active_sam3_model_id = "default"
+active_sam3_checkpoint = SAM3_CHECKPOINT_PATH
+active_sam3_enable_segmentation = True
+active_sam3_metadata: Dict[str, Any] = {
+    "id": "default",
+    "label": "Base SAM3",
+    "checkpoint": SAM3_CHECKPOINT_PATH,
+    "source": "env",
+    "enable_segmentation": True,
+}
 
 
 def _resolve_sam3_device() -> torch.device:
@@ -350,6 +361,22 @@ def _resolve_sam3_device() -> torch.device:
         return torch.device(SAM3_DEVICE_PREF)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_sam3_device:{SAM3_DEVICE_PREF}:{exc}") from exc
+
+
+def _reset_sam3_runtime() -> None:
+    global sam3_text_model, sam3_text_processor, sam3_text_device
+    sam3_text_model = None
+    sam3_text_processor = None
+    sam3_text_device = None
+    try:
+        predictor_manager.unload_all()
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class _Sam1Backend:
@@ -379,9 +406,11 @@ class _Sam3Backend:
         try:
             model = build_sam3_image_model(
                 device=device_str,
-                checkpoint_path=SAM3_CHECKPOINT_PATH,
-                load_from_HF=SAM3_CHECKPOINT_PATH is None,
+                checkpoint_path=active_sam3_checkpoint,
+                load_from_HF=active_sam3_checkpoint is None,
                 enable_inst_interactivity=True,
+                enable_segmentation=active_sam3_enable_segmentation,
+                bpe_path=str(SAM3_BPE_PATH),
             )
             if self.device:
                 model = model.to(self.device)
@@ -453,14 +482,20 @@ def _ensure_sam3_text_runtime():
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         try:
             device_str = "cuda" if device.type == "cuda" else "cpu"
-            if SAM3_CHECKPOINT_PATH:
+            if active_sam3_checkpoint:
                 model = build_sam3_image_model(
-                    checkpoint_path=SAM3_CHECKPOINT_PATH,
+                    checkpoint_path=active_sam3_checkpoint,
                     device=device_str,
                     load_from_HF=False,
+                    enable_segmentation=active_sam3_enable_segmentation,
+                    bpe_path=str(SAM3_BPE_PATH),
                 ).to(device)
             else:
-                model = build_sam3_image_model(device=device_str).to(device)
+                model = build_sam3_image_model(
+                    device=device_str,
+                    enable_segmentation=active_sam3_enable_segmentation,
+                    bpe_path=str(SAM3_BPE_PATH),
+                ).to(device)
             processor = Sam3ImageProcessor(model)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
@@ -973,6 +1008,42 @@ def _predict_with_cache(
     image_name: Optional[str] = None,
     **predict_kwargs: Any,
 ):
+    normalized = _default_variant(variant)
+    if normalized == "sam3" and not active_sam3_enable_segmentation:
+        height, width = np_img.shape[:2]
+        mask = np.zeros((height, width), dtype=np.uint8)
+        box = predict_kwargs.get("box")
+        point_coords = predict_kwargs.get("point_coords")
+        if box is not None and len(box) >= 4:
+            try:
+                x1 = int(round(float(box[0])))
+                y1 = int(round(float(box[1])))
+                x2 = int(round(float(box[2])))
+                y2 = int(round(float(box[3])))
+            except (TypeError, ValueError):
+                x1 = y1 = x2 = y2 = 0
+            x1 = max(0, min(x1, width))
+            x2 = max(0, min(x2, width))
+            y1 = max(0, min(y1, height))
+            y2 = max(0, min(y2, height))
+            if x2 > x1 and y2 > y1:
+                mask[y1:y2, x1:x2] = 1
+        elif point_coords is not None:
+            try:
+                px = int(round(float(point_coords[0][0])))
+                py = int(round(float(point_coords[0][1])))
+            except Exception:
+                px = py = 0
+            px = max(0, min(px, width - 1))
+            py = max(0, min(py, height - 1))
+            size = 2
+            x1 = max(0, px - size)
+            x2 = min(width, px + size)
+            y1 = max(0, py - size)
+            y2 = min(height, py + size)
+            mask[y1:y2, x1:x2] = 1
+        masks = np.asarray([mask], dtype=np.uint8)
+        return masks, None, None
     return predictor_manager.predict(np_img, token, variant, image_name=image_name, **predict_kwargs)
 
 
@@ -1961,6 +2032,32 @@ class QwenTrainRequest(BaseModel):
     max_image_dim: Optional[int] = None
 
 
+class Sam3TrainRequest(BaseModel):
+    dataset_id: str
+    run_name: Optional[str] = None
+    experiment_log_dir: Optional[str] = None
+    train_batch_size: Optional[int] = None
+    val_batch_size: Optional[int] = None
+    num_train_workers: Optional[int] = None
+    num_val_workers: Optional[int] = None
+    max_epochs: Optional[int] = None
+    resolution: Optional[int] = None
+    lr_scale: Optional[float] = None
+    gradient_accumulation_steps: Optional[int] = None
+    val_epoch_freq: Optional[int] = None
+    target_epoch_size: Optional[int] = None
+    num_gpus: Optional[int] = None
+    enable_inst_interactivity: Optional[bool] = None
+    train_limit: Optional[int] = None
+    log_freq: Optional[int] = None
+
+
+class Sam3ModelActivateRequest(BaseModel):
+    checkpoint_path: Optional[str] = None
+    label: Optional[str] = None
+    enable_segmentation: Optional[bool] = None
+
+
 class QwenModelActivateRequest(BaseModel):
     model_id: str
 
@@ -2030,6 +2127,17 @@ QWEN_JOB_ROOT = Path(os.environ.get("QWEN_TRAINING_ROOT", "./uploads/qwen_runs")
 QWEN_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 QWEN_DATASET_ROOT = QWEN_JOB_ROOT / "datasets"
 QWEN_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
+SAM3_JOB_ROOT = Path(os.environ.get("SAM3_TRAINING_ROOT", "./uploads/sam3_runs"))
+SAM3_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+SAM3_DATASET_ROOT = SAM3_JOB_ROOT / "datasets"
+SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
+SAM3_DATASET_META_NAME = "sam3_dataset.json"
+SAM3_REPO_ROOT = (Path(__file__).resolve().parent / "sam3").resolve()
+SAM3_CONFIG_TEMPLATE = Path(__file__).resolve().parent / "sam3_local" / "local_yolo_ft.yaml"
+SAM3_GENERATED_CONFIG_DIR = SAM3_REPO_ROOT / "sam3/train/configs/generated"
+SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+SAM3_BPE_PATH = SAM3_REPO_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
+SAM3_MAX_LOG_LINES = 500
 
 
 @dataclass
@@ -2048,8 +2156,26 @@ class QwenTrainingJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class Sam3TrainingJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    config: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    process: Optional[subprocess.Popen] = None
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
+SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
+SAM3_TRAINING_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
@@ -2164,6 +2290,60 @@ def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
     }
 
 
+def _sam3_job_log(job: Sam3TrainingJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > SAM3_MAX_LOG_LINES:
+        job.logs[:] = job.logs[-SAM3_MAX_LOG_LINES:]
+    job.updated_at = time.time()
+    try:
+        logger.info("[sam3-train %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _sam3_job_update(
+    job: Sam3TrainingJob,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    log_message: bool = True,
+) -> None:
+    if status is not None:
+        job.status = status
+    if message is not None:
+        if message != job.message:
+            job.message = message
+            if log_message:
+                _sam3_job_log(job, message)
+        else:
+            job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
+
+
+def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "logs": job.logs,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
 def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> None:
     try:
         if not jobs:
@@ -2251,6 +2431,96 @@ def _write_qwen_metadata(meta_path: Path, metadata: Dict[str, Any]) -> None:
         logger.warning("Failed to write Qwen metadata for %s: %s", meta_path.parent, exc)
 
 
+def _load_json_metadata(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to read metadata file %s: %s", path, exc)
+    return None
+
+
+def _ensure_qwen_dataset_signature(dataset_dir: Path, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    signature = metadata.get("signature")
+    if signature:
+        return metadata, str(signature)
+    signature = _compute_dir_signature(dataset_dir)
+    metadata["signature"] = signature
+    _persist_qwen_dataset_metadata(dataset_dir, metadata)
+    return metadata, signature
+
+
+def _find_qwen_dataset_by_signature(signature: str) -> Optional[Path]:
+    if not signature:
+        return None
+    for path in QWEN_DATASET_ROOT.iterdir():
+        if not path.is_dir():
+            continue
+        meta = _load_qwen_dataset_metadata(path)
+        if not meta:
+            continue
+        _, sig = _ensure_qwen_dataset_signature(path, meta)
+        if sig == signature:
+            return path
+    return None
+
+
+def _load_sam3_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
+    meta_path = dataset_dir / SAM3_DATASET_META_NAME
+    return _load_json_metadata(meta_path)
+
+
+def _persist_sam3_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
+    meta_path = dataset_dir / SAM3_DATASET_META_NAME
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write SAM3 dataset metadata for %s: %s", dataset_dir, exc)
+
+
+def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
+    cleaned = (dataset_id or "").strip().replace("\\", "/")
+    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
+    candidate_qwen = (QWEN_DATASET_ROOT / safe).resolve()
+    if str(candidate_qwen).startswith(str(QWEN_DATASET_ROOT.resolve())) and candidate_qwen.exists():
+        return candidate_qwen
+    candidate_sam3 = (SAM3_DATASET_ROOT / safe).resolve()
+    if str(candidate_sam3).startswith(str(SAM3_DATASET_ROOT.resolve())) and candidate_sam3.exists():
+        return candidate_sam3
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_dataset_not_found")
+
+
+def _stable_hash(entries: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for item in entries:
+        digest.update(item.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = None) -> str:
+    """Return a stable signature for all files under ``root``."""
+    entries: List[str] = []
+    if not root.exists():
+        return ""
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if allowed_exts is not None and path.suffix.lower() not in allowed_exts:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        rel = path.relative_to(root)
+        entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
+    return _stable_hash(entries)
+
+
 def _persist_qwen_run_metadata(
     result_path: Path,
     config: QwenTrainingConfig,
@@ -2295,6 +2565,7 @@ def _list_qwen_dataset_entries() -> List[Dict[str, Any]]:
         metadata = _load_qwen_dataset_metadata(path)
         if not metadata:
             continue
+        metadata, signature = _ensure_qwen_dataset_signature(path, metadata)
         entry = {
             "id": metadata.get("id") or path.name,
             "label": metadata.get("label") or path.name,
@@ -2305,6 +2576,7 @@ def _list_qwen_dataset_entries() -> List[Dict[str, Any]]:
             "val_count": metadata.get("val_count"),
             "classes": metadata.get("classes", []),
             "context": metadata.get("context", ""),
+            "signature": signature,
         }
         entries.append(entry)
     entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
@@ -2711,6 +2983,23 @@ def qwen_dataset_finalize(
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(job.root_dir, ignore_errors=True)
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"metadata_write_failed:{exc}") from exc
+    signature = _compute_dir_signature(job.root_dir)
+    existing = _find_qwen_dataset_by_signature(signature)
+    if existing is not None:
+        shutil.rmtree(job.root_dir, ignore_errors=True)
+        existing_meta = _load_qwen_dataset_metadata(existing) or {}
+        existing_meta, _ = _ensure_qwen_dataset_signature(existing, existing_meta)
+        logger.info(
+            "[qwen-dataset %s] reused existing dataset=%s (signature match)",
+            job_id[:8],
+            existing.name,
+        )
+        return {
+            "dataset_root": str(existing),
+            "run_name": existing.name,
+            "metadata": existing_meta,
+            "reused": True,
+        }
     desired_name = run_name or job.run_name or f"dataset_{job_id}"
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", desired_name).strip("_") or f"dataset_{job_id}"
     dest_dir = (QWEN_DATASET_ROOT / safe_name).resolve()
@@ -2727,6 +3016,7 @@ def qwen_dataset_finalize(
         "image_count": job.train_count + job.val_count,
         "train_count": job.train_count,
         "val_count": job.val_count,
+        "signature": signature,
     }
     _persist_qwen_dataset_metadata(dest_dir, dataset_meta)
     logger.info(
@@ -2737,7 +3027,7 @@ def qwen_dataset_finalize(
         job.val_count,
         json.dumps(meta_obj, ensure_ascii=False),
     )
-    return {"dataset_root": str(dest_dir), "run_name": safe_name, "metadata": dataset_meta}
+    return {"dataset_root": str(dest_dir), "run_name": safe_name, "metadata": dataset_meta, "reused": False}
 
 
 @app.post("/qwen/dataset/cancel")
@@ -2763,6 +3053,553 @@ def delete_qwen_dataset(dataset_id: str):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found")
     shutil.rmtree(target, ignore_errors=True)
     return {"status": "deleted"}
+
+
+@app.get("/sam3/datasets")
+def list_sam3_datasets():
+    return _list_sam3_datasets()
+
+
+@app.post("/sam3/datasets/{dataset_id}/convert")
+def sam3_convert_dataset(dataset_id: str):
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    annotations_path = dataset_root / "train" / "annotations.jsonl"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    if annotations_path.exists():
+        meta = _convert_qwen_dataset_to_coco(dataset_root)
+    elif train_images.exists() and train_labels.exists():
+        meta = _convert_yolo_dataset_to_coco(dataset_root)
+    else:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
+    return meta
+
+
+def _collect_labels_from_qwen_jsonl(jsonl_path: Path) -> List[str]:
+    labels: set[str] = set()
+    if not jsonl_path.exists():
+        return []
+    try:
+        with jsonl_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                detections = payload.get("detections") or []
+                if not isinstance(detections, list):
+                    continue
+                for det in detections:
+                    if not isinstance(det, dict):
+                        continue
+                    label = str(det.get("label", "")).strip()
+                    if label:
+                        labels.add(label)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to scan labels from %s: %s", jsonl_path, exc)
+    return sorted(labels)
+
+
+def _load_qwen_labelmap(dataset_root: Path) -> List[str]:
+    meta = _load_qwen_dataset_metadata(dataset_root) or {}
+    classes = [str(cls).strip() for cls in meta.get("classes", []) if str(cls).strip()]
+    if classes:
+        return classes
+    labels = set()
+    for split in ("train", "val"):
+        labels.update(_collect_labels_from_qwen_jsonl(dataset_root / split / "annotations.jsonl"))
+    return sorted(labels)
+
+
+def _load_labelmap_file(path: Path) -> List[str]:
+    if not path.exists():
+        return []
+    lower = path.name.lower()
+    try:
+        if lower.endswith(".pkl"):
+            obj = joblib.load(path)
+            if isinstance(obj, list):
+                return [str(x) for x in obj]
+            raise ValueError("labelmap_pickle_not_list")
+        with path.open("r", encoding="utf-8") as handle:
+            classes = [ln.strip() for ln in handle if ln.strip()]
+        return classes
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load labelmap from %s: %s", path, exc)
+        return []
+
+
+def _discover_yolo_labelmap(dataset_root: Path) -> List[str]:
+    for name in ("labelmap.txt", "classes.txt", "labels.txt"):
+        candidate = dataset_root / name
+        classes = _load_labelmap_file(candidate)
+        if classes:
+            return classes
+    return []
+
+
+def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
+    dataset_root = dataset_root.resolve()
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    val_images = dataset_root / "val" / "images"
+    val_labels = dataset_root / "val" / "labels"
+    for path in (train_images, train_labels, val_images, val_labels):
+        if not path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_yolo_split_missing")
+
+    labelmap = _discover_yolo_labelmap(dataset_root)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
+    label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
+    categories = [{"id": cid, "name": name} for name, cid in label_to_id.items()]
+    signature = _compute_dir_signature(dataset_root)
+    existing_meta = _load_sam3_dataset_metadata(dataset_root)
+    if (
+        existing_meta
+        and existing_meta.get("signature") == signature
+        and existing_meta.get("coco_train_json")
+        and existing_meta.get("coco_val_json")
+    ):
+        return existing_meta
+
+    image_id_counter = 1
+    annotation_id = 1
+    images_lookup: Dict[str, int] = {}
+    image_sizes: Dict[str, Tuple[int, int]] = {}
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+    def _image_path_for_label(labels_dir: Path, images_dir: Path, label_file: Path) -> Optional[Path]:
+        stem = label_file.stem
+        for ext in image_exts:
+            candidate = images_dir / f"{stem}{ext}"
+            if candidate.exists():
+                return candidate
+        for candidate in images_dir.glob(f"{stem}.*"):
+            if candidate.suffix.lower() in image_exts:
+                return candidate
+        return None
+
+    def _convert_split(split_images: Path, split_labels: Path, split_name: str) -> str:
+        nonlocal image_id_counter, annotation_id
+        images: List[Dict[str, Any]] = []
+        annotations: List[Dict[str, Any]] = []
+        for label_file in sorted(split_labels.rglob("*.txt")):
+            image_path = _image_path_for_label(split_labels, split_images, label_file)
+            if image_path is None:
+                logger.warning("No matching image for label file %s", label_file)
+                continue
+            image_rel = str(image_path.relative_to(split_images.parent))
+            if image_rel not in images_lookup:
+                try:
+                    with Image.open(image_path) as im:
+                        width, height = im.size
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to read image %s: %s", image_path, exc)
+                    continue
+                images_lookup[image_rel] = image_id_counter
+                image_sizes[image_rel] = (width, height)
+                images.append(
+                    {
+                        "id": image_id_counter,
+                        "file_name": image_rel,
+                        "width": width,
+                        "height": height,
+                    }
+                )
+                image_id_counter += 1
+            image_id = images_lookup[image_rel]
+            width, height = image_sizes.get(image_rel, (None, None))
+            try:
+                with label_file.open("r", encoding="utf-8") as handle:
+                    lines = [ln.strip() for ln in handle if ln.strip()]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to read YOLO labels from %s: %s", label_file, exc)
+                continue
+            for line in lines:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                try:
+                    class_idx = int(float(parts[0]))
+                    cx = float(parts[1])
+                    cy = float(parts[2])
+                    w = float(parts[3])
+                    h = float(parts[4])
+                except (TypeError, ValueError):
+                    continue
+                if class_idx < 0 or class_idx >= len(labelmap):
+                    continue
+                if width is None or height is None:
+                    continue
+                abs_w = w * width
+                abs_h = h * height
+                x1 = cx * width - abs_w / 2.0
+                y1 = cy * height - abs_h / 2.0
+                if abs_w <= 0 or abs_h <= 0:
+                    continue
+                area = abs_w * abs_h
+                annotations.append(
+                    {
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": class_idx + 1,
+                        "bbox": [x1, y1, abs_w, abs_h],
+                        "area": area,
+                        "iscrowd": 0,
+                    }
+                )
+                annotation_id += 1
+        output_path = dataset_root / split_name / "_annotations.coco.json"
+        try:
+            with output_path.open("w", encoding="utf-8") as handle:
+                json.dump({"images": images, "annotations": annotations, "categories": categories}, handle)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}") from exc
+        return str(output_path)
+
+    coco_train = _convert_split(train_images, train_labels, "train")
+    coco_val = _convert_split(val_images, val_labels, "val")
+    sam3_meta = {
+        "id": dataset_root.name,
+        "label": dataset_root.name,
+        "source": "yolo",
+        "dataset_root": str(dataset_root),
+        "signature": signature,
+        "classes": labelmap,
+        "context": "",
+        "image_count": None,
+        "train_count": None,
+        "val_count": None,
+        "coco_train_json": coco_train,
+        "coco_val_json": coco_val,
+        "converted_at": time.time(),
+    }
+    _persist_sam3_dataset_metadata(dataset_root, sam3_meta)
+    return sam3_meta
+
+
+def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
+    dataset_root = dataset_root.resolve()
+    metadata = _load_qwen_dataset_metadata(dataset_root) or {}
+    metadata, signature = _ensure_qwen_dataset_signature(dataset_root, metadata)
+    existing_meta = _load_sam3_dataset_metadata(dataset_root)
+    if (
+        existing_meta
+        and existing_meta.get("signature") == signature
+        and existing_meta.get("coco_train_json")
+        and existing_meta.get("coco_val_json")
+    ):
+        return existing_meta
+
+    labelmap = _load_qwen_labelmap(dataset_root)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
+    label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
+    categories = [{"id": cid, "name": name} for name, cid in label_to_id.items()]
+
+    annotation_id = 1
+    images_lookup: Dict[str, int] = {}
+    image_sizes: Dict[str, Tuple[int, int]] = {}
+
+    def _convert_split(split: str) -> str:
+        nonlocal annotation_id
+        jsonl_path = dataset_root / split / "annotations.jsonl"
+        if not jsonl_path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"sam3_annotations_missing:{split}")
+        images: List[Dict[str, Any]] = []
+        annotations: List[Dict[str, Any]] = []
+        try:
+            with jsonl_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except Exception:
+                        continue
+                    image_rel = payload.get("image")
+                    if not isinstance(image_rel, str):
+                        continue
+                    if image_rel not in images_lookup:
+                        image_path = dataset_root / split / image_rel
+                        if not image_path.exists():
+                            logger.warning("Missing image referenced in %s: %s", jsonl_path, image_path)
+                            continue
+                        try:
+                            with Image.open(image_path) as im:
+                                width, height = im.size
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to read image %s: %s", image_path, exc)
+                            continue
+                        images_lookup[image_rel] = len(images_lookup) + 1
+                        image_sizes[image_rel] = (width, height)
+                        images.append(
+                            {
+                                "id": images_lookup[image_rel],
+                                "file_name": image_rel,
+                                "width": width,
+                                "height": height,
+                            }
+                        )
+                    image_id = images_lookup[image_rel]
+                    width, height = image_sizes.get(image_rel, (None, None))
+                    detections = payload.get("detections") or []
+                    if not isinstance(detections, list):
+                        continue
+                    for det in detections:
+                        if not isinstance(det, dict):
+                            continue
+                        label = str(det.get("label", "")).strip()
+                        if not label or label not in label_to_id:
+                            continue
+                        bbox = det.get("bbox")
+                        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                            try:
+                                x1 = float(bbox[0])
+                                y1 = float(bbox[1])
+                                x2 = float(bbox[2])
+                                y2 = float(bbox[3])
+                            except (TypeError, ValueError):
+                                continue
+                            if width is not None and height is not None:
+                                x1 = max(0.0, min(x1, width))
+                                x2 = max(0.0, min(x2, width))
+                                y1 = max(0.0, min(y1, height))
+                                y2 = max(0.0, min(y2, height))
+                            w = max(0.0, x2 - x1)
+                            h = max(0.0, y2 - y1)
+                            if w <= 0 or h <= 0:
+                                continue
+                            coco_bbox = [x1, y1, w, h]
+                        else:
+                            point = det.get("point")
+                            if not (isinstance(point, (list, tuple)) and len(point) >= 2):
+                                continue
+                            try:
+                                cx = float(point[0])
+                                cy = float(point[1])
+                            except (TypeError, ValueError):
+                                continue
+                            # Convert point to a tiny box to retain the signal.
+                            size = 2.0
+                            x1 = cx - size / 2.0
+                            y1 = cy - size / 2.0
+                            coco_bbox = [x1, y1, size, size]
+                        area = coco_bbox[2] * coco_bbox[3]
+                        if area <= 0:
+                            continue
+                        annotations.append(
+                            {
+                                "id": annotation_id,
+                                "image_id": image_id,
+                                "category_id": label_to_id[label],
+                                "bbox": coco_bbox,
+                                "area": area,
+                                "iscrowd": 0,
+                            }
+                        )
+                        annotation_id += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to convert %s to COCO: %s", jsonl_path, exc)
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_conversion_failed:{split}")
+        output_path = dataset_root / split / "_annotations.coco.json"
+        try:
+            with output_path.open("w", encoding="utf-8") as handle:
+                json.dump({"images": images, "annotations": annotations, "categories": categories}, handle)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}") from exc
+        return str(output_path)
+
+    coco_train = _convert_split("train")
+    coco_val = _convert_split("val")
+    sam3_meta = {
+        "id": metadata.get("id") or dataset_root.name,
+        "label": metadata.get("label") or metadata.get("id") or dataset_root.name,
+        "source": "qwen",
+        "dataset_root": str(dataset_root),
+        "signature": signature,
+        "classes": labelmap,
+        "context": metadata.get("context", ""),
+        "image_count": metadata.get("image_count"),
+        "train_count": metadata.get("train_count"),
+        "val_count": metadata.get("val_count"),
+        "coco_train_json": coco_train,
+        "coco_val_json": coco_val,
+        "converted_at": time.time(),
+    }
+    _persist_sam3_dataset_metadata(dataset_root, sam3_meta)
+    return sam3_meta
+
+
+def _list_sam3_datasets() -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for entry in _list_qwen_dataset_entries():
+        dataset_root = Path(entry["dataset_root"])
+        sam3_meta = _load_sam3_dataset_metadata(dataset_root)
+        coco_ready = False
+        coco_train = None
+        coco_val = None
+        if sam3_meta and sam3_meta.get("signature") == entry.get("signature"):
+            coco_train = sam3_meta.get("coco_train_json")
+            coco_val = sam3_meta.get("coco_val_json")
+            coco_ready = bool(coco_train and coco_val)
+        entries.append(
+            {
+                **entry,
+                "source": "qwen",
+                "coco_ready": coco_ready,
+                "coco_train_json": coco_train,
+                "coco_val_json": coco_val,
+            }
+        )
+    for path in SAM3_DATASET_ROOT.iterdir():
+        if not path.is_dir():
+            continue
+        meta = _load_sam3_dataset_metadata(path)
+        if not meta:
+            continue
+        entries.append(
+            {
+                "id": meta.get("id") or path.name,
+                "label": meta.get("label") or path.name,
+                "dataset_root": str(path),
+                "created_at": meta.get("converted_at") or path.stat().st_mtime,
+                "image_count": meta.get("image_count"),
+                "train_count": meta.get("train_count"),
+                "val_count": meta.get("val_count"),
+                "classes": meta.get("classes", []),
+                "context": meta.get("context", ""),
+                "signature": meta.get("signature"),
+                "source": meta.get("source") or "sam3",
+                "coco_ready": bool(meta.get("coco_train_json") and meta.get("coco_val_json")),
+                "coco_train_json": meta.get("coco_train_json"),
+                "coco_val_json": meta.get("coco_val_json"),
+            }
+        )
+    entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return entries
+
+
+def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    annotations_path = dataset_root / "train" / "annotations.jsonl"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    if annotations_path.exists():
+        meta = _convert_qwen_dataset_to_coco(dataset_root)
+    elif train_images.exists() and train_labels.exists():
+        meta = _convert_yolo_dataset_to_coco(dataset_root)
+    else:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
+    meta["dataset_root"] = str(dataset_root)
+    return meta
+
+
+def _safe_run_name(desired: Optional[str], fallback: str) -> str:
+    name = desired or fallback
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("_") or fallback
+
+
+def _latest_checkpoint_in_dir(checkpoint_dir: Path) -> Optional[str]:
+    if not checkpoint_dir.exists():
+        return None
+    candidates = sorted(
+        checkpoint_dir.glob("*.pt"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return str(candidates[0])
+    return None
+
+
+def _save_sam3_config(cfg: OmegaConf, job_id: str) -> Tuple[str, Path]:
+    SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config_file = SAM3_GENERATED_CONFIG_DIR / f"{job_id}.yaml"
+    OmegaConf.save(config=cfg, f=str(config_file))
+    return f"configs/generated/{config_file.name}", config_file
+
+
+def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: int) -> None:
+    def worker():
+        proc: Optional[subprocess.Popen] = None
+        try:
+            _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
+            config_name, config_file = _save_sam3_config(cfg, job.job_id)
+            cmd = [sys.executable, "train/train.py", "-c", config_name, "--use-cluster", "0"]
+            if num_gpus is not None:
+                cmd.extend(["--num-gpus", str(num_gpus)])
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(SAM3_REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            job.process = proc
+            _sam3_job_log(job, f"Spawned {' '.join(cmd)}")
+            while True:
+                if proc.stdout is None:
+                    break
+                line = proc.stdout.readline()
+                if line == "" and proc.poll() is not None:
+                    break
+                if not line:
+                    continue
+                if job.cancel_event.is_set() and proc.poll() is None:
+                    proc.terminate()
+                    _sam3_job_update(job, status="cancelling", message="Cancellation requested ...")
+                    continue
+                cleaned = line.rstrip("\n")
+                _sam3_job_log(job, cleaned)
+                _sam3_job_update(job, message=cleaned[-200:], log_message=False)
+            retcode = proc.wait() if proc else 1
+            if job.cancel_event.is_set():
+                _sam3_job_update(job, status="cancelled", message="Training cancelled")
+                return
+            if retcode != 0:
+                _sam3_job_update(
+                    job,
+                    status="failed",
+                    message=f"Training failed (exit {retcode})",
+                    error=f"exit_code:{retcode}",
+                )
+                return
+            log_dir = Path(cfg.paths.experiment_log_dir)
+            checkpoint_dir = log_dir / "checkpoints"
+            latest_ckpt = _latest_checkpoint_in_dir(checkpoint_dir)
+            result_payload = {
+                "experiment_log_dir": str(log_dir),
+                "checkpoint": latest_ckpt,
+                "config_path": str(config_file),
+                "enable_segmentation": bool(getattr(cfg.scratch, "enable_segmentation", True)),
+            }
+            _sam3_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
+        except Exception as exc:  # noqa: BLE001
+            _sam3_job_update(job, status="failed", message="Training crashed", error=str(exc))
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+    thread = threading.Thread(target=worker, name=f"sam3-train-{job.job_id}", daemon=True)
+    thread.start()
+
+
+def _get_sam3_job(job_id: str) -> Sam3TrainingJob:
+    with SAM3_TRAINING_JOBS_LOCK:
+        job = SAM3_TRAINING_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_job_not_found")
+        return job
 
 
 @app.post("/qwen/train/dataset/upload")
@@ -3395,6 +4232,144 @@ def cancel_training_job(job_id: str):
         next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
         _job_update(job, status=next_status, message="Cancellation requested ...")
     return {"status": next_status}
+
+
+def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: str) -> Tuple[OmegaConf, int]:
+    cfg = OmegaConf.load(str(SAM3_CONFIG_TEMPLATE))
+    train_ann = Path(meta["coco_train_json"]).resolve()
+    val_ann = Path(meta["coco_val_json"]).resolve()
+    cfg.paths.train_img_folder = str(train_ann.parent)
+    cfg.paths.train_ann_file = str(train_ann)
+    cfg.paths.val_img_folder = str(val_ann.parent)
+    cfg.paths.val_ann_file = str(val_ann)
+    run_name = _safe_run_name(payload.run_name, f"sam3_run_{job_id}")
+    exp_dir = Path(payload.experiment_log_dir) if payload.experiment_log_dir else (SAM3_JOB_ROOT / run_name)
+    cfg.paths.experiment_log_dir = str(exp_dir.resolve())
+    cfg.paths.bpe_path = str(SAM3_BPE_PATH)
+    cfg.launcher.experiment_log_dir = cfg.paths.experiment_log_dir
+    cfg.launcher.gpus_per_node = max(1, int(payload.num_gpus or cfg.launcher.gpus_per_node or 1))
+    cfg.trainer.max_epochs = int(payload.max_epochs) if payload.max_epochs is not None else cfg.trainer.max_epochs
+    cfg.trainer.val_epoch_freq = int(payload.val_epoch_freq) if payload.val_epoch_freq is not None else cfg.trainer.val_epoch_freq
+    cfg.scratch.target_epoch_size = int(payload.target_epoch_size) if payload.target_epoch_size is not None else cfg.scratch.target_epoch_size
+    if payload.resolution is not None:
+        cfg.scratch.resolution = int(payload.resolution)
+    if payload.lr_scale is not None:
+        cfg.scratch.lr_scale = float(payload.lr_scale)
+    if payload.gradient_accumulation_steps is not None:
+        cfg.scratch.gradient_accumulation_steps = int(payload.gradient_accumulation_steps)
+    cfg.trainer.gradient_accumulation_steps = cfg.scratch.gradient_accumulation_steps
+    if payload.train_batch_size is not None:
+        cfg.scratch.train_batch_size = int(payload.train_batch_size)
+    if payload.val_batch_size is not None:
+        cfg.scratch.val_batch_size = int(payload.val_batch_size)
+    if payload.num_train_workers is not None:
+        cfg.scratch.num_train_workers = int(payload.num_train_workers)
+    if payload.num_val_workers is not None:
+        cfg.scratch.num_val_workers = int(payload.num_val_workers)
+    if payload.enable_inst_interactivity is not None:
+        cfg.scratch.enable_inst_interactivity = bool(payload.enable_inst_interactivity)
+    if payload.train_limit is not None:
+        cfg.dataset.num_images = int(payload.train_limit)
+    if payload.log_freq is not None and "logging" in cfg.trainer:
+        cfg.trainer.logging.log_freq = int(payload.log_freq)
+    cfg.trainer.checkpoint.save_dir = f"{cfg.launcher.experiment_log_dir}/checkpoints"
+    if "meters" in cfg.trainer and "val" in cfg.trainer.meters:
+        try:
+            cfg.trainer.meters.val.roboflow100.detection.dump_dir = f"{cfg.launcher.experiment_log_dir}/dumps/local"
+            cfg.trainer.meters.val.roboflow100.detection.pred_file_evaluators[0].gt_path = cfg.paths.val_ann_file
+        except Exception:
+            pass
+    cfg.launcher.num_nodes = 1
+    cfg.submitit.use_cluster = False
+    cfg.submitit.cpus_per_task = max(cfg.scratch.num_train_workers, cfg.submitit.cpus_per_task or 0)
+    Path(cfg.paths.experiment_log_dir).mkdir(parents=True, exist_ok=True)
+    return cfg, int(cfg.launcher.gpus_per_node)
+
+
+@app.post("/sam3/train/jobs")
+def create_sam3_training_job(payload: Sam3TrainRequest):
+    meta = _resolve_sam3_dataset_meta(payload.dataset_id)
+    job_id = uuid.uuid4().hex
+    cfg, num_gpus = _build_sam3_config(payload, meta, job_id)
+    config_dict = OmegaConf.to_container(cfg, resolve=False)  # type: ignore[arg-type]
+    job = Sam3TrainingJob(job_id=job_id, config=config_dict)
+    with SAM3_TRAINING_JOBS_LOCK:
+        SAM3_TRAINING_JOBS[job_id] = job
+        _sam3_job_log(job, "Job queued")
+    logger.info("[sam3-train %s] dataset=%s gpus=%s", job_id[:8], payload.dataset_id, num_gpus)
+    _start_sam3_training_worker(job, cfg, num_gpus)
+    return {"job_id": job_id}
+
+
+@app.get("/sam3/train/jobs")
+def list_sam3_training_jobs():
+    with SAM3_TRAINING_JOBS_LOCK:
+        jobs = sorted(SAM3_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+        return [_serialize_sam3_job(job) for job in jobs]
+
+
+@app.get("/sam3/train/jobs/{job_id}")
+def get_sam3_training_job(job_id: str):
+    job = _get_sam3_job(job_id)
+    return _serialize_sam3_job(job)
+
+
+@app.post("/sam3/train/jobs/{job_id}/cancel")
+def cancel_sam3_training_job(job_id: str):
+    job = _get_sam3_job(job_id)
+    with SAM3_TRAINING_JOBS_LOCK:
+        if job.status in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        if job.cancel_event.is_set():
+            return {"status": job.status}
+        job.cancel_event.set()
+        if job.process and job.process.poll() is None:
+            try:
+                job.process.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
+        _sam3_job_update(job, status=next_status, message="Cancellation requested ...")
+    return {"status": job.status}
+
+
+@app.get("/sam3/models/status")
+def sam3_model_status():
+    return {
+        "checkpoint": active_sam3_checkpoint,
+        "active": active_sam3_metadata,
+        "enable_segmentation": active_sam3_enable_segmentation,
+        "loaded_text": sam3_text_model is not None,
+    }
+
+
+@app.post("/sam3/models/activate")
+def activate_sam3_model(payload: Sam3ModelActivateRequest):
+    global active_sam3_checkpoint, active_sam3_model_id, active_sam3_metadata, active_sam3_enable_segmentation
+    checkpoint_path = payload.checkpoint_path
+    source = "huggingface"
+    resolved_path: Optional[Path] = None
+    if checkpoint_path:
+        resolved_path = Path(checkpoint_path).resolve()
+        if not resolved_path.exists():
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_not_found")
+        checkpoint_path = str(resolved_path)
+        source = "custom"
+    enable_seg = active_sam3_enable_segmentation if checkpoint_path is not None else True
+    if payload.enable_segmentation is not None:
+        enable_seg = bool(payload.enable_segmentation)
+    active_sam3_checkpoint = checkpoint_path
+    active_sam3_enable_segmentation = enable_seg
+    active_sam3_model_id = payload.label or (resolved_path.stem if resolved_path else "facebook/sam3")
+    active_sam3_metadata = {
+        "id": active_sam3_model_id,
+        "label": payload.label or active_sam3_model_id,
+        "checkpoint": active_sam3_checkpoint,
+        "source": source,
+        "enable_segmentation": active_sam3_enable_segmentation,
+    }
+    _reset_sam3_runtime()
+    return {"active": active_sam3_metadata}
 
 
 @app.post("/qwen/train/jobs")

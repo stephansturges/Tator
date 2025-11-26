@@ -137,6 +137,16 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
 4. **(Optional) Pin checkpoints manually** – if you want deterministic paths, call `huggingface_hub.hf_hub_download` (examples in `sam3integration.txt`) and set `SAM3_CHECKPOINT_PATH` / `SAM3_MODEL_ID` to the downloaded files.
 5. **Run the API** — once authenticated, start the backend as usual. Selecting “SAM 3” in the UI enables both the point/bbox flows and the new text prompt panel.
 
+#### Experimental: Training SAM3 (box-only)
+> **Unstable:** this path is still changing. Training currently requires a checkout of the upstream SAM3 repo inside this project; expect sharp edges.
+
+- **Clone upstream into Tator:** from the repo root  
+  `git clone https://github.com/facebookresearch/sam3.git sam3`  
+  then `pip install -e sam3 && pip install einops`.
+- **GPU + CUDA Torch required:** ensure your `torch` build can see CUDA; CPU-only installs will fail.
+- **Kick off training:** start `uvicorn` as usual, open the **Train SAM3** tab, pick a dataset (reuses cached Qwen datasets without re-upload), and click **Start**. Logs stream live and the loss line chart updates as batches finish.
+- **Activate the checkpoint:** when a run completes, use **Activate checkpoint** in the same tab to swap the backend SAM3 model to your finetune.
+
 
 ### Running the Backend on a Remote GPU Host
 You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a remote machine:

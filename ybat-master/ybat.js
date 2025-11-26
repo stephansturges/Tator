@@ -1823,6 +1823,124 @@ function setQwenTrainMessage(text, variant = null) {
     }
 }
 
+const sam3LossState = {
+    points: [],
+    chart: null, // { ctx }
+};
+
+function initSam3LossChart() {
+    if (!sam3TrainElements.lossCanvas || sam3LossState.chart) return;
+    const ctx = sam3TrainElements.lossCanvas.getContext("2d");
+    sam3LossState.chart = { ctx };
+}
+
+function parseSam3LossFromLog(line) {
+    // Expect log lines like "Losses/train_all_loss: 9.58e+01"
+    const match = line.match(/Losses\/train_all_loss:\s*([0-9.+-eE]+)/);
+    return match ? Number(match[1]) : null;
+}
+
+function drawSam3LossChart(points) {
+    const canvas = sam3TrainElements.lossCanvas;
+    if (!canvas || !points.length) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const width = Math.max(canvas.clientWidth || 400, 320);
+    const height = Math.max(canvas.clientHeight || 200, 160);
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+    }
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    const padding = { top: 14, right: 14, bottom: 18, left: 48 };
+    const chartWidth = Math.max(1, width - padding.left - padding.right);
+    const chartHeight = Math.max(1, height - padding.top - padding.bottom);
+
+    const minX = points[0].x;
+    const maxX = points[points.length - 1].x;
+    const xRange = Math.max(1, maxX - minX);
+
+    const yMinRaw = Math.min(...points.map((p) => p.y));
+    const yMaxRaw = Math.max(...points.map((p) => p.y));
+    const yMin = Math.max(0, Math.min(yMinRaw, yMaxRaw - 1e-6));
+    const yMax = Math.max(yMin + 1e-6, yMaxRaw);
+    const yRange = yMax - yMin;
+
+    const tickCount = 4;
+    const tickStep = yRange / tickCount;
+    const ticks = [];
+    for (let i = 0; i <= tickCount; i += 1) {
+        ticks.push(yMin + tickStep * i);
+    }
+
+    // Grid + labels
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 1;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "12px sans-serif";
+    ticks.forEach((tick) => {
+        const norm = (tick - yMin) / yRange;
+        const y = padding.top + (1 - norm) * chartHeight;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(width - padding.right, y);
+        ctx.stroke();
+        ctx.fillText(tick.toExponential(1), padding.left - 6, y);
+    });
+
+    // Axes
+    ctx.strokeStyle = "#94a3b8";
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top);
+    ctx.lineTo(padding.left, padding.top + chartHeight);
+    ctx.stroke();
+
+    // Line
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    points.forEach((point, idx) => {
+        const normX = (point.x - minX) / xRange;
+        const normY = (point.y - yMin) / yRange;
+        const xPos = padding.left + normX * chartWidth;
+        const yPos = padding.top + (1 - normY) * chartHeight;
+        if (idx === 0) {
+            ctx.moveTo(xPos, yPos);
+        } else {
+            ctx.lineTo(xPos, yPos);
+        }
+    });
+    ctx.stroke();
+    ctx.restore();
+}
+
+function updateSam3LossChart(logLines) {
+    if (!sam3TrainElements.lossCanvas) return;
+    initSam3LossChart();
+    const pointsAdded = [];
+    logLines.forEach((line) => {
+        const val = parseSam3LossFromLog(line);
+        if (val !== null && Number.isFinite(val)) {
+            const step = sam3LossState.points.length;
+            const point = { x: step, y: val };
+            sam3LossState.points.push(point);
+            pointsAdded.push(point);
+        }
+    });
+    if (sam3LossState.points.length) {
+        drawSam3LossChart(sam3LossState.points);
+    }
+}
+
 function readNumberInput(input, { integer = false } = {}) {
     if (!input) {
         return undefined;
@@ -2182,6 +2300,7 @@ function updateSam3Ui(job) {
         const logs = Array.isArray(job.logs) ? job.logs : [];
         const lines = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
         sam3TrainElements.log.textContent = lines.slice(-200).join("\n");
+        updateSam3LossChart(lines);
     }
     if (sam3TrainElements.summary) {
         if (job.result && job.result.checkpoint) {
@@ -2355,6 +2474,7 @@ async function initSam3TrainUi() {
     sam3TrainElements.summary = document.getElementById("sam3Summary");
     sam3TrainElements.log = document.getElementById("sam3Log");
     sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
+    sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
     sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
     if (sam3TrainElements.datasetSelect) {
         sam3TrainElements.datasetSelect.addEventListener("change", () => {

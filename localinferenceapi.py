@@ -2132,11 +2132,11 @@ SAM3_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_ROOT = SAM3_JOB_ROOT / "datasets"
 SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
-SAM3_REPO_ROOT = (Path(__file__).resolve().parent / "sam3").resolve()
-SAM3_CONFIG_TEMPLATE = Path(__file__).resolve().parent / "sam3_local" / "local_yolo_ft.yaml"
+SAM3_REPO_ROOT = Path(__file__).resolve().parent.resolve()
+SAM3_CONFIG_TEMPLATE = SAM3_REPO_ROOT / "sam3_local" / "local_yolo_ft.yaml"
 SAM3_GENERATED_CONFIG_DIR = SAM3_REPO_ROOT / "sam3/train/configs/generated"
 SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-SAM3_BPE_PATH = SAM3_REPO_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
+SAM3_BPE_PATH = SAM3_REPO_ROOT / "sam3" / "assets" / "bpe_simple_vocab_16e6.txt.gz"
 SAM3_MAX_LOG_LINES = 500
 
 
@@ -3522,7 +3522,7 @@ def _save_sam3_config(cfg: OmegaConf, job_id: str) -> Tuple[str, Path]:
     SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config_file = SAM3_GENERATED_CONFIG_DIR / f"{job_id}.yaml"
     OmegaConf.save(config=cfg, f=str(config_file))
-    return f"configs/generated/{config_file.name}", config_file
+    return f"generated/{config_file.name}", config_file
 
 
 def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: int) -> None:
@@ -3531,7 +3531,7 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
         try:
             _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
-            cmd = [sys.executable, "train/train.py", "-c", config_name, "--use-cluster", "0"]
+            cmd = [sys.executable, "-m", "sam3.train.train", "-c", config_name, "--use-cluster", "0"]
             if num_gpus is not None:
                 cmd.extend(["--num-gpus", str(num_gpus)])
             proc = subprocess.Popen(

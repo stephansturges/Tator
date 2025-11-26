@@ -12,7 +12,7 @@ paths:
   val_img_folder: <VAL_IMG_DIR>
   val_ann_file: <VAL_COCO_JSON>
   experiment_log_dir: ./uploads/sam3_runs/default
-  bpe_path: sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  bpe_path: assets/bpe_simple_vocab_16e6.txt.gz
 
 # ============================================================================
 # Dataset Configuration (box-only)

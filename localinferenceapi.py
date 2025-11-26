@@ -2138,7 +2138,7 @@ SAM3_PACKAGE_ROOT = SAM3_VENDOR_ROOT / "sam3"
 SAM3_CONFIG_TEMPLATE = SAM3_REPO_ROOT / "sam3_local" / "local_yolo_ft.yaml"
 SAM3_GENERATED_CONFIG_DIR = SAM3_PACKAGE_ROOT / "train/configs/generated"
 SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-SAM3_BPE_PATH = SAM3_PACKAGE_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
+SAM3_BPE_PATH = SAM3_VENDOR_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
 SAM3_MAX_LOG_LINES = 500
 
 

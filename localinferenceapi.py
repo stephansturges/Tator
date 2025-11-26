@@ -3523,7 +3523,8 @@ def _latest_checkpoint_in_dir(checkpoint_dir: Path) -> Optional[str]:
 def _save_sam3_config(cfg: OmegaConf, job_id: str) -> Tuple[str, Path]:
     SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config_file = SAM3_GENERATED_CONFIG_DIR / f"{job_id}.yaml"
-    OmegaConf.save(config=cfg, f=str(config_file))
+    yaml_text = OmegaConf.to_yaml(cfg)
+    config_file.write_text("# @package _global_\n" + yaml_text, encoding="utf-8")
     return f"configs/generated/{config_file.name}", config_file
 
 
@@ -3533,7 +3534,8 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
         try:
             _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
-            cmd = [sys.executable, "-m", "sam3.train.train", "-c", config_name, "--use-cluster", "0"]
+            script_path = SAM3_PACKAGE_ROOT / "train" / "train.py"
+            cmd = [sys.executable, str(script_path), "-c", config_name, "--use-cluster", "0"]
             if num_gpus is not None:
                 cmd.extend(["--num-gpus", str(num_gpus)])
             env = os.environ.copy()

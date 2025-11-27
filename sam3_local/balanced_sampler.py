@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 import math
-import random
-from typing import Iterable, Iterator, List, Optional, Sequence
+from typing import Iterator, List, Optional, Sequence
 
 import torch
 from torch.utils.data import Sampler
 from torch.utils.data.distributed import DistributedSampler
+
+_logger = logging.getLogger(__name__)
+_LOGGED_SUMMARY = False
 
 
 def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
@@ -14,6 +17,7 @@ def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
     Compute per-image weights based on inverse class frequency.
     Each image weight = sum(1 / freq[c]) over its categories.
     """
+    global _LOGGED_SUMMARY
     cat_counts = {}
     for ann in coco.getAnnIds():
         ann_obj = coco.loadAnns([ann])[0]
@@ -31,9 +35,30 @@ def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
             freq = cat_counts.get(cid, 1)
             w += 1.0 / max(1, freq)
         weights.append(w if w > 0 else 1.0)
-    # Normalize to avoid extreme values
     total = sum(weights) or 1.0
-    return [w / total for w in weights]
+    weights = [w / total for w in weights]
+    if not _LOGGED_SUMMARY:
+        _LOGGED_SUMMARY = True
+        try:
+            # Summarize counts and weights
+            cat_items = sorted(cat_counts.items(), key=lambda kv: kv[1])
+            smallest = cat_items[: min(5, len(cat_items))]
+            largest = cat_items[-min(5, len(cat_items)) :] if cat_items else []
+            w_min, w_max = min(weights), max(weights)
+            w_avg = sum(weights) / len(weights)
+            _logger.info(
+                "[sam3-balance] classes=%s images=%s min_w=%.4f avg_w=%.4f max_w=%.4f smallest=%s largest=%s",
+                len(cat_counts),
+                len(ids),
+                w_min,
+                w_avg,
+                w_max,
+                smallest,
+                largest,
+            )
+        except Exception:
+            pass
+    return weights
 
 
 class BalancedSampler(Sampler[int]):
@@ -84,4 +109,3 @@ class DistributedBalancedSampler(DistributedSampler):
 
     def __len__(self) -> int:
         return self.num_samples
-

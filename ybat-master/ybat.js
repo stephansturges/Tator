@@ -1961,23 +1961,20 @@ function drawSam3LossChart() {
     const maxX = Math.max(...seriesX);
     const xRange = Math.max(1, maxX - minX);
 
-    // Average loss axis (left)
-    const [avgMinRaw, avgMaxRaw] = hasAvg ? getMinMax(sam3LossState.avgPoints, (p) => p.y) : [0, 1];
-    const avgMin = Math.max(0, Math.min(avgMinRaw, avgMaxRaw - 1e-6));
-    const avgMax = Math.max(avgMin + 1e-6, avgMaxRaw);
-    const avgRange = avgMax - avgMin;
-
-    // Instant loss axis (right)
-    const [instMinRaw, instMaxRaw] = hasInst ? getMinMax(sam3LossState.instPoints, (p) => p.y) : [0, 1];
-    const instMin = Math.max(0, Math.min(instMinRaw, instMaxRaw - 1e-6));
-    const instMax = Math.max(instMin + 1e-6, instMaxRaw);
-    const instRange = instMax - instMin;
+    // Shared axis across both series to keep scales comparable
+    const allPoints = [];
+    if (hasAvg) allPoints.push(...sam3LossState.avgPoints);
+    if (hasInst) allPoints.push(...sam3LossState.instPoints);
+    const [yMinRaw, yMaxRaw] = allPoints.length ? getMinMax(allPoints, (p) => p.y) : [0, 1];
+    const yMin = Math.max(0, Math.min(yMinRaw, yMaxRaw - 1e-6));
+    const yMax = Math.max(yMin + 1e-6, yMaxRaw);
+    const yRange = yMax - yMin;
 
     const tickCount = 4;
-    const avgTickStep = avgRange / tickCount;
+    const avgTickStep = yRange / tickCount;
     const avgTicks = [];
     for (let i = 0; i <= tickCount; i += 1) {
-        avgTicks.push(avgMin + avgTickStep * i);
+        avgTicks.push(yMin + avgTickStep * i);
     }
 
     // Grid + labels
@@ -1988,7 +1985,7 @@ function drawSam3LossChart() {
     ctx.fillStyle = "#94a3b8";
     ctx.font = "12px sans-serif";
     avgTicks.forEach((tick) => {
-        const norm = (tick - avgMin) / avgRange;
+        const norm = (tick - yMin) / yRange;
         const y = padding.top + (1 - norm) * chartHeight;
         ctx.beginPath();
         ctx.moveTo(padding.left, y);
@@ -2013,7 +2010,7 @@ function drawSam3LossChart() {
         ctx.beginPath();
         sam3LossState.avgPoints.forEach((point, idx) => {
             const normX = (point.x - minX) / xRange;
-            const normY = (point.y - avgMin) / avgRange;
+            const normY = (point.y - yMin) / yRange;
             const xPos = padding.left + normX * chartWidth;
             const yPos = padding.top + (1 - normY) * chartHeight;
             if (idx === 0) {
@@ -2025,30 +2022,14 @@ function drawSam3LossChart() {
         ctx.stroke();
     }
 
-    // Instant loss line (orange) + right axis
+    // Instant loss line (orange) on shared axis
     if (hasInst) {
-        // Right axis ticks
-        ctx.strokeStyle = "#f97316";
-        ctx.fillStyle = "#f97316";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        for (let i = 0; i <= tickCount; i += 1) {
-            const tick = instMin + (instRange / tickCount) * i;
-            const norm = (tick - instMin) / instRange;
-            const y = padding.top + (1 - norm) * chartHeight;
-            ctx.beginPath();
-            ctx.moveTo(width - padding.right, y);
-            ctx.lineTo(width - padding.right + 6, y);
-            ctx.stroke();
-            ctx.fillText(tick.toExponential(1), width - padding.right + 8, y);
-        }
-
         ctx.strokeStyle = "#f97316";
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         sam3LossState.instPoints.forEach((point, idx) => {
             const normX = (point.x - minX) / xRange;
-            const normY = (point.y - instMin) / instRange;
+            const normY = (point.y - yMin) / yRange;
             const xPos = padding.left + normX * chartWidth;
             const yPos = padding.top + (1 - normY) * chartHeight;
             if (idx === 0) {

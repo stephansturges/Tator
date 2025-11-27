@@ -19,7 +19,12 @@ paths:
 # ============================================================================
 dataset:
   num_images: null  # limit training images; null uses all
-  class_balance: False  # oversample rare classes (custom sampler)
+  class_balance: False  # enable custom sampler
+  balance_strategy: inv_sqrt  # none|inv_sqrt|clipped_inv|effective_num|focal
+  balance_power: 0.5        # used by inv_sqrt/clipped_inv (1/freq**power)
+  balance_clip: 10.0        # max ratio (max/min) for clipped_inv; null disables clipping
+  balance_beta: 0.99        # beta for effective number of samples
+  balance_gamma: 0.5        # gamma for focal-style sampling
 
   train_transforms:
     - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
@@ -227,6 +232,11 @@ trainer:
         load_segmentation: ${scratch.enable_segmentation}
         dataset_config:
           class_balance: ${dataset.class_balance}
+          balance_strategy: ${dataset.balance_strategy}
+          balance_power: ${dataset.balance_power}
+          balance_clip: ${dataset.balance_clip}
+          balance_beta: ${dataset.balance_beta}
+          balance_gamma: ${dataset.balance_gamma}
         max_ann_per_img: 500000
         multiplier: 1
         max_train_queries: 50000
@@ -255,6 +265,11 @@ trainer:
           _partial_: true
         dataset_config:
           class_balance: ${dataset.class_balance}
+          balance_strategy: ${dataset.balance_strategy}
+          balance_power: ${dataset.balance_power}
+          balance_clip: ${dataset.balance_clip}
+          balance_beta: ${dataset.balance_beta}
+          balance_gamma: ${dataset.balance_gamma}
         img_folder: ${paths.val_img_folder}
         ann_file: ${paths.val_ann_file}
         transforms: ${dataset.val_transforms}

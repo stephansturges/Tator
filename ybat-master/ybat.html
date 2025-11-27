@@ -618,8 +618,41 @@
                                 <label for="sam3TargetEpochSize">Target epoch size</label>
                                 <input type="number" id="sam3TargetEpochSize" min="1" value="1500" title="Number of batches to treat as one epoch. Caps epoch length even if the dataset would yield more batches. Lower = shorter epochs and faster feedback; higher = longer epochs." />
                             </div>
-                            <div class="training-toggle-row">
-                                <label><input type="checkbox" id="sam3BalanceClasses" /> Balance classes (oversample rare categories)</label>
+                            <div>
+                                <label for="sam3BalanceStrategy" title="Choose how to rebalance rare classes.">
+                                    Balance strategy
+                                </label>
+                                <select id="sam3BalanceStrategy">
+                                    <option value="none" selected>None (uniform sampling)</option>
+                                    <option value="inv_sqrt">Mild: 1/sqrt(freq)</option>
+                                    <option value="clipped_inv">Clipped inverse-freq</option>
+                                    <option value="effective_num">Effective number of samples</option>
+                                    <option value="focal">Focal sampling</option>
+                                </select>
+                            </div>
+                            <div class="balance-param-row sam3-balance-param" data-param="power">
+                                <label for="sam3BalancePower" title="Exponent for inverse-frequency weighting (1/freq^power). Lower = milder.">
+                                    Inverse power
+                                </label>
+                                <input type="number" id="sam3BalancePower" step="0.1" min="0" value="0.5" />
+                            </div>
+                            <div class="balance-param-row sam3-balance-param" data-param="clip">
+                                <label for="sam3BalanceClip" title="Clamp the ratio between highest and lowest weights. e.g., 10 means rare classes get at most 10x the weight of common classes.">
+                                    Clip ratio (max/min)
+                                </label>
+                                <input type="number" id="sam3BalanceClip" step="1" min="1" value="10" />
+                            </div>
+                            <div class="balance-param-row sam3-balance-param" data-param="beta">
+                                <label for="sam3BalanceBeta" title="Beta for effective number of samples weighting. Higher (0.99-0.999) = stronger emphasis on rare classes.">
+                                    Beta (effective num)
+                                </label>
+                                <input type="number" id="sam3BalanceBeta" step="0.001" min="0" max="0.9999" value="0.99" />
+                            </div>
+                            <div class="balance-param-row sam3-balance-param" data-param="gamma">
+                                <label for="sam3BalanceGamma" title="Gamma for focal-style sampling. Higher = more boost to rare/low-freq classes.">
+                                    Gamma (focal)
+                                </label>
+                                <input type="number" id="sam3BalanceGamma" step="0.1" min="0" value="0.5" />
                             </div>
                             <div>
                                 <label for="sam3Warmup">Warmup steps</label>

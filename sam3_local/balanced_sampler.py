@@ -40,22 +40,18 @@ def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
     if not _LOGGED_SUMMARY:
         _LOGGED_SUMMARY = True
         try:
-            # Summarize counts and weights
             cat_items = sorted(cat_counts.items(), key=lambda kv: kv[1])
             smallest = cat_items[: min(5, len(cat_items))]
             largest = cat_items[-min(5, len(cat_items)) :] if cat_items else []
             w_min, w_max = min(weights), max(weights)
             w_avg = sum(weights) / len(weights)
-            _logger.info(
-                "[sam3-balance] classes=%s images=%s min_w=%.4f avg_w=%.4f max_w=%.4f smallest=%s largest=%s",
-                len(cat_counts),
-                len(ids),
-                w_min,
-                w_avg,
-                w_max,
-                smallest,
-                largest,
+            msg = (
+                f"[sam3-balance] classes={len(cat_counts)} images={len(ids)} "
+                f"min_w={w_min:.4f} avg_w={w_avg:.4f} max_w={w_max:.4f} "
+                f"smallest={smallest} largest={largest}"
             )
+            print(msg, flush=True)
+            _logger.info(msg)
         except Exception:
             pass
     return weights

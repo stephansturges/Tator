@@ -1116,7 +1116,18 @@ hr {
     display: flex;
     flex-direction: column;
     gap: 18px;
-    min-height: calc(100vh - 140px);
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+    padding-right: 10px;
+}
+
+.training-status-section::-webkit-scrollbar {
+    width: 8px;
+}
+
+.training-status-section::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.6);
+    border-radius: 4px;
 }
 
 

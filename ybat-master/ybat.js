@@ -1825,9 +1825,8 @@ function setQwenTrainMessage(text, variant = null) {
 
 const sam3LossState = {
     jobId: null,
-    points: [],
-    vramPoints: [],
-    vramMaxGb: null,
+    avgPoints: [],
+    instPoints: [],
     lastLogCount: 0,
     chart: null, // { ctx }
 };
@@ -1846,9 +1845,8 @@ function initSam3LossChart() {
 
 function resetSam3LossChart(jobId = null) {
     sam3LossState.jobId = jobId;
-    sam3LossState.points = [];
-    sam3LossState.vramPoints = [];
-    sam3LossState.vramMaxGb = null;
+    sam3LossState.avgPoints = [];
+    sam3LossState.instPoints = [];
     sam3LossState.lastLogCount = 0;
     const canvas = sam3TrainElements.lossCanvas;
     if (canvas) {
@@ -1861,15 +1859,16 @@ function resetSam3LossChart(jobId = null) {
     }
 }
 
-function parseSam3LossFromLog(line) {
+function parseSam3LossPair(line) {
     // Expect log lines like "Losses/train_all_loss: 9.58e+01 (1.23e+02)"
-    // Prefer the running average in parens when available; fall back to the instant value.
     const match = line.match(/Losses\/train_all_loss:\s*([0-9.+-eE]+)(?:\s*\(\s*([0-9.+-eE]+)\s*\))?/);
     if (!match) return null;
-    const instant = Number(match[1]);
+    const inst = Number(match[1]);
     const avg = match[2] !== undefined ? Number(match[2]) : null;
-    const chosen = Number.isFinite(avg) ? avg : instant;
-    return Number.isFinite(chosen) ? chosen : null;
+    return {
+        instant: Number.isFinite(inst) ? inst : null,
+        average: Number.isFinite(avg) ? avg : null,
+    };
 }
 
 function formatEta(seconds) {
@@ -1919,18 +1918,6 @@ function updateSam3Eta(progress) {
     }
 }
 
-function parseSam3VramFromLog(line) {
-    // Expect "Mem (GB): 19.00 (18.64/19.00)" -> current, avg, peak/total
-    const match = line.match(/Mem\s*\(GB\):\s*([0-9.+-eE]+)(?:\s*\(\s*([0-9.+-eE]+)\s*\/\s*([0-9.+-eE]+)\s*\))?/);
-    if (!match) return null;
-    const current = Number(match[1]);
-    const maxSeen = match[3] !== undefined ? Number(match[3]) : null;
-    return {
-        current: Number.isFinite(current) ? current : null,
-        max: Number.isFinite(maxSeen) ? maxSeen : null,
-    };
-}
-
 function getMinMax(arr, accessor) {
     let min = Infinity;
     let max = -Infinity;
@@ -1947,11 +1934,11 @@ function getMinMax(arr, accessor) {
     return [min, max];
 }
 
-function drawSam3LossChart(points) {
+function drawSam3LossChart() {
     const canvas = sam3TrainElements.lossCanvas;
-    const hasPoints = points && points.length;
-    const hasVram = sam3LossState.vramPoints && sam3LossState.vramPoints.length;
-    if (!canvas || (!hasPoints && !hasVram)) return;
+    const hasAvg = sam3LossState.avgPoints && sam3LossState.avgPoints.length;
+    const hasInst = sam3LossState.instPoints && sam3LossState.instPoints.length;
+    if (!canvas || (!hasAvg && !hasInst)) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -1971,37 +1958,33 @@ function drawSam3LossChart(points) {
     const chartHeight = Math.max(1, height - padding.top - padding.bottom);
 
     const seriesX = [];
-    if (hasPoints) {
-        seriesX.push(points[0].x, points[points.length - 1].x);
+    if (hasAvg) {
+        seriesX.push(sam3LossState.avgPoints[0].x, sam3LossState.avgPoints[sam3LossState.avgPoints.length - 1].x);
     }
-    if (hasVram) {
-        seriesX.push(sam3LossState.vramPoints[0].x, sam3LossState.vramPoints[sam3LossState.vramPoints.length - 1].x);
+    if (hasInst) {
+        seriesX.push(sam3LossState.instPoints[0].x, sam3LossState.instPoints[sam3LossState.instPoints.length - 1].x);
     }
     const minX = Math.min(...seriesX);
     const maxX = Math.max(...seriesX);
     const xRange = Math.max(1, maxX - minX);
 
-    // Loss axis (left)
-    const [yLossMinRaw, yLossMaxRaw] = hasPoints ? getMinMax(points, (p) => p.y) : [0, 1];
-    const yMin = Math.max(0, Math.min(yLossMinRaw, yLossMaxRaw - 1e-6));
-    const yMax = Math.max(yMin + 1e-6, yLossMaxRaw);
-    const yRange = yMax - yMin;
+    // Average loss axis (left)
+    const [avgMinRaw, avgMaxRaw] = hasAvg ? getMinMax(sam3LossState.avgPoints, (p) => p.y) : [0, 1];
+    const avgMin = Math.max(0, Math.min(avgMinRaw, avgMaxRaw - 1e-6));
+    const avgMax = Math.max(avgMin + 1e-6, avgMaxRaw);
+    const avgRange = avgMax - avgMin;
 
-    // VRAM axis (right)
-    let vramMin = 0;
-    let vramMax = sam3LossState.vramMaxGb || 1;
-    if (hasVram) {
-        const [minV, maxV] = getMinMax(sam3LossState.vramPoints, (p) => p.y);
-        vramMin = Math.min(0, minV);
-        vramMax = sam3LossState.vramMaxGb || Math.max(maxV, 0.1);
-    }
-    const vramRange = Math.max(0.1, vramMax - vramMin);
+    // Instant loss axis (right)
+    const [instMinRaw, instMaxRaw] = hasInst ? getMinMax(sam3LossState.instPoints, (p) => p.y) : [0, 1];
+    const instMin = Math.max(0, Math.min(instMinRaw, instMaxRaw - 1e-6));
+    const instMax = Math.max(instMin + 1e-6, instMaxRaw);
+    const instRange = instMax - instMin;
 
     const tickCount = 4;
-    const tickStep = yRange / tickCount;
-    const ticks = [];
+    const avgTickStep = avgRange / tickCount;
+    const avgTicks = [];
     for (let i = 0; i <= tickCount; i += 1) {
-        ticks.push(yMin + tickStep * i);
+        avgTicks.push(avgMin + avgTickStep * i);
     }
 
     // Grid + labels
@@ -2011,8 +1994,8 @@ function drawSam3LossChart(points) {
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#94a3b8";
     ctx.font = "12px sans-serif";
-    ticks.forEach((tick) => {
-        const norm = (tick - yMin) / yRange;
+    avgTicks.forEach((tick) => {
+        const norm = (tick - avgMin) / avgRange;
         const y = padding.top + (1 - norm) * chartHeight;
         ctx.beginPath();
         ctx.moveTo(padding.left, y);
@@ -2028,49 +2011,51 @@ function drawSam3LossChart(points) {
     ctx.lineTo(padding.left, padding.top + chartHeight);
     ctx.stroke();
 
-    // Loss line (blue)
-    ctx.strokeStyle = "#2563eb";
-    ctx.lineWidth = 2;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    points.forEach((point, idx) => {
-        const normX = (point.x - minX) / xRange;
-        const normY = (point.y - yMin) / yRange;
-        const xPos = padding.left + normX * chartWidth;
-        const yPos = padding.top + (1 - normY) * chartHeight;
-        if (idx === 0) {
-            ctx.moveTo(xPos, yPos);
-        } else {
-            ctx.lineTo(xPos, yPos);
-        }
-    });
-    ctx.stroke();
+    // Average loss line (blue)
+    if (hasAvg) {
+        ctx.strokeStyle = "#2563eb";
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        sam3LossState.avgPoints.forEach((point, idx) => {
+            const normX = (point.x - minX) / xRange;
+            const normY = (point.y - avgMin) / avgRange;
+            const xPos = padding.left + normX * chartWidth;
+            const yPos = padding.top + (1 - normY) * chartHeight;
+            if (idx === 0) {
+                ctx.moveTo(xPos, yPos);
+            } else {
+                ctx.lineTo(xPos, yPos);
+            }
+        });
+        ctx.stroke();
+    }
 
-    // VRAM line (red) + right axis
-    if (hasVram) {
+    // Instant loss line (orange) + right axis
+    if (hasInst) {
         // Right axis ticks
-        ctx.strokeStyle = "#ef4444";
-        ctx.fillStyle = "#ef4444";
+        ctx.strokeStyle = "#f97316";
+        ctx.fillStyle = "#f97316";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         for (let i = 0; i <= tickCount; i += 1) {
-            const tick = vramMin + (vramRange / tickCount) * i;
-            const norm = (tick - vramMin) / vramRange;
+            const tick = instMin + (instRange / tickCount) * i;
+            const norm = (tick - instMin) / instRange;
             const y = padding.top + (1 - norm) * chartHeight;
             ctx.beginPath();
             ctx.moveTo(width - padding.right, y);
             ctx.lineTo(width - padding.right + 6, y);
             ctx.stroke();
-            ctx.fillText(`${tick.toFixed(1)} GB`, width - padding.right + 8, y);
+            ctx.fillText(tick.toExponential(1), width - padding.right + 8, y);
         }
 
-        ctx.strokeStyle = "#ef4444";
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#f97316";
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        sam3LossState.vramPoints.forEach((point, idx) => {
+        sam3LossState.instPoints.forEach((point, idx) => {
             const normX = (point.x - minX) / xRange;
-            const normY = (point.y - vramMin) / vramRange;
+            const normY = (point.y - instMin) / instRange;
             const xPos = padding.left + normX * chartWidth;
             const yPos = padding.top + (1 - normY) * chartHeight;
             if (idx === 0) {
@@ -2098,24 +2083,20 @@ function updateSam3LossChart(logLines, jobId) {
     const startIdx = sam3LossState.lastLogCount;
     const newLines = Array.isArray(logLines) ? logLines.slice(startIdx) : [];
     newLines.forEach((line) => {
-        const val = parseSam3LossFromLog(line);
-        if (val !== null && Number.isFinite(val)) {
-            const step = sam3LossState.points.length;
-            const point = { x: step, y: val };
-            sam3LossState.points.push(point);
-        }
-        const mem = parseSam3VramFromLog(line);
-        if (mem && mem.current !== null && Number.isFinite(mem.current)) {
-            const step = sam3LossState.vramPoints.length;
-            sam3LossState.vramPoints.push({ x: step, y: mem.current });
-            if (mem.max !== null && Number.isFinite(mem.max)) {
-                sam3LossState.vramMaxGb = Math.max(sam3LossState.vramMaxGb || 0, mem.max);
+        const parsed = parseSam3LossPair(line);
+        if (parsed && (parsed.instant !== null || parsed.average !== null)) {
+            const nextX = Math.max(sam3LossState.avgPoints.length, sam3LossState.instPoints.length);
+            if (parsed.average !== null) {
+                sam3LossState.avgPoints.push({ x: nextX, y: parsed.average });
+            }
+            if (parsed.instant !== null) {
+                sam3LossState.instPoints.push({ x: nextX, y: parsed.instant });
             }
         }
     });
     sam3LossState.lastLogCount = totalLines;
-    if (sam3LossState.points.length || sam3LossState.vramPoints.length) {
-        drawSam3LossChart(sam3LossState.points);
+    if (sam3LossState.avgPoints.length || sam3LossState.instPoints.length) {
+        drawSam3LossChart();
     }
 }
 

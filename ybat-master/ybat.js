@@ -1824,8 +1824,18 @@ function setQwenTrainMessage(text, variant = null) {
 }
 
 const sam3LossState = {
+    jobId: null,
     points: [],
+    vramPoints: [],
+    vramMaxGb: null,
+    lastLogCount: 0,
     chart: null, // { ctx }
+};
+
+const sam3EtaState = {
+    lastProgress: null,
+    lastTimestamp: null,
+    smoothedRate: null,
 };
 
 function initSam3LossChart() {
@@ -1834,15 +1844,98 @@ function initSam3LossChart() {
     sam3LossState.chart = { ctx };
 }
 
+function resetSam3LossChart(jobId = null) {
+    sam3LossState.jobId = jobId;
+    sam3LossState.points = [];
+    sam3LossState.vramPoints = [];
+    sam3LossState.vramMaxGb = null;
+    sam3LossState.lastLogCount = 0;
+    const canvas = sam3TrainElements.lossCanvas;
+    if (canvas) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+            const width = canvas.width || canvas.clientWidth || 0;
+            const height = canvas.height || canvas.clientHeight || 0;
+            ctx.clearRect(0, 0, width, height);
+        }
+    }
+}
+
 function parseSam3LossFromLog(line) {
-    // Expect log lines like "Losses/train_all_loss: 9.58e+01"
-    const match = line.match(/Losses\/train_all_loss:\s*([0-9.+-eE]+)/);
-    return match ? Number(match[1]) : null;
+    // Expect log lines like "Losses/train_all_loss: 9.58e+01 (1.23e+02)"
+    // Prefer the running average in parens when available; fall back to the instant value.
+    const match = line.match(/Losses\/train_all_loss:\s*([0-9.+-eE]+)(?:\s*\(\s*([0-9.+-eE]+)\s*\))?/);
+    if (!match) return null;
+    const instant = Number(match[1]);
+    const avg = match[2] !== undefined ? Number(match[2]) : null;
+    const chosen = Number.isFinite(avg) ? avg : instant;
+    return Number.isFinite(chosen) ? chosen : null;
+}
+
+function formatEta(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "";
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    if (mins <= 0) return `${secs}s remaining`;
+    if (mins < 60) return `${mins}m ${secs.toString().padStart(2, "0")}s remaining`;
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return `${hours}h ${remMins.toString().padStart(2, "0")}m remaining`;
+}
+
+function resetSam3Eta() {
+    sam3EtaState.lastProgress = null;
+    sam3EtaState.lastTimestamp = null;
+    sam3EtaState.smoothedRate = null;
+    if (sam3TrainElements.etaText) {
+        sam3TrainElements.etaText.textContent = "";
+    }
+}
+
+function updateSam3Eta(progress) {
+    if (!sam3TrainElements.etaText) return;
+    const now = Date.now();
+    if (sam3EtaState.lastProgress === null || progress < sam3EtaState.lastProgress) {
+        sam3EtaState.lastProgress = progress;
+        sam3EtaState.lastTimestamp = now;
+        sam3EtaState.smoothedRate = null;
+        sam3TrainElements.etaText.textContent = "";
+        return;
+    }
+    const deltaP = progress - sam3EtaState.lastProgress;
+    const deltaT = (now - sam3EtaState.lastTimestamp) / 1000;
+    if (deltaP > 0.0005 && deltaT > 0.5) {
+        const instRate = deltaP / deltaT; // progress per second
+        if (instRate > 0) {
+            sam3EtaState.smoothedRate = sam3EtaState.smoothedRate
+                ? sam3EtaState.smoothedRate * 0.7 + instRate * 0.3
+                : instRate;
+            const remaining = (1 - progress) / sam3EtaState.smoothedRate;
+            const text = formatEta(remaining);
+            sam3TrainElements.etaText.textContent = text;
+        }
+        sam3EtaState.lastProgress = progress;
+        sam3EtaState.lastTimestamp = now;
+    }
+}
+
+function parseSam3VramFromLog(line) {
+    // Expect "Mem (GB): 19.00 (18.64/19.00)" -> current, avg, peak/total
+    const match = line.match(/Mem\s*\(GB\):\s*([0-9.+-eE]+)(?:\s*\(\s*([0-9.+-eE]+)\s*\/\s*([0-9.+-eE]+)\s*\))?/);
+    if (!match) return null;
+    const current = Number(match[1]);
+    const maxSeen = match[3] !== undefined ? Number(match[3]) : null;
+    return {
+        current: Number.isFinite(current) ? current : null,
+        max: Number.isFinite(maxSeen) ? maxSeen : null,
+    };
 }
 
 function drawSam3LossChart(points) {
     const canvas = sam3TrainElements.lossCanvas;
-    if (!canvas || !points.length) return;
+    const hasPoints = points && points.length;
+    const hasVram = sam3LossState.vramPoints && sam3LossState.vramPoints.length;
+    if (!canvas || (!hasPoints && !hasVram)) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -1861,15 +1954,29 @@ function drawSam3LossChart(points) {
     const chartWidth = Math.max(1, width - padding.left - padding.right);
     const chartHeight = Math.max(1, height - padding.top - padding.bottom);
 
-    const minX = points[0].x;
-    const maxX = points[points.length - 1].x;
+    const seriesX = [];
+    if (hasPoints) {
+        seriesX.push(points[0].x, points[points.length - 1].x);
+    }
+    if (hasVram) {
+        seriesX.push(sam3LossState.vramPoints[0].x, sam3LossState.vramPoints[sam3LossState.vramPoints.length - 1].x);
+    }
+    const minX = Math.min(...seriesX);
+    const maxX = Math.max(...seriesX);
     const xRange = Math.max(1, maxX - minX);
 
-    const yMinRaw = Math.min(...points.map((p) => p.y));
-    const yMaxRaw = Math.max(...points.map((p) => p.y));
-    const yMin = Math.max(0, Math.min(yMinRaw, yMaxRaw - 1e-6));
-    const yMax = Math.max(yMin + 1e-6, yMaxRaw);
+    // Loss axis (left)
+    const yLossMinRaw = hasPoints ? Math.min(...points.map((p) => p.y)) : 0;
+    const yLossMaxRaw = hasPoints ? Math.max(...points.map((p) => p.y)) : 1;
+    const yMin = Math.max(0, Math.min(yLossMinRaw, yLossMaxRaw - 1e-6));
+    const yMax = Math.max(yMin + 1e-6, yLossMaxRaw);
     const yRange = yMax - yMin;
+
+    // VRAM axis (right)
+    const vramVals = hasVram ? sam3LossState.vramPoints.map((p) => p.y) : [];
+    const vramMin = hasVram ? Math.min(...vramVals, 0) : 0;
+    const vramMax = sam3LossState.vramMaxGb || (hasVram ? Math.max(...vramVals, 0.1) : 1);
+    const vramRange = Math.max(0.1, vramMax - vramMin);
 
     const tickCount = 4;
     const tickStep = yRange / tickCount;
@@ -1902,7 +2009,7 @@ function drawSam3LossChart(points) {
     ctx.lineTo(padding.left, padding.top + chartHeight);
     ctx.stroke();
 
-    // Line
+    // Loss line (blue)
     ctx.strokeStyle = "#2563eb";
     ctx.lineWidth = 2;
     ctx.lineJoin = "round";
@@ -1920,23 +2027,75 @@ function drawSam3LossChart(points) {
         }
     });
     ctx.stroke();
+
+    // VRAM line (red) + right axis
+    if (hasVram) {
+        // Right axis ticks
+        ctx.strokeStyle = "#ef4444";
+        ctx.fillStyle = "#ef4444";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        for (let i = 0; i <= tickCount; i += 1) {
+            const tick = vramMin + (vramRange / tickCount) * i;
+            const norm = (tick - vramMin) / vramRange;
+            const y = padding.top + (1 - norm) * chartHeight;
+            ctx.beginPath();
+            ctx.moveTo(width - padding.right, y);
+            ctx.lineTo(width - padding.right + 6, y);
+            ctx.stroke();
+            ctx.fillText(`${tick.toFixed(1)} GB`, width - padding.right + 8, y);
+        }
+
+        ctx.strokeStyle = "#ef4444";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        sam3LossState.vramPoints.forEach((point, idx) => {
+            const normX = (point.x - minX) / xRange;
+            const normY = (point.y - vramMin) / vramRange;
+            const xPos = padding.left + normX * chartWidth;
+            const yPos = padding.top + (1 - normY) * chartHeight;
+            if (idx === 0) {
+                ctx.moveTo(xPos, yPos);
+            } else {
+                ctx.lineTo(xPos, yPos);
+            }
+        });
+        ctx.stroke();
+    }
     ctx.restore();
 }
 
-function updateSam3LossChart(logLines) {
+function updateSam3LossChart(logLines, jobId) {
     if (!sam3TrainElements.lossCanvas) return;
+    // Reset when switching jobs or if logs shrank (e.g., after a fresh poll or history view).
+    if (jobId && sam3LossState.jobId !== jobId) {
+        resetSam3LossChart(jobId);
+    }
+    const totalLines = Array.isArray(logLines) ? logLines.length : 0;
+    if (totalLines < sam3LossState.lastLogCount) {
+        resetSam3LossChart(jobId || sam3LossState.jobId);
+    }
     initSam3LossChart();
-    const pointsAdded = [];
-    logLines.forEach((line) => {
+    const startIdx = sam3LossState.lastLogCount;
+    const newLines = Array.isArray(logLines) ? logLines.slice(startIdx) : [];
+    newLines.forEach((line) => {
         const val = parseSam3LossFromLog(line);
         if (val !== null && Number.isFinite(val)) {
             const step = sam3LossState.points.length;
             const point = { x: step, y: val };
             sam3LossState.points.push(point);
-            pointsAdded.push(point);
+        }
+        const mem = parseSam3VramFromLog(line);
+        if (mem && mem.current !== null && Number.isFinite(mem.current)) {
+            const step = sam3LossState.vramPoints.length;
+            sam3LossState.vramPoints.push({ x: step, y: mem.current });
+            if (mem.max !== null && Number.isFinite(mem.max)) {
+                sam3LossState.vramMaxGb = Math.max(sam3LossState.vramMaxGb || 0, mem.max);
+            }
         }
     });
-    if (sam3LossState.points.length) {
+    sam3LossState.lastLogCount = totalLines;
+    if (sam3LossState.points.length || sam3LossState.vramPoints.length) {
         drawSam3LossChart(sam3LossState.points);
     }
 }
@@ -2221,6 +2380,7 @@ async function loadSam3Datasets() {
         const selected = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId) || sam3TrainState.datasets[0];
         sam3TrainState.selectedId = selected ? selected.id : null;
         updateSam3DatasetSummary(selected);
+        resetSam3Eta();
     } catch (err) {
         console.error("Failed to load SAM3 datasets", err);
         setSam3Message(`Failed to load datasets: ${err.message || err}`, "error");
@@ -2293,6 +2453,13 @@ function updateSam3Ui(job) {
     if (sam3TrainElements.progressFill) {
         sam3TrainElements.progressFill.style.width = `${pct}%`;
     }
+    if (sam3TrainElements.etaText) {
+        if (pct >= 100 || job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+            sam3TrainElements.etaText.textContent = "";
+        } else {
+            updateSam3Eta(job.progress || 0);
+        }
+    }
     if (sam3TrainElements.cancelButton) {
         sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);
     }
@@ -2300,7 +2467,7 @@ function updateSam3Ui(job) {
         const logs = Array.isArray(job.logs) ? job.logs : [];
         const lines = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
         sam3TrainElements.log.textContent = lines.slice(-200).join("\n");
-        updateSam3LossChart(lines);
+        updateSam3LossChart(lines, job.job_id);
     }
     if (sam3TrainElements.summary) {
         if (job.result && job.result.checkpoint) {
@@ -2397,6 +2564,8 @@ async function startSam3Training() {
         }
         const data = await resp.json();
         sam3TrainState.activeJobId = data.job_id;
+        resetSam3LossChart(data.job_id);
+        resetSam3Eta();
         pollSam3TrainingJob(data.job_id, { force: true }).catch((err) => console.error("SAM3 poll start failed", err));
         setSam3Message("Job queued.", "success");
         refreshSam3History();
@@ -2469,6 +2638,7 @@ async function initSam3TrainUi() {
     sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
     sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
     sam3TrainElements.statusText = document.getElementById("sam3StatusText");
+    sam3TrainElements.etaText = document.getElementById("sam3EtaText");
     sam3TrainElements.progressFill = document.getElementById("sam3ProgressFill");
     sam3TrainElements.message = document.getElementById("sam3Message");
     sam3TrainElements.summary = document.getElementById("sam3Summary");
@@ -2481,6 +2651,7 @@ async function initSam3TrainUi() {
             sam3TrainState.selectedId = sam3TrainElements.datasetSelect.value;
             const entry = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId);
             updateSam3DatasetSummary(entry);
+            resetSam3Eta();
         });
     }
     if (sam3TrainElements.datasetRefresh) {

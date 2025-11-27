@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re
+import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
 from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence
+from collections import deque
 import torch, clip, joblib
 from io import BytesIO
 from PIL import Image
@@ -3531,6 +3532,8 @@ def _save_sam3_config(cfg: OmegaConf, job_id: str) -> Tuple[str, Path]:
 def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: int) -> None:
     def worker():
         proc: Optional[subprocess.Popen] = None
+        tail_logs: deque[str] = deque(maxlen=50)
+        max_epochs = max(1, int(getattr(cfg.trainer, "max_epochs", 1) or 1))
         try:
             _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
@@ -3542,6 +3545,9 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
             existing_py = env.get("PYTHONPATH", "")
             py_root = str(SAM3_VENDOR_ROOT)
             env["PYTHONPATH"] = f"{py_root}:{existing_py}" if existing_py else py_root
+            env.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+            env.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")
+            env.setdefault("NCCL_DEBUG", "INFO")
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(SAM3_VENDOR_ROOT),
@@ -3566,18 +3572,40 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                     _sam3_job_update(job, status="cancelling", message="Cancellation requested ...")
                     continue
                 cleaned = line.rstrip("\n")
+                tail_logs.append(cleaned)
                 _sam3_job_log(job, cleaned)
+                try:
+                    match = re.search(r"Train Epoch:\s*\[(\d+)\]\[\s*(\d+)\s*/\s*(\d+)\]", cleaned)
+                    if match:
+                        epoch_idx = int(match.group(1))
+                        step_idx = int(match.group(2))
+                        total_steps = max(1, int(match.group(3)))
+                        frac = (epoch_idx + (step_idx / total_steps)) / max_epochs
+                        prog_val = max(0.05, min(0.99, frac))
+                        _sam3_job_update(job, progress=prog_val, log_message=False)
+                except Exception:
+                    pass
                 _sam3_job_update(job, message=cleaned[-200:], log_message=False)
             retcode = proc.wait() if proc else 1
             if job.cancel_event.is_set():
                 _sam3_job_update(job, status="cancelled", message="Training cancelled")
                 return
             if retcode != 0:
+                sig_note = ""
+                if retcode < 0:
+                    sig_num = -retcode
+                    try:
+                        sig_name = signal.Signals(sig_num).name
+                    except Exception:
+                        sig_name = f"SIG{sig_num}"
+                    sig_desc = signal.strsignal(sig_num) or sig_name
+                    sig_note = f" (signal {sig_num}: {sig_desc})"
+                tail_text = "\n".join(tail_logs)
                 _sam3_job_update(
                     job,
                     status="failed",
-                    message=f"Training failed (exit {retcode})",
-                    error=f"exit_code:{retcode}",
+                    message=f"Training failed (exit {retcode}{sig_note})",
+                    error=f"exit_code:{retcode}{sig_note}\nlast_logs:\n{tail_text}",
                 )
                 return
             log_dir = Path(cfg.paths.experiment_log_dir)

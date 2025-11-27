@@ -291,14 +291,15 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 
 
 ## LOP
-1. **[planned]** SAM3 integration is underway; until then only SAM1 checkpoints are fully supported.
-2. **[planned]** CLIP regression / training is in early stages - it works but it's likely we can develop some better default recipes
-3. **[up for grabs]** We should add OBB support, it would be pretty simple to do in terms of UX and can really leverage SAM refinement
-4. **[up for grabs]** Tracking / video sequence-annotation would be a cool longer-term objective. 
-5. **[planned]** Docs should be improved, especially around explaining how to run the backend on a remore GPU-enabled server for bigger labeling jobs.
-6. **[up for grabs]** Clean multi-user support would be nice in the future, using a single backend with some UX / UI to deconflict and distribute work packages.
-7. **[planned]** Faster, faster! Everything should be made faster to keep the UX enjoyable.
-8. **[up for grabs]** The logic of running the training from a remote server (transferring images in base64) is untested, and most likely buggy.
+1. **[experimental]** SAM3 (box-only) is available, but the “SAM3-lite” in-repo trainer + activation flow still needs to be finished and hardened.
+2. **[planned]** CLIP regression / training works but needs better default recipes and tuning.
+3. **[up for grabs]** Add oriented bounding-box support to better leverage SAM refinement.
+4. **[up for grabs]** Tracking / video sequence-annotation remains a longer-term objective.
+5. **[planned]** Improve docs, especially for running the backend on remote GPU hosts and clarifying SAM3 training/activation.
+6. **[up for grabs]** Clean multi-user support on a shared backend with UX to deconflict work packages.
+7. **[planned]** Performance: keep pushing latency/throughput down for a smoother UX.
+8. **[up for grabs]** Remote training via base64 transfer is still untested and likely buggy.
+9. **[future]** Optional SAM3 hard-example mining toggle (replay top-loss batches after burn-in), off by default to keep the trainer simple.
 MRs welcome!
 
 ## License

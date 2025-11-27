@@ -2047,6 +2047,8 @@ class Sam3TrainRequest(BaseModel):
     gradient_accumulation_steps: Optional[int] = None
     val_epoch_freq: Optional[int] = None
     target_epoch_size: Optional[int] = None
+    scheduler_warmup: Optional[int] = None
+    scheduler_timescale: Optional[int] = None
     num_gpus: Optional[int] = None
     enable_inst_interactivity: Optional[bool] = None
     train_limit: Optional[int] = None
@@ -4337,6 +4339,10 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
     if payload.gradient_accumulation_steps is not None:
         cfg.scratch.gradient_accumulation_steps = int(payload.gradient_accumulation_steps)
     cfg.trainer.gradient_accumulation_steps = cfg.scratch.gradient_accumulation_steps
+    if payload.scheduler_warmup is not None:
+        cfg.scratch.scheduler_warmup = int(payload.scheduler_warmup)
+    if payload.scheduler_timescale is not None:
+        cfg.scratch.scheduler_timescale = int(payload.scheduler_timescale)
     if payload.train_batch_size is not None:
         cfg.scratch.train_batch_size = int(payload.train_batch_size)
     if payload.val_batch_size is not None:

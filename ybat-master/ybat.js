@@ -2465,9 +2465,10 @@ function updateSam3Ui(job) {
     }
     if (sam3TrainElements.log) {
         const logs = Array.isArray(job.logs) ? job.logs : [];
-        const lines = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
-        sam3TrainElements.log.textContent = lines.slice(-200).join("\n");
-        updateSam3LossChart(lines, job.job_id);
+        const linesAll = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
+        const linesDisplay = linesAll.slice(-200);
+        sam3TrainElements.log.textContent = linesDisplay.join("\n");
+        updateSam3LossChart(linesAll, job.job_id);
     }
     if (sam3TrainElements.summary) {
         if (job.result && job.result.checkpoint) {

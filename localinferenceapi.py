@@ -3534,6 +3534,12 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
         proc: Optional[subprocess.Popen] = None
         tail_logs: deque[str] = deque(maxlen=50)
         max_epochs = max(1, int(getattr(cfg.trainer, "max_epochs", 1) or 1))
+        # Attempt to track steps per epoch from the config if present
+        steps_per_epoch = None
+        try:
+            steps_per_epoch = int(cfg.scratch.target_epoch_size) if getattr(cfg.scratch, "target_epoch_size", None) else None
+        except Exception:
+            steps_per_epoch = None
         try:
             _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
@@ -3580,7 +3586,10 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                         epoch_idx = int(match.group(1))
                         step_idx = int(match.group(2))
                         total_steps = max(1, int(match.group(3)))
-                        frac = (epoch_idx + (step_idx / total_steps)) / max_epochs
+                        # Prefer log-reported total steps; fall back to config target if present
+                        steps_in_epoch = total_steps or steps_per_epoch or total_steps
+                        frac_epoch = (step_idx / steps_in_epoch) if steps_in_epoch else 0.0
+                        frac = (epoch_idx + frac_epoch) / max_epochs
                         prog_val = max(0.05, min(0.99, frac))
                         _sam3_job_update(job, progress=prog_val, log_message=False)
                 except Exception:

@@ -2440,6 +2440,14 @@ async function refreshSam3History() {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         renderSam3History(data);
+        const latestRunning = Array.isArray(data)
+            ? data.find((j) => ["running", "queued", "cancelling"].includes(j.status))
+            : null;
+        if (latestRunning && latestRunning.job_id) {
+            pollSam3TrainingJob(latestRunning.job_id, { force: true, silent: true }).catch((err) =>
+                console.error("SAM3 poll history failed", err),
+            );
+        }
     } catch (err) {
         console.error("Failed to load SAM3 training history", err);
     }
@@ -2448,16 +2456,18 @@ async function refreshSam3History() {
 function updateSam3Ui(job) {
     if (!job || !sam3TrainElements.statusText) return;
     sam3TrainState.lastJobSnapshot = job;
-    const pct = Math.round((job.progress || 0) * 100);
+    const progressVal = Number.isFinite(job.progress) ? job.progress : 0;
+    const pct = Math.round(progressVal * 100);
     sam3TrainElements.statusText.textContent = `${job.status}${job.message ? ` — ${job.message}` : ""}`;
     if (sam3TrainElements.progressFill) {
         sam3TrainElements.progressFill.style.width = `${pct}%`;
+        sam3TrainElements.progressFill.setAttribute("aria-valuenow", pct);
     }
     if (sam3TrainElements.etaText) {
         if (pct >= 100 || job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
             sam3TrainElements.etaText.textContent = "";
         } else {
-            updateSam3Eta(job.progress || 0);
+            updateSam3Eta(progressVal);
         }
     }
     if (sam3TrainElements.cancelButton) {
@@ -2469,6 +2479,15 @@ function updateSam3Ui(job) {
         const linesDisplay = linesAll.slice(-200);
         sam3TrainElements.log.textContent = linesDisplay.join("\n");
         updateSam3LossChart(linesAll, job.job_id);
+    } else {
+        // If we lost references (e.g., DOM re-render), rebind and retry
+        sam3TrainElements.log = document.getElementById("sam3Log");
+        sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
+        if (sam3TrainElements.log && sam3TrainElements.lossCanvas && job && Array.isArray(job.logs)) {
+            const linesAll = job.logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
+            sam3TrainElements.log.textContent = linesAll.slice(-200).join("\n");
+            updateSam3LossChart(linesAll, job.job_id);
+        }
     }
     if (sam3TrainElements.summary) {
         if (job.result && job.result.checkpoint) {
@@ -2488,6 +2507,7 @@ function updateSam3Ui(job) {
 async function pollSam3TrainingJob(jobId, options = {}) {
     if (!jobId) return;
     sam3TrainState.activeJobId = jobId;
+    sam3TrainState.lastSeenJob = sam3TrainState.lastSeenJob || {};
     try {
         const resp = await fetch(`${API_ROOT}/sam3/train/jobs/${jobId}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -2505,6 +2525,7 @@ async function pollSam3TrainingJob(jobId, options = {}) {
             sam3TrainState.pollHandle = null;
             refreshSam3History();
         }
+        sam3TrainState.lastSeenJob[jobId] = job;
     } catch (err) {
         console.error("SAM3 job poll failed", err);
         if (!options.silent) {
@@ -2620,6 +2641,7 @@ async function activateSam3Checkpoint() {
 async function initSam3TrainUi() {
     if (sam3TrainUiInitialized) return;
     sam3TrainUiInitialized = true;
+    sam3TrainState.lastSeenJob = {};
     sam3TrainElements.datasetSelect = document.getElementById("sam3DatasetSelect");
     sam3TrainElements.datasetSummary = document.getElementById("sam3DatasetSummary");
     sam3TrainElements.datasetRefresh = document.getElementById("sam3DatasetRefresh");

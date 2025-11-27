@@ -2569,6 +2569,9 @@ async function startSam3Training() {
         ["scheduler_warmup", sam3TrainElements.warmupSteps],
         ["scheduler_timescale", sam3TrainElements.schedulerTimescale],
     ];
+    if (sam3TrainElements.balanceClasses && sam3TrainElements.balanceClasses.checked) {
+        payload.balance_classes = true;
+    }
     fields.forEach(([key, el]) => {
         const val = maybeNumber(el);
         if (val !== null) payload[key] = val;
@@ -2660,6 +2663,7 @@ async function initSam3TrainUi() {
     sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
     sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
     sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
+    sam3TrainElements.balanceClasses = document.getElementById("sam3BalanceClasses");
     sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
     sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
     sam3TrainElements.instInteractivity = document.getElementById("sam3InstInteractivity");

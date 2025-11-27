@@ -2051,6 +2051,7 @@ class Sam3TrainRequest(BaseModel):
     scheduler_timescale: Optional[int] = None
     num_gpus: Optional[int] = None
     enable_inst_interactivity: Optional[bool] = None
+    balance_classes: Optional[bool] = None
     train_limit: Optional[int] = None
     log_freq: Optional[int] = None
 
@@ -4357,6 +4358,11 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
         cfg.dataset.num_images = int(payload.train_limit)
     if payload.log_freq is not None and "logging" in cfg.trainer:
         cfg.trainer.logging.log_freq = int(payload.log_freq)
+    if payload.balance_classes is not None:
+        cfg.dataset.class_balance = bool(payload.balance_classes)
+        if cfg.dataset.class_balance:
+            cfg.data.train.enable_distributed_sampler = True
+            cfg.data.val.enable_distributed_sampler = True
     cfg.trainer.checkpoint.save_dir = f"{cfg.launcher.experiment_log_dir}/checkpoints"
     if "meters" in cfg.trainer and "val" in cfg.trainer.meters:
         try:

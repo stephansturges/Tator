@@ -19,6 +19,7 @@ paths:
 # ============================================================================
 dataset:
   num_images: null  # limit training images; null uses all
+  class_balance: False  # oversample rare classes (custom sampler)
 
   train_transforms:
     - _target_: sam3.train.transforms.basic_for_api.ComposeAPI

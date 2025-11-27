@@ -2173,6 +2173,7 @@ class Sam3TrainingJob:
     updated_at: float = field(default_factory=time.time)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     process: Optional[subprocess.Popen] = None
+    log_seq: int = 0
 
 
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
@@ -2294,7 +2295,8 @@ def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
 
 
 def _sam3_job_log(job: Sam3TrainingJob, message: str) -> None:
-    entry = {"timestamp": time.time(), "message": message}
+    job.log_seq += 1
+    entry = {"timestamp": time.time(), "message": message, "seq": job.log_seq}
     job.logs.append(entry)
     if len(job.logs) > SAM3_MAX_LOG_LINES:
         job.logs[:] = job.logs[-SAM3_MAX_LOG_LINES:]

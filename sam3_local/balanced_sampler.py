@@ -50,9 +50,12 @@ def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
             largest = cat_items[-min(5, len(cat_items)) :] if cat_items else []
             w_min, w_max = min(weights), max(weights)
             w_avg = sum(weights) / len(weights)
+            def _fmt(v: float) -> str:
+                # Use scientific notation to avoid rounding small weights to 0.0000 in logs.
+                return f"{v:.2e}"
             msg = (
                 f"[sam3-balance] classes={len(cat_counts)} images={len(ids)} "
-                f"min_w={w_min:.4f} avg_w={w_avg:.4f} max_w={w_max:.4f} "
+                f"min_w={_fmt(w_min)} avg_w={_fmt(w_avg)} max_w={_fmt(w_max)} "
                 f"smallest={smallest} largest={largest}"
             )
             print(msg, flush=True)

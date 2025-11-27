@@ -2453,14 +2453,16 @@ function updateSam3Ui(job) {
     if (!job || !sam3TrainElements.statusText) return;
     sam3TrainState.lastJobSnapshot = job;
     const progressVal = computeSam3Progress(job);
-    const pct = Math.max(0, Math.min(100, Math.round(progressVal * 100)));
+    const pctVal = Math.max(0, Math.min(100, progressVal * 100));
+    const pct = Number.isFinite(pctVal) ? pctVal : 0;
+    const pctText = pct.toFixed(1).replace(/\.0$/, "");
     const lastMetric = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1] : null;
     const batch = lastMetric && Number.isFinite(lastMetric.batch) ? lastMetric.batch : null;
     const batchesPerEpoch =
         lastMetric && Number.isFinite(lastMetric.batches_per_epoch) ? lastMetric.batches_per_epoch : null;
     const epoch = lastMetric && Number.isFinite(lastMetric.epoch) ? lastMetric.epoch : null;
     const totalEpochs = lastMetric && Number.isFinite(lastMetric.total_epochs) ? lastMetric.total_epochs : null;
-    let statusText = job.status === "running" || job.status === "queued" ? `Training running, ${pct}% done` : job.status;
+    let statusText = job.status === "running" || job.status === "queued" ? `Training running, ${pctText}% done` : job.status;
     if (Number.isFinite(epoch) && Number.isFinite(batch) && Number.isFinite(batchesPerEpoch)) {
         const epochPart = Number.isFinite(totalEpochs) ? `epoch ${epoch}/${totalEpochs}` : `epoch ${epoch}`;
         statusText += ` (${epochPart}, batch ${batch}/${batchesPerEpoch})`;
@@ -2468,7 +2470,7 @@ function updateSam3Ui(job) {
     sam3TrainElements.statusText.textContent = statusText;
     if (sam3TrainElements.progressFill) {
         sam3TrainElements.progressFill.style.width = `${pct}%`;
-        sam3TrainElements.progressFill.setAttribute("aria-valuenow", pct);
+        sam3TrainElements.progressFill.setAttribute("aria-valuenow", pctText);
     }
     if (sam3TrainElements.cancelButton) {
         sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);

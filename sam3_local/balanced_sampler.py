@@ -10,16 +10,27 @@ from torch.utils.data.distributed import DistributedSampler
 
 _logger = logging.getLogger(__name__)
 _LOGGED_SUMMARY = False
-# Smoothing power for inverse-frequency weighting; <1.0 reduces aggressiveness.
-BALANCE_POWER = 0.5
 # Minimum raw weight to avoid zero-probability datapoints.
 MIN_RAW_WEIGHT = 1e-8
 
 
-def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
+def _compute_image_weights(
+    coco,
+    ids: Sequence[int],
+    *,
+    strategy: str = "inv_sqrt",
+    power: float = 0.5,
+    clip_ratio: Optional[float] = None,
+    beta: float = 0.99,
+    gamma: float = 0.5,
+) -> List[float]:
     """
     Compute per-image weights based on inverse class frequency.
-    Each image weight = sum(1 / freq[c]) over its categories.
+    Strategy options:
+      - inv_sqrt / inv_pow: sum(1 / freq[c]**power)
+      - clipped_inv: inv_pow then clamp to max/min ratio clip_ratio
+      - effective_num: sum((1 - beta)/(1 - beta**freq))
+      - focal: sum((freq/max_freq)**-gamma)
     """
     global _LOGGED_SUMMARY
     cat_counts = {}
@@ -35,11 +46,30 @@ def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
         anns = coco.loadAnns(ann_ids)
         cats = {ann.get("category_id") for ann in anns if ann.get("category_id") is not None}
         w = 0.0
+        max_freq = max(cat_counts.values()) if cat_counts else 1
         for cid in cats:
             freq = cat_counts.get(cid, 1)
-            w += (1.0 / max(1, freq)) ** BALANCE_POWER
+            if strategy in ("inv_sqrt", "inv_pow", "clipped_inv"):
+                w += (1.0 / max(1, freq)) ** power
+            elif strategy == "effective_num":
+                # Class-balanced loss weighting
+                w += (1.0 - beta) / max(MIN_RAW_WEIGHT, 1.0 - (beta ** max(1, freq)))
+            elif strategy == "focal":
+                w += (max(freq, 1) / max_freq) ** (-gamma)
+            elif strategy == "log_inv":
+                w += 1.0 / max(MIN_RAW_WEIGHT, math.log(1.0 + max(1, freq)))
+            else:
+                w += (1.0 / max(1, freq)) ** power
         # Avoid zero so every datapoint remains sampleable.
         weights.append(max(w, MIN_RAW_WEIGHT))
+
+    # Optional clipping to bound max/min ratio for inverse strategies
+    if strategy == "clipped_inv" and clip_ratio and clip_ratio > 1:
+        max_w = max(weights) if weights else 0.0
+        if max_w > 0:
+            floor = max_w / clip_ratio
+            weights = [max(w, floor) for w in weights]
+
     total = sum(weights) or 1.0
     weights = [w / total for w in weights]
     if not _LOGGED_SUMMARY:
@@ -54,7 +84,8 @@ def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
                 # Use scientific notation to avoid rounding small weights to 0.0000 in logs.
                 return f"{v:.2e}"
             msg = (
-                f"[sam3-balance] classes={len(cat_counts)} images={len(ids)} "
+                f"[sam3-balance] strategy={strategy} power={power} clip={clip_ratio} "
+                f"beta={beta} gamma={gamma} classes={len(cat_counts)} images={len(ids)} "
                 f"min_w={_fmt(w_min)} avg_w={_fmt(w_avg)} max_w={_fmt(w_max)} "
                 f"smallest={smallest} largest={largest}"
             )

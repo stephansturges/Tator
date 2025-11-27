@@ -966,6 +966,13 @@ const qwenTrainState = {
         gradAccum: null,
         valFreq: null,
         targetEpochSize: null,
+        warmupSteps: null,
+        schedulerTimescale: null,
+        balanceStrategy: null,
+        balancePower: null,
+        balanceClip: null,
+        balanceBeta: null,
+        balanceGamma: null,
         instInteractivity: null,
         startButton: null,
         cancelButton: null,
@@ -1012,6 +1019,25 @@ const qwenTrainState = {
             return "—";
         }
         return Number(value).toFixed(digits);
+    }
+
+    function updateBalanceParamVisibility(strategy) {
+        const chosen = strategy || (sam3TrainElements.balanceStrategy && sam3TrainElements.balanceStrategy.value) || "none";
+        const rows = document.querySelectorAll(".sam3-balance-param");
+        rows.forEach((row) => {
+            const param = row.dataset ? row.dataset.param : null;
+            let show = false;
+            if (param === "power") {
+                show = ["inv_sqrt", "clipped_inv"].includes(chosen);
+            } else if (param === "clip") {
+                show = chosen === "clipped_inv";
+            } else if (param === "beta") {
+                show = chosen === "effective_num";
+            } else if (param === "gamma") {
+                show = chosen === "focal";
+            }
+            row.style.display = show ? "" : "none";
+        });
     }
 
     function useCachedQwenDataset() {
@@ -2581,8 +2607,28 @@ async function startSam3Training() {
         ["scheduler_warmup", sam3TrainElements.warmupSteps],
         ["scheduler_timescale", sam3TrainElements.schedulerTimescale],
     ];
-    if (sam3TrainElements.balanceClasses && sam3TrainElements.balanceClasses.checked) {
+    const strategy = sam3TrainElements.balanceStrategy ? sam3TrainElements.balanceStrategy.value : "none";
+    if (strategy && strategy !== "none") {
+        payload.balance_strategy = strategy;
         payload.balance_classes = true;
+        const power = maybeNumber(sam3TrainElements.balancePower);
+        const clip = maybeNumber(sam3TrainElements.balanceClip);
+        const beta = maybeNumber(sam3TrainElements.balanceBeta);
+        const gamma = maybeNumber(sam3TrainElements.balanceGamma);
+        if (power !== null && ["inv_sqrt", "clipped_inv"].includes(strategy)) {
+            payload.balance_power = power;
+        }
+        if (clip !== null && strategy === "clipped_inv" && clip >= 1) {
+            payload.balance_clip = clip;
+        }
+        if (beta !== null && strategy === "effective_num") {
+            payload.balance_beta = beta;
+        }
+        if (gamma !== null && strategy === "focal") {
+            payload.balance_gamma = gamma;
+        }
+    } else {
+        payload.balance_classes = false;
     }
     fields.forEach(([key, el]) => {
         const val = maybeNumber(el);
@@ -2669,17 +2715,21 @@ async function initSam3TrainUi() {
     sam3TrainElements.valBatch = document.getElementById("sam3ValBatch");
     sam3TrainElements.trainWorkers = document.getElementById("sam3TrainWorkers");
     sam3TrainElements.valWorkers = document.getElementById("sam3ValWorkers");
-    sam3TrainElements.epochs = document.getElementById("sam3Epochs");
-    sam3TrainElements.resolution = document.getElementById("sam3Resolution");
-    sam3TrainElements.lrScale = document.getElementById("sam3LrScale");
-    sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
-    sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
-    sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
-    sam3TrainElements.balanceClasses = document.getElementById("sam3BalanceClasses");
-    sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
-    sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
-    sam3TrainElements.instInteractivity = document.getElementById("sam3InstInteractivity");
-    sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
+        sam3TrainElements.epochs = document.getElementById("sam3Epochs");
+        sam3TrainElements.resolution = document.getElementById("sam3Resolution");
+        sam3TrainElements.lrScale = document.getElementById("sam3LrScale");
+        sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
+        sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
+        sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
+        sam3TrainElements.balanceStrategy = document.getElementById("sam3BalanceStrategy");
+        sam3TrainElements.balancePower = document.getElementById("sam3BalancePower");
+        sam3TrainElements.balanceClip = document.getElementById("sam3BalanceClip");
+        sam3TrainElements.balanceBeta = document.getElementById("sam3BalanceBeta");
+        sam3TrainElements.balanceGamma = document.getElementById("sam3BalanceGamma");
+        sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
+        sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
+        sam3TrainElements.instInteractivity = document.getElementById("sam3InstInteractivity");
+        sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
     sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
     sam3TrainElements.statusText = document.getElementById("sam3StatusText");
     sam3TrainElements.etaText = document.getElementById("sam3EtaText");
@@ -2687,13 +2737,17 @@ async function initSam3TrainUi() {
     sam3TrainElements.message = document.getElementById("sam3Message");
     sam3TrainElements.summary = document.getElementById("sam3Summary");
     sam3TrainElements.balanceSummary = document.getElementById("sam3BalanceSummary");
-    sam3TrainElements.log = document.getElementById("sam3Log");
-    sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
-    sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
-    sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
-    if (sam3TrainElements.datasetSelect) {
-        sam3TrainElements.datasetSelect.addEventListener("change", () => {
-            sam3TrainState.selectedId = sam3TrainElements.datasetSelect.value;
+        sam3TrainElements.log = document.getElementById("sam3Log");
+        sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
+        sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
+        sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
+        if (sam3TrainElements.balanceStrategy) {
+            sam3TrainElements.balanceStrategy.addEventListener("change", () => updateBalanceParamVisibility());
+            updateBalanceParamVisibility();
+        }
+        if (sam3TrainElements.datasetSelect) {
+            sam3TrainElements.datasetSelect.addEventListener("change", () => {
+                sam3TrainState.selectedId = sam3TrainElements.datasetSelect.value;
             const entry = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId);
             updateSam3DatasetSummary(entry);
             resetSam3Eta();

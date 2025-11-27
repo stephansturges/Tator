@@ -634,6 +634,7 @@
                             <div class="training-note">
                                 <strong>Tuning tips:</strong><br />
                                 • Lower LR scale (e.g., 0.05 or 0.02) to reduce early loss spikes.<br />
+                                • Meta’s default LR scale is 0.1; that makes transformer LR 8e-5, vision 2.5e-5, language 5e-6. Halving/dropping LR scale makes starts gentler.<br />
                                 • Warmup steps: start near-zero LR and ramp up over these steps; higher is gentler/safer, lower is hotter/risks spikes (try 20–100).<br />
                                 • Timescale: stretches the LR schedule; higher keeps LR steady longer, lower decays faster (try 20–40 for short runs).<br />
                                 • To simulate larger batches without extra VRAM, keep batch size at 1 and raise grad accumulation (e.g., 2–4).<br />

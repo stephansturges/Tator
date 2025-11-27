@@ -1931,6 +1931,22 @@ function parseSam3VramFromLog(line) {
     };
 }
 
+function getMinMax(arr, accessor) {
+    let min = Infinity;
+    let max = -Infinity;
+    arr.forEach((item) => {
+        const val = accessor ? accessor(item) : item;
+        if (Number.isFinite(val)) {
+            if (val < min) min = val;
+            if (val > max) max = val;
+        }
+    });
+    if (min === Infinity || max === -Infinity) {
+        return [0, 0];
+    }
+    return [min, max];
+}
+
 function drawSam3LossChart(points) {
     const canvas = sam3TrainElements.lossCanvas;
     const hasPoints = points && points.length;
@@ -1966,16 +1982,19 @@ function drawSam3LossChart(points) {
     const xRange = Math.max(1, maxX - minX);
 
     // Loss axis (left)
-    const yLossMinRaw = hasPoints ? Math.min(...points.map((p) => p.y)) : 0;
-    const yLossMaxRaw = hasPoints ? Math.max(...points.map((p) => p.y)) : 1;
+    const [yLossMinRaw, yLossMaxRaw] = hasPoints ? getMinMax(points, (p) => p.y) : [0, 1];
     const yMin = Math.max(0, Math.min(yLossMinRaw, yLossMaxRaw - 1e-6));
     const yMax = Math.max(yMin + 1e-6, yLossMaxRaw);
     const yRange = yMax - yMin;
 
     // VRAM axis (right)
-    const vramVals = hasVram ? sam3LossState.vramPoints.map((p) => p.y) : [];
-    const vramMin = hasVram ? Math.min(...vramVals, 0) : 0;
-    const vramMax = sam3LossState.vramMaxGb || (hasVram ? Math.max(...vramVals, 0.1) : 1);
+    let vramMin = 0;
+    let vramMax = sam3LossState.vramMaxGb || 1;
+    if (hasVram) {
+        const [minV, maxV] = getMinMax(sam3LossState.vramPoints, (p) => p.y);
+        vramMin = Math.min(0, minV);
+        vramMax = sam3LossState.vramMaxGb || Math.max(maxV, 0.1);
+    }
     const vramRange = Math.max(0.1, vramMax - vramMin);
 
     const tickCount = 4;

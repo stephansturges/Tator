@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     sam_model_type: str = Field("vit_h", env="SAM_MODEL_TYPE")
     sam_checkpoint_path: str = Field("./sam_vit_h_4b8939.pth", env="SAM_CHECKPOINT_PATH")
     sam_variant: str = Field("sam1", env="SAM_VARIANT")
+    sam3_model_id: str = Field("facebook/sam3", env="SAM3_MODEL_ID")
+    sam3_processor_id: str = Field("facebook/sam3", env="SAM3_PROCESSOR_ID")
+    sam3_checkpoint_path: Optional[str] = Field(None, env="SAM3_CHECKPOINT_PATH")
+    sam3_device_override: Optional[str] = Field(None, env="SAM3_DEVICE")
 
     # Runtime
     force_device: Optional[str] = Field(None, env="FORCE_DEVICE")  # e.g., "cpu" or "cuda"

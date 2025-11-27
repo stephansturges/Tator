@@ -2534,6 +2534,8 @@ async function startSam3Training() {
         ["gradient_accumulation_steps", sam3TrainElements.gradAccum],
         ["val_epoch_freq", sam3TrainElements.valFreq],
         ["target_epoch_size", sam3TrainElements.targetEpochSize],
+        ["scheduler_warmup", sam3TrainElements.warmupSteps],
+        ["scheduler_timescale", sam3TrainElements.schedulerTimescale],
     ];
     fields.forEach(([key, el]) => {
         const val = maybeNumber(el);
@@ -2626,6 +2628,8 @@ async function initSam3TrainUi() {
     sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
     sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
     sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
+    sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
+    sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
     sam3TrainElements.instInteractivity = document.getElementById("sam3InstInteractivity");
     sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
     sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");

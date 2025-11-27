@@ -618,6 +618,14 @@
                                 <label for="sam3TargetEpochSize">Target epoch size</label>
                                 <input type="number" id="sam3TargetEpochSize" min="1" value="1500" />
                             </div>
+                            <div>
+                                <label for="sam3Warmup">Warmup steps</label>
+                                <input type="number" id="sam3Warmup" min="0" value="20" />
+                            </div>
+                            <div>
+                                <label for="sam3Timescale">Scheduler timescale</label>
+                                <input type="number" id="sam3Timescale" min="1" value="20" />
+                            </div>
                         </div>
                         <div class="training-toggle-row">
                             <label title="Adds a click-to-refine head like SAM2, but our box-only training doesn’t use it yet. It just makes things slower, so keep it off for now."><input type="checkbox" id="sam3InstInteractivity" /> Enable instance interactivity head</label>
@@ -626,7 +634,7 @@
                             <div class="training-note">
                                 <strong>Tuning tips:</strong><br />
                                 • Lower LR scale (e.g., 0.05 or 0.02) to reduce early loss spikes.<br />
-                                • Leave warmup/schedulers at their defaults; they already ramp in gently.<br />
+                                • Warmup/Timescale: higher warmup ramps LR more gently; higher timescale stretches the schedule. Defaults are a safe start.<br />
                                 • To simulate larger batches without extra VRAM, keep batch size at 1 and raise grad accumulation (e.g., 2–4).<br />
                                 • Typical recipe: resolution 1008, LR scale 0.05, grad accumulation 2, batch sizes 1/1, epochs 20.
                             </div>

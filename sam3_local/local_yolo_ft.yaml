@@ -225,6 +225,8 @@ trainer:
         limit_ids: ${dataset.num_images}
         transforms: ${dataset.train_transforms}
         load_segmentation: ${scratch.enable_segmentation}
+        dataset_config:
+          class_balance: ${dataset.class_balance}
         max_ann_per_img: 500000
         multiplier: 1
         max_train_queries: 50000
@@ -248,6 +250,8 @@ trainer:
         load_segmentation: ${scratch.enable_segmentation}
         coco_json_loader:
           _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
+        dataset_config:
+          class_balance: ${dataset.class_balance}
           include_negatives: true
           category_chunk_size: 2
           _partial_: true

@@ -4360,9 +4360,6 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
         cfg.trainer.logging.log_freq = int(payload.log_freq)
     if payload.balance_classes is not None:
         cfg.dataset.class_balance = bool(payload.balance_classes)
-        if cfg.dataset.class_balance:
-            cfg.data.train.enable_distributed_sampler = True
-            cfg.data.val.enable_distributed_sampler = True
     cfg.trainer.checkpoint.save_dir = f"{cfg.launcher.experiment_log_dir}/checkpoints"
     if "meters" in cfg.trainer and "val" in cfg.trainer.meters:
         try:

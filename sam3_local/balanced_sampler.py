@@ -10,6 +10,10 @@ from torch.utils.data.distributed import DistributedSampler
 
 _logger = logging.getLogger(__name__)
 _LOGGED_SUMMARY = False
+# Smoothing power for inverse-frequency weighting; <1.0 reduces aggressiveness.
+BALANCE_POWER = 0.5
+# Minimum raw weight to avoid zero-probability datapoints.
+MIN_RAW_WEIGHT = 1e-8
 
 
 def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
@@ -33,8 +37,9 @@ def _compute_image_weights(coco, ids: Sequence[int]) -> List[float]:
         w = 0.0
         for cid in cats:
             freq = cat_counts.get(cid, 1)
-            w += 1.0 / max(1, freq)
-        weights.append(w if w > 0 else 1.0)
+            w += (1.0 / max(1, freq)) ** BALANCE_POWER
+        # Avoid zero so every datapoint remains sampleable.
+        weights.append(max(w, MIN_RAW_WEIGHT))
     total = sum(weights) or 1.0
     weights = [w / total for w in weights]
     if not _LOGGED_SUMMARY:

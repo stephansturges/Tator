@@ -32,7 +32,6 @@ submitit>=1.5,<2.0
 fvcore>=0.1.5,<0.1.6
 iopath>=0.1.10,<0.1.11
 tensorboard>=2.14,<3.0
-opencv-python-headless>=4.10,<5.0
 
 # Qwen 2.5 visual-language (optional but enabled by default)
 transformers>=4.41,<5.0
@@ -48,6 +47,7 @@ decord>=0.6,<1.0
 
 # Optional extras for advanced training
 # timm                # for DINOv2 encoders
+# opencv-python       # common image ops (not strictly required)
 # matplotlib          # plotting in notebooks/scripts
 
 # Observability (optional)

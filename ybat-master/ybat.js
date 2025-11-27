@@ -1888,6 +1888,24 @@ function resetSam3Eta() {
     sam3EtaState.smoothedRate = null;
 }
 
+function computeSam3Progress(job) {
+    const fallback = Number.isFinite(job?.progress) ? job.progress : 0;
+    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
+    if (!metrics.length) return Math.max(0, Math.min(1, fallback));
+    const last = metrics[metrics.length - 1] || {};
+    const epoch = Number.isFinite(last.epoch) ? Number(last.epoch) : null;
+    const totalEpochs = Number.isFinite(last.total_epochs) ? Number(last.total_epochs) : null;
+    const batch = Number.isFinite(last.batch) ? Number(last.batch) : null;
+    const batchesPerEpoch = Number.isFinite(last.batches_per_epoch) ? Number(last.batches_per_epoch) : null;
+    if (!epoch || !batch || !batchesPerEpoch || !totalEpochs) {
+        return Math.max(0, Math.min(1, fallback));
+    }
+    const epochIdx0 = Math.max(0, epoch - 1);
+    const fracEpoch = Math.max(0, Math.min(1, batch / Math.max(1, batchesPerEpoch)));
+    const overall = (epochIdx0 + fracEpoch) / Math.max(1, totalEpochs);
+    return Math.max(0, Math.min(1, overall));
+}
+
 function updateSam3Eta(progress) {
     const now = Date.now();
     if (sam3EtaState.lastProgress === null || progress < sam3EtaState.lastProgress) {
@@ -2430,16 +2448,24 @@ async function refreshSam3History() {
 function updateSam3Ui(job) {
     if (!job || !sam3TrainElements.statusText) return;
     sam3TrainState.lastJobSnapshot = job;
-    const progressVal = Number.isFinite(job.progress) ? job.progress : 0;
+    const progressVal = computeSam3Progress(job);
     const pct = Math.max(0, Math.min(100, Math.round(progressVal * 100)));
-    const batch = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1].batch : null;
-    const batchesPerEpoch = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1].batches_per_epoch : null;
-    const epoch = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1].epoch : null;
-    let statusText = `Training running, ${pct}% done`;
+    const lastMetric = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1] : null;
+    const batch = lastMetric && Number.isFinite(lastMetric.batch) ? lastMetric.batch : null;
+    const batchesPerEpoch =
+        lastMetric && Number.isFinite(lastMetric.batches_per_epoch) ? lastMetric.batches_per_epoch : null;
+    const epoch = lastMetric && Number.isFinite(lastMetric.epoch) ? lastMetric.epoch : null;
+    const totalEpochs = lastMetric && Number.isFinite(lastMetric.total_epochs) ? lastMetric.total_epochs : null;
+    let statusText = job.status === "running" || job.status === "queued" ? `Training running, ${pct}% done` : job.status;
     if (Number.isFinite(epoch) && Number.isFinite(batch) && Number.isFinite(batchesPerEpoch)) {
-        statusText += ` (epoch ${epoch}, batch ${batch}/${batchesPerEpoch})`;
+        const epochPart = Number.isFinite(totalEpochs) ? `epoch ${epoch}/${totalEpochs}` : `epoch ${epoch}`;
+        statusText += ` (${epochPart}, batch ${batch}/${batchesPerEpoch})`;
     }
     sam3TrainElements.statusText.textContent = statusText;
+    if (sam3TrainElements.progressFill) {
+        sam3TrainElements.progressFill.style.width = `${pct}%`;
+        sam3TrainElements.progressFill.setAttribute("aria-valuenow", pct);
+    }
     if (sam3TrainElements.cancelButton) {
         sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);
     }

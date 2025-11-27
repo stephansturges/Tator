@@ -250,11 +250,11 @@ trainer:
         load_segmentation: ${scratch.enable_segmentation}
         coco_json_loader:
           _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
-        dataset_config:
-          class_balance: ${dataset.class_balance}
           include_negatives: true
           category_chunk_size: 2
           _partial_: true
+        dataset_config:
+          class_balance: ${dataset.class_balance}
         img_folder: ${paths.val_img_folder}
         ann_file: ${paths.val_ann_file}
         transforms: ${dataset.val_transforms}

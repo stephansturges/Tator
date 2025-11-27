@@ -980,6 +980,7 @@ const qwenTrainState = {
         progressFill: null,
         message: null,
         summary: null,
+        balanceDescription: null,
         log: null,
         history: null,
         activateButton: null,
@@ -1038,6 +1039,21 @@ const qwenTrainState = {
             }
             row.style.display = show ? "" : "none";
         });
+        if (sam3TrainElements.balanceDescription) {
+            let desc = "";
+            if (chosen === "inv_sqrt") {
+                desc = "Weights = sum(1 / freq^power). Power < 1 gives mild up-weighting of rare classes (default power 0.5).";
+            } else if (chosen === "clipped_inv") {
+                desc = "Inverse-frequency with a cap: weight ∝ 1/freq^power, then clipped so max/min ≤ clip ratio.";
+            } else if (chosen === "effective_num") {
+                desc = "Effective number of samples: weight ∝ (1-β)/(1-β^n). Higher β (e.g., 0.99–0.999) boosts rare classes smoothly.";
+            } else if (chosen === "focal") {
+                desc = "Focal-style sampling: weight ∝ (freq / max_freq)^(-γ). Higher γ boosts rare/low-freq classes.";
+            } else {
+                desc = "Uniform sampling (no class rebalance).";
+            }
+            sam3TrainElements.balanceDescription.textContent = desc;
+        }
     }
 
     function useCachedQwenDataset() {
@@ -2726,6 +2742,7 @@ async function initSam3TrainUi() {
         sam3TrainElements.balanceClip = document.getElementById("sam3BalanceClip");
         sam3TrainElements.balanceBeta = document.getElementById("sam3BalanceBeta");
         sam3TrainElements.balanceGamma = document.getElementById("sam3BalanceGamma");
+        sam3TrainElements.balanceDescription = document.getElementById("sam3BalanceDescription");
         sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
         sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
         sam3TrainElements.instInteractivity = document.getElementById("sam3InstInteractivity");

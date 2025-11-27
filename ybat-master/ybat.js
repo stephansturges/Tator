@@ -1896,7 +1896,11 @@ function computeSam3Progress(job) {
     const epoch = Number.isFinite(last.epoch) ? Number(last.epoch) : null;
     const totalEpochs = Number.isFinite(last.total_epochs) ? Number(last.total_epochs) : null;
     const batch = Number.isFinite(last.batch) ? Number(last.batch) : null;
-    const batchesPerEpoch = Number.isFinite(last.batches_per_epoch) ? Number(last.batches_per_epoch) : null;
+    // Prefer explicit batches_per_epoch from metrics; otherwise fall back to target_epoch_size if present on job
+    const batchesPerEpochMetric = Number.isFinite(last.batches_per_epoch) ? Number(last.batches_per_epoch) : null;
+    const batchesPerEpoch =
+        batchesPerEpochMetric ||
+        (Number.isFinite(job?.config?.scratch?.target_epoch_size) ? Number(job.config.scratch.target_epoch_size) : null);
     if (!epoch || !batch || !batchesPerEpoch || !totalEpochs) {
         return Math.max(0, Math.min(1, fallback));
     }

@@ -620,11 +620,11 @@
                             </div>
                             <div>
                                 <label for="sam3Warmup">Warmup steps</label>
-                                <input type="number" id="sam3Warmup" min="0" value="20" />
+                                <input type="number" id="sam3Warmup" min="0" value="20" title="Warmup steps: start the LR near zero and ramp up over this many steps. Higher = gentler/safer start, lower = hotter start. 0 disables warmup." />
                             </div>
                             <div>
                                 <label for="sam3Timescale">Scheduler timescale</label>
-                                <input type="number" id="sam3Timescale" min="1" value="20" />
+                                <input type="number" id="sam3Timescale" min="1" value="20" title="Scheduler timescale: stretches the LR schedule. Higher = slower decay, steadier training. Lower = faster decay, spikier early changes." />
                             </div>
                         </div>
                         <div class="training-toggle-row">
@@ -634,7 +634,8 @@
                             <div class="training-note">
                                 <strong>Tuning tips:</strong><br />
                                 • Lower LR scale (e.g., 0.05 or 0.02) to reduce early loss spikes.<br />
-                                • Warmup/Timescale: higher warmup ramps LR more gently; higher timescale stretches the schedule. Defaults are a safe start.<br />
+                                • Warmup steps: start near-zero LR and ramp up over these steps; higher is gentler/safer, lower is hotter/risks spikes (try 20–100).<br />
+                                • Timescale: stretches the LR schedule; higher keeps LR steady longer, lower decays faster (try 20–40 for short runs).<br />
                                 • To simulate larger batches without extra VRAM, keep batch size at 1 and raise grad accumulation (e.g., 2–4).<br />
                                 • Typical recipe: resolution 1008, LR scale 0.05, grad accumulation 2, batch sizes 1/1, epochs 20.
                             </div>

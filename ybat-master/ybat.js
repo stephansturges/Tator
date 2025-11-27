@@ -2500,6 +2500,10 @@ function updateSam3Ui(job) {
             sam3TrainState.latestCheckpoint = null;
         }
     }
+    if (sam3TrainElements.balanceSummary) {
+        const info = job.result && job.result.balance_info ? String(job.result.balance_info) : "";
+        sam3TrainElements.balanceSummary.textContent = info;
+    }
     if (sam3TrainElements.activateButton) {
         sam3TrainElements.activateButton.disabled = !sam3TrainState.latestCheckpoint;
     }
@@ -2674,6 +2678,7 @@ async function initSam3TrainUi() {
     sam3TrainElements.progressFill = document.getElementById("sam3ProgressFill");
     sam3TrainElements.message = document.getElementById("sam3Message");
     sam3TrainElements.summary = document.getElementById("sam3Summary");
+    sam3TrainElements.balanceSummary = document.getElementById("sam3BalanceSummary");
     sam3TrainElements.log = document.getElementById("sam3Log");
     sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
     sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");

@@ -3597,6 +3597,9 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                 cleaned = line.rstrip("\n")
                 tail_logs.append(cleaned)
                 _sam3_job_log(job, cleaned)
+                if "sam3-balance" in cleaned.lower() or cleaned.startswith("[sam3-balance]"):
+                    job.result = job.result or {}
+                    job.result["balance_info"] = cleaned
                 try:
                     match = re.search(r"Train Epoch:\s*\[(\d+)\]\[\s*(\d+)\s*/\s*(\d+)\]", cleaned)
                     if match:

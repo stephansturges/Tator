@@ -2495,14 +2495,22 @@ function updateSam3Ui(job) {
             const ckpt = escapeHtml(job.result.checkpoint);
             sam3TrainElements.summary.innerHTML = `Checkpoint: <code>${ckpt}</code>`;
             sam3TrainState.latestCheckpoint = job.result.checkpoint;
+            sam3TrainElements.summary.style.display = "block";
         } else {
             sam3TrainElements.summary.textContent = "";
             sam3TrainState.latestCheckpoint = null;
+            sam3TrainElements.summary.style.display = "none";
         }
     }
     if (sam3TrainElements.balanceSummary) {
         const info = job.result && job.result.balance_info ? String(job.result.balance_info) : "";
-        sam3TrainElements.balanceSummary.textContent = info;
+        if (info) {
+            sam3TrainElements.balanceSummary.textContent = info;
+            sam3TrainElements.balanceSummary.style.display = "block";
+        } else {
+            sam3TrainElements.balanceSummary.textContent = "";
+            sam3TrainElements.balanceSummary.style.display = "none";
+        }
     }
     if (sam3TrainElements.activateButton) {
         sam3TrainElements.activateButton.disabled = !sam3TrainState.latestCheckpoint;

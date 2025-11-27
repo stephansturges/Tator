@@ -1886,19 +1886,14 @@ function resetSam3Eta() {
     sam3EtaState.lastProgress = null;
     sam3EtaState.lastTimestamp = null;
     sam3EtaState.smoothedRate = null;
-    if (sam3TrainElements.etaText) {
-        sam3TrainElements.etaText.textContent = "";
-    }
 }
 
 function updateSam3Eta(progress) {
-    if (!sam3TrainElements.etaText) return;
     const now = Date.now();
     if (sam3EtaState.lastProgress === null || progress < sam3EtaState.lastProgress) {
         sam3EtaState.lastProgress = progress;
         sam3EtaState.lastTimestamp = now;
         sam3EtaState.smoothedRate = null;
-        sam3TrainElements.etaText.textContent = "";
         return;
     }
     const deltaP = progress - sam3EtaState.lastProgress;
@@ -1910,8 +1905,6 @@ function updateSam3Eta(progress) {
                 ? sam3EtaState.smoothedRate * 0.7 + instRate * 0.3
                 : instRate;
             const remaining = (1 - progress) / sam3EtaState.smoothedRate;
-            const text = formatEta(remaining);
-            sam3TrainElements.etaText.textContent = text;
         }
         sam3EtaState.lastProgress = progress;
         sam3EtaState.lastTimestamp = now;
@@ -2457,19 +2450,15 @@ function updateSam3Ui(job) {
     if (!job || !sam3TrainElements.statusText) return;
     sam3TrainState.lastJobSnapshot = job;
     const progressVal = Number.isFinite(job.progress) ? job.progress : 0;
-    const pct = Math.round(progressVal * 100);
-    sam3TrainElements.statusText.textContent = `${job.status}${job.message ? ` — ${job.message}` : ""}`;
-    if (sam3TrainElements.progressFill) {
-        sam3TrainElements.progressFill.style.width = `${pct}%`;
-        sam3TrainElements.progressFill.setAttribute("aria-valuenow", pct);
+    const pct = Math.max(0, Math.min(100, Math.round(progressVal * 100)));
+    const batch = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1].batch : null;
+    const batchesPerEpoch = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1].batches_per_epoch : null;
+    const epoch = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1].epoch : null;
+    let statusText = `Training running, ${pct}% done`;
+    if (Number.isFinite(epoch) && Number.isFinite(batch) && Number.isFinite(batchesPerEpoch)) {
+        statusText += ` (epoch ${epoch}, batch ${batch}/${batchesPerEpoch})`;
     }
-    if (sam3TrainElements.etaText) {
-        if (pct >= 100 || job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
-            sam3TrainElements.etaText.textContent = "";
-        } else {
-            updateSam3Eta(progressVal);
-        }
-    }
+    sam3TrainElements.statusText.textContent = statusText;
     if (sam3TrainElements.cancelButton) {
         sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);
     }

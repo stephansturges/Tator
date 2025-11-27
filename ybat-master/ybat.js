@@ -1827,8 +1827,7 @@ const sam3LossState = {
     jobId: null,
     avgPoints: [],
     instPoints: [],
-    lastLogCount: 0,
-    lastSeq: -1,
+    lastMetricCount: 0,
     chart: null, // { ctx }
 };
 
@@ -1848,8 +1847,7 @@ function resetSam3LossChart(jobId = null) {
     sam3LossState.jobId = jobId;
     sam3LossState.avgPoints = [];
     sam3LossState.instPoints = [];
-    sam3LossState.lastLogCount = 0;
-    sam3LossState.lastSeq = -1;
+    sam3LossState.lastMetricCount = 0;
     const canvas = sam3TrainElements.lossCanvas;
     if (canvas) {
         const ctx = canvas.getContext("2d");
@@ -2071,43 +2069,30 @@ function drawSam3LossChart() {
     ctx.restore();
 }
 
-function updateSam3LossChart(logEntries, jobId) {
+function updateSam3LossChartFromMetrics(metrics, jobId) {
     if (!sam3TrainElements.lossCanvas) return;
     if (jobId && sam3LossState.jobId !== jobId) {
         resetSam3LossChart(jobId);
     }
-    const entries = Array.isArray(logEntries) ? logEntries : [];
-    const hasSeq = entries.some((entry) => entry && typeof entry.seq === "number");
-    let newEntries = entries;
-    if (hasSeq) {
-        newEntries = entries.filter((entry) => entry && typeof entry.seq === "number" && entry.seq > sam3LossState.lastSeq);
-        const maxSeq = Math.max(
-            sam3LossState.lastSeq,
-            ...entries.map((e) => (e && typeof e.seq === "number" ? e.seq : sam3LossState.lastSeq)),
-        );
-        sam3LossState.lastSeq = maxSeq;
-    } else {
-        const totalLines = entries.length;
-        if (totalLines < sam3LossState.lastLogCount) {
-            resetSam3LossChart(jobId || sam3LossState.jobId);
-        }
-        const startIdx = sam3LossState.lastLogCount;
-        newEntries = entries.slice(startIdx);
-        sam3LossState.lastLogCount = totalLines;
+    const entries = Array.isArray(metrics) ? metrics : [];
+    if (!entries.length) return;
+    if (entries.length < sam3LossState.lastMetricCount) {
+        resetSam3LossChart(jobId || sam3LossState.jobId);
     }
+    const newEntries = entries.slice(sam3LossState.lastMetricCount);
+    sam3LossState.lastMetricCount = entries.length;
     if (!newEntries.length) return;
     initSam3LossChart();
     newEntries.forEach((entry) => {
-        const line = entry && entry.message ? entry.message : "";
-        const parsed = parseSam3LossPair(line);
-        if (parsed && (parsed.instant !== null || parsed.average !== null)) {
-            const nextX = Math.max(sam3LossState.avgPoints.length, sam3LossState.instPoints.length);
-            if (parsed.average !== null) {
-                sam3LossState.avgPoints.push({ x: nextX, y: parsed.average });
-            }
-            if (parsed.instant !== null) {
-                sam3LossState.instPoints.push({ x: nextX, y: parsed.instant });
-            }
+        if (!entry || typeof entry !== "object") return;
+        const inst = Number(entry.train_loss);
+        const avg = entry.train_loss_avg !== undefined ? Number(entry.train_loss_avg) : null;
+        const stepVal = Number.isFinite(entry.step) ? entry.step : Math.max(sam3LossState.avgPoints.length, sam3LossState.instPoints.length);
+        if (Number.isFinite(avg)) {
+            sam3LossState.avgPoints.push({ x: stepVal, y: avg });
+        }
+        if (Number.isFinite(inst)) {
+            sam3LossState.instPoints.push({ x: stepVal, y: inst });
         }
     });
     if (sam3LossState.avgPoints.length || sam3LossState.instPoints.length) {
@@ -2492,7 +2477,7 @@ function updateSam3Ui(job) {
         const logs = Array.isArray(job.logs) ? job.logs : [];
         const linesDisplay = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean).slice(-200);
         sam3TrainElements.log.textContent = linesDisplay.join("\n");
-        updateSam3LossChart(logs, job.job_id);
+        updateSam3LossChartFromMetrics(job.metrics, job.job_id);
     } else {
         // If we lost references (e.g., DOM re-render), rebind and retry
         sam3TrainElements.log = document.getElementById("sam3Log");
@@ -2500,7 +2485,7 @@ function updateSam3Ui(job) {
         if (sam3TrainElements.log && sam3TrainElements.lossCanvas && job && Array.isArray(job.logs)) {
             const linesAll = job.logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
             sam3TrainElements.log.textContent = linesAll.slice(-200).join("\n");
-            updateSam3LossChart(job.logs, job.job_id);
+            updateSam3LossChartFromMetrics(job.metrics, job.job_id);
         }
     }
     if (sam3TrainElements.summary) {

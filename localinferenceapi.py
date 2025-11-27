@@ -2141,6 +2141,7 @@ SAM3_GENERATED_CONFIG_DIR = SAM3_PACKAGE_ROOT / "train/configs/generated"
 SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 SAM3_BPE_PATH = SAM3_VENDOR_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
 SAM3_MAX_LOG_LINES = 500
+SAM3_MAX_METRIC_POINTS = 2000
 
 
 @dataclass
@@ -2167,6 +2168,7 @@ class Sam3TrainingJob:
     message: str = "Queued"
     config: Dict[str, Any] = field(default_factory=dict)
     logs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
@@ -2307,6 +2309,15 @@ def _sam3_job_log(job: Sam3TrainingJob, message: str) -> None:
         pass
 
 
+def _sam3_job_append_metric(job: Sam3TrainingJob, metric: Dict[str, Any]) -> None:
+    if not metric:
+        return
+    job.metrics.append(metric)
+    if SAM3_MAX_METRIC_POINTS and len(job.metrics) > SAM3_MAX_METRIC_POINTS:
+        job.metrics[:] = job.metrics[-SAM3_MAX_METRIC_POINTS :]
+    job.updated_at = time.time()
+
+
 def _sam3_job_update(
     job: Sam3TrainingJob,
     *,
@@ -2342,6 +2353,7 @@ def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:
         "progress": job.progress,
         "message": job.message,
         "logs": job.logs,
+        "metrics": job.metrics,
         "result": job.result,
         "error": job.error,
         "created_at": job.created_at,
@@ -3594,6 +3606,25 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                         frac = (epoch_idx + frac_epoch) / max_epochs
                         prog_val = max(0.05, min(0.99, frac))
                         _sam3_job_update(job, progress=prog_val, log_message=False)
+                    loss_match = re.search(r"Losses\/train_all_loss:\s*([0-9.+-eE]+)(?:\s*\(\s*([0-9.+-eE]+)\s*\))?", cleaned)
+                    if loss_match and match:
+                        instant = float(loss_match.group(1))
+                        avg_loss = float(loss_match.group(2)) if loss_match.group(2) else None
+                        total_steps = max(1, int(match.group(3)))
+                        steps_in_epoch = total_steps or steps_per_epoch or total_steps
+                        global_step = epoch_idx * steps_in_epoch + step_idx
+                        metric_payload = {
+                            "phase": "train",
+                            "train_loss": instant,
+                            "train_loss_avg": avg_loss,
+                            "batch": step_idx,
+                            "batches_per_epoch": steps_in_epoch,
+                            "epoch": epoch_idx + 1,
+                            "total_epochs": max_epochs,
+                            "step": global_step,
+                            "timestamp": time.time(),
+                        }
+                        _sam3_job_append_metric(job, metric_payload)
                 except Exception:
                     pass
                 _sam3_job_update(job, message=cleaned[-200:], log_message=False)

@@ -3566,7 +3566,7 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                 cmd.extend(["--num-gpus", str(num_gpus)])
             env = os.environ.copy()
             existing_py = env.get("PYTHONPATH", "")
-            py_root = str(SAM3_VENDOR_ROOT)
+            py_root = f"{SAM3_VENDOR_ROOT}:{SAM3_REPO_ROOT}"
             env["PYTHONPATH"] = f"{py_root}:{existing_py}" if existing_py else py_root
             env.setdefault("CUDA_LAUNCH_BLOCKING", "1")
             env.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")

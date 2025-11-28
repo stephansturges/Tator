@@ -5035,12 +5035,26 @@ def promote_sam3_run(run_id: str, variant: str = Query("sam3")):
 
 
 @app.get("/sam3/models/available")
-def list_sam3_available_models(variant: str = Query("sam3")):
-    """List completed run checkpoints for prompt model selection."""
-    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
-    runs = _list_sam3_runs(normalized)
+def list_sam3_available_models(
+    variant: str = Query("sam3"),
+    promoted_only: bool = Query(False),
+):
+    """List run checkpoints for prompt model selection."""
+    variant_norm = (variant or "sam3").strip().lower()
+    variant_list = []
+    if variant_norm in {"all", "*"}:
+        variant_list = ["sam3", "sam3lite"]
+    elif variant_norm == "sam3lite":
+        variant_list = ["sam3lite"]
+    else:
+        variant_list = ["sam3"]
+    runs = []
+    for v in variant_list:
+        runs.extend(_list_sam3_runs(v))
     models: List[Dict[str, Any]] = []
     for run in runs:
+        if promoted_only and not run.get("promoted"):
+            continue
         if run.get("active"):
             # allow listing active too, but mark status
             pass

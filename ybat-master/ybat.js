@@ -1099,15 +1099,25 @@ const qwenTrainState = {
     async function refreshSam3PromptModels() {
         if (!sam3PromptElements.select) return;
         try {
-            const resp = await fetch(`${API_ROOT}/sam3/models/available?variant=sam3`);
+            const resp = await fetch(`${API_ROOT}/sam3/models/available?variant=all&promoted_only=true`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             sam3PromptState.models = Array.isArray(data) ? data : [];
+            sam3PromptState.models.sort((a, b) => {
+                const pa = a.promoted ? 0 : 1;
+                const pb = b.promoted ? 0 : 1;
+                if (pa !== pb) return pa - pb;
+                const va = a.variant || "";
+                const vb = b.variant || "";
+                if (va !== vb) return va.localeCompare(vb);
+                return (a.id || "").localeCompare(b.id || "");
+            });
             sam3PromptElements.select.innerHTML = "";
             sam3PromptState.models.forEach((m, idx) => {
                 const opt = document.createElement("option");
                 opt.value = m.path;
-                opt.textContent = `${m.id || `run ${idx + 1}`}${m.promoted ? " (promoted)" : ""}`;
+                const sizeText = Number.isFinite(m.size_bytes) ? ` – ${formatBytes(m.size_bytes)}` : "";
+                opt.textContent = `${m.id || `run ${idx + 1}`} [${m.variant || "sam3"}]${m.promoted ? " (promoted)" : ""}${sizeText}`;
                 sam3PromptElements.select.appendChild(opt);
             });
             if (sam3PromptState.models.length) {

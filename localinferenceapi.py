@@ -2684,6 +2684,16 @@ def _describe_run_dir(run_dir: Path, variant: str, active_paths: set[Path]) -> D
     logs_dir = run_dir / "logs"
     tensorboard_dir = run_dir / "tensorboard"
     dumps_dir = run_dir / "dumps"
+    marker_path = run_dir / ".promoted"
+    promoted = False
+    promoted_at: Optional[float] = None
+    if marker_path.exists():
+        promoted = True
+        try:
+            meta = json.loads(marker_path.read_text())
+            promoted_at = meta.get("timestamp")
+        except Exception:
+            promoted_at = None
     checkpoints: List[Dict[str, Any]] = []
     if checkpoints_dir.exists():
         for ckpt in sorted(checkpoints_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
@@ -2720,6 +2730,8 @@ def _describe_run_dir(run_dir: Path, variant: str, active_paths: set[Path]) -> D
         "dumps_size_bytes": _dir_size_bytes(dumps_dir),
         "checkpoints": checkpoints,
         "active": run_dir.resolve() in active_paths,
+        "promoted": promoted,
+        "promoted_at": promoted_at,
     }
     return entry
 
@@ -2842,6 +2854,11 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
             continue
     stripped, before, after = _strip_checkpoint_optimizer(keep)
     freed += max(0, before - after)
+    marker = run_dir / ".promoted"
+    try:
+        marker.write_text(json.dumps({"timestamp": time.time(), "keep": str(keep)}), encoding="utf-8")
+    except Exception:
+        pass
     return {
         "kept": str(keep),
         "kept_size_bytes": keep.stat().st_size if keep.exists() else 0,
@@ -2849,6 +2866,8 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
         "deleted": deleted,
         "freed_bytes": freed,
         "run_path": str(run_dir),
+        "promoted": True,
+        "promoted_at": time.time(),
     }
 
 

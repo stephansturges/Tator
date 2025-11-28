@@ -108,14 +108,20 @@ dataset:
         pad_n_queries: 200
         pad_scale_pos: 1.0
 
-    loss_fn_semantic_seg: null
-    scale_by_find_batch_size: ${scratch.scale_by_find_batch_size}
+  loss_fn_semantic_seg: null
+  scale_by_find_batch_size: ${scratch.scale_by_find_batch_size}
 
 # ============================================================================
 # Helper parameters and functions
 # ============================================================================
 scratch:
-  enable_segmentation: False
+  # Keep the segmentation head loaded for text prompting. Requires masks only when
+  # load_segmentation is True.
+  enable_segmentation_head: True
+  # Expect segmentation masks from the dataset/collate and include them in batches.
+  load_segmentation: False
+  # Backwards-compatible alias used in result summaries.
+  enable_segmentation: ${scratch.enable_segmentation_head}
   enable_inst_interactivity: False
 
   # Model parameters
@@ -185,7 +191,7 @@ scratch:
     _partial_: true
     repeats: ${scratch.hybrid_repeats}
     dict_key: roboflow100
-    with_seg_masks: ${scratch.enable_segmentation}
+    with_seg_masks: ${scratch.load_segmentation}
 
   gradient_accumulation_steps: 1
   train_batch_size: 1
@@ -194,7 +200,7 @@ scratch:
     _partial_: true
     repeats: ${scratch.hybrid_repeats}
     dict_key: all
-    with_seg_masks: ${scratch.enable_segmentation}
+    with_seg_masks: ${scratch.load_segmentation}
 
 # ============================================================================
 # Trainer Configuration
@@ -229,7 +235,7 @@ trainer:
         _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
         limit_ids: ${dataset.num_images}
         transforms: ${dataset.train_transforms}
-        load_segmentation: ${scratch.enable_segmentation}
+        load_segmentation: ${scratch.load_segmentation}
         dataset_config:
           class_balance: ${dataset.class_balance}
           balance_strategy: ${dataset.balance_strategy}
@@ -257,7 +263,7 @@ trainer:
       _target_: sam3.train.data.torch_dataset.TorchDataset
       dataset:
         _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
-        load_segmentation: ${scratch.enable_segmentation}
+        load_segmentation: ${scratch.load_segmentation}
         coco_json_loader:
           _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
           include_negatives: true
@@ -289,7 +295,7 @@ trainer:
     bpe_path: ${paths.bpe_path}
     device: cpus
     eval_mode: false
-    enable_segmentation: ${scratch.enable_segmentation}
+    enable_segmentation: ${scratch.enable_segmentation_head}
     enable_inst_interactivity: ${scratch.enable_inst_interactivity}
 
   meters:

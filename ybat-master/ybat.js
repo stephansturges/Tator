@@ -980,7 +980,8 @@ const qwenTrainState = {
         balanceClip: null,
         balanceBeta: null,
         balanceGamma: null,
-        instInteractivity: null,
+        segHead: null,
+        segTrain: null,
         startButton: null,
         cancelButton: null,
         statusText: null,
@@ -1034,7 +1035,9 @@ const qwenTrainState = {
         balanceClip: null,
         balanceBeta: null,
         balanceGamma: null,
-        instInteractivity: null,
+        segHead: null,
+        segTrain: null,
+        bboxOnly: null,
         startButton: null,
         cancelButton: null,
         statusText: null,
@@ -3243,8 +3246,17 @@ async function startSam3Training() {
         const val = maybeNumber(el);
         if (val !== null) payload[key] = val;
     });
-    if (sam3TrainElements.instInteractivity) {
-        payload.enable_inst_interactivity = sam3TrainElements.instInteractivity.checked;
+    const wantsSegTrain = sam3TrainElements.segTrain ? sam3TrainElements.segTrain.checked : false;
+    const bboxOnly = sam3TrainElements.bboxOnly ? sam3TrainElements.bboxOnly.checked : false;
+    if (bboxOnly) {
+        payload.enable_segmentation_head = false;
+        payload.train_segmentation = false;
+    } else {
+        const segHeadChecked = sam3TrainElements.segHead ? sam3TrainElements.segHead.checked : true;
+        payload.enable_segmentation_head = segHeadChecked || wantsSegTrain;
+        if (wantsSegTrain) {
+            payload.train_segmentation = true;
+        }
     }
     setSam3Message("Starting SAM3 training…", "info");
     try {
@@ -3338,7 +3350,9 @@ async function initSam3TrainUi() {
         sam3TrainElements.balanceDescription = document.getElementById("sam3BalanceDescription");
         sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
         sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
-        sam3TrainElements.instInteractivity = document.getElementById("sam3InstInteractivity");
+        sam3TrainElements.segHead = document.getElementById("sam3SegHead");
+        sam3TrainElements.segTrain = document.getElementById("sam3SegTrain");
+        sam3TrainElements.bboxOnly = document.getElementById("sam3BBoxOnly");
         sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
     sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
     sam3TrainElements.statusText = document.getElementById("sam3StatusText");
@@ -3357,11 +3371,27 @@ async function initSam3TrainUi() {
             sam3TrainElements.balanceStrategy.addEventListener("change", () => updateBalanceParamVisibility());
             updateBalanceParamVisibility();
         }
+        if (sam3TrainElements.segTrain && sam3TrainElements.segHead) {
+            sam3TrainElements.segTrain.addEventListener("change", () => {
+                if (sam3TrainElements.segTrain.checked) {
+                    sam3TrainElements.segHead.checked = true;
+                }
+            });
+        }
+        if (sam3TrainElements.bboxOnly && sam3TrainElements.segHead && sam3TrainElements.segTrain) {
+            sam3TrainElements.bboxOnly.addEventListener("change", () => {
+                const bboxMode = sam3TrainElements.bboxOnly.checked;
+                if (bboxMode) {
+                    sam3TrainElements.segHead.checked = false;
+                    sam3TrainElements.segTrain.checked = false;
+                }
+            });
+        }
         if (sam3TrainElements.datasetSelect) {
             sam3TrainElements.datasetSelect.addEventListener("change", () => {
                 sam3TrainState.selectedId = sam3TrainElements.datasetSelect.value;
-            const entry = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId);
-            updateSam3DatasetSummary(entry);
+                const entry = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId);
+                updateSam3DatasetSummary(entry);
             resetSam3Eta();
         });
     }
@@ -3656,9 +3686,6 @@ async function startSam3LiteTraining() {
         const val = maybeNumber(el);
         if (val !== null) payload[key] = val;
     });
-    if (sam3LiteTrainElements.instInteractivity) {
-        payload.enable_inst_interactivity = sam3LiteTrainElements.instInteractivity.checked;
-    }
     setSam3LiteMessage("Starting SAM3-lite training…", "info");
     try {
         const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs`, {
@@ -3752,8 +3779,7 @@ async function initSam3LiteTrainUi() {
     sam3LiteTrainElements.balanceDescription = document.getElementById("sam3LiteBalanceDescription");
     sam3LiteTrainElements.warmupSteps = document.getElementById("sam3LiteWarmup");
     sam3LiteTrainElements.schedulerTimescale = document.getElementById("sam3LiteTimescale");
-    sam3LiteTrainElements.instInteractivity = document.getElementById("sam3LiteInstInteractivity");
-    sam3LiteTrainElements.startButton = document.getElementById("sam3LiteStartBtn");
+        sam3LiteTrainElements.startButton = document.getElementById("sam3LiteStartBtn");
     sam3LiteTrainElements.cancelButton = document.getElementById("sam3LiteCancelBtn");
     sam3LiteTrainElements.statusText = document.getElementById("sam3LiteStatusText");
     sam3LiteTrainElements.progressFill = document.getElementById("sam3LiteProgressFill");

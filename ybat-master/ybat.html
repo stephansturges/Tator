@@ -563,8 +563,8 @@
             <div class="tab-panel" id="tabSam3Train" data-tab-panel="sam3-train">
                 <div class="training-wrapper">
                     <section class="training-form-section">
-                        <h2>Train SAM3 (box-only)</h2>
-                        <p class="training-help">Pick a cached dataset (Qwen uploads or YOLO folders). The server converts to COCO and launches SAM3 training locally.</p>
+                        <h2>Train SAM3 (text-promptable by default)</h2>
+                        <p class="training-help">Pick a cached dataset (Qwen uploads or YOLO folders). By default we keep the SAM3 segmentation head so the resulting checkpoint works with text prompting; masks are only required if you opt in below.</p>
                         <div class="training-field">
                             <label>Dataset</label>
                             <div class="sam3-dataset-row">
@@ -667,7 +667,15 @@
                             </div>
                         </div>
                         <div class="training-toggle-row">
-                            <label title="Adds a click-to-refine head like SAM2, but our box-only training doesn’t use it yet. It just makes things slower, so keep it off for now."><input type="checkbox" id="sam3InstInteractivity" /> Enable instance interactivity head</label>
+                            <label title="Keep the SAM3 segmentation head loaded so text prompting works. Uses the base head weights if you don’t train masks."><input type="checkbox" id="sam3SegHead" checked /> Keep segmentation head for text prompts</label>
+                        </div>
+                        <div class="training-toggle-row">
+                            <label title="Requires mask annotations; includes masks in batches and trains the segmentation head. Leave off if your dataset is bbox-only."><input type="checkbox" id="sam3SegTrain" /> Include segmentation masks (requires masks)</label>
+                            <div class="training-help">Head-only mode keeps text prompting available without needing masks; enable this if your dataset already has masks and you want the head to learn them.</div>
+                        </div>
+                        <div class="training-toggle-row">
+                            <label title="Disables the segmentation head entirely. Smaller checkpoints, faster training, BUT no text prompting and only bbox refinement works."><input type="checkbox" id="sam3BBoxOnly" /> Bbox-refiner only mode (no text prompts, no masks)</label>
+                            <div class="training-help">Use only if you explicitly want a bbox-only refiner. Default OFF so text prompting remains available.</div>
                         </div>
                         <button type="button" id="sam3StartBtn" class="training-button">Start SAM3 Training</button>
                             <div class="training-note">
@@ -829,7 +837,7 @@
                             </div>
                         </div>
                         <div class="training-toggle-row">
-                            <label title="Adds a click-to-refine head like SAM2, but our box-only training doesn’t use it yet. It just makes things slower, so keep it off for now."><input type="checkbox" id="sam3LiteInstInteractivity" /> Enable instance interactivity head</label>
+                            <!-- Instance interactivity removed: no supporting dataset; keeping UI simpler. -->
                         </div>
                         <button type="button" id="sam3LiteStartBtn" class="training-button">Start SAM3-Lite Training</button>
                         <div class="training-note">

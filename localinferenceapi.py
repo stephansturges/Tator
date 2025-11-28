@@ -2100,6 +2100,8 @@ class Sam3TrainRequest(BaseModel):
     balance_gamma: Optional[float] = None
     train_limit: Optional[int] = None
     log_freq: Optional[int] = None
+    enable_segmentation_head: Optional[bool] = None
+    train_segmentation: Optional[bool] = None
 
 
 class Sam3LiteTrainRequest(BaseModel):
@@ -4076,11 +4078,15 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
             log_dir = Path(cfg.paths.experiment_log_dir)
             checkpoint_dir = log_dir / "checkpoints"
             latest_ckpt = _latest_checkpoint_in_dir(checkpoint_dir)
+            seg_head = bool(getattr(cfg.scratch, "enable_segmentation_head", getattr(cfg.scratch, "enable_segmentation", True)))
+            load_seg = bool(getattr(cfg.scratch, "load_segmentation", seg_head))
             result_payload = {
                 "experiment_log_dir": str(log_dir),
                 "checkpoint": latest_ckpt,
                 "config_path": str(config_file),
-                "enable_segmentation": bool(getattr(cfg.scratch, "enable_segmentation", True)),
+                "enable_segmentation": seg_head,
+                "enable_segmentation_head": seg_head,
+                "load_segmentation": load_seg,
             }
             _sam3_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
         except Exception as exc:  # noqa: BLE001
@@ -4933,6 +4939,10 @@ def _start_sam3lite_training_worker(job: Sam3LiteTrainingJob, cfg: Dict[str, Any
 
 def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: str) -> Tuple[OmegaConf, int]:
     cfg = OmegaConf.load(str(SAM3_CONFIG_TEMPLATE))
+    if not hasattr(cfg.scratch, "enable_segmentation_head"):
+        cfg.scratch.enable_segmentation_head = True
+    if not hasattr(cfg.scratch, "load_segmentation"):
+        cfg.scratch.load_segmentation = False
     train_ann = Path(meta["coco_train_json"]).resolve()
     val_ann = Path(meta["coco_val_json"]).resolve()
     cfg.paths.train_img_folder = str(train_ann.parent)
@@ -4948,6 +4958,14 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
     cfg.trainer.max_epochs = int(payload.max_epochs) if payload.max_epochs is not None else cfg.trainer.max_epochs
     cfg.trainer.val_epoch_freq = int(payload.val_epoch_freq) if payload.val_epoch_freq is not None else cfg.trainer.val_epoch_freq
     cfg.scratch.target_epoch_size = int(payload.target_epoch_size) if payload.target_epoch_size is not None else cfg.scratch.target_epoch_size
+    seg_head_requested = payload.enable_segmentation_head
+    train_seg_requested = payload.train_segmentation
+    enable_seg_head = bool(seg_head_requested) if seg_head_requested is not None else bool(cfg.scratch.enable_segmentation_head)
+    train_segmentation = bool(train_seg_requested) if train_seg_requested is not None else bool(cfg.scratch.load_segmentation)
+    cfg.scratch.enable_segmentation_head = enable_seg_head or train_segmentation
+    cfg.scratch.load_segmentation = train_segmentation
+    # Keep legacy flag aligned with head presence so downstream activation sees the capability.
+    cfg.scratch.enable_segmentation = cfg.scratch.enable_segmentation_head
     if payload.resolution is not None:
         cfg.scratch.resolution = int(payload.resolution)
     if payload.lr_scale is not None:

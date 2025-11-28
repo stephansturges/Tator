@@ -5056,7 +5056,8 @@ def list_sam3_available_models(
     base_entry = {
         "id": active_sam3_metadata.get("label") or active_sam3_metadata.get("id") or "base",
         "key": "base",
-        "path": active_sam3_checkpoint or SAM3_MODEL_ID,
+        # Use a real checkpoint path when available; otherwise keep None so the loader will pull from HF.
+        "path": active_sam3_checkpoint or (SAM3_CHECKPOINT_PATH if SAM3_CHECKPOINT_PATH else None),
         "size_bytes": None,
         "promoted": False,
         "active": True,
@@ -5064,8 +5065,7 @@ def list_sam3_available_models(
         "run_path": None,
         "source": active_sam3_metadata.get("source") or "env",
     }
-    if active_sam3_checkpoint:
-        models.append(base_entry)
+    models.append(base_entry)
     for run in runs:
         if promoted_only and not run.get("promoted"):
             continue

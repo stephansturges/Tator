@@ -1116,7 +1116,7 @@ const qwenTrainState = {
             sam3PromptElements.select.innerHTML = "";
             sam3PromptState.models.forEach((m, idx) => {
                 const opt = document.createElement("option");
-                opt.value = m.path;
+                opt.value = m.key || m.path || m.id || `model-${idx}`;
                 const sizeText = Number.isFinite(m.size_bytes) ? ` – ${formatBytes(m.size_bytes)}` : "";
                 opt.textContent = `${m.id || `run ${idx + 1}`} [${m.variant || "sam3"}]${m.promoted ? " (promoted)" : ""}${sizeText}`;
                 sam3PromptElements.select.appendChild(opt);
@@ -1136,7 +1136,7 @@ const qwenTrainState = {
     function updateSam3PromptSummary() {
         if (!sam3PromptElements.summary) return;
         const path = sam3PromptElements.select ? sam3PromptElements.select.value : null;
-        const entry = sam3PromptState.models.find((m) => m.path === path);
+        const entry = sam3PromptState.models.find((m) => (m.key || m.path || m.id) === path);
         if (!entry) {
             sam3PromptElements.summary.textContent = "No model selected.";
             return;
@@ -1157,11 +1157,16 @@ const qwenTrainState = {
     async function activateSam3PromptModel() {
         if (!sam3PromptElements.select) return;
         const path = sam3PromptElements.select.value;
-        if (!path) {
+        const entry = sam3PromptState.models.find((m) => (m.key || m.path || m.id) === path);
+        if (!entry) {
             setSam3PromptMessage("Select a model first.", "warn");
             return;
         }
-        const payload = { checkpoint_path: path, enable_segmentation: false, label: `prompt:${path.split("/").pop()}` };
+        const payload = {
+            checkpoint_path: entry.path || null,
+            enable_segmentation: false,
+            label: `prompt:${(entry.id || entry.path || "sam3").toString().split("/").pop()}`,
+        };
         try {
             const resp = await fetch(`${API_ROOT}/sam3/models/activate`, {
                 method: "POST",

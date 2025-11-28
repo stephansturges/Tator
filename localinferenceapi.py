@@ -5055,7 +5055,8 @@ def list_sam3_available_models(
     # Always expose the base/active env model if available
     base_entry = {
         "id": active_sam3_metadata.get("label") or active_sam3_metadata.get("id") or "base",
-        "path": active_sam3_checkpoint,
+        "key": "base",
+        "path": active_sam3_checkpoint or SAM3_MODEL_ID,
         "size_bytes": None,
         "promoted": False,
         "active": True,

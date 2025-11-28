@@ -2822,6 +2822,13 @@ function renderRunStorage(entries, elements) {
             heading.appendChild(document.createTextNode(" "));
             heading.appendChild(badge);
         }
+        if (entry.promoted) {
+            const badge = document.createElement("span");
+            badge.className = "storage-badge success";
+            badge.textContent = "Promoted";
+            heading.appendChild(document.createTextNode(" "));
+            heading.appendChild(badge);
+        }
         main.appendChild(heading);
         const parts = [];
         if (Number.isFinite(entry.size_bytes)) parts.push(`total ${formatBytes(entry.size_bytes)}`);
@@ -2845,8 +2852,10 @@ function renderRunStorage(entries, elements) {
             { label: "Delete dumps", scope: "dumps" },
             { label: "Delete TB", scope: "tensorboard" },
             { label: "Delete run", scope: "all", danger: true },
-            { label: "Promote (keep last, strip optimizer)", scope: "promote", danger: false },
         ];
+        if (!entry.promoted) {
+            scopes.push({ label: "Promote (keep last, strip optimizer)", scope: "promote", danger: false });
+        }
         scopes.forEach(({ label, scope, danger }) => {
             const btn = document.createElement("button");
             btn.type = "button";

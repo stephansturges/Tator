@@ -197,6 +197,7 @@
     const TAB_TRAINING = "training";
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
+    const TAB_SAM3_LITE_TRAIN = "sam3lite-train";
     const TAB_ACTIVE = "active";
     const TAB_QWEN = "qwen";
     const TAB_PREDICTORS = "predictors";
@@ -231,6 +232,7 @@
     let activeTab = TAB_LABELING;
     let trainingUiInitialized = false;
     let sam3TrainUiInitialized = false;
+    let sam3LiteTrainUiInitialized = false;
     let activeUiInitialized = false;
     let loadedClassList = [];
     const INGEST_PHASE_LABELS = {
@@ -995,6 +997,70 @@ const qwenTrainState = {
         latestCheckpoint: null,
     };
 
+    const sam3StorageElements = {
+        list: null,
+        refresh: null,
+    };
+
+    const sam3StorageState = {
+        items: [],
+    };
+
+    const sam3LiteTrainElements = {
+        datasetSelect: null,
+        datasetSummary: null,
+        datasetRefresh: null,
+        datasetConvert: null,
+        runName: null,
+        trainBatch: null,
+        valBatch: null,
+        trainWorkers: null,
+        valWorkers: null,
+        epochs: null,
+        resolution: null,
+        lrScale: null,
+        gradAccum: null,
+        valFreq: null,
+        targetEpochSize: null,
+        warmupSteps: null,
+        schedulerTimescale: null,
+        balanceStrategy: null,
+        balancePower: null,
+        balanceClip: null,
+        balanceBeta: null,
+        balanceGamma: null,
+        instInteractivity: null,
+        startButton: null,
+        cancelButton: null,
+        statusText: null,
+        progressFill: null,
+        message: null,
+        summary: null,
+        balanceDescription: null,
+        log: null,
+        history: null,
+        activateButton: null,
+    };
+
+    const sam3LiteTrainState = {
+        datasets: [],
+        selectedId: null,
+        activeJobId: null,
+        pollHandle: null,
+        lastJobSnapshot: null,
+        latestCheckpoint: null,
+        lastSeenJob: {},
+    };
+
+    const sam3LiteStorageElements = {
+        list: null,
+        refresh: null,
+    };
+
+    const sam3LiteStorageState = {
+        items: [],
+    };
+
     function escapeHtml(value) {
         return String(value ?? "")
             .replace(/&/g, "&amp;")
@@ -1053,6 +1119,40 @@ const qwenTrainState = {
                 desc = "Uniform sampling (no class rebalance).";
             }
             sam3TrainElements.balanceDescription.textContent = desc;
+        }
+    }
+
+    function updateSam3LiteBalanceParamVisibility(strategy) {
+        const chosen = strategy || (sam3LiteTrainElements.balanceStrategy && sam3LiteTrainElements.balanceStrategy.value) || "none";
+        const rows = document.querySelectorAll(".sam3lite-balance-param");
+        rows.forEach((row) => {
+            const param = row.dataset ? row.dataset.param : null;
+            let show = false;
+            if (param === "power") {
+                show = ["inv_sqrt", "clipped_inv"].includes(chosen);
+            } else if (param === "clip") {
+                show = chosen === "clipped_inv";
+            } else if (param === "beta") {
+                show = chosen === "effective_num";
+            } else if (param === "gamma") {
+                show = chosen === "focal";
+            }
+            row.style.display = show ? "" : "none";
+        });
+        if (sam3LiteTrainElements.balanceDescription) {
+            let desc = "";
+            if (chosen === "inv_sqrt") {
+                desc = "Weights = sum(1 / freq^power). Power < 1 gives mild up-weighting of rare classes (default power 0.5).";
+            } else if (chosen === "clipped_inv") {
+                desc = "Inverse-frequency with a cap: weight ∝ 1/freq^power, then clipped so max/min ≤ clip ratio.";
+            } else if (chosen === "effective_num") {
+                desc = "Effective number of samples: weight ∝ (1-β)/(1-β^n). Higher β (e.g., 0.99–0.999) boosts rare classes smoothly.";
+            } else if (chosen === "focal") {
+                desc = "Focal-style sampling: weight ∝ (freq / max_freq)^(-γ). Higher γ boosts rare/low-freq classes.";
+            } else {
+                desc = "Uniform sampling (no class rebalance).";
+            }
+            sam3LiteTrainElements.balanceDescription.textContent = desc;
         }
     }
 
@@ -1879,6 +1979,12 @@ const sam3EtaState = {
     smoothedRate: null,
 };
 
+const sam3LiteEtaState = {
+    lastProgress: null,
+    lastTimestamp: null,
+    smoothedRate: null,
+};
+
 function initSam3LossChart() {
     if (!sam3TrainElements.lossCanvas || sam3LossState.chart) return;
     const ctx = sam3TrainElements.lossCanvas.getContext("2d");
@@ -1952,6 +2058,27 @@ function computeSam3Progress(job) {
     return Math.max(0, Math.min(1, overall));
 }
 
+function computeSam3LiteProgress(job) {
+    const fallback = Number.isFinite(job?.progress) ? job.progress : 0;
+    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
+    if (!metrics.length) return Math.max(0, Math.min(1, fallback));
+    const last = metrics[metrics.length - 1] || {};
+    const epoch = Number.isFinite(last.epoch) ? Number(last.epoch) : null;
+    const totalEpochs = Number.isFinite(last.total_epochs) ? Number(last.total_epochs) : null;
+    const batch = Number.isFinite(last.batch) ? Number(last.batch) : null;
+    const batchesPerEpochMetric = Number.isFinite(last.batches_per_epoch) ? Number(last.batches_per_epoch) : null;
+    const batchesPerEpoch =
+        batchesPerEpochMetric ||
+        (Number.isFinite(job?.config?.trainer?.target_epoch_size) ? Number(job.config.trainer.target_epoch_size) : null);
+    if (!epoch || !batch || !batchesPerEpoch || !totalEpochs) {
+        return Math.max(0, Math.min(1, fallback));
+    }
+    const epochIdx0 = Math.max(0, epoch - 1);
+    const fracEpoch = Math.max(0, Math.min(1, batch / Math.max(1, batchesPerEpoch)));
+    const overall = (epochIdx0 + fracEpoch) / Math.max(1, totalEpochs);
+    return Math.max(0, Math.min(1, overall));
+}
+
 function updateSam3Eta(progress) {
     const now = Date.now();
     if (sam3EtaState.lastProgress === null || progress < sam3EtaState.lastProgress) {
@@ -1972,6 +2099,34 @@ function updateSam3Eta(progress) {
         }
         sam3EtaState.lastProgress = progress;
         sam3EtaState.lastTimestamp = now;
+    }
+}
+
+function resetSam3LiteEta() {
+    sam3LiteEtaState.lastProgress = null;
+    sam3LiteEtaState.lastTimestamp = null;
+    sam3LiteEtaState.smoothedRate = null;
+}
+
+function updateSam3LiteEta(progress) {
+    const now = Date.now();
+    if (sam3LiteEtaState.lastProgress === null || progress < sam3LiteEtaState.lastProgress) {
+        sam3LiteEtaState.lastProgress = progress;
+        sam3LiteEtaState.lastTimestamp = now;
+        sam3LiteEtaState.smoothedRate = null;
+        return;
+    }
+    const deltaP = progress - sam3LiteEtaState.lastProgress;
+    const deltaT = (now - sam3LiteEtaState.lastTimestamp) / 1000;
+    if (deltaP > 0.0005 && deltaT > 0.5) {
+        const instRate = deltaP / deltaT;
+        if (instRate > 0) {
+            sam3LiteEtaState.smoothedRate = sam3LiteEtaState.smoothedRate
+                ? sam3LiteEtaState.smoothedRate * 0.7 + instRate * 0.3
+                : instRate;
+        }
+        sam3LiteEtaState.lastProgress = progress;
+        sam3LiteEtaState.lastTimestamp = now;
     }
 }
 
@@ -2138,6 +2293,177 @@ function updateSam3LossChartFromMetrics(metrics, jobId) {
     }
 }
 
+const sam3LiteLossState = {
+    jobId: null,
+    avgPoints: [],
+    instPoints: [],
+    lastMetricCount: 0,
+    chart: null,
+};
+
+function initSam3LiteLossChart() {
+    if (!sam3LiteTrainElements.lossCanvas || sam3LiteLossState.chart) return;
+    const ctx = sam3LiteTrainElements.lossCanvas.getContext("2d");
+    sam3LiteLossState.chart = { ctx };
+}
+
+function resetSam3LiteLossChart(jobId = null) {
+    sam3LiteLossState.jobId = jobId;
+    sam3LiteLossState.avgPoints = [];
+    sam3LiteLossState.instPoints = [];
+    sam3LiteLossState.lastMetricCount = 0;
+    const canvas = sam3LiteTrainElements.lossCanvas;
+    if (canvas) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+            const width = canvas.width || canvas.clientWidth || 0;
+            const height = canvas.height || canvas.clientHeight || 0;
+            ctx.clearRect(0, 0, width, height);
+        }
+    }
+}
+
+function drawSam3LiteLossChart() {
+    const canvas = sam3LiteTrainElements.lossCanvas;
+    const hasAvg = sam3LiteLossState.avgPoints && sam3LiteLossState.avgPoints.length;
+    const hasInst = sam3LiteLossState.instPoints && sam3LiteLossState.instPoints.length;
+    if (!canvas || (!hasAvg && !hasInst)) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const width = Math.max(canvas.clientWidth || 400, 320);
+    const height = Math.max(canvas.clientHeight || 200, 160);
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+    }
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    const padding = { top: 14, right: 14, bottom: 18, left: 48 };
+    const chartWidth = Math.max(1, width - padding.left - padding.right);
+    const chartHeight = Math.max(1, height - padding.top - padding.bottom);
+
+    const seriesX = [];
+    if (hasAvg) {
+        seriesX.push(sam3LiteLossState.avgPoints[0].x, sam3LiteLossState.avgPoints[sam3LiteLossState.avgPoints.length - 1].x);
+    }
+    if (hasInst) {
+        seriesX.push(sam3LiteLossState.instPoints[0].x, sam3LiteLossState.instPoints[sam3LiteLossState.instPoints.length - 1].x);
+    }
+    const minX = Math.min(...seriesX);
+    const maxX = Math.max(...seriesX);
+    const xRange = Math.max(1, maxX - minX);
+
+    const allPoints = [];
+    if (hasAvg) allPoints.push(...sam3LiteLossState.avgPoints);
+    if (hasInst) allPoints.push(...sam3LiteLossState.instPoints);
+    const [yMinRaw, yMaxRaw] = allPoints.length ? getMinMax(allPoints, (p) => p.y) : [0, 1];
+    const yMin = Math.max(0, Math.min(yMinRaw, yMaxRaw - 1e-6));
+    const yMax = Math.max(yMin + 1e-6, yMaxRaw);
+    const yRange = yMax - yMin;
+
+    const tickCount = 4;
+    const avgTickStep = yRange / tickCount;
+    const avgTicks = [];
+    for (let i = 0; i <= tickCount; i += 1) {
+        avgTicks.push(yMin + avgTickStep * i);
+    }
+
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 1;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "12px sans-serif";
+    avgTicks.forEach((tick) => {
+        const norm = (tick - yMin) / yRange;
+        const y = padding.top + (1 - norm) * chartHeight;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, y);
+        ctx.lineTo(width - padding.right, y);
+        ctx.stroke();
+        ctx.fillText(tick.toExponential(1), padding.left - 6, y);
+    });
+
+    ctx.strokeStyle = "#94a3b8";
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top);
+    ctx.lineTo(padding.left, padding.top + chartHeight);
+    ctx.stroke();
+
+    if (hasAvg) {
+        ctx.strokeStyle = "#2563eb";
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        sam3LiteLossState.avgPoints.forEach((point, idx) => {
+            const normX = (point.x - minX) / xRange;
+            const normY = (point.y - yMin) / yRange;
+            const xPos = padding.left + normX * chartWidth;
+            const yPos = padding.top + (1 - normY) * chartHeight;
+            if (idx === 0) {
+                ctx.moveTo(xPos, yPos);
+            } else {
+                ctx.lineTo(xPos, yPos);
+            }
+        });
+        ctx.stroke();
+    }
+
+    if (hasInst) {
+        ctx.strokeStyle = "#f97316";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        sam3LiteLossState.instPoints.forEach((point, idx) => {
+            const normX = (point.x - minX) / xRange;
+            const normY = (point.y - yMin) / yRange;
+            const xPos = padding.left + normX * chartWidth;
+            const yPos = padding.top + (1 - normY) * chartHeight;
+            if (idx === 0) {
+                ctx.moveTo(xPos, yPos);
+            } else {
+                ctx.lineTo(xPos, yPos);
+            }
+        });
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function updateSam3LiteLossChartFromMetrics(metrics, jobId) {
+    if (!sam3LiteTrainElements.lossCanvas) return;
+    if (jobId && sam3LiteLossState.jobId !== jobId) {
+        resetSam3LiteLossChart(jobId);
+    }
+    const entries = Array.isArray(metrics) ? metrics : [];
+    if (!entries.length) return;
+    if (entries.length < sam3LiteLossState.lastMetricCount) {
+        resetSam3LiteLossChart(jobId || sam3LiteLossState.jobId);
+    }
+    const newEntries = entries.slice(sam3LiteLossState.lastMetricCount);
+    sam3LiteLossState.lastMetricCount = entries.length;
+    if (!newEntries.length) return;
+    initSam3LiteLossChart();
+    newEntries.forEach((entry) => {
+        if (!entry || typeof entry !== "object") return;
+        const inst = Number(entry.loss ?? entry.train_loss);
+        const avg = entry.loss_avg !== undefined ? Number(entry.loss_avg) : entry.train_loss_avg !== undefined ? Number(entry.train_loss_avg) : null;
+        const stepVal = Number.isFinite(entry.step) ? entry.step : Math.max(sam3LiteLossState.avgPoints.length, sam3LiteLossState.instPoints.length);
+        if (Number.isFinite(avg)) {
+            sam3LiteLossState.avgPoints.push({ x: stepVal, y: avg });
+        }
+        if (Number.isFinite(inst)) {
+            sam3LiteLossState.instPoints.push({ x: stepVal, y: inst });
+        }
+    });
+    if (sam3LiteLossState.avgPoints.length || sam3LiteLossState.instPoints.length) {
+        drawSam3LiteLossChart();
+    }
+}
 function readNumberInput(input, { integer = false } = {}) {
     if (!input) {
         return undefined;
@@ -2472,6 +2798,110 @@ function renderSam3History(list) {
     });
 }
 
+function renderRunStorage(entries, elements) {
+    if (!elements.list) return;
+    elements.list.innerHTML = "";
+    if (!Array.isArray(entries) || !entries.length) {
+        const empty = document.createElement("div");
+        empty.className = "training-history-item";
+        empty.textContent = "No runs found.";
+        elements.list.appendChild(empty);
+        return;
+    }
+    entries.forEach((entry) => {
+        const item = document.createElement("div");
+        item.className = "storage-item";
+        const main = document.createElement("div");
+        main.className = "storage-main";
+        const heading = document.createElement("div");
+        heading.innerHTML = `<strong>${escapeHtml(entry.id)}</strong>`;
+        if (entry.active) {
+            const badge = document.createElement("span");
+            badge.className = "storage-badge warn";
+            badge.textContent = "Active";
+            heading.appendChild(document.createTextNode(" "));
+            heading.appendChild(badge);
+        }
+        main.appendChild(heading);
+        const parts = [];
+        if (Number.isFinite(entry.size_bytes)) parts.push(`total ${formatBytes(entry.size_bytes)}`);
+        if (Number.isFinite(entry.checkpoints_size_bytes) && entry.checkpoints_size_bytes > 0)
+            parts.push(`ckpts ${formatBytes(entry.checkpoints_size_bytes)}`);
+        if (Number.isFinite(entry.logs_size_bytes) && entry.logs_size_bytes > 0)
+            parts.push(`logs ${formatBytes(entry.logs_size_bytes)}`);
+        if (Number.isFinite(entry.tensorboard_size_bytes) && entry.tensorboard_size_bytes > 0)
+            parts.push(`tensorboard ${formatBytes(entry.tensorboard_size_bytes)}`);
+        if (Number.isFinite(entry.dumps_size_bytes) && entry.dumps_size_bytes > 0)
+            parts.push(`dumps ${formatBytes(entry.dumps_size_bytes)}`);
+        const meta = document.createElement("div");
+        meta.className = "storage-meta";
+        meta.textContent = parts.length ? parts.join(" • ") : "Empty run folder.";
+        main.appendChild(meta);
+        const actions = document.createElement("div");
+        actions.className = "storage-actions";
+        const scopes = [
+            { label: "Delete ckpts", scope: "checkpoints" },
+            { label: "Delete logs", scope: "logs" },
+            { label: "Delete dumps", scope: "dumps" },
+            { label: "Delete TB", scope: "tensorboard" },
+            { label: "Delete run", scope: "all", danger: true },
+        ];
+        scopes.forEach(({ label, scope, danger }) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.textContent = label;
+            btn.className = `training-button${danger ? " training-button-danger" : ""}`;
+            btn.disabled = !!entry.active;
+            btn.addEventListener("click", () => deleteRunStorage(entry.id, entry.variant, scope));
+            actions.appendChild(btn);
+        });
+        item.appendChild(main);
+        item.appendChild(actions);
+        elements.list.appendChild(item);
+    });
+}
+
+async function refreshRunStorage(variant = "sam3") {
+    const elements = variant === "sam3lite" ? sam3LiteStorageElements : sam3StorageElements;
+    const state = variant === "sam3lite" ? sam3LiteStorageState : sam3StorageState;
+    if (!elements.list) return;
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/storage/runs?variant=${encodeURIComponent(variant)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        state.items = Array.isArray(data) ? data : [];
+        renderRunStorage(state.items, elements);
+    } catch (err) {
+        console.error("Failed to load run storage", err);
+    }
+}
+
+async function deleteRunStorage(runId, variant, scope) {
+    const label = scope === "all" ? "entire run folder" : scope;
+    const confirmText = `Delete ${label} for ${runId}?`;
+    if (typeof window !== "undefined" && !window.confirm(confirmText)) return;
+    const qs = new URLSearchParams({ variant, scope });
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}?${qs.toString()}`, {
+            method: "DELETE",
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        if (variant === "sam3") {
+            setSam3Message(`Deleted ${label} for ${runId}.`, "success");
+        } else {
+            setSam3LiteMessage(`Deleted ${label} for ${runId}.`, "success");
+        }
+    } catch (err) {
+        console.error("Delete run failed", err);
+        if (variant === "sam3") {
+            setSam3Message(`Delete failed: ${err.message || err}`, "error");
+        } else {
+            setSam3LiteMessage(`Delete failed: ${err.message || err}`, "error");
+        }
+    }
+    await refreshRunStorage(variant);
+}
+
 async function refreshSam3History() {
     try {
         const resp = await fetch(`${API_ROOT}/sam3/train/jobs`);
@@ -2758,6 +3188,8 @@ async function initSam3TrainUi() {
         sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
         sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
         sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
+    sam3StorageElements.list = document.getElementById("sam3StorageList");
+    sam3StorageElements.refresh = document.getElementById("sam3StorageRefresh");
         if (sam3TrainElements.balanceStrategy) {
             sam3TrainElements.balanceStrategy.addEventListener("change", () => updateBalanceParamVisibility());
             updateBalanceParamVisibility();
@@ -2785,8 +3217,425 @@ async function initSam3TrainUi() {
     if (sam3TrainElements.activateButton) {
         sam3TrainElements.activateButton.addEventListener("click", () => activateSam3Checkpoint());
     }
+    if (sam3StorageElements.refresh) {
+        sam3StorageElements.refresh.addEventListener("click", () => refreshRunStorage("sam3"));
+    }
     await loadSam3Datasets();
     await refreshSam3History();
+    await refreshRunStorage("sam3");
+}
+
+function setSam3LiteMessage(text, tone = "info") {
+    if (!sam3LiteTrainElements.message) return;
+    sam3LiteTrainElements.message.textContent = text || "";
+    sam3LiteTrainElements.message.className = `training-message ${tone}`;
+}
+
+function updateSam3LiteDatasetSummary(entry) {
+    if (!sam3LiteTrainElements.datasetSummary) return;
+    if (!entry) {
+        sam3LiteTrainElements.datasetSummary.textContent = "Pick a dataset to train.";
+        return;
+    }
+    const coco = entry.coco_ready ? "COCO ready" : "Convert required";
+    const src = entry.source || "unknown";
+    const counts = [];
+    if (entry.image_count) counts.push(`${entry.image_count} images`);
+    if (entry.train_count) counts.push(`train ${entry.train_count}`);
+    if (entry.val_count) counts.push(`val ${entry.val_count}`);
+    const countText = counts.length ? ` • ${counts.join(" / ")}` : "";
+    sam3LiteTrainElements.datasetSummary.textContent = `${entry.label || entry.id} (${src}, ${coco})${countText}`;
+}
+
+async function loadSam3LiteDatasets() {
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3lite/datasets`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        sam3LiteTrainState.datasets = Array.isArray(data) ? data : [];
+        if (!sam3LiteTrainState.selectedId && sam3LiteTrainState.datasets.length) {
+            sam3LiteTrainState.selectedId = sam3LiteTrainState.datasets[0].id;
+        }
+        if (sam3LiteTrainElements.datasetSelect) {
+            sam3LiteTrainElements.datasetSelect.innerHTML = "";
+            sam3LiteTrainState.datasets.forEach((entry) => {
+                const opt = document.createElement("option");
+                opt.value = entry.id;
+                opt.textContent = `${entry.label || entry.id}${entry.coco_ready ? "" : " (needs convert)"}`;
+                if (entry.id === sam3LiteTrainState.selectedId) {
+                    opt.selected = true;
+                }
+                sam3LiteTrainElements.datasetSelect.appendChild(opt);
+            });
+        }
+        const selected = sam3LiteTrainState.datasets.find((d) => d.id === sam3LiteTrainState.selectedId) || sam3LiteTrainState.datasets[0];
+        sam3LiteTrainState.selectedId = selected ? selected.id : null;
+        updateSam3LiteDatasetSummary(selected);
+        resetSam3LiteEta();
+    } catch (err) {
+        console.error("Failed to load SAM3-lite datasets", err);
+        setSam3LiteMessage(`Failed to load datasets: ${err.message || err}`, "error");
+    }
+}
+
+async function convertSam3LiteDataset() {
+    const datasetId = sam3LiteTrainState.selectedId;
+    if (!datasetId) {
+        setSam3LiteMessage("Select a dataset first.", "warn");
+        return;
+    }
+    setSam3LiteMessage("Converting dataset to COCO…", "info");
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3lite/datasets/${encodeURIComponent(datasetId)}/convert`, { method: "POST" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const meta = await resp.json();
+        setSam3LiteMessage("Dataset converted.", "success");
+        await loadSam3LiteDatasets();
+        return meta;
+    } catch (err) {
+        console.error("SAM3-lite convert failed", err);
+        setSam3LiteMessage(`Convert failed: ${err.message || err}`, "error");
+        throw err;
+    }
+}
+
+function renderSam3LiteHistory(list) {
+    if (!sam3LiteTrainElements.history) return;
+    sam3LiteTrainElements.history.innerHTML = "";
+    if (!Array.isArray(list) || !list.length) {
+        const empty = document.createElement("div");
+        empty.className = "training-history-item";
+        empty.textContent = "No SAM3-lite training jobs yet.";
+        sam3LiteTrainElements.history.appendChild(empty);
+        return;
+    }
+    list.forEach((job) => {
+        const item = document.createElement("div");
+        item.className = "training-history-item";
+        const left = document.createElement("div");
+        const created = formatTimestamp(job.created_at || 0);
+        left.innerHTML = `<strong>${escapeHtml(job.job_id.slice(0, 8))}</strong><div class="training-help">${escapeHtml(job.status)} • ${escapeHtml(created)}</div>`;
+        item.appendChild(left);
+        item.addEventListener("click", () => {
+            if (job.job_id) {
+                pollSam3LiteTrainingJob(job.job_id, { force: true }).catch((err) => console.error("SAM3-lite poll history failed", err));
+            }
+        });
+        sam3LiteTrainElements.history.appendChild(item);
+    });
+}
+
+async function refreshSam3LiteHistory() {
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderSam3LiteHistory(data);
+        const latestRunning = Array.isArray(data)
+            ? data.find((j) => ["running", "queued", "cancelling"].includes(j.status))
+            : null;
+        if (latestRunning && latestRunning.job_id) {
+            pollSam3LiteTrainingJob(latestRunning.job_id, { force: true, silent: true }).catch((err) =>
+                console.error("SAM3-lite poll history failed", err),
+            );
+        }
+    } catch (err) {
+        console.error("Failed to load SAM3-lite training history", err);
+    }
+}
+
+function updateSam3LiteUi(job) {
+    if (!job || !sam3LiteTrainElements.statusText) return;
+    sam3LiteTrainState.lastJobSnapshot = job;
+    const progressVal = computeSam3LiteProgress(job);
+    const pctVal = Math.max(0, Math.min(100, progressVal * 100));
+    const pct = Number.isFinite(pctVal) ? pctVal : 0;
+    const pctText = pct.toFixed(1).replace(/\.0$/, "");
+    const lastMetric = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1] : null;
+    const batch = lastMetric && Number.isFinite(lastMetric.batch) ? lastMetric.batch : null;
+    const batchesPerEpoch = lastMetric && Number.isFinite(lastMetric.batches_per_epoch) ? lastMetric.batches_per_epoch : null;
+    const epoch = lastMetric && Number.isFinite(lastMetric.epoch) ? lastMetric.epoch : null;
+    const totalEpochs = lastMetric && Number.isFinite(lastMetric.total_epochs) ? lastMetric.total_epochs : null;
+    let statusText = job.status === "running" || job.status === "queued" ? `Training running, ${pctText}% done` : job.status;
+    if (Number.isFinite(epoch) && Number.isFinite(batch) && Number.isFinite(batchesPerEpoch)) {
+        const epochPart = Number.isFinite(totalEpochs) ? `epoch ${epoch}/${totalEpochs}` : `epoch ${epoch}`;
+        statusText += ` (${epochPart}, batch ${batch}/${batchesPerEpoch})`;
+    }
+    sam3LiteTrainElements.statusText.textContent = statusText;
+    if (sam3LiteTrainElements.progressFill) {
+        sam3LiteTrainElements.progressFill.style.width = `${pct}%`;
+        sam3LiteTrainElements.progressFill.setAttribute("aria-valuenow", pctText);
+    }
+    if (sam3LiteTrainElements.cancelButton) {
+        sam3LiteTrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);
+    }
+    if (sam3LiteTrainElements.log) {
+        const logs = Array.isArray(job.logs) ? job.logs : [];
+        const linesDisplay = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean).slice(-200);
+        sam3LiteTrainElements.log.textContent = linesDisplay.join("\n");
+        updateSam3LiteLossChartFromMetrics(job.metrics, job.job_id);
+    }
+    if (sam3LiteTrainElements.summary) {
+        if (job.result && job.result.checkpoint) {
+            const ckpt = escapeHtml(job.result.checkpoint);
+            sam3LiteTrainElements.summary.innerHTML = `Checkpoint: <code>${ckpt}</code>`;
+            sam3LiteTrainState.latestCheckpoint = job.result.checkpoint;
+            sam3LiteTrainElements.summary.style.display = "block";
+        } else {
+            sam3LiteTrainElements.summary.textContent = "";
+            sam3LiteTrainState.latestCheckpoint = null;
+            sam3LiteTrainElements.summary.style.display = "none";
+        }
+    }
+    if (sam3LiteTrainElements.balanceSummary) {
+        const info = job.result && job.result.balance_info ? String(job.result.balance_info) : "";
+        if (info) {
+            sam3LiteTrainElements.balanceSummary.textContent = info;
+            sam3LiteTrainElements.balanceSummary.style.display = "block";
+        } else {
+            sam3LiteTrainElements.balanceSummary.textContent = "";
+            sam3LiteTrainElements.balanceSummary.style.display = "none";
+        }
+    }
+    if (sam3LiteTrainElements.activateButton) {
+        sam3LiteTrainElements.activateButton.disabled = !sam3LiteTrainState.latestCheckpoint;
+    }
+}
+
+async function pollSam3LiteTrainingJob(jobId, options = {}) {
+    if (!jobId) return;
+    sam3LiteTrainState.activeJobId = jobId;
+    sam3LiteTrainState.lastSeenJob = sam3LiteTrainState.lastSeenJob || {};
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs/${jobId}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const job = await resp.json();
+        updateSam3LiteUi(job);
+        const running = ["queued", "running", "cancelling"].includes(job.status);
+        if (running || options.force) {
+            if (sam3LiteTrainState.pollHandle) {
+                clearTimeout(sam3LiteTrainState.pollHandle);
+            }
+            sam3LiteTrainState.pollHandle = window.setTimeout(() => {
+                pollSam3LiteTrainingJob(jobId).catch((err) => console.error("SAM3-lite poll failed", err));
+            }, 1500);
+        } else {
+            sam3LiteTrainState.pollHandle = null;
+            refreshSam3LiteHistory();
+        }
+        sam3LiteTrainState.lastSeenJob[jobId] = job;
+    } catch (err) {
+        console.error("SAM3-lite job poll failed", err);
+        if (!options.silent) {
+            setSam3LiteMessage(`Polling failed: ${err.message || err}`, "error");
+        }
+    }
+}
+
+async function startSam3LiteTraining() {
+    const datasetId = sam3LiteTrainState.selectedId;
+    if (!datasetId) {
+        setSam3LiteMessage("Select a dataset first.", "warn");
+        return;
+    }
+    try {
+        await convertSam3LiteDataset();
+    } catch {
+        return;
+    }
+    const payload = { dataset_id: datasetId };
+    const maybeNumber = (input) => {
+        if (!input || !input.value) return null;
+        const num = Number(input.value);
+        return Number.isFinite(num) ? num : null;
+    };
+    if (sam3LiteTrainElements.runName && sam3LiteTrainElements.runName.value.trim()) {
+        payload.run_name = sam3LiteTrainElements.runName.value.trim();
+    }
+    const fields = [
+        ["train_batch_size", sam3LiteTrainElements.trainBatch],
+        ["val_batch_size", sam3LiteTrainElements.valBatch],
+        ["num_train_workers", sam3LiteTrainElements.trainWorkers],
+        ["num_val_workers", sam3LiteTrainElements.valWorkers],
+        ["max_epochs", sam3LiteTrainElements.epochs],
+        ["resolution", sam3LiteTrainElements.resolution],
+        ["lr_scale", sam3LiteTrainElements.lrScale],
+        ["gradient_accumulation_steps", sam3LiteTrainElements.gradAccum],
+        ["val_epoch_freq", sam3LiteTrainElements.valFreq],
+        ["target_epoch_size", sam3LiteTrainElements.targetEpochSize],
+        ["scheduler_warmup", sam3LiteTrainElements.warmupSteps],
+        ["scheduler_timescale", sam3LiteTrainElements.schedulerTimescale],
+    ];
+    const strategy = sam3LiteTrainElements.balanceStrategy ? sam3LiteTrainElements.balanceStrategy.value : "none";
+    if (strategy && strategy !== "none") {
+        payload.balance_strategy = strategy;
+        payload.balance_classes = true;
+        const power = maybeNumber(sam3LiteTrainElements.balancePower);
+        const clip = maybeNumber(sam3LiteTrainElements.balanceClip);
+        const beta = maybeNumber(sam3LiteTrainElements.balanceBeta);
+        const gamma = maybeNumber(sam3LiteTrainElements.balanceGamma);
+        if (power !== null && ["inv_sqrt", "clipped_inv"].includes(strategy)) {
+            payload.balance_power = power;
+        }
+        if (clip !== null && strategy === "clipped_inv" && clip >= 1) {
+            payload.balance_clip = clip;
+        }
+        if (beta !== null && strategy === "effective_num") {
+            payload.balance_beta = beta;
+        }
+        if (gamma !== null && strategy === "focal") {
+            payload.balance_gamma = gamma;
+        }
+    } else {
+        payload.balance_classes = false;
+    }
+    fields.forEach(([key, el]) => {
+        const val = maybeNumber(el);
+        if (val !== null) payload[key] = val;
+    });
+    if (sam3LiteTrainElements.instInteractivity) {
+        payload.enable_inst_interactivity = sam3LiteTrainElements.instInteractivity.checked;
+    }
+    setSam3LiteMessage("Starting SAM3-lite training…", "info");
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(text || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        sam3LiteTrainState.activeJobId = data.job_id;
+        resetSam3LiteLossChart(data.job_id);
+        resetSam3LiteEta();
+        pollSam3LiteTrainingJob(data.job_id, { force: true }).catch((err) => console.error("SAM3-lite poll start failed", err));
+        setSam3LiteMessage("Job queued.", "success");
+        refreshSam3LiteHistory();
+    } catch (err) {
+        console.error("SAM3-lite training start failed", err);
+        setSam3LiteMessage(err.message || "Failed to start training", "error");
+    }
+}
+
+async function cancelSam3LiteTraining() {
+    if (!sam3LiteTrainState.activeJobId) {
+        setSam3LiteMessage("No active job.", "warn");
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs/${sam3LiteTrainState.activeJobId}/cancel`, { method: "POST" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        setSam3LiteMessage("Cancellation requested…", "info");
+    } catch (err) {
+        console.error("SAM3-lite cancel failed", err);
+        setSam3LiteMessage(`Cancel failed: ${err.message || err}`, "error");
+    }
+}
+
+async function activateSam3LiteCheckpoint() {
+    const ckpt =
+        sam3LiteTrainState.latestCheckpoint ||
+        (sam3LiteTrainState.lastJobSnapshot && sam3LiteTrainState.lastJobSnapshot.result && sam3LiteTrainState.lastJobSnapshot.result.checkpoint);
+    if (!ckpt) {
+        setSam3LiteMessage("No checkpoint to activate.", "warn");
+        return;
+    }
+    const payload = {
+        checkpoint_path: ckpt,
+        label: sam3LiteTrainElements.runName && sam3LiteTrainElements.runName.value.trim() ? sam3LiteTrainElements.runName.value.trim() : undefined,
+        enable_segmentation: false,
+    };
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3lite/models/activate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        setSam3LiteMessage("Activated SAM3-lite checkpoint.", "success");
+    } catch (err) {
+        console.error("SAM3-lite activate failed", err);
+        setSam3LiteMessage(`Activate failed: ${err.message || err}`, "error");
+    }
+}
+
+async function initSam3LiteTrainUi() {
+    if (sam3LiteTrainUiInitialized) return;
+    sam3LiteTrainUiInitialized = true;
+    sam3LiteTrainState.lastSeenJob = {};
+    sam3LiteTrainElements.datasetSelect = document.getElementById("sam3LiteDatasetSelect");
+    sam3LiteTrainElements.datasetSummary = document.getElementById("sam3LiteDatasetSummary");
+    sam3LiteTrainElements.datasetRefresh = document.getElementById("sam3LiteDatasetRefresh");
+    sam3LiteTrainElements.datasetConvert = document.getElementById("sam3LiteDatasetConvert");
+    sam3LiteTrainElements.runName = document.getElementById("sam3LiteRunName");
+    sam3LiteTrainElements.trainBatch = document.getElementById("sam3LiteTrainBatch");
+    sam3LiteTrainElements.valBatch = document.getElementById("sam3LiteValBatch");
+    sam3LiteTrainElements.trainWorkers = document.getElementById("sam3LiteTrainWorkers");
+    sam3LiteTrainElements.valWorkers = document.getElementById("sam3LiteValWorkers");
+    sam3LiteTrainElements.epochs = document.getElementById("sam3LiteEpochs");
+    sam3LiteTrainElements.resolution = document.getElementById("sam3LiteResolution");
+    sam3LiteTrainElements.lrScale = document.getElementById("sam3LiteLrScale");
+    sam3LiteTrainElements.gradAccum = document.getElementById("sam3LiteGradAccum");
+    sam3LiteTrainElements.valFreq = document.getElementById("sam3LiteValFreq");
+    sam3LiteTrainElements.targetEpochSize = document.getElementById("sam3LiteTargetEpochSize");
+    sam3LiteTrainElements.balanceStrategy = document.getElementById("sam3LiteBalanceStrategy");
+    sam3LiteTrainElements.balancePower = document.getElementById("sam3LiteBalancePower");
+    sam3LiteTrainElements.balanceClip = document.getElementById("sam3LiteBalanceClip");
+    sam3LiteTrainElements.balanceBeta = document.getElementById("sam3LiteBalanceBeta");
+    sam3LiteTrainElements.balanceGamma = document.getElementById("sam3LiteBalanceGamma");
+    sam3LiteTrainElements.balanceDescription = document.getElementById("sam3LiteBalanceDescription");
+    sam3LiteTrainElements.warmupSteps = document.getElementById("sam3LiteWarmup");
+    sam3LiteTrainElements.schedulerTimescale = document.getElementById("sam3LiteTimescale");
+    sam3LiteTrainElements.instInteractivity = document.getElementById("sam3LiteInstInteractivity");
+    sam3LiteTrainElements.startButton = document.getElementById("sam3LiteStartBtn");
+    sam3LiteTrainElements.cancelButton = document.getElementById("sam3LiteCancelBtn");
+    sam3LiteTrainElements.statusText = document.getElementById("sam3LiteStatusText");
+    sam3LiteTrainElements.progressFill = document.getElementById("sam3LiteProgressFill");
+    sam3LiteTrainElements.message = document.getElementById("sam3LiteMessage");
+    sam3LiteTrainElements.summary = document.getElementById("sam3LiteSummary");
+    sam3LiteTrainElements.balanceSummary = document.getElementById("sam3LiteBalanceSummary");
+    sam3LiteTrainElements.log = document.getElementById("sam3LiteLog");
+    sam3LiteTrainElements.history = document.getElementById("sam3LiteTrainingHistory");
+    sam3LiteTrainElements.lossCanvas = document.getElementById("sam3LiteLossChart");
+    sam3LiteTrainElements.activateButton = document.getElementById("sam3LiteActivateBtn");
+    sam3LiteStorageElements.list = document.getElementById("sam3LiteStorageList");
+    sam3LiteStorageElements.refresh = document.getElementById("sam3LiteStorageRefresh");
+    if (sam3LiteTrainElements.balanceStrategy) {
+        sam3LiteTrainElements.balanceStrategy.addEventListener("change", () => updateSam3LiteBalanceParamVisibility());
+        updateSam3LiteBalanceParamVisibility();
+    }
+    if (sam3LiteTrainElements.datasetSelect) {
+        sam3LiteTrainElements.datasetSelect.addEventListener("change", () => {
+            sam3LiteTrainState.selectedId = sam3LiteTrainElements.datasetSelect.value;
+            const entry = sam3LiteTrainState.datasets.find((d) => d.id === sam3LiteTrainState.selectedId);
+            updateSam3LiteDatasetSummary(entry);
+            resetSam3LiteEta();
+        });
+    }
+    if (sam3LiteTrainElements.datasetRefresh) {
+        sam3LiteTrainElements.datasetRefresh.addEventListener("click", () => loadSam3LiteDatasets());
+    }
+    if (sam3LiteTrainElements.datasetConvert) {
+        sam3LiteTrainElements.datasetConvert.addEventListener("click", () => convertSam3LiteDataset().catch(() => {}));
+    }
+    if (sam3LiteTrainElements.startButton) {
+        sam3LiteTrainElements.startButton.addEventListener("click", () => startSam3LiteTraining());
+    }
+    if (sam3LiteTrainElements.cancelButton) {
+        sam3LiteTrainElements.cancelButton.addEventListener("click", () => cancelSam3LiteTraining());
+    }
+    if (sam3LiteTrainElements.activateButton) {
+        sam3LiteTrainElements.activateButton.addEventListener("click", () => activateSam3LiteCheckpoint());
+    }
+    if (sam3LiteStorageElements.refresh) {
+        sam3LiteStorageElements.refresh.addEventListener("click", () => refreshRunStorage("sam3lite"));
+    }
+    await loadSam3LiteDatasets();
+    await refreshSam3LiteHistory();
+    await refreshRunStorage("sam3lite");
 }
 
 async function cancelQwenDatasetUpload(jobId) {
@@ -4406,6 +5255,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
+        tabElements.sam3LiteTrainButton = document.getElementById("tabSam3LiteTrainButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
         tabElements.qwenButton = document.getElementById("tabQwenButton");
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
@@ -4414,6 +5264,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
+        tabElements.sam3LiteTrainPanel = document.getElementById("tabSam3LiteTrain");
         tabElements.activePanel = document.getElementById("tabActive");
         tabElements.qwenPanel = document.getElementById("tabQwen");
         tabElements.predictorsPanel = document.getElementById("tabPredictors");
@@ -4429,6 +5280,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_TRAIN));
+        }
+        if (tabElements.sam3LiteTrainButton) {
+            tabElements.sam3LiteTrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_LITE_TRAIN));
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
@@ -4460,6 +5314,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
         }
+        if (tabElements.sam3LiteTrainButton) {
+            tabElements.sam3LiteTrainButton.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
+        }
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
         }
@@ -4483,6 +5340,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainPanel) {
             tabElements.sam3TrainPanel.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
+        }
+        if (tabElements.sam3LiteTrainPanel) {
+            tabElements.sam3LiteTrainPanel.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
         }
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);
@@ -4513,6 +5373,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabName === TAB_SAM3_TRAIN && previous !== TAB_SAM3_TRAIN) {
             initSam3TrainUi().catch((err) => console.error("SAM3 UI init failed", err));
+        }
+        if (tabName === TAB_SAM3_LITE_TRAIN && previous !== TAB_SAM3_LITE_TRAIN) {
+            initSam3LiteTrainUi().catch((err) => console.error("SAM3-lite UI init failed", err));
         }
         if (tabName === TAB_ACTIVE && previous !== TAB_ACTIVE) {
             initializeActiveModelUi();

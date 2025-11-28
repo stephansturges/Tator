@@ -1122,7 +1122,8 @@ const qwenTrainState = {
                 sam3PromptElements.select.appendChild(opt);
             });
             if (sam3PromptState.models.length) {
-                sam3PromptElements.select.value = sam3PromptState.models[0].path;
+                const first = sam3PromptState.models[0];
+                sam3PromptElements.select.value = first.key || first.path || first.id || sam3PromptElements.select.options[0].value;
                 updateSam3PromptSummary();
             } else {
                 updateSam3PromptSummary();

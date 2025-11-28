@@ -492,18 +492,20 @@ def _ensure_sam3_text_runtime():
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         try:
             device_str = "cuda" if device.type == "cuda" else "cpu"
+            # Force segmentation head on for text prompting so pred_masks and related keys exist.
+            enable_seg = True
             if active_sam3_checkpoint:
                 model = build_sam3_image_model(
                     checkpoint_path=active_sam3_checkpoint,
                     device=device_str,
                     load_from_HF=False,
-                    enable_segmentation=active_sam3_enable_segmentation,
+                    enable_segmentation=enable_seg,
                     bpe_path=str(SAM3_BPE_PATH),
                 ).to(device)
             else:
                 model = build_sam3_image_model(
                     device=device_str,
-                    enable_segmentation=active_sam3_enable_segmentation,
+                    enable_segmentation=enable_seg,
                     bpe_path=str(SAM3_BPE_PATH),
                 ).to(device)
             processor = Sam3ImageProcessor(model)

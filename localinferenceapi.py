@@ -1542,28 +1542,32 @@ def _run_sam3_text_inference(
     except KeyError:
         # Box-only checkpoints (enable_segmentation=False) do not emit pred_masks.
         # Fall back to raw model output and extract boxes/scores manually.
-        raw = processor.model.forward_grounding(
-            backbone_out=state["backbone_out"],
-            find_input=processor.find_stage,
-            find_target=None,
-            geometric_prompt=state.get("geometric_prompt", processor.model._get_dummy_prompt()),
-        )
-        boxes_xyxy = raw.get("pred_boxes_xyxy") or raw.get("pred_boxes")
-        scores = None
-        logits = raw.get("pred_logits")
-        if logits is not None:
-            try:
-                scores = torch.sigmoid(logits.squeeze(-1))
-            except Exception:  # noqa: BLE001
+        try:
+            raw = processor.model.forward_grounding(
+                backbone_out=state.get("backbone_out", {}),
+                find_input=processor.find_stage,
+                find_target=None,
+                geometric_prompt=state.get("geometric_prompt", processor.model._get_dummy_prompt()),
+            )
+            boxes_xyxy = raw.get("pred_boxes_xyxy") or raw.get("pred_boxes")
+            scores = None
+            logits = raw.get("pred_logits")
+            if logits is not None:
                 try:
-                    scores = torch.sigmoid(logits)
+                    scores = torch.sigmoid(logits.squeeze(-1))
                 except Exception:  # noqa: BLE001
-                    scores = None
-        output = {
-            "boxes": boxes_xyxy,
-            "scores": scores,
-            # no masks for box-only checkpoints
-        }
+                    try:
+                        scores = torch.sigmoid(logits)
+                    except Exception:  # noqa: BLE001
+                        scores = None
+            output = {
+                "boxes": boxes_xyxy,
+                "scores": scores,
+                # no masks for box-only checkpoints
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SAM3 box-only text prompt fallback failed: %s", exc)
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_grounding_failed:{exc}") from exc
     return _sam3_text_detections(pil_img, output, text_prompt, normalized_limit, min_score=float(threshold))
 
 
@@ -5092,7 +5096,8 @@ def list_sam3_available_models(
         {
             "id": "Base SAM3",
             "key": "base",
-            "path": env_base_path or SAM3_MODEL_ID,
+            # Use None so activation loads from HF if no local checkpoint is present.
+            "path": env_base_path,
             "size_bytes": None,
             "promoted": False,
             "active": active_sam3_checkpoint in {None, env_base_path},

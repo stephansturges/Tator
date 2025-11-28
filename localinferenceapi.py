@@ -2733,6 +2733,11 @@ def _list_sam3_runs(variant: str) -> List[Dict[str, Any]]:
     for child in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
         if not child.is_dir():
             continue
+        # Skip dataset folder and other non-run directories under the root
+        if variant == "sam3" and child.resolve() == SAM3_DATASET_ROOT.resolve():
+            continue
+        if child.name.lower() == "datasets":
+            continue
         try:
             runs.append(_describe_run_dir(child, variant, active_paths))
         except Exception:

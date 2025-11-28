@@ -5052,6 +5052,19 @@ def list_sam3_available_models(
     for v in variant_list:
         runs.extend(_list_sam3_runs(v))
     models: List[Dict[str, Any]] = []
+    # Always expose the base/active env model if available
+    base_entry = {
+        "id": active_sam3_metadata.get("label") or active_sam3_metadata.get("id") or "base",
+        "path": active_sam3_checkpoint,
+        "size_bytes": None,
+        "promoted": False,
+        "active": True,
+        "variant": "sam3",
+        "run_path": None,
+        "source": active_sam3_metadata.get("source") or "env",
+    }
+    if active_sam3_checkpoint:
+        models.append(base_entry)
     for run in runs:
         if promoted_only and not run.get("promoted"):
             continue

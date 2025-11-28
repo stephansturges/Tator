@@ -2778,6 +2778,75 @@ def _delete_run_scope(run_dir: Path, scope: str) -> Tuple[List[str], int]:
     return deleted, freed
 
 
+def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
+    """Remove optimizer/scheduler state from a torch checkpoint to shrink size."""
+    before = ckpt_path.stat().st_size if ckpt_path.exists() else 0
+    if not ckpt_path.exists() or before == 0:
+        return False, before, before
+    try:
+        payload = torch.load(ckpt_path, map_location="cpu")
+        removed = False
+        for key in ["optimizer", "optimizers", "lr_schedulers", "schedulers", "trainer"]:
+            if key in payload:
+                payload.pop(key, None)
+                removed = True
+        if not removed:
+            return False, before, before
+        tmp_path = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
+        torch.save(payload, tmp_path)
+        tmp_size = tmp_path.stat().st_size
+        tmp_path.replace(ckpt_path)
+        return True, before, tmp_size
+    except Exception:
+        return False, before, before
+
+
+def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
+    run_dir = _run_dir_for_request(run_id, variant)
+    active_paths = _active_run_paths_for_variant(variant)
+    if run_dir.resolve() in active_paths:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="sam3_run_active")
+    ckpt_dir = run_dir / "checkpoints"
+    if not ckpt_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_dir_missing")
+    ckpts = [p for p in ckpt_dir.iterdir() if p.is_file() and p.suffix in {".ckpt", ".pth", ".pt"}]
+    if not ckpts:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoints_missing")
+    # choose keep candidate: prefer last.ckpt else newest
+    keep = None
+    for p in ckpts:
+        if p.name == "last.ckpt":
+            keep = p
+            break
+    if keep is None:
+        keep = max(ckpts, key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    deleted = []
+    freed = 0
+    for p in ckpts:
+        if p == keep:
+            continue
+        try:
+            size = p.stat().st_size
+        except Exception:
+            size = 0
+        try:
+            p.unlink()
+            deleted.append(str(p))
+            freed += size
+        except Exception:
+            continue
+    stripped, before, after = _strip_checkpoint_optimizer(keep)
+    freed += max(0, before - after)
+    return {
+        "kept": str(keep),
+        "kept_size_bytes": keep.stat().st_size if keep.exists() else 0,
+        "stripped_optimizer": stripped,
+        "deleted": deleted,
+        "freed_bytes": freed,
+        "run_path": str(run_dir),
+    }
+
+
 def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
     cleaned = (dataset_id or "").strip().replace("\\", "/")
     safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
@@ -4933,6 +5002,12 @@ def delete_sam3_run(run_id: str, variant: str = Query("sam3"), scope: str = Quer
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="sam3_run_active")
     deleted, freed = _delete_run_scope(run_dir, scope)
     return {"deleted": deleted, "freed_bytes": freed}
+
+
+@app.post("/sam3/storage/runs/{run_id}/promote")
+def promote_sam3_run(run_id: str, variant: str = Query("sam3")):
+    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
+    return _promote_run(run_id, normalized)
 
 
 @app.post("/sam3lite/train/jobs")

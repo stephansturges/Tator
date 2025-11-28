@@ -2845,6 +2845,7 @@ function renderRunStorage(entries, elements) {
             { label: "Delete dumps", scope: "dumps" },
             { label: "Delete TB", scope: "tensorboard" },
             { label: "Delete run", scope: "all", danger: true },
+            { label: "Promote (keep last, strip optimizer)", scope: "promote", danger: false },
         ];
         scopes.forEach(({ label, scope, danger }) => {
             const btn = document.createElement("button");
@@ -2877,26 +2878,50 @@ async function refreshRunStorage(variant = "sam3") {
 }
 
 async function deleteRunStorage(runId, variant, scope) {
-    const label = scope === "all" ? "entire run folder" : scope;
-    const confirmText = `Delete ${label} for ${runId}?`;
-    if (typeof window !== "undefined" && !window.confirm(confirmText)) return;
-    const qs = new URLSearchParams({ variant, scope });
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}?${qs.toString()}`, {
-            method: "DELETE",
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        if (variant === "sam3") {
-            setSam3Message(`Deleted ${label} for ${runId}.`, "success");
-        } else {
-            setSam3LiteMessage(`Deleted ${label} for ${runId}.`, "success");
+    if (scope === "promote") {
+        const qs = new URLSearchParams({ variant });
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}/promote?${qs.toString()}`, {
+                method: "POST",
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            const msg = `Promoted ${runId}: kept ${data.kept || "checkpoint"}, freed ${formatBytes(data.freed_bytes || 0)}.`;
+            if (variant === "sam3") {
+                setSam3Message(msg, "success");
+            } else {
+                setSam3LiteMessage(msg, "success");
+            }
+        } catch (err) {
+            console.error("Promote run failed", err);
+            if (variant === "sam3") {
+                setSam3Message(`Promote failed: ${err.message || err}`, "error");
+            } else {
+                setSam3LiteMessage(`Promote failed: ${err.message || err}`, "error");
+            }
         }
-    } catch (err) {
-        console.error("Delete run failed", err);
-        if (variant === "sam3") {
-            setSam3Message(`Delete failed: ${err.message || err}`, "error");
-        } else {
-            setSam3LiteMessage(`Delete failed: ${err.message || err}`, "error");
+    } else {
+        const label = scope === "all" ? "entire run folder" : scope;
+        const confirmText = `Delete ${label} for ${runId}?`;
+        if (typeof window !== "undefined" && !window.confirm(confirmText)) return;
+        const qs = new URLSearchParams({ variant, scope });
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}?${qs.toString()}`, {
+                method: "DELETE",
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            if (variant === "sam3") {
+                setSam3Message(`Deleted ${label} for ${runId}.`, "success");
+            } else {
+                setSam3LiteMessage(`Deleted ${label} for ${runId}.`, "success");
+            }
+        } catch (err) {
+            console.error("Delete run failed", err);
+            if (variant === "sam3") {
+                setSam3Message(`Delete failed: ${err.message || err}`, "error");
+            } else {
+                setSam3LiteMessage(`Delete failed: ${err.message || err}`, "error");
+            }
         }
     }
     await refreshRunStorage(variant);

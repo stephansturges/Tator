@@ -66,6 +66,7 @@
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
             <button class="tab-button" data-tab="sam3lite-train" id="tabSam3LiteTrainButton" type="button">Train SAM3 (Local)</button>
+            <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
             <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
             <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">Predictors</button>
@@ -878,6 +879,26 @@
                             <div class="training-help">Lists folders under <code>uploads/sam3lite_runs/</code>; delete logs/dumps/checkpoints you no longer need.</div>
                             <div id="sam3LiteStorageList" class="storage-list"></div>
                         </div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabSam3PromptModels" data-tab-panel="sam3-prompt-models">
+                <div class="training-wrapper">
+                    <section class="training-form-section">
+                        <h2>SAM3 Prompt Model Selection</h2>
+                        <p class="training-help">Pick a locally trained SAM3 checkpoint to use for bbox prompting in the labeling page.</p>
+                        <div class="training-field">
+                            <label for="sam3PromptModelSelect">Available models</label>
+                            <div class="sam3-dataset-row">
+                                <select id="sam3PromptModelSelect"></select>
+                                <button type="button" class="training-button" id="sam3PromptRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help" id="sam3PromptModelSummary"></div>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="sam3PromptActivate">Activate model</button>
+                        </div>
+                        <div class="training-message" id="sam3PromptMessage" role="status"></div>
                     </section>
                 </div>
             </div>

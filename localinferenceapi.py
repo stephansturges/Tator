@@ -5034,6 +5034,41 @@ def promote_sam3_run(run_id: str, variant: str = Query("sam3")):
     return _promote_run(run_id, normalized)
 
 
+@app.get("/sam3/models/available")
+def list_sam3_available_models(variant: str = Query("sam3")):
+    """List completed run checkpoints for prompt model selection."""
+    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
+    runs = _list_sam3_runs(normalized)
+    models: List[Dict[str, Any]] = []
+    for run in runs:
+        if run.get("active"):
+            # allow listing active too, but mark status
+            pass
+        ckpts = run.get("checkpoints") or []
+        if not ckpts:
+            continue
+        # prefer last.ckpt
+        chosen = None
+        for ck in ckpts:
+            if ck.get("file") == "last.ckpt":
+                chosen = ck
+                break
+        if chosen is None:
+            chosen = ckpts[0]
+        models.append(
+            {
+                "id": run.get("id"),
+                "path": chosen.get("path"),
+                "size_bytes": chosen.get("size_bytes"),
+                "promoted": run.get("promoted", False),
+                "active": run.get("active", False),
+                "variant": run.get("variant"),
+                "run_path": run.get("path"),
+            }
+        )
+    return models
+
+
 @app.post("/sam3lite/train/jobs")
 def create_sam3lite_training_job(payload: Sam3LiteTrainRequest):
     meta = _resolve_sam3_dataset_meta(payload.dataset_id)

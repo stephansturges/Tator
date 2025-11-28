@@ -1845,3 +1845,9 @@ hr {
     background: #dcfce7;
     color: #166534;
 }
+
+.prompt-model-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}

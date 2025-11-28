@@ -745,6 +745,8 @@
         trainingButton: null,
         qwenTrainButton: null,
         sam3TrainButton: null,
+        sam3LiteTrainButton: null,
+        sam3PromptModelsButton: null,
         activeButton: null,
         qwenButton: null,
         predictorsButton: null,
@@ -753,6 +755,8 @@
         trainingPanel: null,
         qwenTrainPanel: null,
         sam3TrainPanel: null,
+        sam3LiteTrainPanel: null,
+        sam3PromptModelsPanel: null,
         activePanel: null,
         qwenPanel: null,
         predictorsPanel: null,
@@ -1060,6 +1064,106 @@ const qwenTrainState = {
     const sam3LiteStorageState = {
         items: [],
     };
+
+    const sam3PromptElements = {
+        select: null,
+        refresh: null,
+        summary: null,
+        message: null,
+        activate: null,
+    };
+
+    const sam3PromptState = {
+        models: [],
+        selected: null,
+    };
+
+    function initSam3PromptModelsUi() {
+        sam3PromptElements.select = document.getElementById("sam3PromptModelSelect");
+        sam3PromptElements.refresh = document.getElementById("sam3PromptRefresh");
+        sam3PromptElements.summary = document.getElementById("sam3PromptModelSummary");
+        sam3PromptElements.message = document.getElementById("sam3PromptMessage");
+        sam3PromptElements.activate = document.getElementById("sam3PromptActivate");
+        if (sam3PromptElements.select) {
+            sam3PromptElements.select.addEventListener("change", () => updateSam3PromptSummary());
+        }
+        if (sam3PromptElements.refresh) {
+            sam3PromptElements.refresh.addEventListener("click", () => refreshSam3PromptModels());
+        }
+        if (sam3PromptElements.activate) {
+            sam3PromptElements.activate.addEventListener("click", () => activateSam3PromptModel());
+        }
+        refreshSam3PromptModels();
+    }
+
+    async function refreshSam3PromptModels() {
+        if (!sam3PromptElements.select) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/models/available?variant=sam3`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            sam3PromptState.models = Array.isArray(data) ? data : [];
+            sam3PromptElements.select.innerHTML = "";
+            sam3PromptState.models.forEach((m, idx) => {
+                const opt = document.createElement("option");
+                opt.value = m.path;
+                opt.textContent = `${m.id || `run ${idx + 1}`}${m.promoted ? " (promoted)" : ""}`;
+                sam3PromptElements.select.appendChild(opt);
+            });
+            if (sam3PromptState.models.length) {
+                sam3PromptElements.select.value = sam3PromptState.models[0].path;
+                updateSam3PromptSummary();
+            } else {
+                updateSam3PromptSummary();
+            }
+        } catch (err) {
+            console.error("Failed to load SAM3 prompt models", err);
+            setSam3PromptMessage(`Load failed: ${err.message || err}`, "error");
+        }
+    }
+
+    function updateSam3PromptSummary() {
+        if (!sam3PromptElements.summary) return;
+        const path = sam3PromptElements.select ? sam3PromptElements.select.value : null;
+        const entry = sam3PromptState.models.find((m) => m.path === path);
+        if (!entry) {
+            sam3PromptElements.summary.textContent = "No model selected.";
+            return;
+        }
+        const parts = [];
+        if (entry.promoted) parts.push("promoted");
+        if (Number.isFinite(entry.size_bytes)) parts.push(formatBytes(entry.size_bytes));
+        if (entry.run_path) parts.push(`run: ${entry.run_path}`);
+        sam3PromptElements.summary.textContent = parts.length ? parts.join(" • ") : "";
+    }
+
+    function setSam3PromptMessage(text, tone = "info") {
+        if (!sam3PromptElements.message) return;
+        sam3PromptElements.message.textContent = text || "";
+        sam3PromptElements.message.className = `training-message ${tone}`;
+    }
+
+    async function activateSam3PromptModel() {
+        if (!sam3PromptElements.select) return;
+        const path = sam3PromptElements.select.value;
+        if (!path) {
+            setSam3PromptMessage("Select a model first.", "warn");
+            return;
+        }
+        const payload = { checkpoint_path: path, enable_segmentation: false, label: `prompt:${path.split("/").pop()}` };
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/models/activate`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            setSam3PromptMessage("SAM3 prompt model activated.", "success");
+        } catch (err) {
+            console.error("Activate SAM3 prompt model failed", err);
+            setSam3PromptMessage(`Activate failed: ${err.message || err}`, "error");
+        }
+    }
 
     function escapeHtml(value) {
         return String(value ?? "")
@@ -5298,6 +5402,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
         tabElements.sam3LiteTrainButton = document.getElementById("tabSam3LiteTrainButton");
+        tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
         tabElements.qwenButton = document.getElementById("tabQwenButton");
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
@@ -5307,6 +5412,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
         tabElements.sam3LiteTrainPanel = document.getElementById("tabSam3LiteTrain");
+        tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
         tabElements.activePanel = document.getElementById("tabActive");
         tabElements.qwenPanel = document.getElementById("tabQwen");
         tabElements.predictorsPanel = document.getElementById("tabPredictors");
@@ -5325,6 +5431,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3LiteTrainButton) {
             tabElements.sam3LiteTrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_LITE_TRAIN));
+        }
+        if (tabElements.sam3PromptModelsButton) {
+            tabElements.sam3PromptModelsButton.addEventListener("click", () => setActiveTab("sam3-prompt-models"));
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
@@ -5359,6 +5468,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.sam3LiteTrainButton) {
             tabElements.sam3LiteTrainButton.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
         }
+        if (tabElements.sam3PromptModelsButton) {
+            tabElements.sam3PromptModelsButton.classList.toggle("active", tabName === "sam3-prompt-models");
+        }
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
         }
@@ -5385,6 +5497,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3LiteTrainPanel) {
             tabElements.sam3LiteTrainPanel.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
+        }
+        if (tabElements.sam3PromptModelsPanel) {
+            tabElements.sam3PromptModelsPanel.classList.toggle("active", tabName === "sam3-prompt-models");
         }
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);
@@ -5418,6 +5533,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabName === TAB_SAM3_LITE_TRAIN && previous !== TAB_SAM3_LITE_TRAIN) {
             initSam3LiteTrainUi().catch((err) => console.error("SAM3-lite UI init failed", err));
+        }
+        if (tabName === TAB_SAM3_PROMPT_MODELS && previous !== TAB_SAM3_PROMPT_MODELS) {
+            initSam3PromptModelsUi();
         }
         if (tabName === TAB_ACTIVE && previous !== TAB_ACTIVE) {
             initializeActiveModelUi();

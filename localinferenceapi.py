@@ -4,6 +4,7 @@ import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, log
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
+import yaml
 from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence
 from collections import deque
 import torch, clip, joblib
@@ -404,13 +405,14 @@ class _Sam3Backend:
             raise RuntimeError(f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}")
         self.device = _resolve_sam3_device()
         device_str = "cuda" if self.device.type == "cuda" else "cpu"
+        source = active_sam3_metadata.get("source") if isinstance(active_sam3_metadata, dict) else None
         try:
             model = build_sam3_image_model(
                 device=device_str,
                 checkpoint_path=active_sam3_checkpoint,
                 load_from_HF=active_sam3_checkpoint is None,
                 enable_inst_interactivity=True,
-                enable_segmentation=active_sam3_enable_segmentation,
+                enable_segmentation=active_sam3_enable_segmentation and source != "sam3lite",
                 bpe_path=str(SAM3_BPE_PATH),
             )
             if self.device:
@@ -2061,6 +2063,34 @@ class Sam3TrainRequest(BaseModel):
     log_freq: Optional[int] = None
 
 
+class Sam3LiteTrainRequest(BaseModel):
+    dataset_id: str
+    run_name: Optional[str] = None
+    experiment_log_dir: Optional[str] = None
+    train_batch_size: Optional[int] = None
+    val_batch_size: Optional[int] = None
+    num_train_workers: Optional[int] = None
+    num_val_workers: Optional[int] = None
+    max_epochs: Optional[int] = None
+    resolution: Optional[int] = None
+    lr_scale: Optional[float] = None
+    gradient_accumulation_steps: Optional[int] = None
+    val_epoch_freq: Optional[int] = None
+    target_epoch_size: Optional[int] = None
+    scheduler_warmup: Optional[int] = None
+    scheduler_timescale: Optional[int] = None
+    num_gpus: Optional[int] = None
+    enable_inst_interactivity: Optional[bool] = None
+    balance_classes: Optional[bool] = None
+    balance_strategy: Optional[str] = None
+    balance_power: Optional[float] = None
+    balance_clip: Optional[float] = None
+    balance_beta: Optional[float] = None
+    balance_gamma: Optional[float] = None
+    train_limit: Optional[int] = None
+    log_freq: Optional[int] = None
+
+
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None
     label: Optional[str] = None
@@ -2141,6 +2171,11 @@ SAM3_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_ROOT = SAM3_JOB_ROOT / "datasets"
 SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
+SAM3_LITE_JOB_ROOT = Path(os.environ.get("SAM3_LITE_TRAINING_ROOT", "./uploads/sam3lite_runs"))
+SAM3_LITE_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+SAM3_LITE_CONFIG_TEMPLATE = Path(__file__).resolve().parent / "sam3_lite" / "config" / "default.yaml"
+SAM3_LITE_MAX_LOG_LINES = 500
+SAM3_LITE_MAX_METRIC_POINTS = 2000
 SAM3_REPO_ROOT = Path(__file__).resolve().parent.resolve()
 SAM3_VENDOR_ROOT = SAM3_REPO_ROOT / "sam3"
 SAM3_PACKAGE_ROOT = SAM3_VENDOR_ROOT / "sam3"
@@ -2150,6 +2185,7 @@ SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 SAM3_BPE_PATH = SAM3_VENDOR_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
 SAM3_MAX_LOG_LINES = 500
 SAM3_MAX_METRIC_POINTS = 2000
+SAM3_STORAGE_SCOPES = {"all", "checkpoints", "logs", "tensorboard", "dumps"}
 
 
 @dataclass
@@ -2186,10 +2222,30 @@ class Sam3TrainingJob:
     log_seq: int = 0
 
 
+@dataclass
+class Sam3LiteTrainingJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    config: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    process: Optional[subprocess.Popen] = None
+    log_seq: int = 0
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
 SAM3_TRAINING_JOBS_LOCK = threading.Lock()
+SAM3_LITE_TRAINING_JOBS: Dict[str, Sam3LiteTrainingJob] = {}
+SAM3_LITE_TRAINING_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
@@ -2369,6 +2425,71 @@ def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:
     }
 
 
+def _sam3lite_job_log(job: Sam3LiteTrainingJob, message: str) -> None:
+    job.log_seq += 1
+    entry = {"timestamp": time.time(), "message": message, "seq": job.log_seq}
+    job.logs.append(entry)
+    if len(job.logs) > SAM3_LITE_MAX_LOG_LINES:
+        job.logs[:] = job.logs[-SAM3_LITE_MAX_LOG_LINES :]
+    job.updated_at = time.time()
+    try:
+        logger.info("[sam3lite-train %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _sam3lite_job_append_metric(job: Sam3LiteTrainingJob, metric: Dict[str, Any]) -> None:
+    if not metric:
+        return
+    job.metrics.append(metric)
+    if SAM3_LITE_MAX_METRIC_POINTS and len(job.metrics) > SAM3_LITE_MAX_METRIC_POINTS:
+        job.metrics[:] = job.metrics[-SAM3_LITE_MAX_METRIC_POINTS :]
+    job.updated_at = time.time()
+
+
+def _sam3lite_job_update(
+    job: Sam3LiteTrainingJob,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    log_message: bool = True,
+) -> None:
+    if status is not None:
+        job.status = status
+    if message is not None:
+        if message != job.message:
+            job.message = message
+            if log_message:
+                _sam3lite_job_log(job, message)
+        else:
+            job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
+
+
+def _serialize_sam3lite_job(job: Sam3LiteTrainingJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "logs": job.logs,
+        "metrics": job.metrics,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
 def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> None:
     try:
         if not jobs:
@@ -2506,6 +2627,155 @@ def _persist_sam3_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) 
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to write SAM3 dataset metadata for %s: %s", dataset_dir, exc)
+
+
+def _dir_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except Exception:
+                continue
+    return total
+
+
+def _active_run_paths_for_variant(variant: str) -> set[Path]:
+    paths: set[Path] = set()
+    if variant == "sam3":
+        with SAM3_TRAINING_JOBS_LOCK:
+            jobs = list(SAM3_TRAINING_JOBS.values())
+        for job in jobs:
+            if job.status not in {"running", "queued", "cancelling"}:
+                continue
+            exp_dir = None
+            try:
+                exp_dir = job.config.get("paths", {}).get("experiment_log_dir")
+            except Exception:
+                exp_dir = None
+            if exp_dir:
+                try:
+                    paths.add(Path(exp_dir).resolve())
+                except Exception:
+                    continue
+    else:
+        with SAM3_LITE_TRAINING_JOBS_LOCK:
+            jobs = list(SAM3_LITE_TRAINING_JOBS.values())
+        for job in jobs:
+            if job.status not in {"running", "queued", "cancelling"}):
+                continue
+            exp_dir = None
+            try:
+                exp_dir = job.config.get("experiment_log_dir")
+            except Exception:
+                exp_dir = None
+            if exp_dir:
+                try:
+                    paths.add(Path(exp_dir).resolve())
+                except Exception:
+                    continue
+    return paths
+
+
+def _describe_run_dir(run_dir: Path, variant: str, active_paths: set[Path]) -> Dict[str, Any]:
+    checkpoints_dir = run_dir / "checkpoints"
+    logs_dir = run_dir / "logs"
+    tensorboard_dir = run_dir / "tensorboard"
+    dumps_dir = run_dir / "dumps"
+    checkpoints: List[Dict[str, Any]] = []
+    if checkpoints_dir.exists():
+        for ckpt in sorted(checkpoints_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+            if ckpt.is_file():
+                try:
+                    stat = ckpt.stat()
+                    checkpoints.append(
+                        {
+                            "file": ckpt.name,
+                            "path": str(ckpt),
+                            "size_bytes": stat.st_size,
+                            "updated_at": stat.st_mtime,
+                        }
+                    )
+                except Exception:
+                    continue
+    try:
+        dir_stat = run_dir.stat()
+        created_at = dir_stat.st_ctime
+        updated_at = dir_stat.st_mtime
+    except Exception:
+        created_at = time.time()
+        updated_at = created_at
+    entry = {
+        "id": run_dir.name,
+        "variant": variant,
+        "path": str(run_dir),
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "size_bytes": _dir_size_bytes(run_dir),
+        "checkpoints_size_bytes": _dir_size_bytes(checkpoints_dir),
+        "logs_size_bytes": _dir_size_bytes(logs_dir),
+        "tensorboard_size_bytes": _dir_size_bytes(tensorboard_dir),
+        "dumps_size_bytes": _dir_size_bytes(dumps_dir),
+        "checkpoints": checkpoints,
+        "active": run_dir.resolve() in active_paths,
+    }
+    return entry
+
+
+def _list_sam3_runs(variant: str) -> List[Dict[str, Any]]:
+    root = SAM3_JOB_ROOT if variant == "sam3" else SAM3_LITE_JOB_ROOT
+    if not root.exists():
+        return []
+    active_paths = _active_run_paths_for_variant(variant)
+    runs: List[Dict[str, Any]] = []
+    for child in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+        if not child.is_dir():
+            continue
+        try:
+            runs.append(_describe_run_dir(child, variant, active_paths))
+        except Exception:
+            continue
+    return runs
+
+
+def _run_dir_for_request(run_id: str, variant: str) -> Path:
+    root = SAM3_JOB_ROOT if variant == "sam3" else SAM3_LITE_JOB_ROOT
+    candidate = (root / run_id).resolve()
+    if not str(candidate).startswith(str(root.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_run_id")
+    if not candidate.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_run_not_found")
+    return candidate
+
+
+def _delete_run_scope(run_dir: Path, scope: str) -> Tuple[List[str], int]:
+    targets: List[Path] = []
+    if scope == "all":
+        targets.append(run_dir)
+    else:
+        mapping = {
+            "checkpoints": run_dir / "checkpoints",
+            "logs": run_dir / "logs",
+            "tensorboard": run_dir / "tensorboard",
+            "dumps": run_dir / "dumps",
+        }
+        target = mapping.get(scope)
+        if target:
+            targets.append(target)
+    deleted: List[str] = []
+    freed = 0
+    for target in targets:
+        if not target.exists():
+            continue
+        freed += _dir_size_bytes(target)
+        try:
+            shutil.rmtree(target)
+        except Exception:
+            continue
+        deleted.append(str(target))
+    return deleted, freed
 
 
 def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
@@ -3100,6 +3370,16 @@ def sam3_convert_dataset(dataset_id: str):
     return meta
 
 
+@app.get("/sam3lite/datasets")
+def list_sam3lite_datasets():
+    return _list_sam3_datasets()
+
+
+@app.post("/sam3lite/datasets/{dataset_id}/convert")
+def sam3lite_convert_dataset(dataset_id: str):
+    return sam3_convert_dataset(dataset_id)
+
+
 def _collect_labels_from_qwen_jsonl(jsonl_path: Path) -> List[str]:
     labels: set[str] = set()
     if not jsonl_path.exists():
@@ -3689,6 +3969,14 @@ def _get_sam3_job(job_id: str) -> Sam3TrainingJob:
         job = SAM3_TRAINING_JOBS.get(job_id)
         if not job:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_job_not_found")
+        return job
+
+
+def _get_sam3lite_job(job_id: str) -> Sam3LiteTrainingJob:
+    with SAM3_LITE_TRAINING_JOBS_LOCK:
+        job = SAM3_LITE_TRAINING_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3lite_job_not_found")
         return job
 
 
@@ -4324,6 +4612,193 @@ def cancel_training_job(job_id: str):
     return {"status": next_status}
 
 
+def _save_sam3lite_config(cfg: Dict[str, Any]) -> Path:
+    exp_dir = Path(cfg["experiment_log_dir"])
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = exp_dir / "config.yaml"
+    with cfg_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(cfg, handle, sort_keys=False)
+    return cfg_path
+
+
+def _build_sam3lite_config(payload: Sam3LiteTrainRequest, meta: Dict[str, Any], job_id: str) -> Tuple[Dict[str, Any], int]:
+    base_cfg: Dict[str, Any] = {}
+    if SAM3_LITE_CONFIG_TEMPLATE.exists():
+        try:
+            base_cfg = yaml.safe_load(SAM3_LITE_CONFIG_TEMPLATE.read_text()) or {}
+        except Exception:
+            base_cfg = {}
+    defaults = {
+        "max_epochs": 20,
+        "train_batch_size": 1,
+        "val_batch_size": 1,
+        "num_train_workers": 4,
+        "num_val_workers": 2,
+        "resolution": 1008,
+        "lr_scale": 1.0,
+        "gradient_accumulation_steps": 1,
+        "val_epoch_freq": 10,
+        "target_epoch_size": 1000,
+        "scheduler_warmup": 20,
+        "scheduler_timescale": 20,
+        "log_freq": 10,
+    }
+    run_name = _safe_run_name(payload.run_name, f"sam3lite_run_{job_id}")
+    exp_dir = Path(payload.experiment_log_dir) if payload.experiment_log_dir else (SAM3_LITE_JOB_ROOT / run_name)
+    train_ann = Path(meta["coco_train_json"]).resolve()
+    val_ann = Path(meta["coco_val_json"]).resolve()
+    num_gpus = max(1, int(payload.num_gpus or 1))
+    strategy = payload.balance_strategy or "none"
+    class_balance = bool(payload.balance_classes) if payload.balance_classes is not None else strategy != "none"
+    cfg: Dict[str, Any] = deepcopy(base_cfg) if base_cfg else {}
+    cfg.update({
+        "run_name": run_name,
+        "experiment_log_dir": str(exp_dir.resolve()),
+        "paths": {
+            "train_img_folder": str(train_ann.parent),
+            "train_ann_file": str(train_ann),
+            "val_img_folder": str(val_ann.parent),
+            "val_ann_file": str(val_ann),
+            "signature": meta.get("signature"),
+        },
+        "dataset": {
+            "class_balance": class_balance,
+            "balance_strategy": strategy,
+            "balance_power": payload.balance_power,
+            "balance_clip": payload.balance_clip,
+            "balance_beta": payload.balance_beta,
+            "balance_gamma": payload.balance_gamma,
+            "classes": meta.get("classes"),
+            "train_limit": int(payload.train_limit) if payload.train_limit is not None else None,
+        },
+        "trainer": {
+            "max_epochs": int(payload.max_epochs) if payload.max_epochs is not None else defaults["max_epochs"],
+            "train_batch_size": int(payload.train_batch_size) if payload.train_batch_size is not None else defaults["train_batch_size"],
+            "val_batch_size": int(payload.val_batch_size) if payload.val_batch_size is not None else defaults["val_batch_size"],
+            "num_train_workers": int(payload.num_train_workers) if payload.num_train_workers is not None else defaults["num_train_workers"],
+            "num_val_workers": int(payload.num_val_workers) if payload.num_val_workers is not None else defaults["num_val_workers"],
+            "gradient_accumulation_steps": int(payload.gradient_accumulation_steps) if payload.gradient_accumulation_steps is not None else defaults["gradient_accumulation_steps"],
+            "target_epoch_size": int(payload.target_epoch_size) if payload.target_epoch_size is not None else defaults["target_epoch_size"],
+            "val_epoch_freq": int(payload.val_epoch_freq) if payload.val_epoch_freq is not None else defaults["val_epoch_freq"],
+            "lr_scale": float(payload.lr_scale) if payload.lr_scale is not None else float(defaults["lr_scale"]),
+            "scheduler_warmup": int(payload.scheduler_warmup) if payload.scheduler_warmup is not None else defaults["scheduler_warmup"],
+            "scheduler_timescale": int(payload.scheduler_timescale) if payload.scheduler_timescale is not None else defaults["scheduler_timescale"],
+            "resolution": int(payload.resolution) if payload.resolution is not None else defaults["resolution"],
+            "enable_inst_interactivity": bool(payload.enable_inst_interactivity) if payload.enable_inst_interactivity is not None else False,
+            "num_gpus": num_gpus,
+            "log_freq": int(payload.log_freq) if payload.log_freq is not None else defaults["log_freq"],
+        },
+        "launcher": {
+            "num_nodes": 1,
+            "gpus_per_node": num_gpus,
+        },
+        "metadata": {
+            "dataset_id": payload.dataset_id,
+            "created_at": time.time(),
+        },
+    })
+    return cfg, num_gpus
+
+
+def _start_sam3lite_training_worker(job: Sam3LiteTrainingJob, cfg: Dict[str, Any], num_gpus: int) -> None:
+    def worker() -> None:
+        proc: Optional[subprocess.Popen[str]] = None
+        try:
+            _sam3lite_job_update(job, status="running", progress=0.02, message="Preparing SAM3-lite training job ...")
+            config_path = _save_sam3lite_config(cfg)
+            exp_dir = Path(cfg["experiment_log_dir"])
+            log_dir = exp_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                sys.executable,
+                "-m",
+                "sam3_lite.train",
+                "--config",
+                str(config_path),
+                "--log-dir",
+                str(log_dir),
+                "--num-gpus",
+                str(num_gpus),
+            ]
+            env = os.environ.copy()
+            env.setdefault("PYTHONUNBUFFERED", "1")
+            env.setdefault("PYTHONPATH", f"{SAM3_REPO_ROOT}:{env.get('PYTHONPATH','')}")
+            _sam3lite_job_log(job, f"Spawned {' '.join(cmd)}")
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+            job.process = proc
+            progress_re = re.compile(r"\[sam3lite-progress\s+([0-9.]+)\]", re.IGNORECASE)
+            metric_re = re.compile(r"\[sam3lite-metric\](.*)", re.IGNORECASE)
+            result_re = re.compile(r"\[sam3lite-result\](.*)", re.IGNORECASE)
+            latest_result: Dict[str, Any] = {}
+            if proc.stdout:
+                for raw_line in proc.stdout:
+                    if job.cancel_event.is_set() and proc.poll() is None:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        break
+                    cleaned = raw_line.rstrip("\\n")
+                    if not cleaned:
+                        continue
+                    _sam3lite_job_log(job, cleaned[-300:])
+                    prog_match = progress_re.search(cleaned)
+                    if prog_match:
+                        try:
+                            prog_val = float(prog_match.group(1))
+                            _sam3lite_job_update(job, progress=max(0.0, min(1.0, prog_val)), log_message=False)
+                        except Exception:
+                            pass
+                    metric_match = metric_re.search(cleaned)
+                    if metric_match:
+                        try:
+                            payload = metric_match.group(1).strip()
+                            metric_obj = json.loads(payload)
+                            _sam3lite_job_append_metric(job, metric_obj if isinstance(metric_obj, dict) else {"value": metric_obj})
+                        except Exception:
+                            pass
+                    result_match = result_re.search(cleaned)
+                    if result_match:
+                        try:
+                            payload = result_match.group(1).strip()
+                            latest_result = json.loads(payload)
+                        except Exception:
+                            pass
+            return_code = proc.wait() if proc else 1
+            if job.cancel_event.is_set():
+                _sam3lite_job_update(job, status="cancelled", message="Training cancelled by user")
+                return
+            if return_code == 0:
+                result_payload = latest_result or {
+                    "config_path": str(config_path),
+                    "experiment_log_dir": str(exp_dir),
+                }
+                if "checkpoint" not in result_payload:
+                    ckpt_path = Path(result_payload["experiment_log_dir"]) / "checkpoints" / "last.ckpt"
+                    result_payload["checkpoint"] = str(ckpt_path)
+                _sam3lite_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
+            else:
+                _sam3lite_job_update(job, status="failed", message="Training crashed", error=f"return_code={return_code}")
+        except Exception as exc:  # noqa: BLE001
+            _sam3lite_job_update(job, status="failed", message="Training crashed", error=str(exc))
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+    thread = threading.Thread(target=worker, name=f"sam3lite-train-{job.job_id}", daemon=True)
+    thread.start()
+
+
 def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: str) -> Tuple[OmegaConf, int]:
     cfg = OmegaConf.load(str(SAM3_CONFIG_TEMPLATE))
     train_ann = Path(meta["coco_train_json"]).resolve()
@@ -4441,6 +4916,71 @@ def cancel_sam3_training_job(job_id: str):
     return {"status": job.status}
 
 
+@app.get("/sam3/storage/runs")
+def list_sam3_runs(variant: str = Query("sam3")):
+    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
+    return _list_sam3_runs(normalized)
+
+
+@app.delete("/sam3/storage/runs/{run_id}")
+def delete_sam3_run(run_id: str, variant: str = Query("sam3"), scope: str = Query("all")):
+    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
+    if scope not in SAM3_STORAGE_SCOPES:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_scope")
+    run_dir = _run_dir_for_request(run_id, normalized)
+    active_paths = _active_run_paths_for_variant(normalized)
+    if run_dir.resolve() in active_paths:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="sam3_run_active")
+    deleted, freed = _delete_run_scope(run_dir, scope)
+    return {"deleted": deleted, "freed_bytes": freed}
+
+
+@app.post("/sam3lite/train/jobs")
+def create_sam3lite_training_job(payload: Sam3LiteTrainRequest):
+    meta = _resolve_sam3_dataset_meta(payload.dataset_id)
+    job_id = uuid.uuid4().hex
+    cfg, num_gpus = _build_sam3lite_config(payload, meta, job_id)
+    job = Sam3LiteTrainingJob(job_id=job_id, config=cfg)
+    with SAM3_LITE_TRAINING_JOBS_LOCK:
+        SAM3_LITE_TRAINING_JOBS[job_id] = job
+        _sam3lite_job_log(job, "Job queued")
+    logger.info("[sam3lite-train %s] dataset=%s gpus=%s", job_id[:8], payload.dataset_id, num_gpus)
+    _start_sam3lite_training_worker(job, cfg, num_gpus)
+    return {"job_id": job_id}
+
+
+@app.get("/sam3lite/train/jobs")
+def list_sam3lite_training_jobs():
+    with SAM3_LITE_TRAINING_JOBS_LOCK:
+        jobs = sorted(SAM3_LITE_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+        return [_serialize_sam3lite_job(job) for job in jobs]
+
+
+@app.get("/sam3lite/train/jobs/{job_id}")
+def get_sam3lite_training_job(job_id: str):
+    job = _get_sam3lite_job(job_id)
+    return _serialize_sam3lite_job(job)
+
+
+@app.post("/sam3lite/train/jobs/{job_id}/cancel")
+def cancel_sam3lite_training_job(job_id: str):
+    job = _get_sam3lite_job(job_id)
+    with SAM3_LITE_TRAINING_JOBS_LOCK:
+        if job.status in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        if job.cancel_event.is_set():
+            return {"status": job.status}
+        job.cancel_event.set()
+        if job.process and job.process.poll() is None:
+            try:
+                job.process.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
+        _sam3lite_job_update(job, status=next_status, message="Cancellation requested ...")
+    return {"status": job.status}
+
+
 @app.get("/sam3/models/status")
 def sam3_model_status():
     return {
@@ -4475,6 +5015,59 @@ def activate_sam3_model(payload: Sam3ModelActivateRequest):
         "checkpoint": active_sam3_checkpoint,
         "source": source,
         "enable_segmentation": active_sam3_enable_segmentation,
+    }
+    _reset_sam3_runtime()
+    return {"active": active_sam3_metadata}
+
+
+@app.get("/sam3lite/models/status")
+def sam3lite_model_status():
+    meta = active_sam3_metadata if isinstance(active_sam3_metadata, dict) else {}
+    if isinstance(meta, dict):
+        meta = dict(meta)
+        meta.setdefault("source", "sam3")
+    return {"checkpoint": active_sam3_checkpoint, "active": meta}
+
+
+@app.post("/sam3lite/models/activate")
+def activate_sam3lite_model(payload: Sam3ModelActivateRequest):
+    global active_sam3_checkpoint, active_sam3_model_id, active_sam3_metadata, active_sam3_enable_segmentation
+    checkpoint_path = payload.checkpoint_path
+    resolved_path: Optional[Path] = None
+    if checkpoint_path:
+        resolved_path = Path(checkpoint_path).resolve()
+        if not resolved_path.exists():
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_not_found")
+        checkpoint_path = str(resolved_path)
+        # Validate checkpoint compatibility with SAM3 loader to avoid activating unusable weights.
+        if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None:
+            raise HTTPException(
+                status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}",
+            )
+        try:
+            _ = build_sam3_image_model(
+                device="cpu",
+                checkpoint_path=checkpoint_path,
+                load_from_HF=False,
+                enable_segmentation=False,
+                enable_inst_interactivity=False,
+                bpe_path=str(SAM3_BPE_PATH),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"sam3lite_checkpoint_incompatible:{exc}",
+            ) from exc
+    active_sam3_checkpoint = checkpoint_path
+    active_sam3_enable_segmentation = False
+    active_sam3_model_id = payload.label or (resolved_path.stem if resolved_path else "sam3lite")
+    active_sam3_metadata = {
+        "id": active_sam3_model_id,
+        "label": payload.label or active_sam3_model_id,
+        "checkpoint": active_sam3_checkpoint,
+        "source": "sam3lite",
+        "enable_segmentation": False,
     }
     _reset_sam3_runtime()
     return {"active": active_sam3_metadata}

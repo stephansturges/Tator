@@ -1784,3 +1784,59 @@ hr {
 .sam3-dataset-row select {
     flex: 1;
 }
+
+.storage-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.storage-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.storage-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.storage-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.storage-meta {
+    font-size: 12px;
+    color: #475569;
+}
+
+.storage-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.storage-badge {
+    display: inline-block;
+    background: #e2e8f0;
+    color: #0f172a;
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 12px;
+}
+
+.storage-badge.warn {
+    background: #fff4e5;
+    color: #92400e;
+}

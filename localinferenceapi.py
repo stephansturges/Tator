@@ -33,6 +33,13 @@ import queue
 import itertools
 from dataclasses import dataclass, field, asdict
 
+# Ensure we import the bundled SAM3 package (sam3/sam3) rather than shadowing it
+# with the repo root folder name (sam3/). Without this, sam3 becomes a namespace
+# that lacks the train.data modules needed for text prompting.
+SAM3_SRC_ROOT = (Path(__file__).resolve().parent / "sam3").resolve()
+if SAM3_SRC_ROOT.exists():
+    sys.path.insert(0, str(SAM3_SRC_ROOT))
+
 from tools.clip_training import train_clip_from_yolo, TrainingError, TrainingArtifacts
 try:
     from tools.qwen_training import (

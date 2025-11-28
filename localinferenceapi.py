@@ -2664,7 +2664,7 @@ def _active_run_paths_for_variant(variant: str) -> set[Path]:
         with SAM3_LITE_TRAINING_JOBS_LOCK:
             jobs = list(SAM3_LITE_TRAINING_JOBS.values())
         for job in jobs:
-            if job.status not in {"running", "queued", "cancelling"}):
+            if job.status not in {"running", "queued", "cancelling"}:
                 continue
             exp_dir = None
             try:

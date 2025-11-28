@@ -198,6 +198,7 @@
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
     const TAB_SAM3_LITE_TRAIN = "sam3lite-train";
+    const TAB_SAM3_PROMPT_MODELS = "sam3-prompt-models";
     const TAB_ACTIVE = "active";
     const TAB_QWEN = "qwen";
     const TAB_PREDICTORS = "predictors";
@@ -5443,7 +5444,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             tabElements.sam3LiteTrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_LITE_TRAIN));
         }
         if (tabElements.sam3PromptModelsButton) {
-            tabElements.sam3PromptModelsButton.addEventListener("click", () => setActiveTab("sam3-prompt-models"));
+            tabElements.sam3PromptModelsButton.addEventListener("click", () => setActiveTab(TAB_SAM3_PROMPT_MODELS));
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
@@ -5479,7 +5480,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             tabElements.sam3LiteTrainButton.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
         }
         if (tabElements.sam3PromptModelsButton) {
-            tabElements.sam3PromptModelsButton.classList.toggle("active", tabName === "sam3-prompt-models");
+            tabElements.sam3PromptModelsButton.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
@@ -5509,7 +5510,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             tabElements.sam3LiteTrainPanel.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
         }
         if (tabElements.sam3PromptModelsPanel) {
-            tabElements.sam3PromptModelsPanel.classList.toggle("active", tabName === "sam3-prompt-models");
+            tabElements.sam3PromptModelsPanel.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
         }
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);

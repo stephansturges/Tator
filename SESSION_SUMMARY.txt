@@ -3,6 +3,9 @@ Branch: qwen-training (local).
 Future objective
 - Create a self-contained “SAM3-lite” training module in-repo (no external sam3 clone): keep only box-only essentials (model_builder, tokenizer, train loop, transforms, losses, eval postprocessors, BPE asset), drop unused cluster/submitit/Triton bits, simplify configs/entrypoint, slim requirements, add a tiny smoke test, and point the backend/UI to the new path.
 
+Future work note (SAM3 text prompting dependency)
+- SAM3 text prompting uses upstream `Sam3Processor`, which imports helpers from `sam3.train.data` (FindStage/collator). Our repo-level `sam3/` directory was shadowing the real package, breaking `sam3.train.data` and text prompting. We fixed runtime by prepending the bundled vendor package (`/sam3`) to `sys.path` in `localinferenceapi.py`. Longer term: vendor the minimal inference-only helpers under a non-conflicting namespace to remove the `sam3.train.*` dependency entirely.
+
 SAM3 box-only fine-tune + activation (pending)
 - Data pipeline: reuse staged Qwen datasets; convert YOLO images/labels/labelmap to COCO train/val on the server; cache by dataset signature.
 - Upload handling: reuse Qwen chunked upload flow; short-circuit reupload if signature matches; expose convert/list endpoints.
@@ -16,3 +19,22 @@ Other follow-ups
 - Smoke test/CLI to load SAM3, run point+bbox prompt, log VRAM/mask output.
 - Update docs (README/AGENTS) with dataset reuse/no-local-path constraint, training tunables, activation flow, GPU expectations.
 - Future enhancement: optional SAM3 hard-example mining toggle (e.g., replay top-loss batches after a burn-in epoch), off by default to keep the lite trainer simple.
+
+Current task: build a real SAM3-lite trainer (box-only, in-repo)
+- Port assets/tokenizer: ship BPE file under sam3_lite/assets, reimplement tokenizer wrapper used by the model builder.
+- Port model: implement minimal SAM3 box-only modules (vision backbone, text encoder, fusion transformer, decoder heads, bbox/presence heads, embeddings) matching vendor shapes; add bbox postprocessor.
+- Data pipeline: COCO reader, transforms (resize/pad/normalize, bbox jitter), collate, class-balanced sampler with existing strategies; support target_epoch_size handling.
+- Losses/matcher: bbox (L1+GIoU) + class/presence/focal components as in vendor box-only path; matcher if required by heads.
+- Optim/schedulers: AdamW with layer-wise decay groups, inverse-square-root schedulers, weight decay exceptions, grad clipping.
+- Training loop: single-node DDP, grad accumulation, val hook (optional), progress/metric emission via [sam3lite-progress]/[sam3lite-metric], checkpoint save (last/best) in vendor-compatible format if possible; config saved per run.
+- Activation/inference: add loader for SAM3-lite checkpoints and wire /sam3 inference to switch when source=sam3lite; remove guard once compatibility confirmed; otherwise store metadata to prevent crashes.
+- Dependencies/config/docs: slim requirements, pydantic/YAML schema defaults, smoke test (load + dummy forward), README/AGENTS updates for dual-mode and activation flow.
+
+Actionable next steps (SAM3-lite rebuild)
+1) Lay down sam3_lite package structure: assets dir with BPE copy, tokenizer wrapper, config loader (pydantic/dataclass), logging/util helpers, and placeholders for data/model/loss/optim/train modules.
+2) Implement data pipeline: COCO detection reader without upstream deps, transforms (resize/pad/normalize/bbox jitter), collate, class-balanced sampler honoring strategies (none/inv_sqrt/clipped_inv/effective_num/focal), target_epoch_size handling.
+3) Implement model builder: vision backbone + text encoder (compatible embeddings), fusion transformer, decoder heads (bbox/presence), positional embeddings, postprocessor for bbox outputs matching vendor shapes.
+4) Implement losses/matcher and optimization: bbox L1+GIoU + presence/focal, matcher if needed; AdamW with layer decay, inverse-square-root schedulers, wd exemptions, grad clipping; checkpoint saving (last/best) and config snapshot.
+5) Implement training loop: single-node DDP with grad accumulation, optional val hook, metrics/progress emission tags, logging to tensorboard/log files; write checkpoints under uploads/sam3lite_runs/<run>.
+6) Integrate backend: wire activation/inference to load sam3_lite checkpoints (remove temp guard), expose metadata/status; update APIs if new fields needed.
+7) Add docs/tests: README/AGENTS notes, slim requirements, smoke test script to load model and run dummy forward using saved checkpoint.

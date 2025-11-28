@@ -1537,7 +1537,33 @@ def _run_sam3_text_inference(
         except (TypeError, ValueError):
             normalized_limit = None
     state = processor.set_image(pil_img)
-    output = processor.set_text_prompt(state=state, prompt=text_prompt)
+    try:
+        output = processor.set_text_prompt(state=state, prompt=text_prompt)
+    except KeyError:
+        # Box-only checkpoints (enable_segmentation=False) do not emit pred_masks.
+        # Fall back to raw model output and extract boxes/scores manually.
+        raw = processor.model.forward_grounding(
+            backbone_out=state["backbone_out"],
+            find_input=processor.find_stage,
+            find_target=None,
+            geometric_prompt=state.get("geometric_prompt", processor.model._get_dummy_prompt()),
+        )
+        boxes_xyxy = raw.get("pred_boxes_xyxy") or raw.get("pred_boxes")
+        scores = None
+        logits = raw.get("pred_logits")
+        if logits is not None:
+            try:
+                scores = torch.sigmoid(logits.squeeze(-1))
+            except Exception:  # noqa: BLE001
+                try:
+                    scores = torch.sigmoid(logits)
+                except Exception:  # noqa: BLE001
+                    scores = None
+        output = {
+            "boxes": boxes_xyxy,
+            "scores": scores,
+            # no masks for box-only checkpoints
+        }
     return _sam3_text_detections(pil_img, output, text_prompt, normalized_limit, min_score=float(threshold))
 
 
@@ -5060,19 +5086,36 @@ def list_sam3_available_models(
         runs.extend(_list_sam3_runs(v))
     models: List[Dict[str, Any]] = []
     # Always expose the base/active env model if available
-    base_entry = {
-        "id": active_sam3_metadata.get("label") or active_sam3_metadata.get("id") or "base",
-        "key": "base",
-        # Use a real checkpoint path when available; otherwise keep None so the loader will pull from HF.
-        "path": active_sam3_checkpoint or (SAM3_CHECKPOINT_PATH if SAM3_CHECKPOINT_PATH else None),
-        "size_bytes": None,
-        "promoted": False,
-        "active": True,
-        "variant": "sam3",
-        "run_path": None,
-        "source": active_sam3_metadata.get("source") or "env",
-    }
-    models.append(base_entry)
+    # Env/base model entry (always listed)
+    env_base_path = SAM3_CHECKPOINT_PATH if SAM3_CHECKPOINT_PATH else None
+    models.append(
+        {
+            "id": "Base SAM3",
+            "key": "base",
+            "path": env_base_path or SAM3_MODEL_ID,
+            "size_bytes": None,
+            "promoted": False,
+            "active": active_sam3_checkpoint in {None, env_base_path},
+            "variant": "sam3",
+            "run_path": None,
+            "source": "env",
+        }
+    )
+    # Current active model entry (if different from env/base)
+    if active_sam3_checkpoint and active_sam3_checkpoint != env_base_path:
+        models.append(
+            {
+                "id": active_sam3_metadata.get("label") or active_sam3_metadata.get("id") or "active",
+                "key": f"active:{active_sam3_checkpoint}",
+                "path": active_sam3_checkpoint,
+                "size_bytes": None,
+                "promoted": False,
+                "active": True,
+                "variant": "sam3",
+                "run_path": None,
+                "source": active_sam3_metadata.get("source") or "env",
+            }
+        )
     for run in runs:
         if promoted_only and not run.get("promoted"):
             continue

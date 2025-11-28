@@ -2911,8 +2911,16 @@ async function deleteRunStorage(runId, variant, scope) {
         }
     } else {
         const label = scope === "all" ? "entire run folder" : scope;
-        const confirmText = `Delete ${label} for ${runId}?`;
-        if (typeof window !== "undefined" && !window.confirm(confirmText)) return;
+        let confirmText = `Delete ${label} for ${runId}?`;
+        const entry =
+            (variant === "sam3" ? sam3StorageState.items : sam3LiteStorageState.items).find((r) => r.id === runId) || null;
+        if (entry && entry.promoted) {
+            confirmText = `This run is promoted.\n${confirmText}\nClick OK to delete anyway.`;
+            const second = typeof window !== "undefined" ? window.confirm(confirmText) : true;
+            if (!second) return;
+        } else if (typeof window !== "undefined" && !window.confirm(confirmText)) {
+            return;
+        }
         const qs = new URLSearchParams({ variant, scope });
         try {
             const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}?${qs.toString()}`, {

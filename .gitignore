@@ -223,7 +223,11 @@ training.txr
 # Local configuration / logs
 .env
 logs/
+lightning_logs/
 *.log
+check_cuda.sh
+sam3integration.txt
+sam3/
 
 # Front-end scratch artifacts
 ybat-master/ybat_*.js
@@ -245,4 +249,5 @@ pyrightconfig.json
 
 # Local session/agent notes (never commit)
 SESSION_SUMMARY.txt
+SESSION.md
 AGENTS.md

@@ -65,6 +65,7 @@
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
+            <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
             <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
             <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
@@ -889,6 +890,83 @@
                             <div id="sam3LiteStorageList" class="storage-list"></div>
                         </div>
                     </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabDatasets" data-tab-panel="datasets">
+                <div class="training-card">
+                    <div class="training-card__header">
+                        <div class="training-card__title">Dataset Management</div>
+                        <div class="training-help">Upload YOLO/YOLO-seg datasets once and reuse them across CLIP, Qwen, and SAM3 training. Use the builder below to create segmentation variants.</div>
+                    </div>
+                    <div class="training-card__body dataset-manager">
+                        <div class="training-subsection">
+                            <div class="training-subsection__title">Upload current labeling session</div>
+                            <div class="training-help">Packages the images + bboxes you have loaded in the labeling tab and caches them as a bbox dataset.</div>
+                            <div class="training-actions">
+                                <button type="button" id="datasetUploadCurrentBtn" class="training-button">Upload current dataset</button>
+                                <div id="datasetUploadCurrentSummary" class="training-help"></div>
+                            </div>
+                        </div>
+                        <div class="training-subsection">
+                            <div class="training-subsection__title">Upload YOLO/YOLO-seg zip</div>
+                            <label for="datasetUploadFile">Zip file (expects train/val &gt; images + labels)</label>
+                            <input type="file" id="datasetUploadFile" accept=".zip" />
+                            <div class="training-grid">
+                                <div>
+                                    <label for="datasetUploadName">Dataset name (optional)</label>
+                                    <input type="text" id="datasetUploadName" placeholder="Defaults to zip name" />
+                                </div>
+                                <div>
+                                    <label for="datasetUploadType">Dataset type</label>
+                                    <select id="datasetUploadType">
+                                        <option value="">Auto-detect</option>
+                                        <option value="bbox">BBox (YOLO)</option>
+                                        <option value="seg">Polygon masks (YOLO-seg)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="training-actions">
+                                <button type="button" id="datasetUploadBtn" class="training-button">Upload dataset</button>
+                                <button type="button" id="datasetListRefresh" class="training-button training-button--ghost">Refresh list</button>
+                            </div>
+                            <div id="datasetUploadMessage" class="training-message"></div>
+                        </div>
+                        <div class="training-subsection">
+                            <div class="training-subsection__title">Datasets</div>
+                            <div id="datasetList" class="training-history"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="training-card">
+                    <div class="training-card__header">
+                        <div class="training-card__title">Build segmentation datasets from bbox datasets</div>
+                        <div class="training-help">Creates YOLO polygon masks using SAM; currently scaffolded (no masks generated yet).</div>
+                    </div>
+                    <div class="training-card__body">
+                        <label for="segBuilderDatasetSelect">Source bbox dataset</label>
+                        <select id="segBuilderDatasetSelect"></select>
+                        <div id="segBuilderDatasetSummary" class="training-help">Pick a dataset to convert.</div>
+                        <label for="segBuilderOutputName">Output dataset name</label>
+                        <input type="text" id="segBuilderOutputName" placeholder="Defaults to &lt;dataset&gt;_seg" />
+                        <label for="segBuilderVariant">SAM variant</label>
+                        <select id="segBuilderVariant">
+                            <option value="sam3">SAM 3</option>
+                            <option value="sam1">SAM 1</option>
+                        </select>
+                        <div class="training-help">Polygons only (YOLO-seg). Output is kept separate; originals stay untouched.</div>
+                        <div class="training-actions">
+                            <button type="button" id="segBuilderStartBtn" class="training-button">Plan build (stub)</button>
+                            <button type="button" id="segBuilderRefreshBtn" class="training-button training-button--ghost">Refresh datasets</button>
+                        </div>
+                        <div id="segBuilderMessage" class="training-message"></div>
+                    </div>
+                    <div class="training-card__footer">
+                        <div class="training-subsection__title">Segmentation build jobs</div>
+                        <div id="segBuilderJobs" class="training-history"></div>
+                        <div class="training-actions">
+                            <button type="button" id="segBuilderJobsRefresh" class="training-button training-button--ghost">Refresh jobs</button>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="tab-panel" id="tabSam3PromptModels" data-tab-panel="sam3-prompt-models">

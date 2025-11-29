@@ -2141,6 +2141,7 @@ class Sam3ModelActivateRequest(BaseModel):
 class QwenModelActivateRequest(BaseModel):
     model_id: str
 
+
 class ActiveModelRequest(BaseModel):
     classifier_path: Optional[str] = None
     labelmap_path: Optional[str] = None
@@ -2153,6 +2154,13 @@ class ActiveModelResponse(BaseModel):
     labelmap_path: Optional[str]
     clip_ready: bool
     labelmap_entries: List[str] = []
+
+
+class SegmentationBuildRequest(BaseModel):
+    source_dataset_id: str = Field(..., description="Existing bbox dataset id (Qwen or SAM3)")
+    output_name: Optional[str] = Field(None, description="Optional output dataset name")
+    sam_variant: Literal["sam1", "sam3"] = Field("sam3", description="Generator to use for masks")
+    output_format: Literal["yolo-seg"] = Field("yolo-seg", description="Target mask encoding (polygons)")
 
 
 @dataclass
@@ -2217,6 +2225,8 @@ SAM3_LITE_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_LITE_CONFIG_TEMPLATE = Path(__file__).resolve().parent / "sam3_lite" / "config" / "default.yaml"
 SAM3_LITE_MAX_LOG_LINES = 500
 SAM3_LITE_MAX_METRIC_POINTS = 2000
+SEG_BUILDER_ROOT = Path(os.environ.get("SEGMENTATION_ROOT", "./uploads/seg_runs"))
+SEG_BUILDER_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_REPO_ROOT = Path(__file__).resolve().parent.resolve()
 SAM3_VENDOR_ROOT = SAM3_REPO_ROOT / "sam3"
 SAM3_PACKAGE_ROOT = SAM3_VENDOR_ROOT / "sam3"
@@ -2281,16 +2291,35 @@ class Sam3LiteTrainingJob:
     log_seq: int = 0
 
 
+@dataclass
+class SegmentationBuildJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    config: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
 SAM3_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_LITE_TRAINING_JOBS: Dict[str, Sam3LiteTrainingJob] = {}
 SAM3_LITE_TRAINING_JOBS_LOCK = threading.Lock()
+SEGMENTATION_BUILD_JOBS: Dict[str, SegmentationBuildJob] = {}
+SEGMENTATION_BUILD_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
+DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_DATASET_JOBS: Dict[str, ClipDatasetUploadJob] = {}
 CLIP_DATASET_JOBS_LOCK = threading.Lock()
 QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}
@@ -2531,6 +2560,61 @@ def _serialize_sam3lite_job(job: Sam3LiteTrainingJob) -> Dict[str, Any]:
     }
 
 
+def _seg_job_log(job: SegmentationBuildJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > MAX_JOB_LOGS:
+        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+    job.updated_at = time.time()
+    try:
+        logger.info("[seg-build %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _seg_job_update(
+    job: SegmentationBuildJob,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    log_message: bool = True,
+) -> None:
+    if status is not None:
+        job.status = status
+    if message is not None:
+        if message != job.message:
+            job.message = message
+            if log_message:
+                _seg_job_log(job, message)
+        else:
+            job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
+
+
+def _serialize_seg_job(job: SegmentationBuildJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "logs": job.logs,
+        "config": job.config,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
 def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> None:
     try:
         if not jobs:
@@ -2658,7 +2742,20 @@ def _find_qwen_dataset_by_signature(signature: str) -> Optional[Path]:
 
 def _load_sam3_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     meta_path = dataset_dir / SAM3_DATASET_META_NAME
-    return _load_json_metadata(meta_path)
+    data = _load_json_metadata(meta_path)
+    if not data:
+        return None
+    # Backfill defaults for older datasets.
+    updated = False
+    if "id" not in data:
+        data["id"] = dataset_dir.name
+        updated = True
+    if "type" not in data:
+        data["type"] = "bbox"
+        updated = True
+    if updated:
+        _persist_sam3_dataset_metadata(dataset_dir, data)
+    return data
 
 
 def _persist_sam3_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
@@ -3006,6 +3103,7 @@ def _list_qwen_dataset_entries() -> List[Dict[str, Any]]:
             "classes": metadata.get("classes", []),
             "context": metadata.get("context", ""),
             "signature": signature,
+            "type": metadata.get("type", "bbox"),
         }
         entries.append(entry)
     entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
@@ -3082,7 +3180,15 @@ def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
         with meta_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
             if isinstance(data, dict):
-                data.setdefault("id", dataset_dir.name)
+                updated = False
+                if "id" not in data:
+                    data["id"] = dataset_dir.name
+                    updated = True
+                if "type" not in data:
+                    data["type"] = "bbox"
+                    updated = True
+                if updated:
+                    _persist_qwen_dataset_metadata(dataset_dir, data)
                 return data
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to read Qwen dataset metadata from %s: %s", meta_path, exc)
@@ -3484,6 +3590,116 @@ def delete_qwen_dataset(dataset_id: str):
     return {"status": "deleted"}
 
 
+def _find_yolo_dataset_root(extracted_dir: Path) -> Optional[Path]:
+    candidates: List[Path] = [extracted_dir]
+    for child in extracted_dir.iterdir():
+        if child.is_dir():
+            candidates.append(child)
+    for candidate in candidates:
+        train_images = candidate / "train" / "images"
+        train_labels = candidate / "train" / "labels"
+        if train_images.exists() and train_labels.exists():
+            return candidate
+    return None
+
+
+def _count_images_in_dir(images_dir: Path) -> int:
+    if not images_dir.exists():
+        return 0
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+    count = 0
+    for path in images_dir.rglob("*"):
+        if path.is_file() and path.suffix.lower() in exts:
+            count += 1
+    return count
+
+
+def _infer_yolo_dataset_type(labels_dir: Path, fallback: str = "bbox") -> str:
+    if not labels_dir.exists():
+        return fallback
+    try:
+        for txt in labels_dir.rglob("*.txt"):
+            with txt.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    parts = line.strip().split()
+                    if len(parts) > 5:
+                        return "seg"
+    except Exception:
+        return fallback
+    return fallback
+
+
+@app.post("/datasets/upload")
+async def upload_dataset_zip(
+    file: UploadFile = File(...),
+    dataset_id: Optional[str] = Form(None),
+    dataset_type: Optional[str] = Form(None),
+):
+    filename = file.filename or "dataset.zip"
+    safe_name = _safe_run_name(dataset_id, Path(filename).stem or f"dataset_{uuid.uuid4().hex[:6]}")
+    tmp_root = Path(tempfile.mkdtemp(prefix="dataset_upload_", dir=str(DATASET_UPLOAD_ROOT)))
+    zip_path = tmp_root / "payload.zip"
+    try:
+        await _write_upload_file(file, zip_path)
+        extracted_dir = tmp_root / "extracted"
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extracted_dir)
+        dataset_root = _find_yolo_dataset_root(extracted_dir)
+        if not dataset_root:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_layout_not_found")
+        split_train_images = dataset_root / "train" / "images"
+        split_train_labels = dataset_root / "train" / "labels"
+        split_val_images = dataset_root / "val" / "images"
+        split_val_labels = dataset_root / "val" / "labels"
+        if not split_train_images.exists() or not split_train_labels.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="train_split_missing")
+        target_dir = (SAM3_DATASET_ROOT / safe_name).resolve()
+        if not str(target_dir).startswith(str(SAM3_DATASET_ROOT.resolve())):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_invalid")
+        if target_dir.exists():
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_exists")
+        shutil.move(str(dataset_root), str(target_dir))
+        dataset_kind = (dataset_type or "").strip().lower() or _infer_yolo_dataset_type(target_dir / "train" / "labels", "bbox")
+        if dataset_kind not in {"bbox", "seg"}:
+            dataset_kind = "bbox"
+        labelmap = _discover_yolo_labelmap(target_dir)
+        train_count = _count_images_in_dir(target_dir / "train" / "images")
+        val_count = _count_images_in_dir(target_dir / "val" / "images") if split_val_images.exists() else 0
+        image_count = train_count + val_count
+        signature = _compute_dir_signature(target_dir)
+        metadata = {
+            "id": safe_name,
+            "label": safe_name,
+            "dataset_root": str(target_dir),
+            "type": dataset_kind,
+            "source": "upload",
+            "created_at": time.time(),
+            "image_count": image_count,
+            "train_count": train_count,
+            "val_count": val_count,
+            "classes": labelmap,
+            "signature": signature,
+        }
+        _persist_sam3_dataset_metadata(target_dir, metadata)
+        logger.info(
+            "[dataset-upload] stored=%s type=%s train=%d val=%d classes=%d",
+            safe_name,
+            dataset_kind,
+            train_count,
+            val_count,
+            len(labelmap),
+        )
+        return metadata
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+@app.get("/datasets")
+def list_datasets():
+    return _list_sam3_datasets()
+
+
 @app.get("/sam3/datasets")
 def list_sam3_datasets():
     return _list_sam3_datasets()
@@ -3512,6 +3728,29 @@ def list_sam3lite_datasets():
 @app.post("/sam3lite/datasets/{dataset_id}/convert")
 def sam3lite_convert_dataset(dataset_id: str):
     return sam3_convert_dataset(dataset_id)
+
+
+@app.post("/segmentation/build/jobs")
+def start_segmentation_build_job(request: SegmentationBuildRequest):
+    job = _start_segmentation_build_job(request)
+    return _serialize_seg_job(job)
+
+
+@app.get("/segmentation/build/jobs")
+def list_segmentation_build_jobs():
+    with SEGMENTATION_BUILD_JOBS_LOCK:
+        jobs = list(SEGMENTATION_BUILD_JOBS.values())
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return [_serialize_seg_job(job) for job in jobs]
+
+
+@app.get("/segmentation/build/jobs/{job_id}")
+def get_segmentation_build_job(job_id: str):
+    with SEGMENTATION_BUILD_JOBS_LOCK:
+        job = SEGMENTATION_BUILD_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="segmentation_job_not_found")
+    return _serialize_seg_job(job)
 
 
 def _collect_labels_from_qwen_jsonl(jsonl_path: Path) -> List[str]:
@@ -3706,6 +3945,7 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
         "id": dataset_root.name,
         "label": dataset_root.name,
         "source": "yolo",
+        "type": "bbox",
         "dataset_root": str(dataset_root),
         "signature": signature,
         "classes": labelmap,
@@ -3725,6 +3965,9 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     dataset_root = dataset_root.resolve()
     metadata = _load_qwen_dataset_metadata(dataset_root) or {}
     metadata, signature = _ensure_qwen_dataset_signature(dataset_root, metadata)
+    if "type" not in metadata:
+        metadata["type"] = "bbox"
+        _persist_qwen_dataset_metadata(dataset_root, metadata)
     existing_meta = _load_sam3_dataset_metadata(dataset_root)
     if (
         existing_meta
@@ -3860,6 +4103,7 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
         "id": metadata.get("id") or dataset_root.name,
         "label": metadata.get("label") or metadata.get("id") or dataset_root.name,
         "source": "qwen",
+        "type": metadata.get("type", "bbox"),
         "dataset_root": str(dataset_root),
         "signature": signature,
         "classes": labelmap,
@@ -3891,6 +4135,7 @@ def _list_sam3_datasets() -> List[Dict[str, Any]]:
             {
                 **entry,
                 "source": "qwen",
+                "type": entry.get("type", "bbox"),
                 "coco_ready": coco_ready,
                 "coco_train_json": coco_train,
                 "coco_val_json": coco_val,
@@ -3915,6 +4160,7 @@ def _list_sam3_datasets() -> List[Dict[str, Any]]:
                 "context": meta.get("context", ""),
                 "signature": meta.get("signature"),
                 "source": meta.get("source") or "sam3",
+                "type": meta.get("type", "bbox"),
                 "coco_ready": bool(meta.get("coco_train_json") and meta.get("coco_val_json")),
                 "coco_train_json": meta.get("coco_train_json"),
                 "coco_val_json": meta.get("coco_val_json"),
@@ -3937,6 +4183,89 @@ def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
     meta["dataset_root"] = str(dataset_root)
     return meta
+
+
+def _plan_segmentation_build(request: SegmentationBuildRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    dataset_root = _resolve_sam3_or_qwen_dataset(request.source_dataset_id)
+    source_meta = _load_qwen_dataset_metadata(dataset_root) or _load_sam3_dataset_metadata(dataset_root)
+    if not source_meta:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="segmentation_source_metadata_missing")
+    dataset_type = source_meta.get("type", "bbox")
+    if dataset_type != "bbox":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_requires_bbox")
+    source_id = source_meta.get("id") or dataset_root.name
+    suggested_name = f"{source_id}_seg"
+    output_id = _safe_run_name(request.output_name, suggested_name)
+    output_root = (SAM3_DATASET_ROOT / output_id).resolve()
+    if not str(output_root).startswith(str(SAM3_DATASET_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid")
+    if output_root.exists():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="segmentation_output_exists")
+
+    classes = source_meta.get("classes") or []
+    context = source_meta.get("context") or source_meta.get("dataset_context") or ""
+    source_signature = source_meta.get("signature") or _compute_dir_signature(dataset_root)
+    planned_meta = {
+        "id": output_id,
+        "label": source_meta.get("label") or source_id,
+        "type": "seg",
+        "source": "segmentation_builder",
+        "source_dataset_id": source_id,
+        "source_dataset_root": str(dataset_root),
+        "source_signature": source_signature,
+        "generator_variant": request.sam_variant,
+        "output_format": request.output_format,
+        "classes": classes,
+        "context": context,
+        "created_at": time.time(),
+    }
+    planned_layout = {
+        "dataset_root": str(output_root),
+        "images_dir": str(output_root / "images"),
+        "labels_dir": str(output_root / "labels"),
+        "metadata_path": str(output_root / SAM3_DATASET_META_NAME),
+        "log_dir": str(SEG_BUILDER_ROOT / "logs" / output_id),
+    }
+    return planned_meta, planned_layout
+
+
+def _start_segmentation_build_job(request: SegmentationBuildRequest) -> SegmentationBuildJob:
+    planned_meta, planned_layout = _plan_segmentation_build(request)
+    job_id = str(uuid.uuid4())
+    job = SegmentationBuildJob(
+        job_id=job_id,
+        status="queued",
+        message="Queued",
+        progress=0.0,
+        config={
+            "source_dataset_id": request.source_dataset_id,
+            "sam_variant": request.sam_variant,
+            "output_format": request.output_format,
+            "planned_metadata": planned_meta,
+            "planned_layout": planned_layout,
+        },
+    )
+    with SEGMENTATION_BUILD_JOBS_LOCK:
+        SEGMENTATION_BUILD_JOBS[job_id] = job
+
+    def worker() -> None:
+        try:
+            _seg_job_update(job, status="running", progress=0.05, message="Segmentation builder stub running")
+            job.result = {"planned_metadata": planned_meta, "planned_layout": planned_layout}
+            _seg_job_update(
+                job,
+                status="blocked",
+                progress=0.05,
+                message="Segmentation builder is scaffolded only; conversion not implemented yet",
+                error="segmentation_builder_not_implemented",
+            )
+        except HTTPException as exc:
+            _seg_job_update(job, status="failed", message=str(exc.detail), error=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001
+            _seg_job_update(job, status="failed", message=str(exc), error=str(exc))
+
+    threading.Thread(target=worker, daemon=True, name=f"seg-build-{job_id[:8]}").start()
+    return job
 
 
 def _safe_run_name(desired: Optional[str], fallback: str) -> str:
@@ -4146,6 +4475,13 @@ async def upload_qwen_dataset(file: UploadFile = File(...), run_name: Optional[s
         if not annotations.exists():
             shutil.rmtree(dest_dir, ignore_errors=True)
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dataset_missing_annotations:{split}")
+    # Backfill minimal metadata so downstream listings have type information.
+    metadata = _load_qwen_dataset_metadata(dest_dir) or {}
+    metadata.setdefault("id", safe_token)
+    metadata.setdefault("label", safe_token)
+    metadata.setdefault("created_at", time.time())
+    metadata.setdefault("type", "bbox")
+    _persist_qwen_dataset_metadata(dest_dir, metadata)
     return {"dataset_root": str(dest_dir), "run_name": safe_token}
 
 
@@ -4960,10 +5296,12 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
     cfg.trainer.max_epochs = int(payload.max_epochs) if payload.max_epochs is not None else cfg.trainer.max_epochs
     cfg.trainer.val_epoch_freq = int(payload.val_epoch_freq) if payload.val_epoch_freq is not None else cfg.trainer.val_epoch_freq
     cfg.scratch.target_epoch_size = int(payload.target_epoch_size) if payload.target_epoch_size is not None else cfg.scratch.target_epoch_size
+    dataset_type = meta.get("type", "bbox")
     seg_head_requested = payload.enable_segmentation_head
     train_seg_requested = payload.train_segmentation
-    enable_seg_head = bool(seg_head_requested) if seg_head_requested is not None else bool(cfg.scratch.enable_segmentation_head)
-    train_segmentation = bool(train_seg_requested) if train_seg_requested is not None else bool(cfg.scratch.load_segmentation)
+    default_seg = dataset_type == "seg"
+    enable_seg_head = bool(seg_head_requested) if seg_head_requested is not None else (bool(cfg.scratch.enable_segmentation_head) or default_seg)
+    train_segmentation = bool(train_seg_requested) if train_seg_requested is not None else (bool(cfg.scratch.load_segmentation) or default_seg)
     cfg.scratch.enable_segmentation_head = enable_seg_head or train_segmentation
     cfg.scratch.load_segmentation = train_segmentation
     # Keep legacy flag aligned with head presence so downstream activation sees the capability.

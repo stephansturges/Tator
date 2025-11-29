@@ -198,6 +198,7 @@
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
     const TAB_SAM3_LITE_TRAIN = "sam3lite-train";
+    const TAB_DATASETS = "datasets";
     const TAB_SAM3_PROMPT_MODELS = "sam3-prompt-models";
     const TAB_ACTIVE = "active";
     const TAB_QWEN = "qwen";
@@ -234,6 +235,7 @@
     let trainingUiInitialized = false;
     let sam3TrainUiInitialized = false;
     let sam3LiteTrainUiInitialized = false;
+    let segBuilderUiInitialized = false;
     let activeUiInitialized = false;
     let loadedClassList = [];
     const INGEST_PHASE_LABELS = {
@@ -748,6 +750,7 @@
         sam3TrainButton: null,
         sam3LiteTrainButton: null,
         sam3PromptModelsButton: null,
+        datasetsButton: null,
         activeButton: null,
         qwenButton: null,
         predictorsButton: null,
@@ -758,6 +761,7 @@
         sam3TrainPanel: null,
         sam3LiteTrainPanel: null,
         sam3PromptModelsPanel: null,
+        datasetsPanel: null,
         activePanel: null,
         qwenPanel: null,
         predictorsPanel: null,
@@ -1069,6 +1073,181 @@ const qwenTrainState = {
     const sam3LiteStorageState = {
         items: [],
     };
+
+    const segBuilderElements = {
+        datasetSelect: null,
+        datasetSummary: null,
+        outputName: null,
+        samVariant: null,
+        startButton: null,
+        refreshButton: null,
+        jobsRefresh: null,
+        jobsContainer: null,
+        message: null,
+    };
+
+    const segBuilderState = {
+        datasets: [],
+        selectedId: null,
+        jobs: [],
+        lastSeenJob: {},
+    };
+
+    const datasetManagerElements = {
+        uploadFile: null,
+        uploadName: null,
+        uploadType: null,
+        uploadBtn: null,
+        uploadMessage: null,
+        uploadCurrentBtn: null,
+        uploadCurrentSummary: null,
+        refreshBtn: null,
+        list: null,
+    };
+
+    const datasetManagerState = {
+        datasets: [],
+        uploading: false,
+    };
+
+    function setDatasetUploadMessage(text, tone) {
+        if (!datasetManagerElements.uploadMessage) return;
+        datasetManagerElements.uploadMessage.textContent = text || "";
+        datasetManagerElements.uploadMessage.className = `training-message ${tone || ""}`;
+    }
+
+    function renderDatasetList(list) {
+        datasetManagerState.datasets = Array.isArray(list) ? list : [];
+        const container = datasetManagerElements.list;
+        if (container) {
+            container.innerHTML = "";
+            if (!datasetManagerState.datasets.length) {
+                const empty = document.createElement("div");
+                empty.className = "training-history-item";
+                empty.textContent = "No datasets yet. Upload one to get started.";
+                container.appendChild(empty);
+            } else {
+                datasetManagerState.datasets.forEach((entry) => {
+                    const item = document.createElement("div");
+                    item.className = "training-history-item";
+                    const header = document.createElement("div");
+                    header.className = "training-history-row";
+                    const title = document.createElement("div");
+                    title.className = "training-history-title";
+                    title.textContent = entry.label || entry.id;
+                    const badge = document.createElement("span");
+                    badge.className = "badge";
+                    badge.textContent = (entry.type || "bbox").toUpperCase();
+                    header.appendChild(title);
+                    header.appendChild(badge);
+                    const meta = document.createElement("div");
+                    meta.className = "training-help";
+                    const parts = [];
+                    if (entry.source) parts.push(entry.source);
+                    const counts = [];
+                    if (entry.image_count) counts.push(`${entry.image_count} img`);
+                    if (entry.train_count) counts.push(`train ${entry.train_count}`);
+                    if (entry.val_count) counts.push(`val ${entry.val_count}`);
+                    if (counts.length) parts.push(counts.join(" / "));
+                    meta.textContent = parts.join(" • ") || "Dataset ready";
+                    item.appendChild(header);
+                    item.appendChild(meta);
+                    container.appendChild(item);
+                });
+            }
+        }
+        renderSegBuilderDatasets(datasetManagerState.datasets);
+    }
+
+    async function refreshDatasetList() {
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            renderDatasetList(data);
+        } catch (err) {
+            console.error("Failed to refresh datasets", err);
+            setDatasetUploadMessage(`Failed to load datasets: ${err.message || err}`, "error");
+        }
+    }
+
+    async function uploadDatasetZip() {
+        if (!datasetManagerElements.uploadFile || !datasetManagerElements.uploadFile.files.length) {
+            setDatasetUploadMessage("Choose a zip file first.", "warn");
+            return;
+        }
+        const formData = new FormData();
+        formData.append("file", datasetManagerElements.uploadFile.files[0]);
+        if (datasetManagerElements.uploadName && datasetManagerElements.uploadName.value.trim()) {
+            formData.append("dataset_id", datasetManagerElements.uploadName.value.trim());
+        }
+        if (datasetManagerElements.uploadType && datasetManagerElements.uploadType.value) {
+            formData.append("dataset_type", datasetManagerElements.uploadType.value);
+        }
+        datasetManagerState.uploading = true;
+        setDatasetUploadMessage("Uploading dataset…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/upload`, { method: "POST", body: formData });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const data = detail ? JSON.parse(detail) : {};
+            setDatasetUploadMessage(`Uploaded ${data.label || data.id || "dataset"}.`, "success");
+            if (datasetManagerElements.uploadFile) {
+                datasetManagerElements.uploadFile.value = "";
+            }
+            await refreshDatasetList();
+        } catch (err) {
+            console.error("Dataset upload failed", err);
+            setDatasetUploadMessage(err.message || "Dataset upload failed", "error");
+        } finally {
+            datasetManagerState.uploading = false;
+        }
+    }
+
+    async function uploadCurrentDatasetToCache() {
+        try {
+            setDatasetUploadMessage("Packaging current dataset…", "info");
+            const result = await uploadQwenDatasetStream();
+            const label = result?.run_name || "dataset";
+            setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
+            if (datasetManagerElements.uploadCurrentSummary) {
+                datasetManagerElements.uploadCurrentSummary.textContent = `Cached as ${label}`;
+            }
+            await refreshDatasetList();
+        } catch (err) {
+            console.error("Upload current dataset failed", err);
+            setDatasetUploadMessage(err.message || "Failed to upload current dataset", "error");
+        }
+    }
+
+    async function initDatasetManagerTab() {
+        if (datasetManagerElements.uploadBtn) {
+            return;
+        }
+        datasetManagerElements.uploadFile = document.getElementById("datasetUploadFile");
+        datasetManagerElements.uploadName = document.getElementById("datasetUploadName");
+        datasetManagerElements.uploadType = document.getElementById("datasetUploadType");
+        datasetManagerElements.uploadBtn = document.getElementById("datasetUploadBtn");
+        datasetManagerElements.uploadMessage = document.getElementById("datasetUploadMessage");
+        datasetManagerElements.uploadCurrentBtn = document.getElementById("datasetUploadCurrentBtn");
+        datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
+        datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
+        datasetManagerElements.list = document.getElementById("datasetList");
+        if (datasetManagerElements.uploadBtn) {
+            datasetManagerElements.uploadBtn.addEventListener("click", () => uploadDatasetZip());
+        }
+        if (datasetManagerElements.uploadCurrentBtn) {
+            datasetManagerElements.uploadCurrentBtn.addEventListener("click", () => uploadCurrentDatasetToCache());
+        }
+        if (datasetManagerElements.refreshBtn) {
+            datasetManagerElements.refreshBtn.addEventListener("click", () => refreshDatasetList());
+        }
+        initSegBuilderUi();
+        await refreshDatasetList();
+        await refreshSegBuilderJobs();
+    }
 
     const sam3PromptElements = {
         select: null,
@@ -3324,6 +3503,181 @@ async function activateSam3Checkpoint() {
     }
 }
 
+function setSegBuilderMessage(text, tone = "info") {
+    if (!segBuilderElements.message) return;
+    segBuilderElements.message.textContent = text || "";
+    segBuilderElements.message.className = `training-message ${tone}`;
+}
+
+function updateSegBuilderDatasetSummary(entry) {
+    if (!segBuilderElements.datasetSummary) return;
+    if (!entry) {
+        segBuilderElements.datasetSummary.textContent = "Pick a bbox dataset to convert.";
+        return;
+    }
+    const pieces = [];
+    pieces.push(entry.type ? `${entry.type.toUpperCase()} dataset` : "bbox dataset");
+    if (entry.source) pieces.push(entry.source);
+    const counts = [];
+    if (entry.image_count) counts.push(`${entry.image_count} images`);
+    if (entry.train_count) counts.push(`train ${entry.train_count}`);
+    if (entry.val_count) counts.push(`val ${entry.val_count}`);
+    if (counts.length) pieces.push(counts.join(" / "));
+    segBuilderElements.datasetSummary.textContent = pieces.join(" • ");
+}
+
+function renderSegBuilderDatasets(list) {
+    segBuilderState.datasets = Array.isArray(list) ? list : [];
+    if (!segBuilderElements.datasetSelect) return;
+    segBuilderElements.datasetSelect.innerHTML = "";
+    segBuilderState.datasets.forEach((entry) => {
+        const opt = document.createElement("option");
+        opt.value = entry.id;
+        const typeLabel = entry.type ? `[${entry.type}] ` : "";
+        const cocoNote = entry.coco_ready ? "" : " (needs convert)";
+        opt.textContent = `${typeLabel}${entry.label || entry.id}${cocoNote}`;
+        if ((entry.type || "bbox") !== "bbox") {
+            opt.disabled = true;
+        }
+        if (entry.id === segBuilderState.selectedId) {
+            opt.selected = true;
+        }
+        segBuilderElements.datasetSelect.appendChild(opt);
+    });
+    const selected = segBuilderState.datasets.find((d) => d.id === segBuilderState.selectedId && (d.type || "bbox") === "bbox")
+        || segBuilderState.datasets.find((d) => (d.type || "bbox") === "bbox")
+        || null;
+    segBuilderState.selectedId = selected ? selected.id : null;
+    if (segBuilderElements.datasetSelect && segBuilderState.selectedId) {
+        segBuilderElements.datasetSelect.value = segBuilderState.selectedId;
+    }
+    updateSegBuilderDatasetSummary(selected);
+}
+
+async function refreshSegBuilderDatasets() {
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/datasets`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderSegBuilderDatasets(data);
+    } catch (err) {
+        console.error("Failed to load datasets for segmentation builder", err);
+        setSegBuilderMessage(`Failed to load datasets: ${err.message || err}`, "error");
+    }
+}
+
+function renderSegBuilderJobs(list) {
+    segBuilderState.jobs = Array.isArray(list) ? list : [];
+    const container = segBuilderElements.jobsContainer;
+    if (!container) return;
+    container.innerHTML = "";
+    if (!segBuilderState.jobs.length) {
+        const empty = document.createElement("div");
+        empty.className = "training-history-item";
+        empty.textContent = "No segmentation build jobs yet.";
+        container.appendChild(empty);
+        return;
+    }
+    segBuilderState.jobs.forEach((job) => {
+        const item = document.createElement("div");
+        item.className = "training-history-item";
+        const left = document.createElement("div");
+        const created = formatTimestamp(job.created_at || 0);
+        const planned = job.result && job.result.planned_metadata ? job.result.planned_metadata : job.config && job.config.planned_metadata;
+        const targetId = planned && planned.id ? planned.id : "";
+        const subtitleParts = [job.status || "unknown", created];
+        if (targetId) {
+            subtitleParts.unshift(targetId);
+        }
+        left.innerHTML = `<strong>${escapeHtml(job.job_id ? job.job_id.slice(0, 8) : "job")}</strong><div class="training-help">${escapeHtml(subtitleParts.filter(Boolean).join(" • "))}</div>`;
+        item.appendChild(left);
+        if (job.message) {
+            const msg = document.createElement("div");
+            msg.className = "training-help";
+            msg.textContent = job.message;
+            item.appendChild(msg);
+        }
+        container.appendChild(item);
+    });
+}
+
+async function refreshSegBuilderJobs() {
+    try {
+        const resp = await fetch(`${API_ROOT}/segmentation/build/jobs`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderSegBuilderJobs(data);
+    } catch (err) {
+        console.error("Failed to refresh segmentation jobs", err);
+        setSegBuilderMessage(`Failed to refresh jobs: ${err.message || err}`, "error");
+    }
+}
+
+async function startSegmentationBuild() {
+    const datasetId = segBuilderState.selectedId;
+    if (!datasetId) {
+        setSegBuilderMessage("Select a bbox dataset first.", "warn");
+        return;
+    }
+    const payload = {
+        source_dataset_id: datasetId,
+        sam_variant: segBuilderElements.samVariant ? segBuilderElements.samVariant.value || "sam3" : "sam3",
+    };
+    if (segBuilderElements.outputName && segBuilderElements.outputName.value.trim()) {
+        payload.output_name = segBuilderElements.outputName.value.trim();
+    }
+    setSegBuilderMessage("Queuing segmentation build (stub)…", "info");
+    try {
+        const resp = await fetch(`${API_ROOT}/segmentation/build/jobs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(text || `HTTP ${resp.status}`);
+        }
+        const job = await resp.json();
+        setSegBuilderMessage("Job queued. Conversion is scaffolded only (no masks yet).", "success");
+        await refreshSegBuilderJobs();
+    } catch (err) {
+        console.error("Segmentation build start failed", err);
+        setSegBuilderMessage(err.message || "Failed to start segmentation build", "error");
+    }
+}
+
+async function initSegBuilderTab() {
+    if (segBuilderUiInitialized) return;
+    segBuilderUiInitialized = true;
+    segBuilderElements.datasetSelect = document.getElementById("segBuilderDatasetSelect");
+    segBuilderElements.datasetSummary = document.getElementById("segBuilderDatasetSummary");
+    segBuilderElements.outputName = document.getElementById("segBuilderOutputName");
+    segBuilderElements.samVariant = document.getElementById("segBuilderVariant");
+    segBuilderElements.startButton = document.getElementById("segBuilderStartBtn");
+    segBuilderElements.refreshButton = document.getElementById("segBuilderRefreshBtn");
+    segBuilderElements.jobsRefresh = document.getElementById("segBuilderJobsRefresh");
+    segBuilderElements.jobsContainer = document.getElementById("segBuilderJobs");
+    segBuilderElements.message = document.getElementById("segBuilderMessage");
+    if (segBuilderElements.datasetSelect) {
+        segBuilderElements.datasetSelect.addEventListener("change", () => {
+            segBuilderState.selectedId = segBuilderElements.datasetSelect.value || null;
+            const entry = segBuilderState.datasets.find((d) => d.id === segBuilderState.selectedId);
+            updateSegBuilderDatasetSummary(entry);
+        });
+    }
+    if (segBuilderElements.startButton) {
+        segBuilderElements.startButton.addEventListener("click", () => startSegmentationBuild());
+    }
+    if (segBuilderElements.refreshButton) {
+        segBuilderElements.refreshButton.addEventListener("click", () => refreshSegBuilderDatasets());
+    }
+    if (segBuilderElements.jobsRefresh) {
+        segBuilderElements.jobsRefresh.addEventListener("click", () => refreshSegBuilderJobs());
+    }
+    await refreshSegBuilderDatasets();
+    await refreshSegBuilderJobs();
+}
+
 async function initSam3TrainUi() {
     if (sam3TrainUiInitialized) return;
     sam3TrainUiInitialized = true;
@@ -5447,6 +5801,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
         tabElements.sam3LiteTrainButton = document.getElementById("tabSam3LiteTrainButton");
         tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
+        tabElements.datasetsButton = document.getElementById("tabDatasetsButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
         tabElements.qwenButton = document.getElementById("tabQwenButton");
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
@@ -5457,6 +5812,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
         tabElements.sam3LiteTrainPanel = document.getElementById("tabSam3LiteTrain");
         tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
+        tabElements.datasetsPanel = document.getElementById("tabDatasets");
         tabElements.activePanel = document.getElementById("tabActive");
         tabElements.qwenPanel = document.getElementById("tabQwen");
         tabElements.predictorsPanel = document.getElementById("tabPredictors");
@@ -5478,6 +5834,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3PromptModelsButton) {
             tabElements.sam3PromptModelsButton.addEventListener("click", () => setActiveTab(TAB_SAM3_PROMPT_MODELS));
+        }
+        if (tabElements.datasetsButton) {
+            tabElements.datasetsButton.addEventListener("click", () => setActiveTab(TAB_DATASETS));
         }
         if (tabElements.activeButton) {
             tabElements.activeButton.addEventListener("click", () => setActiveTab(TAB_ACTIVE));
@@ -5515,6 +5874,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.sam3PromptModelsButton) {
             tabElements.sam3PromptModelsButton.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
         }
+        if (tabElements.datasetsButton) {
+            tabElements.datasetsButton.classList.toggle("active", tabName === TAB_DATASETS);
+        }
         if (tabElements.activeButton) {
             tabElements.activeButton.classList.toggle("active", tabName === TAB_ACTIVE);
         }
@@ -5544,6 +5906,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3PromptModelsPanel) {
             tabElements.sam3PromptModelsPanel.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
+        }
+        if (tabElements.datasetsPanel) {
+            tabElements.datasetsPanel.classList.toggle("active", tabName === TAB_DATASETS);
         }
         if (tabElements.activePanel) {
             tabElements.activePanel.classList.toggle("active", tabName === TAB_ACTIVE);
@@ -5580,6 +5945,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabName === TAB_SAM3_PROMPT_MODELS && previous !== TAB_SAM3_PROMPT_MODELS) {
             initSam3PromptModelsUi();
+        }
+        if (tabName === TAB_DATASETS && previous !== TAB_DATASETS) {
+            initDatasetManagerTab().catch((err) => console.error("Dataset manager init failed", err));
         }
         if (tabName === TAB_ACTIVE && previous !== TAB_ACTIVE) {
             initializeActiveModelUi();

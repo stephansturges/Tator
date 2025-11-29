@@ -137,6 +137,9 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
 4. **(Optional) Pin checkpoints manually** – if you want deterministic paths, call `huggingface_hub.hf_hub_download` (examples in `sam3integration.txt`) and set `SAM3_CHECKPOINT_PATH` / `SAM3_MODEL_ID` to the downloaded files.
 5. **Run the API** — once authenticated, start the backend as usual. Selecting “SAM 3” in the UI enables both the point/bbox flows and the new text prompt panel.
 
+### Segmentation Builder (bbox → polygons)
+The new **Segmentation Builder** tab scaffolds a conversion pipeline that clones an existing **bbox** dataset into a YOLO-seg (polygon) dataset using SAM1 or SAM3. The original dataset stays untouched; the copy is named `<source>_seg` by default and carries `type: seg` in its metadata so training can auto-enable mask losses later. Current build is a stub (jobs start and record planned metadata/layout) while the mask generator lands; COCO remains an internal bridge only.
+
 #### Experimental: Training SAM3 (box-only)
 > **Unstable:** this path is still changing. Training currently requires a checkout of the upstream SAM3 repo inside this project; expect sharp edges.
 
@@ -146,11 +149,11 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
 - **GPU + CUDA Torch required:** ensure your `torch` build can see CUDA; CPU-only installs will fail.
 - **Kick off training:** start `uvicorn` as usual, open the **Train SAM3** tab, pick a dataset (reuses cached Qwen datasets without re-upload), and click **Start**. Logs stream live and the loss line chart updates as batches finish.
 - **Activate the checkpoint:** when a run completes, use **Activate checkpoint** in the same tab to swap the backend SAM3 model to your finetune.
-- **Monkeypatch is now the default:** we keep SAM3’s segmentation head weights for text prompting, but freeze/ignore its segmentation head + mask FPN layers during bbox-only training to avoid DDP unused-parameter crashes. This patch is applied automatically at import time; no env vars are needed. If you intentionally want the upstream behavior (e.g., you have segmentation masks and want to train the heads), disable it with:
+- **Monkeypatch defaults ON:** we keep SAM3’s segmentation head weights for text prompting, but freeze/ignore segmentation-head + mask-FPN params during bbox-only training to avoid DDP unused-parameter crashes. The patch is applied automatically; disable it only if you truly train masks:
   ```bash
   SAM3_MONKEYPATCH=0 python -m uvicorn app:app --host 127.0.0.1 --port 8000
   ```
-  Otherwise, just launch `uvicorn` normally and the patch will be active.
+  Otherwise, launch `uvicorn` normally and the patch stays enabled.
 
 
 ### Running the Backend on a Remote GPU Host
@@ -229,12 +232,12 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 - Activate a model to make the Assist panel reuse its exact prompts and defaults; the items/context fields on the labeling tab auto-populate from the active metadata so inference matches training.
 - Use the Train Qwen tab to produce new adapters, then switch between them here without touching the backend.
 
-### Predictors Tab
+### SAM Predictors Tab
 - Choose how many SAM predictors stay resident (current + optional next/previous) so you can preload in whichever direction you travel.
 - See live stats for active/loaded slots, predictor RAM consumption, total FastAPI RAM usage, and free system memory. Values refresh automatically every few seconds while the tab is open.
 - The Label Images tab respects this budget immediately: with 1 predictor only the current image stays hot, with 2 the “next” image preloads, and with 3 you also keep the previous image ready for instant backtracking.
 
-### Backend Tab
+### Backend Config Tab
 - Configure the base URL that the UI uses for all API calls. Enter `http://host:port` (tunnels supported) and click **Save**; the setting persists in `localStorage` so it survives reloads.
 - Use **Test Connection** to ping `/sam_slots` on the target server and confirm it’s reachable before switching tabs.
 - Handy when you run the FastAPI backend on a remote GPU box and access it over SSH port forwarding.

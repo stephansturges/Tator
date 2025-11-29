@@ -3990,6 +3990,8 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
             env.setdefault("CUDA_LAUNCH_BLOCKING", "1")
             env.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")
             env.setdefault("NCCL_DEBUG", "INFO")
+            # Enable runtime monkeypatches (loaded via sitecustomize.py) to keep vendor tree untouched.
+            env.setdefault("SAM3_MONKEYPATCH", "1")
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(SAM3_VENDOR_ROOT),

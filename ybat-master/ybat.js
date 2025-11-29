@@ -805,6 +805,7 @@
         runButton: null,
         autoButton: null,
         status: null,
+        classSelect: null,
     };
     const DEFAULT_QWEN_METADATA = {
         id: "default",
@@ -6879,6 +6880,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.thresholdInput = document.getElementById("sam3Threshold");
         sam3TextElements.maskThresholdInput = document.getElementById("sam3MaskThreshold");
         sam3TextElements.maxResultsInput = document.getElementById("sam3MaxResults");
+        sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
@@ -6888,6 +6890,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
         }
+        updateSam3ClassOptions({ resetOverride: true });
         updateSam3TextButtons();
     }
 
@@ -6907,22 +6910,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     function updateSam3TextButtons() {
-        const readyForSam3 = samVariant === "sam3";
         const busy = sam3TextRequestActive;
-        setButtonDisabled(sam3TextElements.runButton, !readyForSam3 || busy);
-        setButtonDisabled(sam3TextElements.autoButton, !readyForSam3 || busy);
+        setButtonDisabled(sam3TextElements.runButton, busy);
+        setButtonDisabled(sam3TextElements.autoButton, busy);
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.textContent = busy ? "Running…" : "Run SAM3";
         }
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.textContent = busy ? "Running…" : "Run SAM3 + Auto Class";
         }
-        if (sam3TextElements.panel) {
-            sam3TextElements.panel.classList.toggle("sam3-text-panel--disabled", !readyForSam3);
-        }
-        if (!readyForSam3) {
-            setSam3TextStatus("Set SAM variant to SAM3 to enable text prompts.", "warn");
-        } else if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
+        if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
             setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
         }
     }
@@ -6993,12 +6990,55 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return currentClass;
     }
 
+    function updateSam3ClassOptions({ resetOverride = false, preserveSelection = false } = {}) {
+        if (!sam3TextElements.classSelect) {
+            return;
+        }
+        const classNames = orderedClassNames();
+        sam3TextElements.classSelect.innerHTML = "";
+        if (!classNames.length) {
+            const placeholder = document.createElement("option");
+            placeholder.textContent = "Load classes first";
+            placeholder.value = "";
+            sam3TextElements.classSelect.appendChild(placeholder);
+            sam3TextElements.classSelect.disabled = true;
+            return;
+        }
+        sam3TextElements.classSelect.disabled = false;
+        const previousValue = preserveSelection ? sam3TextElements.classSelect.value : null;
+        classNames.forEach((name) => {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name;
+            sam3TextElements.classSelect.appendChild(option);
+        });
+        let targetValue = null;
+        if (preserveSelection && previousValue && classNames.includes(previousValue)) {
+            targetValue = previousValue;
+        } else if (currentClass && classNames.includes(currentClass)) {
+            targetValue = currentClass;
+        } else {
+            targetValue = classNames[0];
+        }
+        sam3TextElements.classSelect.value = targetValue;
+        if (resetOverride && classNames.length) {
+            sam3TextElements.classSelect.value = targetValue;
+        }
+    }
+
     function updateQwenRunButton() {
         if (!qwenElements.runButton) {
             return;
         }
         qwenElements.runButton.disabled = !qwenAvailable || qwenRequestActive;
         qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Use Qwen";
+    }
+
+    function getSam3TargetClass() {
+        if (sam3TextElements.classSelect && sam3TextElements.classSelect.value) {
+            return sam3TextElements.classSelect.value;
+        }
+        return currentClass;
     }
 
     function toggleQwenAdvanced(forceState = null) {
@@ -7273,10 +7313,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextRequestActive) {
             return;
         }
-        if (samVariant !== "sam3") {
-            setSam3TextStatus("Set SAM variant to SAM3 first.", "warn");
-            return;
-        }
         if (!currentImage || !currentImage.name) {
             setSam3TextStatus("Load an image before running SAM3.", "warn");
             return;
@@ -7287,7 +7323,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             sam3TextElements.promptInput?.focus();
             return;
         }
-        const targetClass = getQwenTargetClass();
+        const targetClass = getSam3TargetClass();
         if (!auto && !targetClass) {
             setSam3TextStatus("Pick a class to assign boxes to before running SAM3.", "warn");
             return;
@@ -10275,6 +10311,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                             }
                             setCurrentClass();
                             updateQwenClassOptions({ resetOverride: true });
+                            updateSam3ClassOptions({ resetOverride: true });
                             if (Object.keys(images).length > 0) {
                                 setBboxImportEnabled(true);
                                 document.getElementById("restoreBboxes").disabled = false;
@@ -10295,6 +10332,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         loadedClassList = [];
         clearMultiPointAnnotations();
         updateQwenClassOptions({ resetOverride: true });
+        updateSam3ClassOptions({ resetOverride: true });
     };
 
     const setCurrentClass = () => {
@@ -10306,6 +10344,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         clearMultiPointAnnotations();
         syncQwenClassToCurrent();
+        updateSam3ClassOptions({ preserveSelection: true });
     };
 
     const listenClassSelect = () => {

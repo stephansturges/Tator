@@ -146,6 +146,11 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
 - **GPU + CUDA Torch required:** ensure your `torch` build can see CUDA; CPU-only installs will fail.
 - **Kick off training:** start `uvicorn` as usual, open the **Train SAM3** tab, pick a dataset (reuses cached Qwen datasets without re-upload), and click **Start**. Logs stream live and the loss line chart updates as batches finish.
 - **Activate the checkpoint:** when a run completes, use **Activate checkpoint** in the same tab to swap the backend SAM3 model to your finetune.
+- **Monkeypatch is now the default:** we keep SAM3’s segmentation head weights for text prompting, but freeze/ignore its segmentation head + mask FPN layers during bbox-only training to avoid DDP unused-parameter crashes. This patch is applied automatically at import time; no env vars are needed. If you intentionally want the upstream behavior (e.g., you have segmentation masks and want to train the heads), disable it with:
+  ```bash
+  SAM3_MONKEYPATCH=0 python -m uvicorn app:app --host 127.0.0.1 --port 8000
+  ```
+  Otherwise, just launch `uvicorn` normally and the patch will be active.
 
 
 ### Running the Backend on a Remote GPU Host
@@ -291,7 +296,7 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 
 
 ## LOP
-1. **[experimental]** SAM3 (box-only) is available, but the “SAM3-lite” in-repo trainer + activation flow still needs to be finished and hardened.
+1. **[future]** Disentangle from Meta’s SAM3 repo with an in-repo trainer; postponed until the current SAM3 path is stable.
 2. **[planned]** CLIP regression / training works but needs better default recipes and tuning.
 3. **[up for grabs]** Add oriented bounding-box support to better leverage SAM refinement.
 4. **[up for grabs]** Tracking / video sequence-annotation remains a longer-term objective.

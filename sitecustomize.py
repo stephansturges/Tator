@@ -1,8 +1,8 @@
 """
 Lightweight runtime monkeypatches for SAM3 training.
 
-We prefer not to edit the vendor package; when the environment variable
-SAM3_MONKEYPATCH=1 is present we tweak the SAM3 trainer at import time.
+We prefer not to edit the vendor package; by default we tweak the SAM3 trainer
+at import time. Set SAM3_MONKEYPATCH=0 to disable.
 """
 
 import logging
@@ -106,5 +106,12 @@ def _patch_sam3_trainer() -> None:
     sam3_trainer.print_model_summary = _print_model_summary_patched
 
 
-if os.environ.get("SAM3_MONKEYPATCH") == "1":
+def _monkeypatch_enabled() -> bool:
+    flag = os.environ.get("SAM3_MONKEYPATCH", "1").lower()
+    return flag not in ("0", "false", "off", "no")
+
+
+if _monkeypatch_enabled():
     _patch_sam3_trainer()
+else:
+    logging.info("SAM3 monkeypatch disabled via SAM3_MONKEYPATCH=0")

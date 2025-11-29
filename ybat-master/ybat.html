@@ -65,12 +65,11 @@
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
-            <button class="tab-button" data-tab="sam3lite-train" id="tabSam3LiteTrainButton" type="button">Train SAM3 (Local)</button>
             <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
             <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
-            <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">Predictors</button>
-            <button class="tab-button" data-tab="settings" id="tabSettingsButton" type="button">Backend</button>
+            <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">SAM Predictors</button>
+            <button class="tab-button" data-tab="settings" id="tabSettingsButton" type="button">Backend Config</button>
         </div>
         <div class="tab-panels">
             <div class="tab-panel active" id="tabLabeling" data-tab-panel="labeling">
@@ -152,10 +151,10 @@
                                 <p class="qwen-hint">Uses the prompts saved with the active Qwen model; add extra context via the advanced overrides when needed.</p>
                                 <section class="sam3-text-panel" id="sam3TextPanel" aria-labelledby="sam3TextTitle">
                                     <div class="sam3-text-panel__header">
-                                        <span id="sam3TextTitle">SAM3 Text Prompt</span>
+                                        <span id="sam3TextTitle"><strong>SAM3 Text Prompt</strong></span>
                                         <span id="sam3TextStatus" class="sam3-text-status" aria-live="polite"></span>
                                     </div>
-                                    <p class="sam3-text-hint">Switch the SAM model selector to “SAM 3” to enable text prompts.</p>
+                                    <p class="sam3-text-hint">Runs text-driven segmentation with SAM3. Can be used alongside the bbox tools.</p>
                                     <label for="sam3TextPrompt">Prompt (describe what to segment)</label>
                                     <input type="text" id="sam3TextPrompt" placeholder="e.g., red helmet" />
                                     <div class="sam3-text-grid">
@@ -166,6 +165,8 @@
                                         <label for="sam3MaxResults">Max results</label>
                                         <input type="number" id="sam3MaxResults" min="1" max="100" value="20" />
                                     </div>
+                                    <label for="sam3ClassSelect">Assign detections to class</label>
+                                    <select id="sam3ClassSelect"></select>
                                     <div class="sam3-text-buttons">
                                         <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
                                         <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
@@ -670,8 +671,8 @@
                             <label title="Keep the SAM3 segmentation head loaded so text prompting works. Uses the base head weights if you don’t train masks."><input type="checkbox" id="sam3SegHead" checked /> Keep segmentation head for text prompts</label>
                         </div>
                         <div class="training-toggle-row">
-                            <label title="Requires mask annotations; includes masks in batches and trains the segmentation head. Leave off if your dataset is bbox-only."><input type="checkbox" id="sam3SegTrain" /> Include segmentation masks (requires masks)</label>
-                            <div class="training-help">Head-only mode keeps text prompting available without needing masks; enable this if your dataset already has masks and you want the head to learn them.</div>
+                            <label title="Only turn this on if your dataset includes segmentation masks. It will feed masks into training and update the segmentation head; leave off for bbox-only datasets (head stays frozen for prompting)."><input type="checkbox" id="sam3SegTrain" /> Train segmentation head with masks (requires masks)</label>
+                            <div class="training-help">Default OFF for bbox-only runs. Turn ON only when you have mask annotations and want the segmentation head to learn them; otherwise the head stays frozen but still serves text prompts.</div>
                         </div>
                         <div class="training-toggle-row">
                             <label title="Disables the segmentation head entirely. Smaller checkpoints, faster training, BUT no text prompting and only bbox refinement works."><input type="checkbox" id="sam3BBoxOnly" /> Bbox-refiner only mode (no text prompts, no masks)</label>

@@ -22,6 +22,7 @@ def _patch_sam3_trainer() -> None:
     sam3_trainer._tator_monkeypatched = True
     original_setup = sam3_trainer.Trainer._setup_components
     original_setup_ddp = sam3_trainer.Trainer._setup_ddp_distributed_training
+    original_print_model_summary = sam3_trainer.print_model_summary
 
     def _setup_components_patched(self: Any):
         # Run the original setup first.
@@ -66,21 +67,44 @@ def _patch_sam3_trainer() -> None:
     def _setup_ddp_distributed_training_patched(
         self: Any, distributed_conf: Any, accelerator: Any
     ):
-        # If we froze/ignored segmentation params, disable unused-parameter
-        # bookkeeping so DDP does not expect gradients for them.
-        if getattr(self, "_tator_force_disable_find_unused", False):
-            if distributed_conf.find_unused_parameters:
-                logging.info(
-                    "Monkeypatch: forcing find_unused_parameters=False because %d params are ignored.",
-                    len(getattr(self, "_tator_ignore_params", [])),
-                )
-            distributed_conf.find_unused_parameters = False
         return original_setup_ddp(self, distributed_conf, accelerator)
+
+    def _print_model_summary_patched(model: Any, log_dir: str = "") -> None:
+        """
+        Avoid dumping the entire model repr, but still log parameter counts.
+        """
+        if getattr(model, "_tator_summary_printed", False):
+            return
+        model._tator_summary_printed = True
+        if sam3_trainer.get_rank() != 0:
+            return
+        param_kwargs = {}
+        trainable_parameters = sum(
+            p.numel() for p in model.parameters(**param_kwargs) if p.requires_grad
+        )
+        total_parameters = sum(p.numel() for p in model.parameters(**param_kwargs))
+        non_trainable_parameters = total_parameters - trainable_parameters
+        logging.info("==" * 10)
+        logging.info(f"Summary for model {type(model)}")
+        logging.info(
+            "\tParam counts (trainable / total / frozen): "
+            f"{trainable_parameters:,} / {total_parameters:,} / {non_trainable_parameters:,}"
+        )
+        logging.info("==" * 10)
+        if log_dir:
+            try:
+                with sam3_trainer.g_pathmgr.open(
+                    os.path.join(log_dir, "model.txt"), "w"
+                ) as f:
+                    print(model, file=f)
+            except Exception:
+                pass
 
     sam3_trainer.Trainer._setup_components = _setup_components_patched
     sam3_trainer.Trainer._setup_ddp_distributed_training = (
         _setup_ddp_distributed_training_patched
     )
+    sam3_trainer.print_model_summary = _print_model_summary_patched
 
 
 if os.environ.get("SAM3_MONKEYPATCH") == "1":

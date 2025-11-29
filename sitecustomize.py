@@ -45,11 +45,19 @@ def _patch_sam3_trainer() -> None:
                 for name, param in self.model.named_parameters():
                     if name in seg_param_names:
                         param.requires_grad = False
-                ignored = set(
+                # DDP matches names before wrapping, but be safe and include module-prefixed variants.
+                ddp_ignore = set(
                     getattr(self.model, "_ddp_params_and_buffers_to_ignore", []) or []
                 )
-                ignored.update(seg_param_names)
-                self.model._ddp_params_and_buffers_to_ignore = list(ignored)
+                ddp_ignore.update(seg_param_names)
+                ddp_ignore.update([f"module.{n}" for n in seg_param_names])
+                self.model._ddp_params_and_buffers_to_ignore = list(ddp_ignore)
+                # Avoid DDP unused parameter bookkeeping when segmentation is frozen.
+                try:
+                    if getattr(self, "distributed_conf", None) is not None:
+                        self.distributed_conf.find_unused_parameters = False
+                except Exception:
+                    pass
                 logging.info(
                     "Monkeypatch: segmentation head params frozen and marked to ignore in DDP "
                     "because load_segmentation=False (params: %s)",

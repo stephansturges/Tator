@@ -618,9 +618,15 @@
                                 <label for="sam3ValFreq">Val every N epochs</label>
                                 <input type="number" id="sam3ValFreq" min="1" value="10" />
                             </div>
-                            <div>
-                                <label for="sam3TargetEpochSize">Target epoch size</label>
-                                <input type="number" id="sam3TargetEpochSize" min="1" value="1500" title="Number of batches to treat as one epoch. Caps epoch length even if the dataset would yield more batches. Lower = shorter epochs and faster feedback; higher = longer epochs." />
+                            <div class="checkbox-row">
+                                <label><input type="checkbox" id="sam3CapEpoch" checked /> Cap epoch size</label>
+                                <label for="sam3TargetEpochSize">Batches per epoch</label>
+                                <input type="number" id="sam3TargetEpochSize" min="1" value="1500" title="Number of batches to treat as one epoch. When capped, epochs stop after this many batches even if the dataset is larger." />
+                            </div>
+                            <div class="checkbox-row">
+                                <label><input type="checkbox" id="sam3CapVal" /> Cap validation size</label>
+                                <label for="sam3ValCapSize">Val images</label>
+                                <input type="number" id="sam3ValCapSize" min="1" value="200" disabled title="Optional cap on number of validation images for quick smoke tests." />
                             </div>
                             <div>
                                 <label for="sam3BalanceStrategy" title="Choose how to rebalance rare classes.">

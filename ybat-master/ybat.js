@@ -2345,6 +2345,17 @@ function computeSam3Progress(job) {
     const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
     if (!metrics.length) return Math.max(0, Math.min(1, fallback));
     const last = metrics[metrics.length - 1] || {};
+    // Validation progress (if present) overrides train-derived progress
+    const lastVal = [...metrics].reverse().find(
+        (m) => m && m.phase === "val" && Number.isFinite(m.val_step) && Number.isFinite(m.val_total),
+    );
+    if (lastVal) {
+        const valStep = Number(lastVal.val_step);
+        const valTotal = Math.max(1, Number(lastVal.val_total));
+        const valFrac = Math.max(0, Math.min(1, valStep / valTotal));
+        const base = Math.max(0.9, fallback);
+        return Math.max(base, Math.min(1, base + 0.1 * valFrac));
+    }
     const epoch = Number.isFinite(last.epoch) ? Number(last.epoch) : null;
     const totalEpochs = Number.isFinite(last.total_epochs) ? Number(last.total_epochs) : null;
     const batch = Number.isFinite(last.batch) ? Number(last.batch) : null;
@@ -3280,10 +3291,19 @@ function updateSam3Ui(job) {
         lastMetric && Number.isFinite(lastMetric.batches_per_epoch) ? lastMetric.batches_per_epoch : null;
     const epoch = lastMetric && Number.isFinite(lastMetric.epoch) ? lastMetric.epoch : null;
     const totalEpochs = lastMetric && Number.isFinite(lastMetric.total_epochs) ? lastMetric.total_epochs : null;
+    const lastPhase = lastMetric && lastMetric.phase ? String(lastMetric.phase) : null;
+    const valStep = lastPhase === "val" && Number.isFinite(lastMetric?.val_step) ? Number(lastMetric.val_step) : null;
+    const valTotal = lastPhase === "val" && Number.isFinite(lastMetric?.val_total) ? Number(lastMetric.val_total) : null;
     let statusText = job.status === "running" || job.status === "queued" ? `Training running, ${pctText}% done` : job.status;
-    if (Number.isFinite(epoch) && Number.isFinite(batch) && Number.isFinite(batchesPerEpoch)) {
+    if (lastPhase === "val" && Number.isFinite(valStep) && Number.isFinite(valTotal)) {
+        statusText = `Validation running, ${pctText}% done (batch ${valStep}/${valTotal})`;
+    } else if (Number.isFinite(epoch) && Number.isFinite(batch) && Number.isFinite(batchesPerEpoch)) {
         const epochPart = Number.isFinite(totalEpochs) ? `epoch ${epoch}/${totalEpochs}` : `epoch ${epoch}`;
+        statusText = job.status === "running" || job.status === "queued" ? `Training running, ${pctText}% done` : job.status;
         statusText += ` (${epochPart}, batch ${batch}/${batchesPerEpoch})`;
+    }
+    if (job.status === "succeeded") {
+        statusText = "Training + validation complete";
     }
     sam3TrainElements.statusText.textContent = statusText;
     if (sam3TrainElements.progressFill) {
@@ -3395,10 +3415,17 @@ async function startSam3Training() {
         ["lr_scale", sam3TrainElements.lrScale],
         ["gradient_accumulation_steps", sam3TrainElements.gradAccum],
         ["val_epoch_freq", sam3TrainElements.valFreq],
-        ["target_epoch_size", sam3TrainElements.targetEpochSize],
         ["scheduler_warmup", sam3TrainElements.warmupSteps],
         ["scheduler_timescale", sam3TrainElements.schedulerTimescale],
     ];
+    const capEpoch = sam3TrainElements.capEpoch ? sam3TrainElements.capEpoch.checked : true;
+    if (capEpoch) {
+        fields.push(["target_epoch_size", sam3TrainElements.targetEpochSize]);
+    }
+    const capVal = sam3TrainElements.capVal ? sam3TrainElements.capVal.checked : false;
+    if (capVal) {
+        fields.push(["val_limit", sam3TrainElements.valCapSize]);
+    }
     const strategy = sam3TrainElements.balanceStrategy ? sam3TrainElements.balanceStrategy.value : "none";
     if (strategy && strategy !== "none") {
         payload.balance_strategy = strategy;
@@ -3694,9 +3721,12 @@ async function initSam3TrainUi() {
         sam3TrainElements.epochs = document.getElementById("sam3Epochs");
         sam3TrainElements.resolution = document.getElementById("sam3Resolution");
         sam3TrainElements.lrScale = document.getElementById("sam3LrScale");
-        sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
-        sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
-        sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
+    sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
+    sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
+    sam3TrainElements.capEpoch = document.getElementById("sam3CapEpoch");
+    sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
+    sam3TrainElements.capVal = document.getElementById("sam3CapVal");
+    sam3TrainElements.valCapSize = document.getElementById("sam3ValCapSize");
         sam3TrainElements.balanceStrategy = document.getElementById("sam3BalanceStrategy");
         sam3TrainElements.balancePower = document.getElementById("sam3BalancePower");
         sam3TrainElements.balanceClip = document.getElementById("sam3BalanceClip");
@@ -3752,6 +3782,18 @@ async function initSam3TrainUi() {
     }
     if (sam3TrainElements.datasetRefresh) {
         sam3TrainElements.datasetRefresh.addEventListener("click", () => loadSam3Datasets());
+    }
+    if (sam3TrainElements.capEpoch && sam3TrainElements.targetEpochSize) {
+        sam3TrainElements.capEpoch.addEventListener("change", () => {
+            sam3TrainElements.targetEpochSize.disabled = !sam3TrainElements.capEpoch.checked;
+        });
+        sam3TrainElements.targetEpochSize.disabled = !sam3TrainElements.capEpoch.checked;
+    }
+    if (sam3TrainElements.capVal && sam3TrainElements.valCapSize) {
+        sam3TrainElements.capVal.addEventListener("change", () => {
+            sam3TrainElements.valCapSize.disabled = !sam3TrainElements.capVal.checked;
+        });
+        sam3TrainElements.valCapSize.disabled = !sam3TrainElements.capVal.checked;
     }
     if (sam3TrainElements.datasetConvert) {
         sam3TrainElements.datasetConvert.addEventListener("click", () => convertSam3Dataset().catch(() => {}));

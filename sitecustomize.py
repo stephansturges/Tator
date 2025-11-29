@@ -38,29 +38,28 @@ def _patch_sam3_trainer() -> None:
             pass
 
         if not load_segmentation and hasattr(self, "model"):
-            seg_param_names = [
-                name
-                for name, _ in getattr(self.model, "named_parameters", lambda: [])()
-                if "segmentation_head" in name
-            ]
-            if seg_param_names:
-                # Track the ignored params so DDP setup can be adjusted later.
-                self._tator_ignore_params = seg_param_names
+            ignore_param_names = []
+            for name, _ in getattr(self.model, "named_parameters", lambda: [])():
+                if "segmentation_head" in name:
+                    ignore_param_names.append(name)
+                elif "backbone.vision_backbone.convs" in name:
+                    # Convs block feeds segmentation features; not needed for bbox-only.
+                    ignore_param_names.append(name)
+            if ignore_param_names:
+                self._tator_ignore_params = ignore_param_names
                 self._tator_force_disable_find_unused = True
                 for name, param in self.model.named_parameters():
-                    if name in seg_param_names:
+                    if name in ignore_param_names:
                         param.requires_grad = False
-                # DDP matches names before wrapping, but be safe and include module-prefixed variants.
                 ddp_ignore = set(
                     getattr(self.model, "_ddp_params_and_buffers_to_ignore", []) or []
                 )
-                ddp_ignore.update(seg_param_names)
-                ddp_ignore.update([f"module.{n}" for n in seg_param_names])
+                ddp_ignore.update(ignore_param_names)
+                ddp_ignore.update([f"module.{n}" for n in ignore_param_names])
                 self.model._ddp_params_and_buffers_to_ignore = list(ddp_ignore)
                 logging.info(
-                    "Monkeypatch: segmentation head params frozen and marked to ignore in DDP "
-                    "because load_segmentation=False (params: %s)",
-                    seg_param_names,
+                    "Monkeypatch: froze and ignored params not needed for bbox-only training: %s",
+                    ignore_param_names,
                 )
         return out
 

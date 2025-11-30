@@ -2442,7 +2442,7 @@ function updateSam3Eta(progress) {
         sam3EtaState.lastProgress = progress;
         sam3EtaState.lastTimestamp = now;
         sam3EtaState.smoothedRate = null;
-        return;
+        return null;
     }
     const deltaP = progress - sam3EtaState.lastProgress;
     const deltaT = (now - sam3EtaState.lastTimestamp) / 1000;
@@ -2453,10 +2453,12 @@ function updateSam3Eta(progress) {
                 ? sam3EtaState.smoothedRate * 0.7 + instRate * 0.3
                 : instRate;
             const remaining = (1 - progress) / sam3EtaState.smoothedRate;
+            sam3EtaState.lastProgress = progress;
+            sam3EtaState.lastTimestamp = now;
+            return remaining;
         }
-        sam3EtaState.lastProgress = progress;
-        sam3EtaState.lastTimestamp = now;
     }
+    return sam3EtaState.smoothedRate ? (1 - progress) / sam3EtaState.smoothedRate : null;
 }
 
 function resetSam3LiteEta() {
@@ -3427,6 +3429,18 @@ function updateSam3Ui(job) {
     if (sam3TrainElements.progressFill) {
         sam3TrainElements.progressFill.style.width = `${pct}%`;
         sam3TrainElements.progressFill.setAttribute("aria-valuenow", pctText);
+    }
+    if (sam3TrainElements.etaText) {
+        const remaining = updateSam3Eta(progressVal);
+        if (job.status === "succeeded") {
+            sam3TrainElements.etaText.textContent = "ETA: complete";
+        } else if (remaining !== null && remaining > 0) {
+            sam3TrainElements.etaText.textContent = `ETA: ${formatEta(remaining)}`;
+        } else {
+            sam3TrainElements.etaText.textContent = "ETA: estimating…";
+        }
+    } else {
+        updateSam3Eta(progressVal);
     }
     if (sam3TrainElements.cancelButton) {
         sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);

@@ -687,7 +687,7 @@
                             <textarea id="sam3PromptVariants" rows="3" placeholder="class_one: variant a, variant b&#10;hard_hat: helmet, safety helmet"></textarea>
                             <div class="training-help">One class per line: <code>class_name: alt1, alt2</code>. We swap the class name for one of these phrases during training; leave blank to use the class names as-is.</div>
                             <div class="training-toggle-row">
-                                <label title="When on, pick a random variant per class each epoch (train); when off, always use the first variant. Validation always uses the first variant."><input type="checkbox" id="sam3PromptRandomize" checked /> Randomize variants each epoch</label>
+                                <label title="When on, pick a random variant per datapoint during training; when off, always use the first variant. Validation always uses the first variant."><input type="checkbox" id="sam3PromptRandomize" checked /> Randomize variants per datapoint</label>
                             </div>
                         </div>
                         <div class="training-toggle-row">

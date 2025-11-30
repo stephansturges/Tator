@@ -5415,6 +5415,16 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
     if payload.gradient_accumulation_steps is not None:
         cfg.scratch.gradient_accumulation_steps = int(payload.gradient_accumulation_steps)
     cfg.trainer.gradient_accumulation_steps = cfg.scratch.gradient_accumulation_steps
+    if cfg.trainer.gradient_accumulation_steps and cfg.trainer.gradient_accumulation_steps > 1:
+        try:
+            train_collate = cfg.trainer.data.train.collate_fn
+            train_collate._target_ = "sam3.train.data.collator.collate_fn_api_with_chunking"
+            train_collate.num_chunks = int(cfg.trainer.gradient_accumulation_steps)
+            train_collate._partial_ = True
+            if not hasattr(train_collate, "repeats"):
+                train_collate.repeats = cfg.scratch.hybrid_repeats
+        except Exception:
+            pass
     if payload.scheduler_warmup is not None:
         cfg.scratch.scheduler_warmup = int(payload.scheduler_warmup)
     if payload.scheduler_timescale is not None:

@@ -2446,7 +2446,7 @@ function updateSam3Eta(progress) {
     }
     const deltaP = progress - sam3EtaState.lastProgress;
     const deltaT = (now - sam3EtaState.lastTimestamp) / 1000;
-    if (deltaP > 0.0005 && deltaT > 0.5) {
+    if (deltaP > 0 && deltaT > 0.2) {
         const instRate = deltaP / deltaT; // progress per second
         if (instRate > 0) {
             sam3EtaState.smoothedRate = sam3EtaState.smoothedRate

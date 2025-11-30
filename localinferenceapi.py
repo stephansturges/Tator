@@ -2101,6 +2101,7 @@ class Sam3TrainRequest(BaseModel):
     train_limit: Optional[int] = None
     val_limit: Optional[int] = None
     log_freq: Optional[int] = None
+    log_every_batch: Optional[bool] = None
     enable_segmentation_head: Optional[bool] = None
     train_segmentation: Optional[bool] = None
     freeze_language_backbone: Optional[bool] = None
@@ -4465,7 +4466,7 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                         prog_val = max(0.05, min(0.99, frac))
                         _sam3_job_update(job, progress=prog_val, log_message=False)
                     loss_match = re.search(
-                        r"Losses\/train_all_loss:\s*(?:last=)?([0-9.+-eE]+)(?:.*?(?:avg\d*=?\s*([0-9.+-eE]+)|\(\s*([0-9.+-eE]+)\s*\)))?",
+                        r"Losses\/train_all_loss:\s*(?:last|batch)=?([0-9.+-eE]+)(?:.*?(?:avg\d*=?\s*([0-9.+-eE]+)|\(\s*([0-9.+-eE]+)\s*\)))?",
                         cleaned,
                     )
                     if loss_match and match:
@@ -4480,8 +4481,8 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                         global_step = epoch_idx * steps_in_epoch + step_idx
                         metric_payload = {
                             "phase": "train",
-                            "train_loss": instant,
-                            "train_loss_avg": avg_loss,
+                            "train_loss_batch": instant,
+                            "train_loss_avg10": avg_loss,
                             "batch": step_idx,
                             "batches_per_epoch": steps_in_epoch,
                             "epoch": epoch_idx + 1,
@@ -4490,6 +4491,34 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                             "timestamp": time.time(),
                         }
                         _sam3_job_append_metric(job, metric_payload)
+                    if "Meters:" in cleaned and "coco_eval_bbox_AP" in cleaned:
+                        try:
+                            # Extract key/value pairs like '...': np.float64(0.123)
+                            pairs = re.findall(r"'([^']+)':\s*np\.float64\(([0-9.eE+-]+)\)", cleaned)
+                            meter_map = {k: float(v) for k, v in pairs}
+                            epoch_meta = re.search(r"'Trainer/epoch':\s*([0-9]+)", cleaned)
+                            epoch_val = int(epoch_meta.group(1)) + 1 if epoch_meta else None
+                            val_payload: Dict[str, Any] = {
+                                "phase": "val",
+                                "timestamp": time.time(),
+                            }
+                            if epoch_val is not None:
+                                val_payload["epoch"] = epoch_val
+                            # Pick the first coco_eval_bbox_* metrics if present.
+                            for key, field in [
+                                ("coco_eval_bbox_AP", "coco_ap"),
+                                ("coco_eval_bbox_AP_50", "coco_ap50"),
+                                ("coco_eval_bbox_AP_75", "coco_ap75"),
+                                ("coco_eval_bbox_AR_maxDets@10", "coco_ar10"),
+                                ("coco_eval_bbox_AR_maxDets@100", "coco_ar100"),
+                            ]:
+                                for meter_key, meter_val in meter_map.items():
+                                    if meter_key.endswith(key):
+                                        val_payload[field] = meter_val
+                                        break
+                            _sam3_job_append_metric(job, val_payload)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 _sam3_job_update(job, message=cleaned[-200:], log_message=False)
@@ -5464,7 +5493,12 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
                     cfg.trainer.data.val.dataset.limit_ids = val_limit
         except Exception:
             pass
-    if payload.log_freq is not None and "logging" in cfg.trainer:
+    if payload.log_every_batch:
+        try:
+            cfg.trainer.logging.log_freq = 1
+        except Exception:
+            pass
+    elif payload.log_freq is not None and "logging" in cfg.trainer:
         cfg.trainer.logging.log_freq = int(payload.log_freq)
     # Language backbone tuning (text alignment preservation)
     if payload.language_backbone_lr is not None:

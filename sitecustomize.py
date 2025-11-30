@@ -124,19 +124,26 @@ def _patch_logging_smoothing() -> None:
     class RollingAverageMeter(tu.AverageMeter):
         """
         Drop-in replacement that computes a rolling, sample-weighted average for losses.
-        Defaults to window=50 for loss meters; retains cumulative avg for others.
+        Defaults to window=10 for loss meters; retains cumulative avg for others.
         """
 
         def __init__(self, name, device, fmt=":f", window_size=None):
             self.window_size = window_size
             if self.window_size is None and isinstance(name, str) and "Losses/" in name:
-                self.window_size = 50
+                self.window_size = 10
             self._window = deque(maxlen=self.window_size) if self.window_size else None
             super().__init__(name, device, fmt)
 
         def reset(self):
+            # On first construction, allow the base reset to initialize fields.
+            if not getattr(self, "_initialized", False):
+                super().reset()
+                self._initialized = True
+                return
+            # For rolling-loss meters, keep the window across epochs to avoid spikes.
+            if self._window is not None:
+                return
             super().reset()
-            self._window = deque(maxlen=self.window_size) if self.window_size else None
 
         def update(self, val, n=1):
             self.val = val
@@ -153,8 +160,9 @@ def _patch_logging_smoothing() -> None:
         def __str__(self):
             fmt_spec = self.fmt.lstrip(":")
             if self.window_size:
-                return f"{self.name}: last={self.val:{fmt_spec}} avg{self.window_size}={self.avg:{fmt_spec}}"
-            return f"{self.name}: last={self.val:{fmt_spec}} avg={self.avg:{fmt_spec}}"
+                # Make it clear this is a logged batch loss plus a rolling window.
+                return f"{self.name}: batch={self.val:{fmt_spec}} avg{self.window_size}={self.avg:{fmt_spec}}"
+            return f"{self.name}: batch={self.val:{fmt_spec}} avg={self.avg:{fmt_spec}}"
 
     tu.AverageMeter = RollingAverageMeter
     tu.RollingAverageMeter = RollingAverageMeter
@@ -166,7 +174,8 @@ def _patch_logging_smoothing() -> None:
         entries = [self.prefix + self.batch_fmtstr.format(batch)]
         for meter in self.meters:
             name = getattr(meter, "name", "")
-            if name in {"Data Time", "Mem (GB)"}:
+            # Keep memory meter; drop data time and dummy default loss.
+            if name in {"Data Time", "Losses/train_default_loss"}:
                 continue
             entries.append(str(meter))
         msg = " | ".join(entries)

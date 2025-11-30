@@ -989,6 +989,7 @@ const qwenTrainState = {
         languageLr: null,
         promptVariants: null,
         promptRandomize: null,
+        logAll: null,
         segHead: null,
         segTrain: null,
         startButton: null,
@@ -1010,6 +1011,7 @@ const qwenTrainState = {
         pollHandle: null,
         lastJobSnapshot: null,
         latestCheckpoint: null,
+        valMetrics: [],
     };
 
     const sam3StorageElements = {
@@ -2281,6 +2283,37 @@ const sam3LossState = {
     chart: null, // { ctx }
 };
 
+function renderSam3ValMetrics() {
+    const container = sam3TrainElements.valMetrics;
+    if (!container) return;
+    const vals = sam3TrainState.valMetrics || [];
+    if (!vals.length) {
+        container.textContent = "No validation metrics yet.";
+        return;
+    }
+    const latest = vals[vals.length - 1];
+    const rows = vals
+        .map((entry, idx) => {
+            const ep = Number.isFinite(entry.epoch) ? entry.epoch : `#${idx + 1}`;
+            const ap = Number.isFinite(entry.ap) ? entry.ap.toFixed(3) : "–";
+            const ap50 = Number.isFinite(entry.ap50) ? entry.ap50.toFixed(3) : "–";
+            const ap75 = Number.isFinite(entry.ap75) ? entry.ap75.toFixed(3) : "–";
+            return `<tr><td>${ep}</td><td>${ap}</td><td>${ap50}</td><td>${ap75}</td></tr>`;
+        })
+        .join("");
+    container.innerHTML = `
+        <div class="training-help">Latest ${
+            Number.isFinite(latest.epoch) ? `epoch ${latest.epoch}` : `validation #${vals.length}`
+        }: AP ${Number.isFinite(latest.ap) ? latest.ap.toFixed(3) : "–"}, AP50 ${
+        Number.isFinite(latest.ap50) ? latest.ap50.toFixed(3) : "–"
+    }, AP75 ${Number.isFinite(latest.ap75) ? latest.ap75.toFixed(3) : "–"}</div>
+        <table class="metrics-table">
+            <thead><tr><th>Epoch</th><th>AP</th><th>AP50</th><th>AP75</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+}
+
 const sam3EtaState = {
     lastProgress: null,
     lastTimestamp: null,
@@ -2585,6 +2618,7 @@ function updateSam3LossChartFromMetrics(metrics, jobId) {
     if (!sam3TrainElements.lossCanvas) return;
     if (jobId && sam3LossState.jobId !== jobId) {
         resetSam3LossChart(jobId);
+        sam3TrainState.valMetrics = [];
     }
     const entries = Array.isArray(metrics) ? metrics : [];
     if (!entries.length) return;
@@ -2597,8 +2631,13 @@ function updateSam3LossChartFromMetrics(metrics, jobId) {
     initSam3LossChart();
     newEntries.forEach((entry) => {
         if (!entry || typeof entry !== "object") return;
-        const inst = Number(entry.train_loss);
-        const avg = entry.train_loss_avg !== undefined ? Number(entry.train_loss_avg) : null;
+        const inst = entry.train_loss_batch !== undefined ? Number(entry.train_loss_batch) : Number(entry.train_loss);
+        const avg =
+            entry.train_loss_avg10 !== undefined
+                ? Number(entry.train_loss_avg10)
+                : entry.train_loss_avg !== undefined
+                  ? Number(entry.train_loss_avg)
+                  : null;
         const stepVal = Number.isFinite(entry.step) ? entry.step : Math.max(sam3LossState.avgPoints.length, sam3LossState.instPoints.length);
         if (Number.isFinite(avg)) {
             sam3LossState.avgPoints.push({ x: stepVal, y: avg });
@@ -2606,10 +2645,21 @@ function updateSam3LossChartFromMetrics(metrics, jobId) {
         if (Number.isFinite(inst)) {
             sam3LossState.instPoints.push({ x: stepVal, y: inst });
         }
+        if (entry.phase === "val" && (entry.coco_ap !== undefined || entry.coco_ap50 !== undefined)) {
+            sam3TrainState.valMetrics.push({
+                epoch: Number.isFinite(entry.epoch) ? Number(entry.epoch) : null,
+                ap: entry.coco_ap !== undefined ? Number(entry.coco_ap) : null,
+                ap50: entry.coco_ap50 !== undefined ? Number(entry.coco_ap50) : null,
+                ap75: entry.coco_ap75 !== undefined ? Number(entry.coco_ap75) : null,
+                ar10: entry.coco_ar10 !== undefined ? Number(entry.coco_ar10) : null,
+                ar100: entry.coco_ar100 !== undefined ? Number(entry.coco_ar100) : null,
+            });
+        }
     });
     if (sam3LossState.avgPoints.length || sam3LossState.instPoints.length) {
         drawSam3LossChart();
     }
+    renderSam3ValMetrics();
 }
 
 const sam3LiteLossState = {
@@ -2769,8 +2819,15 @@ function updateSam3LiteLossChartFromMetrics(metrics, jobId) {
     initSam3LiteLossChart();
     newEntries.forEach((entry) => {
         if (!entry || typeof entry !== "object") return;
-        const inst = Number(entry.loss ?? entry.train_loss);
-        const avg = entry.loss_avg !== undefined ? Number(entry.loss_avg) : entry.train_loss_avg !== undefined ? Number(entry.train_loss_avg) : null;
+        const inst = entry.loss !== undefined ? Number(entry.loss) : entry.train_loss_batch !== undefined ? Number(entry.train_loss_batch) : Number(entry.train_loss);
+        const avg =
+            entry.loss_avg !== undefined
+                ? Number(entry.loss_avg)
+                : entry.train_loss_avg10 !== undefined
+                  ? Number(entry.train_loss_avg10)
+                  : entry.train_loss_avg !== undefined
+                    ? Number(entry.train_loss_avg)
+                    : null;
         const stepVal = Number.isFinite(entry.step) ? entry.step : Math.max(sam3LiteLossState.avgPoints.length, sam3LiteLossState.instPoints.length);
         if (Number.isFinite(avg)) {
             sam3LiteLossState.avgPoints.push({ x: stepVal, y: avg });
@@ -3322,14 +3379,17 @@ function updateSam3Ui(job) {
         const linesDisplay = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean).slice(-200);
         sam3TrainElements.log.textContent = linesDisplay.join("\n");
         updateSam3LossChartFromMetrics(job.metrics, job.job_id);
+        renderSam3ValMetrics();
     } else {
         // If we lost references (e.g., DOM re-render), rebind and retry
         sam3TrainElements.log = document.getElementById("sam3Log");
         sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
+        sam3TrainElements.valMetrics = document.getElementById("sam3ValMetrics");
         if (sam3TrainElements.log && sam3TrainElements.lossCanvas && job && Array.isArray(job.logs)) {
             const linesAll = job.logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean);
             sam3TrainElements.log.textContent = linesAll.slice(-200).join("\n");
             updateSam3LossChartFromMetrics(job.metrics, job.job_id);
+            renderSam3ValMetrics();
         }
     }
     if (sam3TrainElements.summary) {
@@ -3494,6 +3554,9 @@ async function startSam3Training() {
                 payload.prompt_randomize = !!sam3TrainElements.promptRandomize.checked;
             }
         }
+    }
+    if (sam3TrainElements.logAll && sam3TrainElements.logAll.checked) {
+        payload.log_every_batch = true;
     }
     const wantsSegTrain = sam3TrainElements.segTrain ? sam3TrainElements.segTrain.checked : false;
     const bboxOnly = sam3TrainElements.bboxOnly ? sam3TrainElements.bboxOnly.checked : false;
@@ -3781,20 +3844,22 @@ async function initSam3TrainUi() {
         sam3TrainElements.languageLr = document.getElementById("sam3LanguageLr");
         sam3TrainElements.promptVariants = document.getElementById("sam3PromptVariants");
         sam3TrainElements.promptRandomize = document.getElementById("sam3PromptRandomize");
+        sam3TrainElements.logAll = document.getElementById("sam3LogAll");
         sam3TrainElements.segHead = document.getElementById("sam3SegHead");
         sam3TrainElements.segTrain = document.getElementById("sam3SegTrain");
         sam3TrainElements.bboxOnly = document.getElementById("sam3BBoxOnly");
         sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
-    sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
-    sam3TrainElements.statusText = document.getElementById("sam3StatusText");
-    sam3TrainElements.etaText = document.getElementById("sam3EtaText");
-    sam3TrainElements.progressFill = document.getElementById("sam3ProgressFill");
-    sam3TrainElements.message = document.getElementById("sam3Message");
-    sam3TrainElements.summary = document.getElementById("sam3Summary");
-    sam3TrainElements.balanceSummary = document.getElementById("sam3BalanceSummary");
+        sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
+        sam3TrainElements.statusText = document.getElementById("sam3StatusText");
+        sam3TrainElements.etaText = document.getElementById("sam3EtaText");
+        sam3TrainElements.progressFill = document.getElementById("sam3ProgressFill");
+        sam3TrainElements.message = document.getElementById("sam3Message");
+        sam3TrainElements.summary = document.getElementById("sam3Summary");
+        sam3TrainElements.balanceSummary = document.getElementById("sam3BalanceSummary");
         sam3TrainElements.log = document.getElementById("sam3Log");
         sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
         sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
+        sam3TrainElements.valMetrics = document.getElementById("sam3ValMetrics");
         sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
     sam3StorageElements.list = document.getElementById("sam3StorageList");
     sam3StorageElements.refresh = document.getElementById("sam3StorageRefresh");

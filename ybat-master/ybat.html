@@ -675,6 +675,9 @@
                             </div>
                         </div>
                         <div class="training-toggle-row">
+                            <label title="For debugging only: prints a log line every minibatch (instead of every Nth). Creates very large logs."><input type="checkbox" id="sam3LogAll" /> Log every minibatch (very verbose)</label>
+                        </div>
+                        <div class="training-toggle-row">
                             <label title="Stops updating the language/text encoder to preserve base vocabulary. Overrides the language LR override below."><input type="checkbox" id="sam3FreezeLanguage" /> Freeze language backbone (preserve base text prompts)</label>
                         </div>
                         <div class="training-field">
@@ -727,14 +730,18 @@
                         <div class="training-actions">
                             <button type="button" class="training-button" id="sam3ActivateBtn" disabled>Activate checkpoint</button>
                         </div>
-                        <div class="training-chart">
-                            <h3>Loss</h3>
-                            <canvas id="sam3LossChart" height="120"></canvas>
-                            <div class="training-chart-legend">
-                                <span class="legend-item legend-blue">Blue: smoothed running average loss (cumulative mean over batches seen so far in the current epoch)</span>
-                                <span class="legend-item legend-orange">Orange: instantaneous batch loss</span>
-                                <span class="legend-item">Log lines show <code>last</code> and a rolling avg over the last ~50 mini-batches.</span>
+                            <div class="training-chart">
+                                <h3>Loss</h3>
+                                <canvas id="sam3LossChart" height="120"></canvas>
+                                <div class="training-chart-legend">
+                                <span class="legend-item legend-blue">Blue: rolling average loss (last ~10 batches; computed every batch even if not all are logged).</span>
+                                <span class="legend-item legend-orange">Orange: logged batch loss (printed every Nth minibatch; some batches are skipped in logs).</span>
+                                <span class="legend-item">Log lines show <code>batch=</code> and <code>avg10=</code> (last ~10 minibatches).</span>
+                                </div>
                             </div>
+                        <div class="training-chart">
+                            <h3>Validation (COCO bbox)</h3>
+                            <div id="sam3ValMetrics" class="training-help">No validation metrics yet.</div>
                         </div>
                         <div class="training-logs">
                             <h3>Logs</h3>
@@ -892,8 +899,8 @@
                             <h3>Loss</h3>
                             <canvas id="sam3LiteLossChart" height="120"></canvas>
                             <div class="training-chart-legend">
-                                <span class="legend-item legend-blue">Blue: smoothed running average loss</span>
-                                <span class="legend-item legend-orange">Orange: instantaneous batch loss</span>
+                                <span class="legend-item legend-blue">Blue: rolling average loss (last ~10 logged batches).</span>
+                                <span class="legend-item legend-orange">Orange: logged batch loss (printed every Nth minibatch).</span>
                             </div>
                         </div>
                         <div class="training-logs">

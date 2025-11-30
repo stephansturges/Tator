@@ -4464,10 +4464,17 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                         frac = (epoch_idx + frac_epoch) / max_epochs
                         prog_val = max(0.05, min(0.99, frac))
                         _sam3_job_update(job, progress=prog_val, log_message=False)
-                    loss_match = re.search(r"Losses\/train_all_loss:\s*([0-9.+-eE]+)(?:\s*\(\s*([0-9.+-eE]+)\s*\))?", cleaned)
+                    loss_match = re.search(
+                        r"Losses\/train_all_loss:\s*(?:last=)?([0-9.+-eE]+)(?:.*?(?:avg\d*=?\s*([0-9.+-eE]+)|\(\s*([0-9.+-eE]+)\s*\)))?",
+                        cleaned,
+                    )
                     if loss_match and match:
                         instant = float(loss_match.group(1))
-                        avg_loss = float(loss_match.group(2)) if loss_match.group(2) else None
+                        avg_loss = None
+                        if loss_match.group(2):
+                            avg_loss = float(loss_match.group(2))
+                        elif loss_match.group(3):
+                            avg_loss = float(loss_match.group(3))
                         total_steps = max(1, int(match.group(3)))
                         steps_in_epoch = total_steps or steps_per_epoch or total_steps
                         global_step = epoch_idx * steps_in_epoch + step_idx

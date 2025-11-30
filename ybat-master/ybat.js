@@ -1004,15 +1004,16 @@ const qwenTrainState = {
         activateButton: null,
     };
 
-    const sam3TrainState = {
-        datasets: [],
-        selectedId: null,
-        activeJobId: null,
-        pollHandle: null,
-        lastJobSnapshot: null,
-        latestCheckpoint: null,
-        valMetrics: [],
-    };
+const sam3TrainState = {
+    datasets: [],
+    selectedId: null,
+    activeJobId: null,
+    pollHandle: null,
+    lastJobSnapshot: null,
+    latestCheckpoint: null,
+    trendAlpha: 0.05,
+    valMetrics: [],
+};
 
     const sam3StorageElements = {
         list: null,
@@ -2279,6 +2280,8 @@ const sam3LossState = {
     jobId: null,
     avgPoints: [],
     instPoints: [],
+    trendPoints: [],
+    rawPoints: [],
     lastMetricCount: 0,
     chart: null, // { ctx }
 };
@@ -2336,6 +2339,8 @@ function resetSam3LossChart(jobId = null) {
     sam3LossState.jobId = jobId;
     sam3LossState.avgPoints = [];
     sam3LossState.instPoints = [];
+    sam3LossState.trendPoints = [];
+    sam3LossState.rawPoints = [];
     sam3LossState.lastMetricCount = 0;
     const canvas = sam3TrainElements.lossCanvas;
     if (canvas) {
@@ -2502,7 +2507,8 @@ function drawSam3LossChart() {
     const canvas = sam3TrainElements.lossCanvas;
     const hasAvg = sam3LossState.avgPoints && sam3LossState.avgPoints.length;
     const hasInst = sam3LossState.instPoints && sam3LossState.instPoints.length;
-    if (!canvas || (!hasAvg && !hasInst)) return;
+    const hasTrend = sam3LossState.trendPoints && sam3LossState.trendPoints.length;
+    if (!canvas || (!hasAvg && !hasInst && !hasTrend)) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -2528,6 +2534,9 @@ function drawSam3LossChart() {
     if (hasInst) {
         seriesX.push(sam3LossState.instPoints[0].x, sam3LossState.instPoints[sam3LossState.instPoints.length - 1].x);
     }
+    if (hasTrend) {
+        seriesX.push(sam3LossState.trendPoints[0].x, sam3LossState.trendPoints[sam3LossState.trendPoints.length - 1].x);
+    }
     const minX = Math.min(...seriesX);
     const maxX = Math.max(...seriesX);
     const xRange = Math.max(1, maxX - minX);
@@ -2536,6 +2545,7 @@ function drawSam3LossChart() {
     const allPoints = [];
     if (hasAvg) allPoints.push(...sam3LossState.avgPoints);
     if (hasInst) allPoints.push(...sam3LossState.instPoints);
+    if (hasTrend) allPoints.push(...sam3LossState.trendPoints);
     const [yMinRaw, yMaxRaw] = allPoints.length ? getMinMax(allPoints, (p) => p.y) : [0, 1];
     const yMin = Math.max(0, Math.min(yMinRaw, yMaxRaw - 1e-6));
     const yMax = Math.max(yMin + 1e-6, yMaxRaw);
@@ -2611,6 +2621,26 @@ function drawSam3LossChart() {
         });
         ctx.stroke();
     }
+    // Trend line (green, dashed)
+    if (hasTrend) {
+        ctx.strokeStyle = "#22c55e";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        sam3LossState.trendPoints.forEach((point, idx) => {
+            const normX = (point.x - minX) / xRange;
+            const normY = (point.y - yMin) / yRange;
+            const xPos = padding.left + normX * chartWidth;
+            const yPos = padding.top + (1 - normY) * chartHeight;
+            if (idx === 0) {
+                ctx.moveTo(xPos, yPos);
+            } else {
+                ctx.lineTo(xPos, yPos);
+            }
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
     ctx.restore();
 }
 
@@ -2645,6 +2675,18 @@ function updateSam3LossChartFromMetrics(metrics, jobId) {
         if (Number.isFinite(inst)) {
             sam3LossState.instPoints.push({ x: stepVal, y: inst });
         }
+        const trendBase = Number.isFinite(avg) ? avg : Number.isFinite(inst) ? inst : null;
+        if (trendBase !== null) {
+            sam3LossState.rawPoints.push({ x: stepVal, y: trendBase });
+            const alpha = sam3TrainState.trendAlpha || 0.05;
+            if (!sam3LossState.trendPoints.length) {
+                sam3LossState.trendPoints.push({ x: stepVal, y: trendBase });
+            } else {
+                const prev = sam3LossState.trendPoints[sam3LossState.trendPoints.length - 1].y;
+                const smoothed = alpha * trendBase + (1 - alpha) * prev;
+                sam3LossState.trendPoints.push({ x: stepVal, y: smoothed });
+            }
+        }
         if (entry.phase === "val" && (entry.coco_ap !== undefined || entry.coco_ap50 !== undefined)) {
             sam3TrainState.valMetrics.push({
                 epoch: Number.isFinite(entry.epoch) ? Number(entry.epoch) : null,
@@ -2660,6 +2702,21 @@ function updateSam3LossChartFromMetrics(metrics, jobId) {
         drawSam3LossChart();
     }
     renderSam3ValMetrics();
+}
+
+function recomputeSam3Trend() {
+    sam3LossState.trendPoints = [];
+    if (!sam3LossState.rawPoints.length) return;
+    const alpha = sam3TrainState.trendAlpha || 0.05;
+    sam3LossState.rawPoints.forEach((pt, idx) => {
+        if (idx === 0) {
+            sam3LossState.trendPoints.push({ x: pt.x, y: pt.y });
+        } else {
+            const prev = sam3LossState.trendPoints[sam3LossState.trendPoints.length - 1].y;
+            const smoothed = alpha * pt.y + (1 - alpha) * prev;
+            sam3LossState.trendPoints.push({ x: pt.x, y: smoothed });
+        }
+    });
 }
 
 const sam3LiteLossState = {
@@ -3845,6 +3902,8 @@ async function initSam3TrainUi() {
         sam3TrainElements.promptVariants = document.getElementById("sam3PromptVariants");
         sam3TrainElements.promptRandomize = document.getElementById("sam3PromptRandomize");
         sam3TrainElements.logAll = document.getElementById("sam3LogAll");
+        sam3TrainElements.trendSmooth = document.getElementById("sam3TrendSmooth");
+        sam3TrainElements.trendSmoothValue = document.getElementById("sam3TrendSmoothValue");
         sam3TrainElements.segHead = document.getElementById("sam3SegHead");
         sam3TrainElements.segTrain = document.getElementById("sam3SegTrain");
         sam3TrainElements.bboxOnly = document.getElementById("sam3BBoxOnly");
@@ -3866,6 +3925,20 @@ async function initSam3TrainUi() {
         if (sam3TrainElements.balanceStrategy) {
             sam3TrainElements.balanceStrategy.addEventListener("change", () => updateBalanceParamVisibility());
             updateBalanceParamVisibility();
+        }
+        if (sam3TrainElements.trendSmooth && sam3TrainElements.trendSmoothValue) {
+            const setTrendLabel = (val) => {
+                sam3TrainElements.trendSmoothValue.textContent = Number(val).toFixed(2);
+            };
+            sam3TrainElements.trendSmooth.addEventListener("input", (e) => {
+                const val = parseFloat(e.target.value);
+                if (!Number.isFinite(val)) return;
+                sam3TrainState.trendAlpha = Math.max(0.001, Math.min(0.9, val));
+                setTrendLabel(sam3TrainState.trendAlpha);
+                recomputeSam3Trend();
+                drawSam3LossChart();
+            });
+            setTrendLabel(sam3TrainState.trendAlpha || sam3TrainElements.trendSmooth.value || 0.05);
         }
         if (sam3TrainElements.freezeLanguage && sam3TrainElements.languageLr) {
             sam3TrainElements.freezeLanguage.addEventListener("change", () => {

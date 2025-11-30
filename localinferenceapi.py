@@ -4466,7 +4466,7 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
                         prog_val = max(0.05, min(0.99, frac))
                         _sam3_job_update(job, progress=prog_val, log_message=False)
                     loss_match = re.search(
-                        r"Losses\/train_all_loss:\s*(?:last|batch)=?([0-9.+-eE]+)(?:.*?(?:avg\d*=?\s*([0-9.+-eE]+)|\(\s*([0-9.+-eE]+)\s*\)))?",
+                        r"Losses\/train_all_loss:\s*(?:(?:last|batch)=)?([0-9.+-eE]+)(?:.*?(?:avg\d*=?\s*([0-9.+-eE]+)|\(\s*([0-9.+-eE]+)\s*\)))?",
                         cleaned,
                     )
                     if loss_match and match:

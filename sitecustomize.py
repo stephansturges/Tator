@@ -166,6 +166,12 @@ def _patch_logging_smoothing() -> None:
 
     tu.AverageMeter = RollingAverageMeter
     tu.RollingAverageMeter = RollingAverageMeter
+    try:
+        from sam3.train import trainer as sam3_trainer  # type: ignore
+
+        sam3_trainer.AverageMeter = RollingAverageMeter
+    except Exception:
+        pass
 
     # Trim noisy progress logging: drop data/mem meters and extra real_meters section.
     orig_display = tu.ProgressMeter.display

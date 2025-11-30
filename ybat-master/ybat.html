@@ -730,15 +730,19 @@
                         <div class="training-actions">
                             <button type="button" class="training-button" id="sam3ActivateBtn" disabled>Activate checkpoint</button>
                         </div>
-                            <div class="training-chart">
-                                <h3>Loss</h3>
-                                <canvas id="sam3LossChart" height="120"></canvas>
-                                <div class="training-chart-legend">
+                        <div class="training-chart">
+                            <h3>Loss</h3>
+                            <canvas id="sam3LossChart" height="120"></canvas>
+                            <div class="training-chart-legend">
                                 <span class="legend-item legend-blue">Blue: rolling average loss (last ~10 batches; computed every batch even if not all are logged).</span>
                                 <span class="legend-item legend-orange">Orange: logged batch loss (printed every Nth minibatch; some batches are skipped in logs).</span>
                                 <span class="legend-item">Log lines show <code>batch=</code> and <code>avg10=</code> (last ~10 minibatches).</span>
+                                <div class="training-help">
+                                    Smoothed trend (EMA): <input type="range" id="sam3TrendSmooth" min="0.01" max="0.5" step="0.01" value="0.05" />
+                                    <span id="sam3TrendSmoothValue">0.05</span> (lower = smoother)
                                 </div>
                             </div>
+                        </div>
                         <div class="training-chart">
                             <h3>Validation (COCO bbox)</h3>
                             <div id="sam3ValMetrics" class="training-help">No validation metrics yet.</div>

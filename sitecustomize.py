@@ -7,6 +7,7 @@ at import time. Set SAM3_MONKEYPATCH=0 to disable.
 
 import logging
 import os
+from collections import deque
 from typing import Any
 
 
@@ -111,7 +112,73 @@ def _monkeypatch_enabled() -> bool:
     return flag not in ("0", "false", "off", "no")
 
 
+def _patch_logging_smoothing() -> None:
+    try:
+        from sam3.train.utils import train_utils as tu
+    except Exception:
+        return
+    if getattr(tu, "_tator_logging_patch", False):
+        return
+    tu._tator_logging_patch = True
+
+    class RollingAverageMeter(tu.AverageMeter):
+        """
+        Drop-in replacement that computes a rolling, sample-weighted average for losses.
+        Defaults to window=50 for loss meters; retains cumulative avg for others.
+        """
+
+        def __init__(self, name, device, fmt=":f", window_size=None):
+            self.window_size = window_size
+            if self.window_size is None and isinstance(name, str) and "Losses/" in name:
+                self.window_size = 50
+            self._window = deque(maxlen=self.window_size) if self.window_size else None
+            super().__init__(name, device, fmt)
+
+        def reset(self):
+            super().reset()
+            self._window = deque(maxlen=self.window_size) if self.window_size else None
+
+        def update(self, val, n=1):
+            self.val = val
+            self.sum += val * n
+            self.count += n
+            if self._window is not None:
+                self._window.append((val, n))
+                win_sum = sum(v * w for v, w in self._window)
+                win_count = sum(w for _, w in self._window)
+                self.avg = win_sum / max(win_count, 1)
+            else:
+                self.avg = self.sum / self.count
+
+        def __str__(self):
+            fmt_spec = self.fmt.lstrip(":")
+            if self.window_size:
+                return f"{self.name}: last={self.val:{fmt_spec}} avg{self.window_size}={self.avg:{fmt_spec}}"
+            return f"{self.name}: last={self.val:{fmt_spec}} avg={self.avg:{fmt_spec}}"
+
+    tu.AverageMeter = RollingAverageMeter
+    tu.RollingAverageMeter = RollingAverageMeter
+
+    # Trim noisy progress logging: drop data/mem meters and extra real_meters section.
+    orig_display = tu.ProgressMeter.display
+
+    def _display_filtered(self, batch, enable_print=False):
+        entries = [self.prefix + self.batch_fmtstr.format(batch)]
+        for meter in self.meters:
+            name = getattr(meter, "name", "")
+            if name in {"Data Time", "Mem (GB)"}:
+                continue
+            entries.append(str(meter))
+        msg = " | ".join(entries)
+        logging.info(msg)
+        if enable_print:
+            print(msg)
+
+    tu.ProgressMeter.display = _display_filtered
+
+
 if _monkeypatch_enabled():
     _patch_sam3_trainer()
+    _patch_logging_smoothing()
 else:
     logging.info("SAM3 monkeypatch disabled via SAM3_MONKEYPATCH=0")

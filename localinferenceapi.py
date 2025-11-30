@@ -5482,21 +5482,20 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
         except Exception:
             pass
     # Prompt vocab overrides: allow multiple variants per class and optional randomization during training
-    prompt_map: Dict[int, List[str]] = {}
     user_prompts = payload.prompt_variants or {}
+    prompt_map: Dict[int, List[str]] = {}
     classes = meta.get("classes") or []
-
-    def _normalise_variants(raw: Any) -> List[str]:
-        if raw is None:
+    if classes and user_prompts:
+        def _normalise_variants(raw: Any) -> List[str]:
+            if raw is None:
+                return []
+            if isinstance(raw, str):
+                parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+                return parts if parts else [raw.strip()] if raw.strip() else []
+            if isinstance(raw, (list, tuple, set)):
+                return [str(p).strip() for p in raw if str(p).strip()]
             return []
-        if isinstance(raw, str):
-            parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
-            return parts if parts else [raw.strip()] if raw.strip() else []
-        if isinstance(raw, (list, tuple, set)):
-            return [str(p).strip() for p in raw if str(p).strip()]
-        return []
 
-    if classes:
         for idx, label in enumerate(classes):
             # allow lookup by label or by (1-based) category id
             cat_id = idx + 1
@@ -5507,9 +5506,8 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
                 or user_prompts.get(str(cat_id))
             )
             variants = _normalise_variants(custom)
-            if not variants:
-                variants = [label]
-            prompt_map[cat_id] = variants
+            if variants:
+                prompt_map[cat_id] = variants
 
     if prompt_map:
         prompt_randomize = bool(payload.prompt_randomize) if payload.prompt_randomize is not None else True

@@ -228,6 +228,7 @@ lightning_logs/
 check_cuda.sh
 sam3integration.txt
 sam3/
+sam3_lite/
 
 # Front-end scratch artifacts
 ybat-master/ybat_*.js

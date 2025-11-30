@@ -2103,6 +2103,10 @@ class Sam3TrainRequest(BaseModel):
     log_freq: Optional[int] = None
     enable_segmentation_head: Optional[bool] = None
     train_segmentation: Optional[bool] = None
+    freeze_language_backbone: Optional[bool] = None
+    language_backbone_lr: Optional[float] = None
+    prompt_variants: Optional[Dict[str, Any]] = None
+    prompt_randomize: Optional[bool] = None
 
 
 class Sam3LiteTrainRequest(BaseModel):
@@ -5445,6 +5449,17 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
             pass
     if payload.log_freq is not None and "logging" in cfg.trainer:
         cfg.trainer.logging.log_freq = int(payload.log_freq)
+    # Language backbone tuning (text alignment preservation)
+    if payload.language_backbone_lr is not None:
+        try:
+            cfg.scratch.lr_language_backbone = float(payload.language_backbone_lr)
+        except Exception:
+            pass
+    if payload.freeze_language_backbone:
+        try:
+            cfg.scratch.lr_language_backbone = 0.0
+        except Exception:
+            pass
     # Balance strategy/config
     if payload.balance_strategy is not None:
         cfg.dataset.balance_strategy = payload.balance_strategy
@@ -5466,6 +5481,72 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
             cfg.trainer.meters.val.roboflow100.detection.pred_file_evaluators[0].gt_path = cfg.paths.val_ann_file
         except Exception:
             pass
+    # Prompt vocab overrides: allow multiple variants per class and optional randomization during training
+    prompt_map: Dict[int, List[str]] = {}
+    user_prompts = payload.prompt_variants or {}
+    classes = meta.get("classes") or []
+
+    def _normalise_variants(raw: Any) -> List[str]:
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+            return parts if parts else [raw.strip()] if raw.strip() else []
+        if isinstance(raw, (list, tuple, set)):
+            return [str(p).strip() for p in raw if str(p).strip()]
+        return []
+
+    if classes:
+        for idx, label in enumerate(classes):
+            # allow lookup by label or by (1-based) category id
+            cat_id = idx + 1
+            custom = (
+                user_prompts.get(label)
+                or user_prompts.get(str(label))
+                or user_prompts.get(cat_id)
+                or user_prompts.get(str(cat_id))
+            )
+            variants = _normalise_variants(custom)
+            if not variants:
+                variants = [label]
+            prompt_map[cat_id] = variants
+
+    if prompt_map:
+        prompt_randomize = bool(payload.prompt_randomize) if payload.prompt_randomize is not None else True
+        # Train loader
+        try:
+            train_loader_cfg = cfg.trainer.data.train.dataset.get("coco_json_loader")  # type: ignore[index]
+        except Exception:
+            train_loader_cfg = None
+        if train_loader_cfg is None:
+            cfg.trainer.data.train.dataset["coco_json_loader"] = {}
+            train_loader_cfg = cfg.trainer.data.train.dataset.get("coco_json_loader")  # type: ignore[index]
+        try:
+            train_loader_cfg["_target_"] = "sam3.train.data.coco_json_loaders.COCO_FROM_JSON"
+            train_loader_cfg["_partial_"] = True
+            train_loader_cfg["prompts"] = prompt_map
+            train_loader_cfg["prompt_randomize"] = prompt_randomize
+        except Exception:
+            pass
+        # Val loader (deterministic prompts)
+        try:
+            val_loader_cfg = cfg.trainer.data.val.dataset.coco_json_loader  # type: ignore[assignment]
+        except Exception:
+            val_loader_cfg = None
+        if val_loader_cfg is None:
+            try:
+                cfg.trainer.data.val.dataset["coco_json_loader"] = {}
+                val_loader_cfg = cfg.trainer.data.val.dataset.coco_json_loader  # type: ignore[assignment]
+            except Exception:
+                val_loader_cfg = None
+        if val_loader_cfg is not None:
+            try:
+                val_loader_cfg["_target_"] = "sam3.train.data.coco_json_loaders.COCO_FROM_JSON"
+                val_loader_cfg["_partial_"] = True
+                val_loader_cfg["prompts"] = prompt_map
+                val_loader_cfg["prompt_randomize"] = False
+            except Exception:
+                pass
     cfg.launcher.num_nodes = 1
     cfg.submitit.use_cluster = False
     cfg.submitit.cpus_per_task = max(cfg.scratch.num_train_workers, cfg.submitit.cpus_per_task or 0)

@@ -106,11 +106,30 @@ class BalancedSampler(Sampler[int]):
         self.indices = list(indices)
         self.weights = torch.as_tensor(weights, dtype=torch.double)
         self.num_samples = num_samples or len(self.indices)
+        self._use_positions = not self._indices_cover_positions()
+
+    def _indices_cover_positions(self) -> bool:
+        """
+        Detect whether provided indices already correspond to positional indices
+        (0..len-1). If not, we fall back to emitting positions so downstream
+        datasets that expect positional indexing (e.g., self.ids[idx]) don't
+        see out-of-bounds values.
+        """
+        if not self.indices:
+            return True
+        try:
+            # Fast path: if max index fits within length and min is zero, assume positional.
+            return min(self.indices) == 0 and max(self.indices) < len(self.indices)
+        except Exception:
+            return False
 
     def __iter__(self) -> Iterator[int]:
         sampled = torch.multinomial(self.weights, self.num_samples, replacement=True)
         for idx in sampled.tolist():
-            yield self.indices[idx]
+            if self._use_positions:
+                yield idx
+            else:
+                yield self.indices[idx]
 
     def __len__(self) -> int:
         return self.num_samples
@@ -130,6 +149,15 @@ class DistributedBalancedSampler(DistributedSampler):
         self.weights = torch.as_tensor(weights, dtype=torch.double)
         self.indices = list(indices)
         self.num_samples = num_samples or math.ceil(len(self.indices) / self.num_replicas)
+        self._use_positions = not self._indices_cover_positions()
+
+    def _indices_cover_positions(self) -> bool:
+        if not self.indices:
+            return True
+        try:
+            return min(self.indices) == 0 and max(self.indices) < len(self.indices)
+        except Exception:
+            return False
 
     def __iter__(self) -> Iterator[int]:
         # Evenly split across replicas
@@ -140,7 +168,10 @@ class DistributedBalancedSampler(DistributedSampler):
         # Deterministic per-rank stride
         subsampled = sampled[self.rank : self.num_replicas * self.num_samples : self.num_replicas]
         for idx in subsampled:
-            yield self.indices[idx]
+            if self._use_positions:
+                yield idx
+            else:
+                yield self.indices[idx]
 
     def __len__(self) -> int:
         return self.num_samples

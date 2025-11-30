@@ -675,6 +675,22 @@
                             </div>
                         </div>
                         <div class="training-toggle-row">
+                            <label title="Stops updating the language/text encoder to preserve base vocabulary. Overrides the language LR override below."><input type="checkbox" id="sam3FreezeLanguage" /> Freeze language backbone (preserve base text prompts)</label>
+                        </div>
+                        <div class="training-field">
+                            <label for="sam3LanguageLr">Language backbone LR override</label>
+                            <input type="number" id="sam3LanguageLr" step="0.000001" min="0" placeholder="≈5e-5 × LR scale (default)" />
+                            <div class="training-help">Optional: set a specific LR for the text encoder. Set to 0 (or check “Freeze language”) to keep base vocabulary; leave blank to use the config default.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="sam3PromptVariants">Prompt variants per class (text grounding)</label>
+                            <textarea id="sam3PromptVariants" rows="3" placeholder="class_one: variant a, variant b&#10;hard_hat: helmet, safety helmet"></textarea>
+                            <div class="training-help">One class per line: <code>class_name: alt1, alt2</code>. We swap the class name for one of these phrases during training; leave blank to use the class names as-is.</div>
+                            <div class="training-toggle-row">
+                                <label title="When on, pick a random variant per class each epoch (train); when off, always use the first variant. Validation always uses the first variant."><input type="checkbox" id="sam3PromptRandomize" checked /> Randomize variants each epoch</label>
+                            </div>
+                        </div>
+                        <div class="training-toggle-row">
                             <label title="Keep the SAM3 segmentation head loaded so text prompting works. Uses the base head weights if you don’t train masks."><input type="checkbox" id="sam3SegHead" checked /> Keep segmentation head for text prompts</label>
                         </div>
                         <div class="training-toggle-row">

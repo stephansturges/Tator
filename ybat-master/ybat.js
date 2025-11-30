@@ -985,6 +985,10 @@ const qwenTrainState = {
         balanceClip: null,
         balanceBeta: null,
         balanceGamma: null,
+        freezeLanguage: null,
+        languageLr: null,
+        promptVariants: null,
+        promptRandomize: null,
         segHead: null,
         segTrain: null,
         startButton: null,
@@ -3402,6 +3406,28 @@ async function startSam3Training() {
         const num = Number(input.value);
         return Number.isFinite(num) ? num : null;
     };
+    const parsePromptVariants = (text) => {
+        if (!text) return {};
+        const mapping = {};
+        text
+            .split(/\n+/)
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .forEach((line) => {
+                const splitter = line.includes("=") && !line.includes(":") ? "=" : ":";
+                const [rawLabel, rest] = line.split(splitter);
+                const label = (rawLabel || "").trim();
+                if (!label) return;
+                const variants = (rest || "")
+                    .split(/[,;]/)
+                    .map((v) => v.trim())
+                    .filter(Boolean);
+                if (variants.length) {
+                    mapping[label] = variants;
+                }
+            });
+        return mapping;
+    };
     if (sam3TrainElements.runName && sam3TrainElements.runName.value.trim()) {
         payload.run_name = sam3TrainElements.runName.value.trim();
     }
@@ -3453,6 +3479,22 @@ async function startSam3Training() {
         const val = maybeNumber(el);
         if (val !== null) payload[key] = val;
     });
+    if (sam3TrainElements.freezeLanguage && sam3TrainElements.freezeLanguage.checked) {
+        payload.freeze_language_backbone = true;
+    }
+    const langLr = maybeNumber(sam3TrainElements.languageLr);
+    if (langLr !== null) {
+        payload.language_backbone_lr = langLr;
+    }
+    if (sam3TrainElements.promptVariants) {
+        const variants = parsePromptVariants(sam3TrainElements.promptVariants.value);
+        if (Object.keys(variants).length) {
+            payload.prompt_variants = variants;
+            if (sam3TrainElements.promptRandomize) {
+                payload.prompt_randomize = !!sam3TrainElements.promptRandomize.checked;
+            }
+        }
+    }
     const wantsSegTrain = sam3TrainElements.segTrain ? sam3TrainElements.segTrain.checked : false;
     const bboxOnly = sam3TrainElements.bboxOnly ? sam3TrainElements.bboxOnly.checked : false;
     if (bboxOnly) {
@@ -3735,6 +3777,10 @@ async function initSam3TrainUi() {
         sam3TrainElements.balanceDescription = document.getElementById("sam3BalanceDescription");
         sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
         sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
+        sam3TrainElements.freezeLanguage = document.getElementById("sam3FreezeLanguage");
+        sam3TrainElements.languageLr = document.getElementById("sam3LanguageLr");
+        sam3TrainElements.promptVariants = document.getElementById("sam3PromptVariants");
+        sam3TrainElements.promptRandomize = document.getElementById("sam3PromptRandomize");
         sam3TrainElements.segHead = document.getElementById("sam3SegHead");
         sam3TrainElements.segTrain = document.getElementById("sam3SegTrain");
         sam3TrainElements.bboxOnly = document.getElementById("sam3BBoxOnly");
@@ -3755,6 +3801,15 @@ async function initSam3TrainUi() {
         if (sam3TrainElements.balanceStrategy) {
             sam3TrainElements.balanceStrategy.addEventListener("change", () => updateBalanceParamVisibility());
             updateBalanceParamVisibility();
+        }
+        if (sam3TrainElements.freezeLanguage && sam3TrainElements.languageLr) {
+            sam3TrainElements.freezeLanguage.addEventListener("change", () => {
+                const frozen = sam3TrainElements.freezeLanguage.checked;
+                sam3TrainElements.languageLr.disabled = frozen;
+                if (frozen) {
+                    sam3TrainElements.languageLr.value = "";
+                }
+            });
         }
         if (sam3TrainElements.segTrain && sam3TrainElements.segHead) {
             sam3TrainElements.segTrain.addEventListener("change", () => {

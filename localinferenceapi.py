@@ -3797,10 +3797,16 @@ def _find_coco_split(dataset_root: Path) -> Tuple[Path, Path]:
     """Return (annotations_path, images_dir) preferring val split, then train."""
     val_ann = dataset_root / "val" / "_annotations.coco.json"
     if val_ann.exists():
-        return val_ann, val_ann.parent / "images"
+        images_dir = val_ann.parent / "images"
+        if not images_dir.exists():
+            images_dir = val_ann.parent
+        return val_ann, images_dir
     train_ann = dataset_root / "train" / "_annotations.coco.json"
     if train_ann.exists():
-        return train_ann, train_ann.parent / "images"
+        images_dir = train_ann.parent / "images"
+        if not images_dir.exists():
+            images_dir = train_ann.parent
+        return train_ann, images_dir
     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_annotations_missing")
 
 

@@ -1160,6 +1160,15 @@ hr {
     border-radius: 4px;
 }
 
+#tabPromptHelper .training-status-section {
+    flex: 1 1 820px;
+    max-width: none;
+}
+
+#tabPromptHelper .training-form-section {
+    flex: 0 0 400px;
+}
+
 
 .training-progress {
     height: 8px;

@@ -3493,6 +3493,7 @@ async function pollPromptHelperJob(force = false) {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const job = await resp.json();
         promptHelperState.lastJob = job;
+        console.info("[prompt-helper] poll", job);
         if (promptHelperElements.status) {
             const pct = job.progress ? Math.round(job.progress * 100) : 0;
             promptHelperElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%)`;
@@ -3524,6 +3525,7 @@ async function generatePromptHelperPrompts() {
     try {
         setPromptHelperMessage("Generating prompt suggestions…", "info");
         if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = true;
+        console.info("[prompt-helper] generating suggestions", { datasetId, maxSynonyms, useQwen });
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/suggest`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -3538,6 +3540,7 @@ async function generatePromptHelperPrompts() {
             throw new Error(detail || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        console.info("[prompt-helper] suggestions received", data);
         promptHelperState.suggestions = Array.isArray(data.classes) ? data.classes : [];
         promptHelperState.promptsByClass = {};
         promptHelperState.suggestions.forEach((cls) => {
@@ -3599,6 +3602,7 @@ async function startPromptHelperJob() {
             use_qwen: useQwen,
             prompts_by_class: promptsMap,
         };
+        console.info("[prompt-helper] starting evaluation", payload);
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },

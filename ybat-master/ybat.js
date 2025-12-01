@@ -3526,6 +3526,10 @@ function renderPromptHelperResults(job) {
     if (promptHelperElements.logs) {
         promptHelperElements.logs.innerHTML = "";
     }
+    if (promptHelperElements.summary) {
+        promptHelperElements.summary.title =
+            "Score = F1 * (0.5 + 0.5 * detection-rate). Higher is better; balances precision, recall, and how many images yielded matches.";
+    }
     if (job.error) {
         const errEl = document.createElement("div");
         errEl.className = "training-message error";

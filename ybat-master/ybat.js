@@ -2459,11 +2459,9 @@ function computeMetricProgress(job) {
 function computeMetricEta(job, progressOverride = null) {
     const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
     const created = Number.isFinite(job?.created_at) ? Number(job.created_at) : null;
-    const firstTs = metrics.find((m) => Number.isFinite(m?.timestamp))?.timestamp;
-    const lastTs = [...metrics].reverse().find((m) => Number.isFinite(m?.timestamp))?.timestamp;
-    const startTs = Number.isFinite(firstTs) ? firstTs : created;
-    const endTs = Number.isFinite(lastTs) ? lastTs : Date.now() / 1000;
-    if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return null;
+    const startTs = created;
+    const endTs = Date.now() / 1000;
+    if (!Number.isFinite(startTs) || endTs <= startTs) return null;
     const progress = progressOverride !== null ? progressOverride : computeMetricProgress(job);
     if (!Number.isFinite(progress) || progress <= 0) return null;
     const elapsed = endTs - startTs;

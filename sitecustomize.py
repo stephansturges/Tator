@@ -115,6 +115,8 @@ def _monkeypatch_enabled() -> bool:
 def _patch_logging_smoothing() -> None:
     try:
         from sam3.train.utils import train_utils as tu
+        from sam3.eval import coco_writer
+        from sam3.eval import coco_eval_offline
     except Exception:
         return
     if getattr(tu, "_tator_logging_patch", False):
@@ -172,6 +174,58 @@ def _patch_logging_smoothing() -> None:
         sam3_trainer.AverageMeter = RollingAverageMeter
     except Exception:
         pass
+
+    # Monkeypatch COCO writer to filter low-score detections and allow higher max dets.
+    SCORE_THRESH = 0.2
+    MAX_DETS = 1000
+
+    if not getattr(coco_writer, "_tator_patch", False):
+        coco_writer._tator_patch = True
+
+        orig_gather = coco_writer.CocoWriter.gather_and_merge_predictions
+
+        def _gather_and_merge_predictions_filtered(self):
+            logging.info(
+                "Prediction Dumper: Gathering predictions with score>=%.2f and maxdets=%s",
+                SCORE_THRESH,
+                MAX_DETS,
+            )
+            merged = orig_gather(self)
+            # Filter by score
+            filtered = [p for p in merged if p.get("score", 0) >= SCORE_THRESH]
+            if not filtered:
+                return filtered
+            # Re-limit per image to MAX_DETS keeping top scores
+            preds_by_image = {}
+            for p in filtered:
+                img_id = p.get("image_id")
+                if img_id is None:
+                    continue
+                preds_by_image.setdefault(img_id, []).append(p)
+            out = []
+            for img_id, plist in preds_by_image.items():
+                plist.sort(key=lambda x: x.get("score", 0), reverse=True)
+                out.extend(plist[:MAX_DETS])
+            return out
+
+        coco_writer.CocoWriter.gather_and_merge_predictions = (
+            _gather_and_merge_predictions_filtered
+        )
+
+    # Monkeypatch COCOevalCustom to raise maxDets for recall metrics.
+    if not getattr(coco_eval_offline, "_tator_patch", False):
+        coco_eval_offline._tator_patch = True
+        OrigCOCOevalCustom = coco_eval_offline.COCOevalCustom
+
+        class COCOevalCustomPatched(OrigCOCOevalCustom):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                try:
+                    self.params.maxDets = [1, 10, MAX_DETS]
+                except Exception:
+                    pass
+
+        coco_eval_offline.COCOevalCustom = COCOevalCustomPatched
 
     # Trim noisy progress logging: drop data/mem meters and extra real_meters section.
     orig_display = tu.ProgressMeter.display

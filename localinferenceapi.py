@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal
+import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
@@ -1727,12 +1727,12 @@ def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, in
     return output_text, input_width, input_height
 
 
-def _generate_qwen_text(prompt: str, *, max_new_tokens: int = 128) -> str:
+def _generate_qwen_text(prompt: str, *, max_new_tokens: int = 128, use_system_prompt: bool = True) -> str:
     """Text-only generation with Qwen for small helper tasks (no images)."""
     model, processor = _ensure_qwen_ready()
     messages: List[Dict[str, Any]] = []
     sys_prompt = (active_qwen_metadata or {}).get("system_prompt")
-    if sys_prompt:
+    if use_system_prompt and sys_prompt:
         messages.append(
             {
                 "role": "system",
@@ -3851,14 +3851,24 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
             text = _generate_qwen_text(
                 (
                     f"Suggest up to {max_synonyms} short, natural phrases humans use for the object class "
-                    f"'{human or cleaned}'. Return a comma-separated list, 1-3 words each, no numbering."
+                    f"'{human or cleaned}'. Return a comma-separated list, 1-3 words each, no numbering, no JSON."
                 ),
                 max_new_tokens=96,
+                use_system_prompt=False,
             )
             raw_parts = re.split(r"[\\n;,]+", text)
             for part in raw_parts:
                 normalized = part.strip().strip('"').strip("'")
                 if not normalized:
+                    continue
+                if any(ch in normalized for ch in "{}[]:\""):
+                    continue
+                if len(normalized) > 40:
+                    continue
+                if not re.search(r"[A-Za-z]", normalized):
+                    continue
+                words = normalized.split()
+                if len(words) > 4:
                     continue
                 variants.append(normalized)
         except Exception as exc:  # noqa: BLE001

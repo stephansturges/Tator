@@ -4059,6 +4059,17 @@ def _sample_images_for_category(cat_id: int, img_ids: List[int], sample_size: in
     return rnd.sample(img_ids, sample_size)
 
 
+def _sample_negative_images(cat_id: int, all_img_ids: List[int], cat_to_images: Dict[int, set[int]], sample_size: int, seed: int) -> List[int]:
+    """Pick images that do NOT contain the target category."""
+    negative_pool = [img_id for img_id in all_img_ids if img_id not in cat_to_images.get(cat_id, set())]
+    if not negative_pool or sample_size <= 0:
+        return []
+    rnd = random.Random(seed + cat_id * 15391)
+    if len(negative_pool) <= sample_size:
+        return negative_pool
+    return rnd.sample(negative_pool, sample_size)
+
+
 def _evaluate_prompt_for_class(
     prompt: str,
     *,
@@ -4147,6 +4158,7 @@ def _evaluate_prompt_for_class(
     avg_score = score_sum / matched_scores if matched_scores else None
     f1 = (2 * precision * recall) / (precision + recall + 1e-8) if (precision + recall) > 0 else 0.0
     overall_score = f1 * (0.5 + 0.5 * det_rate)
+    fps = max(0, total_preds - matches)
     return {
         "prompt": prompt,
         "precision": precision,
@@ -4159,6 +4171,7 @@ def _evaluate_prompt_for_class(
         "preds": total_preds,
         "matches": matches,
         "gts": total_gt,
+        "fps": fps,
     }
 
 
@@ -4186,6 +4199,18 @@ class PromptHelperRequest(BaseModel):
     use_qwen: bool = True
     # Optional explicit prompts provided by the user; key is category_id.
     prompts_by_class: Optional[Dict[int, List[str]]] = None
+
+
+class PromptHelperSearchRequest(BaseModel):
+    dataset_id: str
+    sample_per_class: int = Field(20, ge=1, le=2000)
+    negatives_per_class: int = Field(20, ge=0, le=2000)
+    score_threshold: float = Field(0.2, ge=0.0, le=1.0)
+    max_dets: int = Field(100, ge=1, le=2000)
+    iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    seed: int = 42
+    precision_floor: float = Field(0.9, ge=0.0, le=1.0)
+    prompts_by_class: Dict[int, List[str]]
 
 
 def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
@@ -4328,6 +4353,164 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
         job.updated_at = time.time()
 
 
+def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSearchRequest) -> None:
+    with PROMPT_HELPER_JOBS_LOCK:
+        PROMPT_HELPER_JOBS[job.job_id] = job
+    job.status = "running"
+    job.message = "Loading dataset…"
+    job.request = {"mode": "search", **payload.dict()}
+    job.updated_at = time.time()
+    try:
+        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        categories = coco.get("categories") or []
+        if not payload.prompts_by_class:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="search_prompts_required")
+        cat_to_images: Dict[int, set[int]] = {}
+        for ann in coco.get("annotations", []):
+            try:
+                cat_id = int(ann["category_id"])
+                img_id = int(ann["image_id"])
+            except Exception:
+                continue
+            cat_to_images.setdefault(cat_id, set()).add(img_id)
+        prompts_map: Dict[int, List[str]] = {}
+        for k, vals in payload.prompts_by_class.items():
+            try:
+                cid = int(k)
+            except Exception:
+                continue
+            if not isinstance(vals, (list, tuple)):
+                continue
+            cleaned = [v.strip() for v in vals if isinstance(v, str) and v.strip()]
+            if cleaned:
+                prompts_map[cid] = cleaned
+        if not prompts_map:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="search_prompts_empty")
+        all_img_ids = list(images.keys())
+        image_cache: Dict[int, Image.Image] = {}
+        total_steps = 0
+        for idx, cat in enumerate(categories):
+            cat_id = int(cat.get("id", idx))
+            prompts = prompts_map.get(cat_id)
+            if not prompts:
+                continue
+            pos_ids = _sample_images_for_category(
+                cat_id,
+                list(cat_to_images.get(cat_id, set())),
+                payload.sample_per_class,
+                payload.seed,
+            )
+            neg_ids = _sample_negative_images(
+                cat_id,
+                all_img_ids,
+                cat_to_images,
+                payload.negatives_per_class,
+                payload.seed,
+            )
+            eval_count = len(set(pos_ids + neg_ids)) or 1
+            total_steps += len(prompts) * eval_count
+        job.total_steps = total_steps
+        job.completed_steps = 0
+        results: List[Dict[str, Any]] = []
+        total_classes = len(categories) or 1
+        for idx, cat in enumerate(categories):
+            cat_id = int(cat.get("id", idx))
+            class_name = str(cat.get("name", f"class_{cat_id}"))
+            prompts = prompts_map.get(cat_id)
+            if not prompts:
+                continue
+            job.message = f"Searching prompts for {class_name} ({idx + 1}/{total_classes})…"
+            job.progress = idx / total_classes
+            pos_ids = _sample_images_for_category(
+                cat_id,
+                list(cat_to_images.get(cat_id, set())),
+                payload.sample_per_class,
+                payload.seed,
+            )
+            neg_ids = _sample_negative_images(
+                cat_id,
+                all_img_ids,
+                cat_to_images,
+                payload.negatives_per_class,
+                payload.seed,
+            )
+            eval_ids = list(dict.fromkeys([*pos_ids, *neg_ids]))
+            candidate_results: List[Dict[str, Any]] = []
+            for prompt in prompts:
+                try:
+                    job.logs.append(
+                        {
+                            "ts": time.time(),
+                            "msg": f"Eval '{prompt}' on {len(eval_ids)} imgs (+{len(pos_ids)} pos / {len(neg_ids)} neg)",
+                        }
+                    )
+                    if len(job.logs) > MAX_JOB_LOGS:
+                        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                except Exception:
+                    pass
+                metrics = _evaluate_prompt_for_class(
+                    prompt,
+                    cat_id=cat_id,
+                    image_ids=eval_ids,
+                    gt_by_image_cat=gt_by_image_cat,
+                    images=images,
+                    score_threshold=payload.score_threshold,
+                    max_dets=payload.max_dets,
+                    iou_threshold=payload.iou_threshold,
+                    image_cache=image_cache,
+                )
+                penalty = 1.0
+                if payload.precision_floor > 0:
+                    penalty = min(1.0, metrics["precision"] / max(payload.precision_floor, 1e-6))
+                metrics["precision_penalty"] = penalty
+                metrics["search_score"] = metrics["recall"] * (0.5 + 0.5 * metrics["det_rate"]) * penalty
+                metrics["images_evaluated"] = len(eval_ids)
+                metrics["positive_images"] = len(pos_ids)
+                metrics["negative_images"] = len(neg_ids)
+                candidate_results.append(metrics)
+                job.completed_steps += max(1, len(eval_ids))
+                if job.total_steps:
+                    job.progress = min(1.0, job.completed_steps / job.total_steps)
+                job.updated_at = time.time()
+            candidate_results.sort(
+                key=lambda m: (
+                    m.get("search_score", 0.0),
+                    m.get("recall", 0.0),
+                    m.get("precision", 0.0),
+                ),
+                reverse=True,
+            )
+            best = candidate_results[0] if candidate_results else None
+            results.append(
+                {
+                    "class_id": cat_id,
+                    "class_name": class_name,
+                    "positive_images": len(pos_ids),
+                    "negative_images": len(neg_ids),
+                    "best": best,
+                    "candidates": candidate_results,
+                }
+            )
+            job.progress = (idx + 1) / total_classes
+            job.updated_at = time.time()
+        job.status = "completed"
+        job.message = "Done"
+        job.result = {
+            "classes": results,
+            "config": payload.dict(),
+            "dataset_id": payload.dataset_id,
+            "mode": "search",
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Prompt search job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Failed"
+    finally:
+        job.updated_at = time.time()
+
+
 def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     job_id = f"ph_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
@@ -4338,15 +4521,112 @@ def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     return job
 
 
+def _start_prompt_helper_search_job(payload: PromptHelperSearchRequest) -> PromptHelperJob:
+    job_id = f"phs_{uuid.uuid4().hex[:8]}"
+    job = PromptHelperJob(job_id=job_id)
+    with PROMPT_HELPER_JOBS_LOCK:
+        PROMPT_HELPER_JOBS[job.job_id] = job
+    thread = threading.Thread(target=_run_prompt_helper_search_job, args=(job, payload), daemon=True)
+    thread.start()
+    return job
+
+
 @app.post("/sam3/prompt_helper/suggest")
 def prompt_helper_suggest(payload: PromptHelperSuggestRequest):
     return _suggest_prompts_for_dataset(payload)
+
+
+def _list_prompt_helper_presets() -> List[Dict[str, Any]]:
+    presets: List[Dict[str, Any]] = []
+    for path in PROMPT_HELPER_PRESET_ROOT.glob("*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            presets.append(data)
+        except Exception:
+            continue
+    presets.sort(key=lambda p: p.get("created_at", 0), reverse=True)
+    return presets
+
+
+def _load_prompt_helper_preset(preset_id: str) -> Dict[str, Any]:
+    path = (PROMPT_HELPER_PRESET_ROOT / f"{preset_id}.json").resolve()
+    if not str(path).startswith(str(PROMPT_HELPER_PRESET_ROOT.resolve())) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_preset_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"prompt_helper_preset_load_failed:{exc}") from exc
+
+
+def _save_prompt_helper_preset(label: str, dataset_id: str, prompts_by_class: Dict[int, List[str]]) -> Dict[str, Any]:
+    preset_id = f"phset_{uuid.uuid4().hex[:8]}"
+    created_at = time.time()
+    payload = {
+        "id": preset_id,
+        "label": label or preset_id,
+        "dataset_id": dataset_id,
+        "created_at": created_at,
+        "prompts_by_class": prompts_by_class,
+    }
+    path = (PROMPT_HELPER_PRESET_ROOT / f"{preset_id}.json").resolve()
+    if not str(path).startswith(str(PROMPT_HELPER_PRESET_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return payload
 
 
 @app.post("/sam3/prompt_helper/jobs")
 def start_prompt_helper_job(payload: PromptHelperRequest):
     job = _start_prompt_helper_job(payload)
     return _serialize_prompt_helper_job(job)
+
+
+@app.post("/sam3/prompt_helper/search")
+def start_prompt_helper_search(payload: PromptHelperSearchRequest):
+    job = _start_prompt_helper_search_job(payload)
+    return _serialize_prompt_helper_job(job)
+
+
+@app.get("/sam3/prompt_helper/presets")
+def list_prompt_helper_presets():
+    return _list_prompt_helper_presets()
+
+
+@app.get("/sam3/prompt_helper/presets/{preset_id}")
+def get_prompt_helper_preset(preset_id: str):
+    return _load_prompt_helper_preset(preset_id)
+
+
+@app.post("/sam3/prompt_helper/presets")
+def create_prompt_helper_preset(
+    dataset_id: str = Form(...),
+    label: str = Form(""),
+    prompts_json: str = Form(...),
+):
+    try:
+        prompts_by_class = json.loads(prompts_json)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_prompts:{exc}") from exc
+    if not isinstance(prompts_by_class, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompts_must_be_object")
+    normalized: Dict[int, List[str]] = {}
+    for key, vals in prompts_by_class.items():
+        try:
+            cid = int(key)
+        except Exception:
+            continue
+        if not isinstance(vals, (list, tuple)):
+            continue
+        cleaned = [str(v).strip() for v in vals if isinstance(v, str) and str(v).strip()]
+        if cleaned:
+            normalized[cid] = cleaned
+    if not normalized:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="no_prompts_provided")
+    preset = _save_prompt_helper_preset(label, dataset_id, normalized)
+    return preset
 
 
 @app.get("/sam3/prompt_helper/presets")

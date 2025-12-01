@@ -911,6 +911,35 @@ hr {
     font-weight: 600;
 }
 
+.metric-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 13px;
+    color: #0f172a;
+}
+
+.metric-table th,
+.metric-table td {
+    border: 1px solid #e2e8f0;
+    padding: 6px 8px;
+    text-align: center;
+}
+
+.metric-table th {
+    background: #f8fafc;
+    font-weight: 700;
+}
+
+.metric-table tr:nth-child(even) {
+    background: #f8fafc;
+}
+
+.metric-table__highlight {
+    background: #ecfeff;
+    font-weight: 600;
+}
+
 .qwen-train-intro {
     margin: 0;
     font-size: 13px;
@@ -979,6 +1008,7 @@ hr {
 
 .training-status-section {
     position: relative;
+    flex: 1;
 }
 
 .training-form-section {

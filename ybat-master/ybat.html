@@ -853,8 +853,8 @@
                         <p class="training-help">Use your edited prompts above, then run a targeted search that samples positives and negatives to find the safest wording (prioritizes recall but penalizes prompts below a precision floor).</p>
                         <div class="training-field">
                             <label for="promptSearchClassSelect">Class to search</label>
-                            <select id="promptSearchClassSelect"></select>
-                            <div class="training-help">Default is all classes. Pick one to iterate faster on a single label.</div>
+                            <select id="promptSearchClassSelect" style="width: 100%; min-width: 200px;"></select>
+                            <div class="training-help">Default is all classes. Pick one to iterate faster on a single label (generate prompts first to populate).</div>
                         </div>
                         <div class="training-grid">
                             <div>
@@ -893,6 +893,50 @@
                         <div class="training-note">
                             Uses the current prompt list above (including any edits or presets). Positive samples only include images with the class; negatives are sampled from images without the class to reveal false positives.
                         </div>
+                        <div class="training-divider"></div>
+                        <h3>Prompt Recipe Mining</h3>
+                        <p class="training-help">Find an ordered set of prompts + thresholds that covers all GTs for a class with zero (or minimal) false positives.</p>
+                        <div class="training-field">
+                            <label for="promptRecipeClassSelect">Class to target</label>
+                            <select id="promptRecipeClassSelect"></select>
+                            <div class="training-help">Runs on a deterministic sample for this class.</div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="promptRecipeSampleSize">Positive images</label>
+                                <input type="number" id="promptRecipeSampleSize" min="1" value="30" title="How many images containing the class to sample." />
+                            </div>
+                            <div>
+                                <label for="promptRecipeNegatives">Negative images</label>
+                                <input type="number" id="promptRecipeNegatives" min="0" value="10" title="How many images without the class to include for FP checks." />
+                            </div>
+                            <div>
+                                <label for="promptRecipeThresholds">Thresholds (comma sep)</label>
+                                <input type="text" id="promptRecipeThresholds" value="0.2,0.3,0.4" title="Score thresholds to try for each prompt." />
+                            </div>
+                            <div>
+                                <label for="promptRecipeMaxDets">Max detections/image</label>
+                                <input type="number" id="promptRecipeMaxDets" min="1" value="100" />
+                            </div>
+                            <div>
+                                <label for="promptRecipeIouThresh">IoU threshold</label>
+                                <input type="number" id="promptRecipeIouThresh" step="0.05" min="0" max="1" value="0.5" />
+                            </div>
+                            <div>
+                                <label for="promptRecipeSeed">Random seed</label>
+                                <input type="number" id="promptRecipeSeed" value="42" />
+                            </div>
+                            <div>
+                                <label for="promptRecipeExpandCount">Qwen expand (max)</label>
+                                <input type="number" id="promptRecipeExpandCount" min="0" max="50" value="10" title="How many new prompts to request from Qwen." />
+                            </div>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="promptRecipeExpandBtn">Expand prompts with Qwen</button>
+                            <button type="button" class="training-button" id="promptRecipeRunBtn">Mine recipe</button>
+                        </div>
+                        <div class="training-message" id="promptRecipeMessage" role="status"></div>
+                        <div class="training-note">Uses prompts for the selected class (edit in the list above). Runs on positives + optional negatives; tries each threshold per prompt and proposes an ordered recipe.</div>
                     </section>
                     <section class="training-status-section">
                         <h2>Prompts & Results</h2>
@@ -918,6 +962,15 @@
                                 <div id="promptSearchLogs" class="training-log"></div>
                             </div>
                             <div id="promptSearchResults" class="training-history"></div>
+                            <div class="training-subsection">
+                                <h5>Prompt Recipe Mining</h5>
+                                <div class="training-help" id="promptRecipeStatus">Idle</div>
+                                <div class="training-subsection">
+                                    <h5>Recipe log</h5>
+                                    <div id="promptRecipeLogs" class="training-log"></div>
+                                </div>
+                                <div id="promptRecipeResults" class="training-history"></div>
+                            </div>
                         </div>
                     </section>
                 </div>

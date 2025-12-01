@@ -882,6 +882,35 @@ hr {
     align-items: flex-start;
 }
 
+.metrics-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 13px;
+    color: #0f172a;
+}
+
+.metrics-table th,
+.metrics-table td {
+    border: 1px solid #e2e8f0;
+    padding: 6px 8px;
+    text-align: center;
+}
+
+.metrics-table th {
+    background: #f8fafc;
+    font-weight: 700;
+}
+
+.metrics-table tr:nth-child(even) {
+    background: #f8fafc;
+}
+
+.metrics-table tr.highlight {
+    background: #ecfeff;
+    font-weight: 600;
+}
+
 .qwen-train-intro {
     margin: 0;
     font-size: 13px;

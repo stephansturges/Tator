@@ -2294,24 +2294,53 @@ function renderSam3ValMetrics() {
         container.textContent = "No validation metrics yet.";
         return;
     }
-    const latest = vals[vals.length - 1];
-    const rows = vals
+    const valsSorted = [...vals].sort((a, b) => {
+        const ea = Number.isFinite(a.epoch) ? a.epoch : 0;
+        const eb = Number.isFinite(b.epoch) ? b.epoch : 0;
+        return eb - ea; // latest first
+    });
+    const latest = valsSorted[0];
+    const best = valsSorted.reduce((bestSoFar, entry) => {
+        if (Number.isFinite(entry.ap) && (!bestSoFar || entry.ap > bestSoFar.ap)) {
+            return entry;
+        }
+        return bestSoFar;
+    }, null);
+    const rows = valsSorted
         .map((entry, idx) => {
             const ep = Number.isFinite(entry.epoch) ? entry.epoch : `#${idx + 1}`;
             const ap = Number.isFinite(entry.ap) ? entry.ap.toFixed(3) : "–";
             const ap50 = Number.isFinite(entry.ap50) ? entry.ap50.toFixed(3) : "–";
             const ap75 = Number.isFinite(entry.ap75) ? entry.ap75.toFixed(3) : "–";
-            return `<tr><td>${ep}</td><td>${ap}</td><td>${ap50}</td><td>${ap75}</td></tr>`;
+            const ar10 = Number.isFinite(entry.ar10) ? entry.ar10.toFixed(3) : "–";
+            const ar100 = Number.isFinite(entry.ar100) ? entry.ar100.toFixed(3) : "–";
+            const cls = idx === 0 ? "highlight" : "";
+            return `<tr class="${cls}"><td>${ep}</td><td>${ap}</td><td>${ap50}</td><td>${ap75}</td><td>${ar10}</td><td>${ar100}</td></tr>`;
         })
         .join("");
+    const latestLabel = Number.isFinite(latest.epoch) ? `epoch ${latest.epoch}` : `validation #${vals.length}`;
+    const bestLabel =
+        best && Number.isFinite(best.epoch)
+            ? `epoch ${best.epoch} (best AP)`
+            : best
+              ? "best AP"
+              : "n/a";
+    const bestAp = best && Number.isFinite(best.ap) ? best.ap.toFixed(3) : "–";
+    const bestAp50 = best && Number.isFinite(best.ap50) ? best.ap50.toFixed(3) : "–";
+    const bestAp75 = best && Number.isFinite(best.ap75) ? best.ap75.toFixed(3) : "–";
     container.innerHTML = `
-        <div class="training-help">Latest ${
-            Number.isFinite(latest.epoch) ? `epoch ${latest.epoch}` : `validation #${vals.length}`
-        }: AP ${Number.isFinite(latest.ap) ? latest.ap.toFixed(3) : "–"}, AP50 ${
+        <div class="training-help">
+            COCO bbox metrics on the validation set (higher is better).
+            AP is averaged over IoU 0.50–0.95; AP50/AP75 are stricter IoU thresholds; AR10/AR100 are recall with 10/100 detections per image.
+        </div>
+        <div class="training-help">
+            Latest ${latestLabel}: AP ${Number.isFinite(latest.ap) ? latest.ap.toFixed(3) : "–"} • AP50 ${
         Number.isFinite(latest.ap50) ? latest.ap50.toFixed(3) : "–"
-    }, AP75 ${Number.isFinite(latest.ap75) ? latest.ap75.toFixed(3) : "–"}</div>
+    } • AP75 ${Number.isFinite(latest.ap75) ? latest.ap75.toFixed(3) : "–"}
+            ${best ? `<br/>Best ${bestLabel}: AP ${bestAp} • AP50 ${bestAp50} • AP75 ${bestAp75}` : ""}
+        </div>
         <table class="metrics-table">
-            <thead><tr><th>Epoch</th><th>AP</th><th>AP50</th><th>AP75</th></tr></thead>
+            <thead><tr><th>Epoch</th><th>AP (0.50–0.95)</th><th>AP50</th><th>AP75</th><th>AR10</th><th>AR100</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>
     `;

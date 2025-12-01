@@ -6411,6 +6411,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
+        tabElements.promptHelperButton = document.getElementById("tabPromptHelperButton");
         tabElements.sam3LiteTrainButton = document.getElementById("tabSam3LiteTrainButton");
         tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
         tabElements.datasetsButton = document.getElementById("tabDatasetsButton");
@@ -6422,6 +6423,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
+        tabElements.promptHelperPanel = document.getElementById("tabPromptHelper");
         tabElements.sam3LiteTrainPanel = document.getElementById("tabSam3LiteTrain");
         tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
         tabElements.datasetsPanel = document.getElementById("tabDatasets");
@@ -6440,6 +6442,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_TRAIN));
+        }
+        if (tabElements.promptHelperButton) {
+            tabElements.promptHelperButton.addEventListener("click", () => setActiveTab(TAB_PROMPT_HELPER));
         }
         if (tabElements.sam3LiteTrainButton) {
             tabElements.sam3LiteTrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_LITE_TRAIN));
@@ -6480,6 +6485,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
         }
+        if (tabElements.promptHelperButton) {
+            tabElements.promptHelperButton.classList.toggle("active", tabName === TAB_PROMPT_HELPER);
+        }
         if (tabElements.sam3LiteTrainButton) {
             tabElements.sam3LiteTrainButton.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
         }
@@ -6512,6 +6520,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainPanel) {
             tabElements.sam3TrainPanel.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
+        }
+        if (tabElements.promptHelperPanel) {
+            tabElements.promptHelperPanel.classList.toggle("active", tabName === TAB_PROMPT_HELPER);
         }
         if (tabElements.sam3LiteTrainPanel) {
             tabElements.sam3LiteTrainPanel.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);

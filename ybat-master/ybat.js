@@ -1064,6 +1064,27 @@ const sam3TrainState = {
         presets: [],
     };
 
+    const promptSearchElements = {
+        sampleSize: null,
+        negatives: null,
+        precisionFloor: null,
+        scoreThresh: null,
+        maxDets: null,
+        iouThresh: null,
+        seed: null,
+        runButton: null,
+        status: null,
+        logs: null,
+        results: null,
+        message: null,
+    };
+
+    const promptSearchState = {
+        activeJobId: null,
+        pollHandle: null,
+        lastJob: null,
+    };
+
     let promptHelperInitialized = false;
 
     const sam3LiteTrainElements = {
@@ -3299,6 +3320,12 @@ function setPromptHelperMessage(text, tone = "info") {
     promptHelperElements.message.className = `training-message ${tone}`;
 }
 
+function setPromptSearchMessage(text, tone = "info") {
+    if (!promptSearchElements.message) return;
+    promptSearchElements.message.textContent = text || "";
+    promptSearchElements.message.className = `training-message ${tone}`;
+}
+
 function updatePromptHelperDatasetSummary(entry) {
     if (!promptHelperElements.datasetSummary) return;
     if (!entry) {
@@ -3613,6 +3640,197 @@ function renderPromptHelperResults(job) {
     }
 }
 
+function renderPromptSearchResults(job) {
+    if (!promptSearchElements.results || !promptSearchElements.status) return;
+    promptSearchElements.results.innerHTML = "";
+    if (promptSearchElements.logs) promptSearchElements.logs.innerHTML = "";
+    if (job.error) {
+        const err = document.createElement("div");
+        err.className = "training-message error";
+        err.textContent = job.error;
+        promptSearchElements.results.appendChild(err);
+        return;
+    }
+    const result = job.result;
+    if (!result || !Array.isArray(result.classes)) {
+        return;
+    }
+    const cfg = result.config || {};
+    const summaryBits = [
+        `Dataset ${result.dataset_id || ""}`,
+        `${cfg.sample_per_class ?? "?"} pos/imgs`,
+        `${cfg.negatives_per_class ?? 0} neg/imgs`,
+        `score ≥ ${cfg.score_threshold ?? "?"}`,
+        `max dets ${cfg.max_dets ?? "?"}`,
+        `IoU ${cfg.iou_threshold ?? "?"}`,
+        `precision floor ${cfg.precision_floor ?? "?"}`,
+        `seed ${cfg.seed ?? "?"}`,
+    ];
+    if (promptSearchElements.status) {
+        promptSearchElements.status.title = "Search score boosts recall/det-rate but penalizes prompts that fall below the precision floor.";
+        promptSearchElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""}`;
+    }
+    if (promptSearchElements.message) {
+        promptSearchElements.message.textContent = summaryBits.join(" • ");
+    }
+    const frag = document.createDocumentFragment();
+    result.classes.forEach((cls) => {
+        const card = document.createElement("div");
+        card.className = "training-card";
+        const header = document.createElement("div");
+        header.className = "training-card__header";
+        const title = document.createElement("div");
+        title.className = "training-card__title";
+        title.textContent = `${cls.class_name || cls.class_id} (pos ${cls.positive_images || 0} / neg ${cls.negative_images || 0})`;
+        header.appendChild(title);
+        card.appendChild(header);
+        const body = document.createElement("div");
+        body.className = "training-card__body";
+        const table = document.createElement("table");
+        table.className = "metric-table";
+        const thead = document.createElement("thead");
+        thead.innerHTML = `
+                <tr>
+                    <th>Best?</th>
+                    <th>Search score</th>
+                    <th>Prompt</th>
+                    <th>Precision</th>
+                    <th>Recall</th>
+                    <th>Det rate</th>
+                    <th>Avg IoU</th>
+                    <th>Preds</th>
+                    <th>GTs</th>
+                    <th>FPs</th>
+                </tr>
+            `;
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        (cls.candidates || []).forEach((cand, idx) => {
+            const row = document.createElement("tr");
+            if (idx === 0) row.classList.add("metric-table__highlight");
+            const detRate = cand.det_rate ?? 0;
+            row.innerHTML = `
+                    <td>${idx === 0 ? "★" : ""}</td>
+                    <td>${formatMetric(cand.search_score, 3)}</td>
+                    <td>${cand.prompt}</td>
+                    <td>${formatMetric(cand.precision, 3)}</td>
+                    <td>${formatMetric(cand.recall, 3)}</td>
+                    <td>${formatMetric(detRate, 3)}</td>
+                    <td>${formatMetric(cand.avg_iou, 3)}</td>
+                    <td>${cand.preds ?? 0}</td>
+                    <td>${cand.gts ?? 0}</td>
+                    <td>${cand.fps ?? 0}</td>
+                `;
+            tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        body.appendChild(table);
+        card.appendChild(body);
+        frag.appendChild(card);
+    });
+    promptSearchElements.results.appendChild(frag);
+}
+
+async function pollPromptSearchJob(force = false) {
+    if (!promptSearchState.activeJobId) return;
+    if (promptSearchState.pollHandle && !force) {
+        // interval controls timing
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(promptSearchState.activeJobId)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const job = await resp.json();
+        promptSearchState.lastJob = job;
+        if (promptSearchElements.logs && Array.isArray(job.logs)) {
+            const logFrag = document.createDocumentFragment();
+            job.logs.slice(-200).forEach((entry) => {
+                const div = document.createElement("div");
+                div.className = "training-log-line";
+                const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
+                div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
+                logFrag.appendChild(div);
+            });
+            promptSearchElements.logs.innerHTML = "";
+            promptSearchElements.logs.appendChild(logFrag);
+        }
+        if (promptSearchElements.status) {
+            const pct = job.progress ? Math.round(job.progress * 100) : 0;
+            const steps = job.total_steps ? ` • ${job.completed_steps || 0}/${job.total_steps}` : "";
+            promptSearchElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%${steps})`;
+        }
+        if (job.status === "completed" || job.status === "failed") {
+            if (promptSearchState.pollHandle) {
+                clearInterval(promptSearchState.pollHandle);
+                promptSearchState.pollHandle = null;
+            }
+            if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = false;
+            renderPromptSearchResults(job);
+        }
+    } catch (err) {
+        console.error("Prompt search poll failed", err);
+        setPromptSearchMessage(`Poll failed: ${err.message || err}`, "error");
+    }
+}
+
+async function startPromptSearchJob() {
+    const datasetId = promptHelperState.selectedId;
+    if (!datasetId) {
+        setPromptSearchMessage("Select a dataset first.", "warn");
+        return;
+    }
+    if (!promptHelperState.suggestions.length) {
+        setPromptSearchMessage("Generate prompts first, then run search.", "warn");
+        return;
+    }
+    const promptsMap = collectPromptsFromUi();
+    if (!Object.keys(promptsMap).length) {
+        setPromptSearchMessage("Add prompts for at least one class.", "warn");
+        return;
+    }
+    const samplePerClass = readNumberInput(promptSearchElements.sampleSize, { integer: true }) ?? 20;
+    const negativesPerClass = readNumberInput(promptSearchElements.negatives, { integer: true }) ?? 20;
+    const precisionFloor = readNumberInput(promptSearchElements.precisionFloor, { integer: false }) ?? 0.9;
+    const scoreThreshold = readNumberInput(promptSearchElements.scoreThresh, { integer: false }) ?? 0.2;
+    const maxDets = readNumberInput(promptSearchElements.maxDets, { integer: true }) ?? 100;
+    const iouThreshold = readNumberInput(promptSearchElements.iouThresh, { integer: false }) ?? 0.5;
+    const seed = readNumberInput(promptSearchElements.seed, { integer: true }) ?? 42;
+    try {
+        setPromptSearchMessage("Starting prompt search…", "info");
+        if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = true;
+        if (promptSearchElements.status) promptSearchElements.status.textContent = "Starting search…";
+        const payload = {
+            dataset_id: datasetId,
+            sample_per_class: samplePerClass,
+            negatives_per_class: negativesPerClass,
+            score_threshold: scoreThreshold,
+            max_dets: maxDets,
+            iou_threshold: iouThreshold,
+            seed,
+            precision_floor: precisionFloor,
+            prompts_by_class: promptsMap,
+        };
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/search`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        const job = await resp.json();
+        promptSearchState.activeJobId = job.job_id;
+        promptSearchState.lastJob = job;
+        if (promptSearchState.pollHandle) clearInterval(promptSearchState.pollHandle);
+        promptSearchState.pollHandle = setInterval(() => pollPromptSearchJob(), 2000);
+        pollPromptSearchJob(true);
+    } catch (err) {
+        console.error("Prompt search start failed", err);
+        setPromptSearchMessage(`Start failed: ${err.message || err}`, "error");
+        if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = false;
+    }
+}
+
 async function pollPromptHelperJob(force = false) {
     if (!promptHelperState.activeJobId) return;
     if (promptHelperState.pollHandle && !force) {
@@ -3820,6 +4038,18 @@ async function initPromptHelperUi() {
     promptHelperElements.logs = document.getElementById("promptHelperLogs");
     promptHelperElements.message = document.getElementById("promptHelperMessage");
     promptHelperElements.applyButton = document.getElementById("promptHelperApplyBtn");
+    promptSearchElements.sampleSize = document.getElementById("promptSearchSampleSize");
+    promptSearchElements.negatives = document.getElementById("promptSearchNegatives");
+    promptSearchElements.precisionFloor = document.getElementById("promptSearchPrecisionFloor");
+    promptSearchElements.scoreThresh = document.getElementById("promptSearchScoreThresh");
+    promptSearchElements.maxDets = document.getElementById("promptSearchMaxDets");
+    promptSearchElements.iouThresh = document.getElementById("promptSearchIouThresh");
+    promptSearchElements.seed = document.getElementById("promptSearchSeed");
+    promptSearchElements.runButton = document.getElementById("promptSearchRunBtn");
+    promptSearchElements.status = document.getElementById("promptSearchStatus");
+    promptSearchElements.logs = document.getElementById("promptSearchLogs");
+    promptSearchElements.results = document.getElementById("promptSearchResults");
+    promptSearchElements.message = document.getElementById("promptSearchMessage");
     if (promptHelperElements.evaluateButton) {
         promptHelperElements.evaluateButton.disabled = true;
     }
@@ -3835,6 +4065,10 @@ async function initPromptHelperUi() {
             if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = true;
             if (promptHelperElements.results) promptHelperElements.results.innerHTML = "";
             if (promptHelperElements.summary) promptHelperElements.summary.textContent = "";
+            if (promptSearchElements.results) promptSearchElements.results.innerHTML = "";
+            if (promptSearchElements.logs) promptSearchElements.logs.innerHTML = "";
+            if (promptSearchElements.status) promptSearchElements.status.textContent = "Idle";
+            setPromptSearchMessage("");
         });
     }
     if (promptHelperElements.datasetRefresh) {
@@ -3865,9 +4099,15 @@ async function initPromptHelperUi() {
     if (promptHelperElements.applyButton) {
         promptHelperElements.applyButton.addEventListener("click", applyPromptHelperMapping);
     }
+    if (promptSearchElements.runButton) {
+        promptSearchElements.runButton.addEventListener("click", () => {
+            startPromptSearchJob().catch((err) => console.error("Prompt search start failed", err));
+        });
+    }
     await loadPromptHelperDatasets();
     await loadPromptHelperPresets();
     setPromptHelperMessage("Generate suggestions, edit prompts, then evaluate with SAM3.", "info");
+    setPromptSearchMessage("Use the prompts above, then run a targeted search for the best wording.", "info");
 }
 
 function renderSam3History(list) {

@@ -1038,9 +1038,11 @@ const sam3TrainState = {
         iouThresh: null,
         seed: null,
         useQwen: null,
-        startButton: null,
+        generateButton: null,
+        evaluateButton: null,
         status: null,
         summary: null,
+        prompts: null,
         results: null,
         message: null,
         applyButton: null,
@@ -1052,6 +1054,8 @@ const sam3TrainState = {
         activeJobId: null,
         pollHandle: null,
         lastJob: null,
+        suggestions: [],
+        promptsByClass: {},
     };
 
     let promptHelperInitialized = false;
@@ -3339,6 +3343,71 @@ function formatMetric(value, digits = 3) {
     return Number(value).toFixed(digits);
 }
 
+function renderPromptHelperPrompts() {
+    if (!promptHelperElements.prompts) return;
+    promptHelperElements.prompts.innerHTML = "";
+    const classes = promptHelperState.suggestions || [];
+    if (!classes.length) {
+        const empty = document.createElement("div");
+        empty.className = "training-help";
+        empty.textContent = "Generate prompts to edit and evaluate.";
+        promptHelperElements.prompts.appendChild(empty);
+        return;
+    }
+    const frag = document.createDocumentFragment();
+    classes.forEach((cls) => {
+        const card = document.createElement("div");
+        card.className = "training-card";
+        const header = document.createElement("div");
+        header.className = "training-card__header";
+        const title = document.createElement("div");
+        title.className = "training-card__title";
+        const metaBits = [];
+        if (cls.image_count) metaBits.push(`${cls.image_count} images`);
+        if (cls.gt_count) metaBits.push(`${cls.gt_count} boxes`);
+        title.textContent = `${cls.class_name || cls.class_id}${metaBits.length ? ` (${metaBits.join(" / ")})` : ""}`;
+        header.appendChild(title);
+        card.appendChild(header);
+        const body = document.createElement("div");
+        body.className = "training-card__body";
+        const label = document.createElement("label");
+        label.textContent = "Prompts (comma or newline separated)";
+        label.setAttribute("for", `promptHelperInput-${cls.class_id}`);
+        const textarea = document.createElement("textarea");
+        textarea.id = `promptHelperInput-${cls.class_id}`;
+        textarea.rows = 2;
+        const prompts = promptHelperState.promptsByClass[cls.class_id] || cls.default_prompts || [];
+        textarea.value = prompts.join(", ");
+        body.appendChild(label);
+        body.appendChild(textarea);
+        const hint = document.createElement("div");
+        hint.className = "training-help";
+        hint.textContent = "Edit before evaluation; first prompt is used as-is.";
+        body.appendChild(hint);
+        card.appendChild(body);
+        frag.appendChild(card);
+    });
+    promptHelperElements.prompts.appendChild(frag);
+}
+
+function collectPromptsFromUi() {
+    const map = {};
+    (promptHelperState.suggestions || []).forEach((cls) => {
+        const input = document.getElementById(`promptHelperInput-${cls.class_id}`);
+        if (!input) return;
+        const raw = input.value || "";
+        const parts = raw
+            .split(/[\n,]+/)
+            .map((p) => p.trim())
+            .filter(Boolean);
+        if (parts.length) {
+            map[cls.class_id] = parts;
+        }
+    });
+    promptHelperState.promptsByClass = map;
+    return map;
+}
+
 function renderPromptHelperResults(job) {
     if (!promptHelperElements.status || !promptHelperElements.results || !promptHelperElements.summary) return;
     promptHelperElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""}`;
@@ -3433,11 +3502,60 @@ async function pollPromptHelperJob(force = false) {
                 clearInterval(promptHelperState.pollHandle);
                 promptHelperState.pollHandle = null;
             }
+            if (promptHelperElements.evaluateButton) {
+                promptHelperElements.evaluateButton.disabled = false;
+            }
             renderPromptHelperResults(job);
         }
     } catch (err) {
         console.error("Prompt helper poll failed", err);
         setPromptHelperMessage(`Poll failed: ${err.message || err}`, "error");
+    }
+}
+
+async function generatePromptHelperPrompts() {
+    const datasetId = promptHelperState.selectedId;
+    if (!datasetId) {
+        setPromptHelperMessage("Select a dataset first.", "warn");
+        return;
+    }
+    const maxSynonyms = readNumberInput(promptHelperElements.maxSynonyms, { integer: true }) ?? 3;
+    const useQwen = promptHelperElements.useQwen ? !!promptHelperElements.useQwen.checked : true;
+    try {
+        setPromptHelperMessage("Generating prompt suggestions…", "info");
+        if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = true;
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/suggest`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                dataset_id: datasetId,
+                max_synonyms: maxSynonyms,
+                use_qwen: useQwen,
+            }),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        promptHelperState.suggestions = Array.isArray(data.classes) ? data.classes : [];
+        promptHelperState.promptsByClass = {};
+        promptHelperState.suggestions.forEach((cls) => {
+            if (Array.isArray(cls.default_prompts) && cls.default_prompts.length) {
+                promptHelperState.promptsByClass[cls.class_id] = cls.default_prompts;
+            }
+        });
+        promptHelperState.lastJob = null;
+        promptHelperState.activeJobId = null;
+        renderPromptHelperPrompts();
+        if (promptHelperElements.results) promptHelperElements.results.innerHTML = "";
+        if (promptHelperElements.summary) promptHelperElements.summary.textContent = "Prompts ready; run evaluation to score them.";
+        if (promptHelperElements.status) promptHelperElements.status.textContent = "Generated prompts (not evaluated yet).";
+        setPromptHelperMessage("Suggestions ready. Review/edit, then evaluate with SAM3.", "success");
+        if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = false;
+    } catch (err) {
+        console.error("Prompt helper suggest failed", err);
+        setPromptHelperMessage(`Generation failed: ${err.message || err}`, "error");
     }
 }
 
@@ -3454,9 +3572,20 @@ async function startPromptHelperJob() {
     const iouThreshold = readNumberInput(promptHelperElements.iouThresh, { integer: false }) ?? 0.5;
     const seed = readNumberInput(promptHelperElements.seed, { integer: true }) ?? 42;
     const useQwen = promptHelperElements.useQwen ? !!promptHelperElements.useQwen.checked : true;
-    setPromptHelperMessage("Starting prompt helper job…", "info");
+    const promptsMap = collectPromptsFromUi();
+    if (!Object.keys(promptsMap).length) {
+        setPromptHelperMessage("Add prompts for at least one class, or generate suggestions first.", "warn");
+        return;
+    }
+    setPromptHelperMessage("Starting prompt helper evaluation…", "info");
     if (promptHelperElements.applyButton) {
         promptHelperElements.applyButton.disabled = true;
+    }
+    if (promptHelperElements.evaluateButton) {
+        promptHelperElements.evaluateButton.disabled = true;
+    }
+    if (promptHelperElements.status) {
+        promptHelperElements.status.textContent = "Starting evaluation…";
     }
     try {
         const payload = {
@@ -3468,6 +3597,7 @@ async function startPromptHelperJob() {
             iou_threshold: iouThreshold,
             seed,
             use_qwen: useQwen,
+            prompts_by_class: promptsMap,
         };
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs`, {
             method: "POST",
@@ -3530,18 +3660,29 @@ async function initPromptHelperUi() {
     promptHelperElements.iouThresh = document.getElementById("promptHelperIouThresh");
     promptHelperElements.seed = document.getElementById("promptHelperSeed");
     promptHelperElements.useQwen = document.getElementById("promptHelperUseQwen");
-    promptHelperElements.startButton = document.getElementById("promptHelperStartBtn");
+    promptHelperElements.generateButton = document.getElementById("promptHelperGenerateBtn");
+    promptHelperElements.evaluateButton = document.getElementById("promptHelperEvaluateBtn");
     promptHelperElements.status = document.getElementById("promptHelperStatus");
     promptHelperElements.summary = document.getElementById("promptHelperSummary");
+    promptHelperElements.prompts = document.getElementById("promptHelperPrompts");
     promptHelperElements.results = document.getElementById("promptHelperResults");
     promptHelperElements.message = document.getElementById("promptHelperMessage");
     promptHelperElements.applyButton = document.getElementById("promptHelperApplyBtn");
+    if (promptHelperElements.evaluateButton) {
+        promptHelperElements.evaluateButton.disabled = true;
+    }
 
     if (promptHelperElements.datasetSelect) {
         promptHelperElements.datasetSelect.addEventListener("change", (e) => {
             promptHelperState.selectedId = e.target.value;
             const entry = promptHelperState.datasets.find((d) => d.id === promptHelperState.selectedId);
             updatePromptHelperDatasetSummary(entry);
+            promptHelperState.suggestions = [];
+            promptHelperState.promptsByClass = {};
+            renderPromptHelperPrompts();
+            if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = true;
+            if (promptHelperElements.results) promptHelperElements.results.innerHTML = "";
+            if (promptHelperElements.summary) promptHelperElements.summary.textContent = "";
         });
     }
     if (promptHelperElements.datasetRefresh) {
@@ -3549,8 +3690,13 @@ async function initPromptHelperUi() {
             loadPromptHelperDatasets().catch((err) => console.error("Prompt helper dataset refresh failed", err));
         });
     }
-    if (promptHelperElements.startButton) {
-        promptHelperElements.startButton.addEventListener("click", () => {
+    if (promptHelperElements.generateButton) {
+        promptHelperElements.generateButton.addEventListener("click", () => {
+            generatePromptHelperPrompts().catch((err) => console.error("Prompt helper generate failed", err));
+        });
+    }
+    if (promptHelperElements.evaluateButton) {
+        promptHelperElements.evaluateButton.addEventListener("click", () => {
             startPromptHelperJob().catch((err) => console.error("Prompt helper start failed", err));
         });
     }
@@ -3558,7 +3704,7 @@ async function initPromptHelperUi() {
         promptHelperElements.applyButton.addEventListener("click", applyPromptHelperMapping);
     }
     await loadPromptHelperDatasets();
-    setPromptHelperMessage("Configure options and click Generate + evaluate.", "info");
+    setPromptHelperMessage("Generate suggestions, edit prompts, then evaluate with SAM3.", "info");
 }
 
 function renderSam3History(list) {

@@ -1530,12 +1530,17 @@ def _run_sam3_text_inference(
     limit: Optional[int],
 ) -> List[QwenDetection]:
     _, processor, _ = _ensure_sam3_text_runtime()
+    try:
+        processor.set_confidence_threshold(float(threshold))
+    except Exception:
+        # If the processor refuses the threshold, continue with its default.
+        pass
     normalized_limit: Optional[int]
     if limit is None:
         normalized_limit = None
     else:
         try:
-            normalized_limit = max(1, min(int(limit), 100))
+            normalized_limit = max(1, int(limit))
         except (TypeError, ValueError):
             normalized_limit = None
     state = processor.set_image(pil_img)
@@ -3863,6 +3868,9 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
                     continue
                 if any(ch in normalized for ch in "{}[]:\""):
                     continue
+                alpha_chars = re.sub(r"[^A-Za-z]", "", normalized)
+                if len(alpha_chars) < 3:
+                    continue
                 if len(normalized) > 40:
                     continue
                 if not re.search(r"[A-Za-z]", normalized):
@@ -3887,6 +3895,41 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
     head = ordered[:1]
     tail = ordered[1 : 1 + max_synonyms]
     return head + tail
+
+
+def _suggest_prompts_for_dataset(payload: PromptHelperSuggestRequest) -> Dict[str, Any]:
+    dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+    coco, _, _ = _load_coco_index(dataset_root)
+    categories = coco.get("categories") or []
+    cat_to_images: Dict[int, set[int]] = {}
+    cat_to_gts: Dict[int, int] = {}
+    for ann in coco.get("annotations", []):
+        try:
+            cat_id = int(ann["category_id"])
+            img_id = int(ann["image_id"])
+        except Exception:
+            continue
+        cat_to_images.setdefault(cat_id, set()).add(img_id)
+        cat_to_gts[cat_id] = cat_to_gts.get(cat_id, 0) + 1
+    classes: List[Dict[str, Any]] = []
+    for idx, cat in enumerate(categories):
+        cat_id = int(cat.get("id", idx))
+        class_name = str(cat.get("name", f"class_{cat_id}"))
+        prompts = _generate_prompt_variants_for_class(class_name, payload.max_synonyms, payload.use_qwen)
+        classes.append(
+            {
+                "class_id": cat_id,
+                "class_name": class_name,
+                "default_prompts": prompts,
+                "image_count": len(cat_to_images.get(cat_id, set())),
+                "gt_count": cat_to_gts.get(cat_id, 0),
+            }
+        )
+    return {
+        "dataset_id": payload.dataset_id,
+        "config": payload.dict(),
+        "classes": classes,
+    }
 
 
 def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
@@ -4026,6 +4069,12 @@ def _evaluate_prompt_for_class(
     }
 
 
+class PromptHelperSuggestRequest(BaseModel):
+    dataset_id: str
+    max_synonyms: int = Field(3, ge=0, le=10)
+    use_qwen: bool = True
+
+
 class PromptHelperRequest(BaseModel):
     dataset_id: str
     sample_per_class: int = Field(10, ge=1, le=1000)
@@ -4035,6 +4084,8 @@ class PromptHelperRequest(BaseModel):
     iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
     seed: int = 42
     use_qwen: bool = True
+    # Optional explicit prompts provided by the user; key is category_id.
+    prompts_by_class: Optional[Dict[int, List[str]]] = None
 
 
 def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
@@ -4070,6 +4121,16 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
             except Exception:
                 continue
             cat_to_images.setdefault(cat_id, set()).add(img_id)
+        prompts_map: Dict[int, List[str]] = {}
+        if payload.prompts_by_class:
+            for k, vals in payload.prompts_by_class.items():
+                try:
+                    cid = int(k)
+                except Exception:
+                    continue
+                cleaned = [v.strip() for v in vals if isinstance(v, str) and v.strip()]
+                if cleaned:
+                    prompts_map[cid] = cleaned
         results: List[Dict[str, Any]] = []
         total_classes = len(categories) or 1
         image_cache: Dict[int, Image.Image] = {}
@@ -4079,11 +4140,13 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
             job.message = f"Evaluating {class_name} ({idx + 1}/{total_classes})…"
             job.progress = (idx) / total_classes
             job.updated_at = time.time()
-            candidates = _generate_prompt_variants_for_class(
-                class_name,
-                payload.max_synonyms,
-                payload.use_qwen,
-            )
+            candidates = prompts_map.get(cat_id)
+            if not candidates:
+                candidates = _generate_prompt_variants_for_class(
+                    class_name,
+                    payload.max_synonyms,
+                    payload.use_qwen,
+                )
             sampled_images = _sample_images_for_category(
                 cat_id,
                 list(cat_to_images.get(cat_id, set())),
@@ -4139,6 +4202,11 @@ def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     thread = threading.Thread(target=_run_prompt_helper_job, args=(job, payload), daemon=True)
     thread.start()
     return job
+
+
+@app.post("/sam3/prompt_helper/suggest")
+def prompt_helper_suggest(payload: PromptHelperSuggestRequest):
+    return _suggest_prompts_for_dataset(payload)
 
 
 @app.post("/sam3/prompt_helper/jobs")

@@ -827,18 +827,23 @@
                             <label title="Use Qwen to brainstorm human-friendly phrases. Turn off to only use your raw class names + simple cleaned variants."><input type="checkbox" id="promptHelperUseQwen" checked /> Use Qwen to propose phrases</label>
                         </div>
                         <div class="training-actions">
-                            <button type="button" class="training-button" id="promptHelperStartBtn">Generate + evaluate</button>
+                            <button type="button" class="training-button" id="promptHelperGenerateBtn">Generate prompts</button>
+                            <button type="button" class="training-button" id="promptHelperEvaluateBtn" disabled>Evaluate with SAM3</button>
                         </div>
                         <div class="training-note">
-                            <strong>How scoring works:</strong> we sample images per class, run SAM3 text prompts (one prompt at a time), and compute precision/recall-style scores vs. ground truth boxes. Higher detects/image and recall mean better alignment. The seed keeps sampling deterministic.
+                            <strong>Flow:</strong> generate/edit prompts, then run evaluation. Scoring samples images per class, runs SAM3 text prompts one at a time, and reports precision/recall-style stats against ground truth boxes.
                         </div>
                         <div class="training-message" id="promptHelperMessage" role="status"></div>
                     </section>
                     <section class="training-status-section">
-                        <h2>Results</h2>
+                        <h2>Prompts & Results</h2>
                         <div class="training-help" id="promptHelperStatus">Idle</div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="promptHelperApplyBtn" disabled>Apply top prompts to SAM3 training</button>
+                        </div>
+                        <div class="training-subsection">
+                            <h4>Prompts to evaluate</h4>
+                            <div id="promptHelperPrompts"></div>
                         </div>
                         <div class="training-summary" id="promptHelperSummary"></div>
                         <div id="promptHelperResults" class="training-history"></div>

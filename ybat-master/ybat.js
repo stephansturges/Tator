@@ -2318,9 +2318,7 @@ function renderSam3ValMetrics() {
 }
 
 const sam3EtaState = {
-    lastProgress: null,
-    lastTimestamp: null,
-    smoothedRate: null,
+    startTime: null,
 };
 
 const sam3LiteEtaState = {
@@ -2377,9 +2375,7 @@ function formatEta(seconds) {
 }
 
 function resetSam3Eta() {
-    sam3EtaState.lastProgress = null;
-    sam3EtaState.lastTimestamp = null;
-    sam3EtaState.smoothedRate = null;
+    sam3EtaState.startTime = null;
 }
 
 function computeSam3Progress(job) {
@@ -2438,27 +2434,18 @@ function computeSam3LiteProgress(job) {
 
 function updateSam3Eta(progress) {
     const now = Date.now();
-    if (sam3EtaState.lastProgress === null || progress < sam3EtaState.lastProgress) {
-        sam3EtaState.lastProgress = progress;
-        sam3EtaState.lastTimestamp = now;
-        sam3EtaState.smoothedRate = null;
+    if (!Number.isFinite(progress) || progress <= 0) {
+        sam3EtaState.startTime = sam3EtaState.startTime || now;
         return null;
     }
-    const deltaP = progress - sam3EtaState.lastProgress;
-    const deltaT = (now - sam3EtaState.lastTimestamp) / 1000;
-    if (deltaP > 0 && deltaT > 0.2) {
-        const instRate = deltaP / deltaT; // progress per second
-        if (instRate > 0) {
-            sam3EtaState.smoothedRate = sam3EtaState.smoothedRate
-                ? sam3EtaState.smoothedRate * 0.7 + instRate * 0.3
-                : instRate;
-            const remaining = (1 - progress) / sam3EtaState.smoothedRate;
-            sam3EtaState.lastProgress = progress;
-            sam3EtaState.lastTimestamp = now;
-            return remaining;
-        }
+    if (sam3EtaState.startTime === null) {
+        sam3EtaState.startTime = now;
+        return null;
     }
-    return sam3EtaState.smoothedRate ? (1 - progress) / sam3EtaState.smoothedRate : null;
+    const elapsed = (now - sam3EtaState.startTime) / 1000; // seconds
+    if (elapsed <= 0) return null;
+    const remaining = elapsed * (1 - progress) / progress;
+    return remaining > 0 ? remaining : null;
 }
 
 function resetSam3LiteEta() {

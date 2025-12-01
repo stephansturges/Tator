@@ -1086,6 +1086,29 @@ const sam3TrainState = {
         lastJob: null,
     };
 
+    const promptRecipeElements = {
+        classSelect: null,
+        sampleSize: null,
+        negatives: null,
+        thresholds: null,
+        maxDets: null,
+        iouThresh: null,
+        seed: null,
+        expandCount: null,
+        expandButton: null,
+        runButton: null,
+        status: null,
+        logs: null,
+        results: null,
+        message: null,
+    };
+
+    const promptRecipeState = {
+        activeJobId: null,
+        pollHandle: null,
+        lastJob: null,
+    };
+
     let promptHelperInitialized = false;
 
     const sam3LiteTrainElements = {
@@ -3321,11 +3344,38 @@ function setPromptHelperMessage(text, tone = "info") {
     promptHelperElements.message.className = `training-message ${tone}`;
 }
 
-function setPromptSearchMessage(text, tone = "info") {
-    if (!promptSearchElements.message) return;
-    promptSearchElements.message.textContent = text || "";
-    promptSearchElements.message.className = `training-message ${tone}`;
-}
+    function setPromptSearchMessage(text, tone = "info") {
+        if (!promptSearchElements.message) return;
+        promptSearchElements.message.textContent = text || "";
+        promptSearchElements.message.className = `training-message ${tone}`;
+    }
+
+    function setPromptRecipeMessage(text, tone = "info") {
+        if (!promptRecipeElements.message) return;
+        promptRecipeElements.message.textContent = text || "";
+        promptRecipeElements.message.className = `training-message ${tone}`;
+    }
+
+    function readThresholdList(inputEl, fallback = 0.2) {
+        if (!inputEl) return [fallback];
+        const raw = inputEl.value || "";
+        const parts = raw
+            .split(/[,\s]+/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => parseFloat(s))
+            .filter((v) => !Number.isNaN(v) && v >= 0 && v <= 1);
+        if (!parts.length) return [fallback];
+        const seen = new Set();
+        const cleaned = [];
+        parts.forEach((v) => {
+            const key = v.toFixed(4);
+            if (seen.has(key)) return;
+            seen.add(key);
+            cleaned.push(v);
+        });
+        return cleaned;
+    }
 
 function updatePromptHelperDatasetSummary(entry) {
     if (!promptHelperElements.datasetSummary) return;
@@ -3735,6 +3785,178 @@ function renderPromptSearchResults(job) {
     promptSearchElements.results.appendChild(frag);
 }
 
+function renderPromptRecipeResults(job) {
+    if (!promptRecipeElements.results || !promptRecipeElements.status) return;
+    promptRecipeElements.results.innerHTML = "";
+    if (promptRecipeElements.logs) promptRecipeElements.logs.innerHTML = "";
+    if (job.error) {
+        const err = document.createElement("div");
+        err.className = "training-message error";
+        err.textContent = job.error;
+        promptRecipeElements.results.appendChild(err);
+        return;
+    }
+    const result = job.result;
+    if (!result) return;
+    const recipe = result.recipe || {};
+    const summary = recipe.summary || {};
+    if (promptRecipeElements.status) {
+        promptRecipeElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""}`;
+        promptRecipeElements.status.title = "Recipe tries to cover all GTs in the sample with zero/low FPs.";
+    }
+    const frag = document.createDocumentFragment();
+    const summaryCard = document.createElement("div");
+    summaryCard.className = "training-card";
+    const summaryBody = document.createElement("div");
+    summaryBody.className = "training-card__body";
+    const coverageRate = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0";
+    summaryBody.innerHTML = `
+        <div><strong>Class:</strong> ${escapeHtml(result.class_name || result.class_id)}</div>
+        <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${coverageRate}%)
+        • FPs: ${summary.fps || 0}
+        • Duplicates: ${summary.duplicates || 0}
+        • Pos imgs: ${result.positive_images || 0}
+        • Neg imgs: ${result.negative_images || 0}</div>
+    `;
+    summaryCard.appendChild(summaryBody);
+    frag.appendChild(summaryCard);
+
+    const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+    if (steps.length) {
+        const stepCard = document.createElement("div");
+        stepCard.className = "training-card";
+        const body = document.createElement("div");
+        body.className = "training-card__body";
+        const table = document.createElement("table");
+        table.className = "metric-table";
+        const thead = document.createElement("thead");
+        thead.innerHTML = `
+            <tr>
+                <th>#</th>
+                <th>Prompt</th>
+                <th>Thr</th>
+                <th>Gain</th>
+                <th>Cov%</th>
+                <th>FPs</th>
+                <th>Dup</th>
+                <th>Prec</th>
+                <th>Rec</th>
+                <th>Det rate</th>
+            </tr>
+        `;
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        steps.forEach((step, idx) => {
+            const cov = Number.isFinite(step.coverage_after) ? (step.coverage_after * 100).toFixed(1) : "0";
+            const row = document.createElement("tr");
+            row.innerHTML = `
+                <td>${idx + 1}</td>
+                <td>${escapeHtml(step.prompt || "")}</td>
+                <td>${step.threshold ?? "–"}</td>
+                <td>${step.gain ?? 0}</td>
+                <td>${cov}</td>
+                <td>${step.fps ?? 0}</td>
+                <td>${step.duplicates ?? 0}</td>
+                <td>${formatMetric(step.precision, 3)}</td>
+                <td>${formatMetric(step.recall, 3)}</td>
+                <td>${formatMetric(step.det_rate, 3)}</td>
+            `;
+            tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        body.appendChild(table);
+        stepCard.appendChild(body);
+        frag.appendChild(stepCard);
+    }
+
+    const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+    if (candidates.length) {
+        const candCard = document.createElement("div");
+        candCard.className = "training-card";
+        const body = document.createElement("div");
+        body.className = "training-card__body";
+        const table = document.createElement("table");
+        table.className = "metric-table";
+        const thead = document.createElement("thead");
+        thead.innerHTML = `
+            <tr>
+                <th>Prompt</th>
+                <th>Thr</th>
+                <th>Matched GT</th>
+                <th>FPs</th>
+                <th>Prec</th>
+                <th>Rec</th>
+                <th>Det rate</th>
+                <th>Avg IoU</th>
+                <th>Preds</th>
+                <th>GTs</th>
+            </tr>
+        `;
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        candidates.forEach((cand) => {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+                <td>${escapeHtml(cand.prompt || "")}</td>
+                <td>${cand.threshold ?? "–"}</td>
+                <td>${cand.matched_gt ?? 0}</td>
+                <td>${cand.fps ?? 0}</td>
+                <td>${formatMetric(cand.precision, 3)}</td>
+                <td>${formatMetric(cand.recall, 3)}</td>
+                <td>${formatMetric(cand.det_rate, 3)}</td>
+                <td>${formatMetric(cand.avg_iou, 3)}</td>
+                <td>${cand.preds ?? 0}</td>
+                <td>${cand.gts ?? 0}</td>
+            `;
+            tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        body.appendChild(table);
+        candCard.appendChild(body);
+        frag.appendChild(candCard);
+    }
+
+    const coverage = Array.isArray(result.coverage_by_image) ? result.coverage_by_image : [];
+    if (coverage.length) {
+        const covCard = document.createElement("div");
+        covCard.className = "training-card";
+        const body = document.createElement("div");
+        body.className = "training-card__body";
+        const list = document.createElement("div");
+        coverage.slice(0, 40).forEach((entry) => {
+            const hits = (entry.hits || [])
+                .map((h) => `#${(h.step ?? 0) + 1}(${h.matched || 0}/${h.fps || 0}fp)`)
+                .join(", ");
+            const div = document.createElement("div");
+            div.className = "training-history-item";
+            div.textContent = `${entry.file_name || entry.image_id}: GT ${entry.gt || 0}, hits [${hits || "none"}]`;
+            list.appendChild(div);
+        });
+        if (coverage.length > 40) {
+            const more = document.createElement("div");
+            more.className = "training-help";
+            more.textContent = `Showing first 40 of ${coverage.length} images.`;
+            list.appendChild(more);
+        }
+        body.appendChild(list);
+        covCard.appendChild(body);
+        frag.appendChild(covCard);
+    }
+
+    promptRecipeElements.results.appendChild(frag);
+    if (promptRecipeElements.logs && Array.isArray(job.logs)) {
+        const logFrag = document.createDocumentFragment();
+        job.logs.slice(-200).forEach((entry) => {
+            const div = document.createElement("div");
+            div.className = "training-log-line";
+            const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
+            div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
+            logFrag.appendChild(div);
+        });
+        promptRecipeElements.logs.appendChild(logFrag);
+    }
+}
+
 async function pollPromptSearchJob(force = false) {
     if (!promptSearchState.activeJobId) return;
     if (promptSearchState.pollHandle && !force) {
@@ -3773,6 +3995,158 @@ async function pollPromptSearchJob(force = false) {
     } catch (err) {
         console.error("Prompt search poll failed", err);
         setPromptSearchMessage(`Poll failed: ${err.message || err}`, "error");
+    }
+}
+
+async function pollPromptRecipeJob(force = false) {
+    if (!promptRecipeState.activeJobId) return;
+    if (promptRecipeState.pollHandle && !force) {
+        // interval controls timing
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(promptRecipeState.activeJobId)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const job = await resp.json();
+        promptRecipeState.lastJob = job;
+        if (promptRecipeElements.logs && Array.isArray(job.logs)) {
+            const logFrag = document.createDocumentFragment();
+            job.logs.slice(-200).forEach((entry) => {
+                const div = document.createElement("div");
+                div.className = "training-log-line";
+                const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
+                div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
+                logFrag.appendChild(div);
+            });
+            promptRecipeElements.logs.innerHTML = "";
+            promptRecipeElements.logs.appendChild(logFrag);
+        }
+        if (promptRecipeElements.status) {
+            const pct = job.progress ? Math.round(job.progress * 100) : 0;
+            const steps = job.total_steps ? ` • ${job.completed_steps || 0}/${job.total_steps}` : "";
+            promptRecipeElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%${steps})`;
+        }
+        if (job.status === "completed" || job.status === "failed") {
+            if (promptRecipeState.pollHandle) {
+                clearInterval(promptRecipeState.pollHandle);
+                promptRecipeState.pollHandle = null;
+            }
+            if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = false;
+            renderPromptRecipeResults(job);
+        }
+    } catch (err) {
+        console.error("Prompt recipe poll failed", err);
+        setPromptRecipeMessage(`Poll failed: ${err.message || err}`, "error");
+    }
+}
+
+async function startPromptRecipeJob() {
+    const datasetId = promptHelperState.selectedId;
+    if (!datasetId) {
+        setPromptRecipeMessage("Select a dataset first.", "warn");
+        return;
+    }
+    const targetVal = promptRecipeElements.classSelect?.value;
+    const classId = targetVal ? parseInt(targetVal, 10) : NaN;
+    if (Number.isNaN(classId)) {
+        setPromptRecipeMessage("Choose a class to target.", "warn");
+        return;
+    }
+    const promptsMap = collectPromptsFromUi();
+    const prompts = promptsMap[classId];
+    if (!prompts || !prompts.length) {
+        setPromptRecipeMessage("Add prompts for the selected class.", "warn");
+        return;
+    }
+    const sampleSize = readNumberInput(promptRecipeElements.sampleSize, { integer: true }) ?? 30;
+    const negatives = readNumberInput(promptRecipeElements.negatives, { integer: true }) ?? 10;
+    const maxDets = readNumberInput(promptRecipeElements.maxDets, { integer: true }) ?? 100;
+    const iouThreshold = readNumberInput(promptRecipeElements.iouThresh, { integer: false }) ?? 0.5;
+    const seed = readNumberInput(promptRecipeElements.seed, { integer: true }) ?? 42;
+    const thresholds = readThresholdList(promptRecipeElements.thresholds, 0.2);
+    const scoreThreshold = thresholds.length ? thresholds[0] : 0.2;
+    const payload = {
+        dataset_id: datasetId,
+        class_id: classId,
+        sample_size: sampleSize,
+        negatives,
+        max_dets: maxDets,
+        iou_threshold: iouThreshold,
+        seed,
+        score_threshold: scoreThreshold,
+        prompts: prompts.map((p) => ({ prompt: p, thresholds })),
+    };
+    try {
+        setPromptRecipeMessage("Starting recipe mining…", "info");
+        if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = true;
+        if (promptRecipeElements.status) promptRecipeElements.status.textContent = "Starting recipe job…";
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/recipe`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        const job = await resp.json();
+        promptRecipeState.activeJobId = job.job_id;
+        promptRecipeState.lastJob = job;
+        if (promptRecipeState.pollHandle) clearInterval(promptRecipeState.pollHandle);
+        promptRecipeState.pollHandle = setInterval(() => pollPromptRecipeJob(), 2000);
+        pollPromptRecipeJob(true);
+    } catch (err) {
+        console.error("Prompt recipe start failed", err);
+        setPromptRecipeMessage(err.message || "Start failed", "error");
+        if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = false;
+    }
+}
+
+async function expandPromptRecipePrompts() {
+    const datasetId = promptHelperState.selectedId;
+    if (!datasetId) {
+        setPromptRecipeMessage("Select a dataset first.", "warn");
+        return;
+    }
+    const targetVal = promptRecipeElements.classSelect?.value;
+    const classId = targetVal ? parseInt(targetVal, 10) : NaN;
+    if (Number.isNaN(classId)) {
+        setPromptRecipeMessage("Choose a class to expand.", "warn");
+        return;
+    }
+    const expandCount = readNumberInput(promptRecipeElements.expandCount, { integer: true }) ?? 10;
+    const promptsMap = collectPromptsFromUi();
+    const prompts = promptsMap[classId] || [];
+    if (!prompts.length) {
+        setPromptRecipeMessage("Add at least one prompt for the class, then expand.", "warn");
+        return;
+    }
+    try {
+        setPromptRecipeMessage("Requesting Qwen expansions…", "info");
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/expand`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                dataset_id: datasetId,
+                class_id: classId,
+                base_prompts: prompts,
+                max_new: expandCount,
+            }),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        const combined = Array.isArray(data.combined) ? data.combined : prompts;
+        const target = document.getElementById(`promptHelperInput-${classId}`);
+        if (target) {
+            target.value = combined.join(", ");
+        }
+        promptHelperState.promptsByClass[classId] = combined;
+        setPromptRecipeMessage(`Added ${Math.max(0, combined.length - prompts.length)} new prompts from Qwen.`, "success");
+    } catch (err) {
+        console.error("Prompt recipe expand failed", err);
+        setPromptRecipeMessage(err.message || "Expand failed", "error");
     }
 }
 
@@ -4064,6 +4438,20 @@ async function initPromptHelperUi() {
     promptSearchElements.logs = document.getElementById("promptSearchLogs");
     promptSearchElements.results = document.getElementById("promptSearchResults");
     promptSearchElements.message = document.getElementById("promptSearchMessage");
+    promptRecipeElements.classSelect = document.getElementById("promptRecipeClassSelect");
+    promptRecipeElements.sampleSize = document.getElementById("promptRecipeSampleSize");
+    promptRecipeElements.negatives = document.getElementById("promptRecipeNegatives");
+    promptRecipeElements.thresholds = document.getElementById("promptRecipeThresholds");
+    promptRecipeElements.maxDets = document.getElementById("promptRecipeMaxDets");
+    promptRecipeElements.iouThresh = document.getElementById("promptRecipeIouThresh");
+    promptRecipeElements.seed = document.getElementById("promptRecipeSeed");
+    promptRecipeElements.expandCount = document.getElementById("promptRecipeExpandCount");
+    promptRecipeElements.expandButton = document.getElementById("promptRecipeExpandBtn");
+    promptRecipeElements.runButton = document.getElementById("promptRecipeRunBtn");
+    promptRecipeElements.status = document.getElementById("promptRecipeStatus");
+    promptRecipeElements.logs = document.getElementById("promptRecipeLogs");
+    promptRecipeElements.results = document.getElementById("promptRecipeResults");
+    promptRecipeElements.message = document.getElementById("promptRecipeMessage");
     if (promptHelperElements.evaluateButton) {
         promptHelperElements.evaluateButton.disabled = true;
     }
@@ -4083,6 +4471,28 @@ async function initPromptHelperUi() {
             if (promptSearchElements.logs) promptSearchElements.logs.innerHTML = "";
             if (promptSearchElements.status) promptSearchElements.status.textContent = "Idle";
             setPromptSearchMessage("");
+            if (promptRecipeElements.results) promptRecipeElements.results.innerHTML = "";
+            if (promptRecipeElements.logs) promptRecipeElements.logs.innerHTML = "";
+            if (promptRecipeElements.status) promptRecipeElements.status.textContent = "Idle";
+            setPromptRecipeMessage("");
+            if (promptRecipeState.pollHandle) {
+                clearInterval(promptRecipeState.pollHandle);
+                promptRecipeState.pollHandle = null;
+            }
+            promptRecipeState.activeJobId = null;
+            promptRecipeState.lastJob = null;
+            if (promptSearchElements.classSelect) {
+                promptSearchElements.classSelect.innerHTML = "";
+                const allOpt = document.createElement("option");
+                allOpt.value = "all";
+                allOpt.textContent = "All classes";
+                promptSearchElements.classSelect.appendChild(allOpt);
+                promptSearchElements.classSelect.disabled = true;
+            }
+            if (promptRecipeElements.classSelect) {
+                promptRecipeElements.classSelect.innerHTML = "";
+                promptRecipeElements.classSelect.disabled = true;
+            }
             populatePromptSearchClassSelect();
         });
     }
@@ -4119,27 +4529,64 @@ async function initPromptHelperUi() {
             startPromptSearchJob().catch((err) => console.error("Prompt search start failed", err));
         });
     }
+    if (promptRecipeElements.runButton) {
+        promptRecipeElements.runButton.addEventListener("click", () => {
+            startPromptRecipeJob().catch((err) => console.error("Prompt recipe start failed", err));
+        });
+    }
+    if (promptRecipeElements.expandButton) {
+        promptRecipeElements.expandButton.addEventListener("click", () => {
+            expandPromptRecipePrompts().catch((err) => console.error("Prompt recipe expand failed", err));
+        });
+    }
     await loadPromptHelperDatasets();
     await loadPromptHelperPresets();
     setPromptHelperMessage("Generate suggestions, edit prompts, then evaluate with SAM3.", "info");
     setPromptSearchMessage("Use the prompts above, then run a targeted search for the best wording.", "info");
+    setPromptRecipeMessage("Mine an ordered recipe per class using the prompts you’ve edited above.", "info");
+    // Make sure class dropdowns are visible/enabled when prompts are present.
+    populatePromptSearchClassSelect();
 }
 
 function populatePromptSearchClassSelect() {
-    if (!promptSearchElements.classSelect) return;
-    const select = promptSearchElements.classSelect;
-    select.innerHTML = "";
-    const allOpt = document.createElement("option");
-    allOpt.value = "all";
-    allOpt.textContent = "All classes";
-    select.appendChild(allOpt);
-    (promptHelperState.suggestions || []).forEach((cls) => {
-        const opt = document.createElement("option");
-        opt.value = cls.class_id;
-        opt.textContent = cls.class_name || cls.class_id;
-        select.appendChild(opt);
-    });
-    select.value = "all";
+    const classes = promptHelperState.suggestions || [];
+    if (promptSearchElements.classSelect) {
+        const select = promptSearchElements.classSelect;
+        select.innerHTML = "";
+        const allOpt = document.createElement("option");
+        allOpt.value = "all";
+        allOpt.textContent = "All classes";
+        select.appendChild(allOpt);
+        classes.forEach((cls) => {
+            const opt = document.createElement("option");
+            opt.value = cls.class_id;
+            opt.textContent = cls.class_name || cls.class_id;
+            select.appendChild(opt);
+        });
+        select.value = "all";
+        select.disabled = !classes.length;
+    }
+    if (promptRecipeElements.classSelect) {
+        const select = promptRecipeElements.classSelect;
+        select.innerHTML = "";
+        classes.forEach((cls) => {
+            const opt = document.createElement("option");
+            opt.value = cls.class_id;
+            opt.textContent = cls.class_name || cls.class_id;
+            select.appendChild(opt);
+        });
+        if (classes.length) {
+            select.value = classes[0].class_id;
+            select.disabled = false;
+        } else {
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "No classes yet";
+            select.appendChild(placeholder);
+            select.value = "";
+            select.disabled = true;
+        }
+    }
 }
 
 function renderSam3History(list) {

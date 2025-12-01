@@ -4214,6 +4214,352 @@ class PromptHelperSearchRequest(BaseModel):
     class_id: Optional[int] = None
 
 
+class PromptRecipePrompt(BaseModel):
+    prompt: str
+    thresholds: Optional[List[float]] = None
+
+
+class PromptRecipeRequest(BaseModel):
+    dataset_id: str
+    class_id: int
+    prompts: List[PromptRecipePrompt]
+    sample_size: int = Field(30, ge=1, le=5000)
+    negatives: int = Field(0, ge=0, le=5000)
+    max_dets: int = Field(100, ge=1, le=2000)
+    iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    seed: int = 42
+    score_threshold: float = Field(0.2, ge=0.0, le=1.0)
+    threshold_candidates: Optional[List[float]] = None
+
+
+class PromptRecipeExpandRequest(BaseModel):
+    dataset_id: str
+    class_id: int
+    base_prompts: List[str]
+    max_new: int = Field(10, ge=0, le=50)
+
+
+def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new: int) -> List[str]:
+    """Use Qwen to brainstorm additional prompt variants for a class."""
+    cleaned_base = []
+    for entry in base_prompts:
+        if not isinstance(entry, str):
+            continue
+        val = entry.strip()
+        if val:
+            cleaned_base.append(val)
+    if max_new <= 0 or not cleaned_base:
+        return []
+    seen = {p.lower() for p in cleaned_base}
+    try:
+        prompt_text = (
+            "You are helping to find robust text prompts for SAM3 text detection. "
+            f"The target class is '{_humanize_class_name(class_name)}'. "
+            f"Existing prompts: {', '.join(cleaned_base)}. "
+            f"Generate up to {max_new} additional, diverse prompts (1-4 words) that would still correctly describe this class, "
+            "including common synonyms, sub-types, or everyday phrases users might use. "
+            "Avoid false positives by staying specific to the class. "
+            "Return a simple comma-separated list, no numbering or JSON."
+        )
+        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+        suggestions: List[str] = []
+        for part in re.split(r"[\\n;,]+", text):
+            normalized = part.strip().strip('"').strip("'")
+            if not normalized:
+                continue
+            if any(ch in normalized for ch in "{}[]:\""):
+                continue
+            if len(normalized) > 48:
+                continue
+            words = normalized.split()
+            if not words or len(words) > 5:
+                continue
+            if any(len(w) < 2 for w in words):
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            suggestions.append(normalized)
+        return suggestions[:max_new]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
+        return []
+
+
+def _normalize_recipe_thresholds(thresholds: Optional[List[float]], fallback: float, limit: int = 20) -> List[float]:
+    values = thresholds if thresholds is not None else [fallback]
+    cleaned: List[float] = []
+    seen = set()
+    for raw in values:
+        try:
+            val = float(raw)
+        except Exception:
+            continue
+        if val < 0.0 or val > 1.0:
+            continue
+        key = round(val, 4)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(val)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _build_gt_index_for_class(
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]], target_class: int
+) -> Tuple[Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]], set[str], Dict[int, int]]:
+    gt_index: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]] = {}
+    all_keys: set[str] = set()
+    per_image_counts: Dict[int, int] = {}
+    for img_id, by_cat in gt_by_image_cat.items():
+        boxes = by_cat.get(target_class)
+        if not boxes:
+            continue
+        entries: List[Tuple[str, Tuple[float, float, float, float]]] = []
+        for idx, bbox in enumerate(boxes):
+            key = f"{img_id}:{idx}"
+            entries.append((key, _xywh_to_xyxy(bbox)))
+            all_keys.add(key)
+        gt_index[img_id] = entries
+        per_image_counts[img_id] = len(entries)
+    return gt_index, all_keys, per_image_counts
+
+
+def _evaluate_prompt_candidate(
+    prompt: str,
+    threshold: float,
+    *,
+    cat_id: int,
+    image_ids: List[int],
+    gt_index: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]],
+    images: Dict[int, Dict[str, Any]],
+    iou_threshold: float,
+    max_dets: int,
+    image_cache: Dict[int, Image.Image],
+) -> Dict[str, Any]:
+    total_gt = sum(len(gt_index.get(img_id, [])) for img_id in image_ids)
+    total_preds = 0
+    matches = 0
+    fps = 0
+    det_images = 0
+    iou_sum = 0.0
+    score_sum = 0.0
+    matched_scores = 0
+    matched_gt_keys: set[str] = set()
+    matches_by_image: Dict[int, Dict[str, Any]] = {}
+    for img_id in image_ids:
+        info = images.get(img_id)
+        if not info:
+            continue
+        path = info.get("path")
+        width = info.get("width")
+        height = info.get("height")
+        if not path or width is None or height is None:
+            continue
+        gts = gt_index.get(img_id, [])
+        gt_used = [False] * len(gts)
+        try:
+            pil_img = image_cache[img_id]
+        except KeyError:
+            try:
+                pil_img = Image.open(path).convert("RGB")
+            except Exception:
+                continue
+            image_cache[img_id] = pil_img
+        preds = _run_sam3_text_inference(
+            pil_img,
+            prompt,
+            threshold=threshold,
+            mask_threshold=0.0,
+            limit=max_dets,
+        )
+        pred_boxes: List[Tuple[float, float, float, float, Optional[float]]] = []
+        for det in preds:
+            try:
+                x1, y1, x2, y2 = _yolo_to_xyxy(pil_img.width, pil_img.height, det.bbox)
+                pred_boxes.append((x1, y1, x2, y2, det.score))
+            except Exception:
+                continue
+        if not pred_boxes:
+            continue
+        pred_boxes.sort(key=lambda b: (b[4] if b[4] is not None else 0.0), reverse=True)
+        total_preds += len(pred_boxes)
+        matched_in_image = 0
+        fp_in_image = 0
+        matched_keys: List[str] = []
+        for x1, y1, x2, y2, score in pred_boxes:
+            best_iou = 0.0
+            best_idx = -1
+            for idx, (_, gt_box) in enumerate(gts):
+                if gt_used[idx]:
+                    continue
+                iou = _iou((x1, y1, x2, y2), gt_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = idx
+            if best_iou >= iou_threshold and best_idx >= 0:
+                gt_used[best_idx] = True
+                matches += 1
+                matched_in_image += 1
+                matched_key = gts[best_idx][0]
+                matched_keys.append(matched_key)
+                matched_gt_keys.add(matched_key)
+                iou_sum += best_iou
+                if score is not None:
+                    score_sum += score
+                    matched_scores += 1
+            else:
+                fp_in_image += 1
+        fps += fp_in_image
+        if matched_in_image > 0:
+            det_images += 1
+        if matched_keys or fp_in_image:
+            matches_by_image[img_id] = {"matched": matched_keys, "fps": fp_in_image}
+    precision = matches / total_preds if total_preds else 0.0
+    recall = matches / total_gt if total_gt else 0.0
+    det_rate = det_images / len(image_ids) if image_ids else 0.0
+    avg_iou = iou_sum / matches if matches else None
+    avg_score = score_sum / matched_scores if matched_scores else None
+    f1 = (2 * precision * recall) / (precision + recall + 1e-8) if (precision + recall) > 0 else 0.0
+    overall_score = f1 * (0.5 + 0.5 * det_rate)
+    return {
+        "prompt": prompt,
+        "threshold": threshold,
+        "precision": precision,
+        "recall": recall,
+        "det_rate": det_rate,
+        "avg_iou": avg_iou,
+        "avg_score": avg_score,
+        "score": overall_score,
+        "f1": f1,
+        "preds": total_preds,
+        "matches": matches,
+        "gts": total_gt,
+        "fps": fps,
+        "det_images": det_images,
+        "matched_gt_keys": matched_gt_keys,
+        "matches_by_image": matches_by_image,
+    }
+
+
+def _build_prompt_recipe(
+    candidates: List[Dict[str, Any]],
+    all_gt_keys: set[str],
+    per_image_gt: Dict[int, int],
+    images: Dict[int, Dict[str, Any]],
+    image_ids: List[int],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    remaining = set(all_gt_keys)
+    steps: List[Dict[str, Any]] = []
+    total_fps = 0
+    total_duplicates = 0
+    used_prompt_keys: set[Tuple[str, float]] = set()
+    ordered_candidates = list(candidates)
+    while remaining and ordered_candidates:
+        best = None
+        best_score = (-1, -1, -1, -1)
+        for cand in ordered_candidates:
+            prompt_key = (cand.get("prompt"), cand.get("threshold"))
+            if prompt_key in used_prompt_keys:
+                continue
+            cand_matches = cand.get("matched_gt_keys") or set()
+            gain = len(cand_matches & remaining)
+            zero_fp = cand.get("fps", 0) == 0
+            if gain == 0 and zero_fp:
+                continue
+            score_tuple = (
+                1 if zero_fp else 0,
+                gain,
+                cand.get("recall", 0.0),
+                cand.get("precision", 0.0),
+            )
+            if score_tuple > best_score:
+                best = cand
+                best_score = score_tuple
+        if not best:
+            break
+        cand = best
+        prompt_key = (cand.get("prompt"), cand.get("threshold"))
+        used_prompt_keys.add(prompt_key)
+        matched_keys = set(cand.get("matched_gt_keys") or [])
+        gain = len(matched_keys & remaining)
+        duplicate_hits = max(0, len(matched_keys) - gain)
+        total_duplicates += duplicate_hits
+        total_fps += max(0, cand.get("fps", 0))
+        remaining -= matched_keys
+        covered_after = len(all_gt_keys) - len(remaining)
+        steps.append(
+            {
+                "prompt": cand.get("prompt"),
+                "threshold": cand.get("threshold"),
+                "gain": gain,
+                "matches": len(matched_keys),
+                "fps": cand.get("fps", 0),
+                "precision": cand.get("precision"),
+                "recall": cand.get("recall"),
+                "det_rate": cand.get("det_rate"),
+                "avg_iou": cand.get("avg_iou"),
+                "avg_score": cand.get("avg_score"),
+                "duplicates": duplicate_hits,
+                "covered_after": covered_after,
+                "_matches_by_image": cand.get("matches_by_image") or {},
+            }
+        )
+    coverage_rate = (len(all_gt_keys) - len(remaining)) / len(all_gt_keys) if all_gt_keys else 0.0
+    recipe = {
+        "steps": [
+            {
+                **{k: v for k, v in step.items() if not k.startswith("_")},
+                "coverage_after": (step.get("covered_after", 0) / len(all_gt_keys)) if all_gt_keys else 0.0,
+            }
+            for step in steps
+        ],
+        "summary": {
+            "total_gt": len(all_gt_keys),
+            "covered": len(all_gt_keys) - len(remaining),
+            "coverage_rate": coverage_rate,
+            "fps": total_fps,
+            "duplicates": total_duplicates,
+        },
+    }
+    coverage_by_image: List[Dict[str, Any]] = []
+    coverage_map: Dict[int, Dict[str, Any]] = {}
+    for img_id in image_ids:
+        info = images.get(img_id, {})
+        entry = {
+            "image_id": img_id,
+            "file_name": info.get("file_name"),
+            "gt": per_image_gt.get(img_id, 0),
+            "hits": [],
+            "covered": False,
+        }
+        coverage_map[img_id] = entry
+        coverage_by_image.append(entry)
+    for idx, step in enumerate(steps):
+        matches_by_image = step.get("_matches_by_image") or {}
+        for img_id, img_info in matches_by_image.items():
+            target = coverage_map.get(img_id)
+            if not target:
+                continue
+            matched_list = img_info.get("matched") or []
+            fp_count = img_info.get("fps", 0)
+            target["hits"].append(
+                {
+                    "step": idx,
+                    "prompt": step.get("prompt"),
+                    "threshold": step.get("threshold"),
+                    "matched": len(matched_list),
+                    "fps": fp_count,
+                }
+            )
+            if matched_list:
+                target["covered"] = True
+    return recipe, coverage_by_image
+
+
 def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
@@ -4518,6 +4864,141 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
         job.updated_at = time.time()
 
 
+def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -> None:
+    with PROMPT_HELPER_JOBS_LOCK:
+        PROMPT_HELPER_JOBS[job.job_id] = job
+    job.status = "running"
+    job.message = "Loading dataset…"
+    job.request = {"mode": "recipe", **payload.dict()}
+    job.updated_at = time.time()
+    try:
+        if not payload.prompts:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="recipe_prompts_required")
+        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        categories = coco.get("categories") or []
+        cat_entry = next((c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id), None)
+        if not cat_entry:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="recipe_class_not_found")
+        class_name = str(cat_entry.get("name", f"class_{payload.class_id}"))
+        cat_to_images: Dict[int, set[int]] = {}
+        for ann in coco.get("annotations", []):
+            try:
+                cat_id = int(ann["category_id"])
+                img_id = int(ann["image_id"])
+            except Exception:
+                continue
+            cat_to_images.setdefault(cat_id, set()).add(img_id)
+        pos_ids = _sample_images_for_category(
+            payload.class_id,
+            list(cat_to_images.get(payload.class_id, set())),
+            payload.sample_size,
+            payload.seed,
+        )
+        all_img_ids = list(images.keys())
+        neg_ids = _sample_negative_images(
+            payload.class_id,
+            all_img_ids,
+            cat_to_images,
+            payload.negatives,
+            payload.seed,
+        )
+        eval_ids = list(dict.fromkeys([*pos_ids, *neg_ids]))
+        image_cache: Dict[int, Image.Image] = {}
+        gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, payload.class_id)
+        gt_index = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in eval_ids}
+        per_image_gt = {img_id: per_image_gt_all.get(img_id, 0) for img_id in eval_ids}
+        all_gt_keys = set()
+        for entries in gt_index.values():
+            for key, _ in entries:
+                all_gt_keys.add(key)
+        if not eval_ids:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="recipe_no_images_sampled")
+        if not all_gt_keys:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="recipe_no_gt_for_class")
+        thresholds_cache: Dict[str, List[float]] = {}
+        total_steps = 0
+        for prompt_entry in payload.prompts:
+            key = prompt_entry.prompt
+            thresholds_cache[key] = _normalize_recipe_thresholds(
+                prompt_entry.thresholds or payload.threshold_candidates,
+                payload.score_threshold,
+            )
+            total_steps += len(thresholds_cache[key]) * max(1, len(eval_ids))
+        job.total_steps = total_steps
+        job.completed_steps = 0
+        candidates: List[Dict[str, Any]] = []
+        for idx, prompt_entry in enumerate(payload.prompts):
+            thresholds = thresholds_cache.get(prompt_entry.prompt) or [payload.score_threshold]
+            for thr in thresholds:
+                try:
+                    job.logs.append(
+                        {
+                            "ts": time.time(),
+                            "msg": f"Eval prompt {idx + 1}/{len(payload.prompts)} @ {thr:.2f} on {len(eval_ids)} images",
+                        }
+                    )
+                    if len(job.logs) > MAX_JOB_LOGS:
+                        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                except Exception:
+                    pass
+                metrics = _evaluate_prompt_candidate(
+                    prompt_entry.prompt,
+                    thr,
+                    cat_id=payload.class_id,
+                    image_ids=eval_ids,
+                    gt_index=gt_index,
+                    images=images,
+                    iou_threshold=payload.iou_threshold,
+                    max_dets=payload.max_dets,
+                    image_cache=image_cache,
+                )
+                metrics["class_name"] = class_name
+                metrics["class_id"] = payload.class_id
+                metrics["image_count"] = len(eval_ids)
+                candidates.append(metrics)
+                job.completed_steps += len(eval_ids)
+                if job.total_steps:
+                    job.progress = min(1.0, job.completed_steps / job.total_steps)
+                job.message = f"Evaluated {prompt_entry.prompt} ({job.completed_steps}/{job.total_steps} images)"
+                job.updated_at = time.time()
+        recipe, coverage_by_image = _build_prompt_recipe(
+            candidates,
+            all_gt_keys,
+            per_image_gt,
+            images,
+            eval_ids,
+        )
+        job.status = "completed"
+        job.message = "Done"
+        job.result = {
+            "mode": "recipe",
+            "dataset_id": payload.dataset_id,
+            "class_id": payload.class_id,
+            "class_name": class_name,
+            "positive_images": len(pos_ids),
+            "negative_images": len(neg_ids),
+            "gt_count": len(all_gt_keys),
+            "config": payload.dict(),
+            "candidates": [
+                {
+                    **{k: v for k, v in cand.items() if k not in {"matched_gt_keys", "matches_by_image"}},
+                    "matched_gt": len(cand.get("matched_gt_keys") or []),
+                }
+                for cand in candidates
+            ],
+            "recipe": recipe,
+            "coverage_by_image": coverage_by_image,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Prompt recipe job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Failed"
+    finally:
+        job.updated_at = time.time()
+
+
 def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     job_id = f"ph_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
@@ -4538,9 +5019,47 @@ def _start_prompt_helper_search_job(payload: PromptHelperSearchRequest) -> Promp
     return job
 
 
+def _start_prompt_recipe_job(payload: PromptRecipeRequest) -> PromptHelperJob:
+    job_id = f"phr_{uuid.uuid4().hex[:8]}"
+    job = PromptHelperJob(job_id=job_id)
+    with PROMPT_HELPER_JOBS_LOCK:
+        PROMPT_HELPER_JOBS[job.job_id] = job
+    thread = threading.Thread(target=_run_prompt_recipe_job, args=(job, payload), daemon=True)
+    thread.start()
+    return job
+
+
 @app.post("/sam3/prompt_helper/suggest")
 def prompt_helper_suggest(payload: PromptHelperSuggestRequest):
     return _suggest_prompts_for_dataset(payload)
+
+
+@app.post("/sam3/prompt_helper/expand")
+def prompt_helper_expand(payload: PromptRecipeExpandRequest):
+    dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+    coco, _, _ = _load_coco_index(dataset_root)
+    categories = coco.get("categories") or []
+    cat_entry = next((c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id), None)
+    if not cat_entry:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="recipe_class_not_found")
+    class_name = str(cat_entry.get("name", f"class_{payload.class_id}"))
+    base_prompts = [p.strip() for p in payload.base_prompts if isinstance(p, str) and p.strip()]
+    new_prompts = _expand_prompts_with_qwen(class_name, base_prompts, payload.max_new)
+    combined: List[str] = []
+    seen = set()
+    for prompt in [*base_prompts, *new_prompts]:
+        low = prompt.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        combined.append(prompt)
+    return {
+        "class_id": payload.class_id,
+        "class_name": class_name,
+        "base_prompts": base_prompts,
+        "new_prompts": new_prompts,
+        "combined": combined,
+    }
 
 
 def _list_prompt_helper_presets() -> List[Dict[str, Any]]:
@@ -4594,6 +5113,12 @@ def start_prompt_helper_job(payload: PromptHelperRequest):
 @app.post("/sam3/prompt_helper/search")
 def start_prompt_helper_search(payload: PromptHelperSearchRequest):
     job = _start_prompt_helper_search_job(payload)
+    return _serialize_prompt_helper_job(job)
+
+
+@app.post("/sam3/prompt_helper/recipe")
+def start_prompt_helper_recipe(payload: PromptRecipeRequest):
+    job = _start_prompt_recipe_job(payload)
     return _serialize_prompt_helper_job(job)
 
 

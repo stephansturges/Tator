@@ -3860,6 +3860,10 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
     if human and human.lower() != cleaned.lower():
         base.append(human)
     base_lower = {b.lower() for b in base if b}
+    base_words = []
+    for entry in base_lower:
+        base_words.extend(re.split(r"[\\s_\\-]+", entry))
+    base_words = [w for w in base_words if w]
     variants: List[str] = []
     if use_qwen and max_synonyms > 0:
         try:
@@ -3888,6 +3892,8 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
                 words = normalized.split()
                 if len(words) > 4:
                     continue
+                if any(len(w) < 3 for w in words):
+                    continue
                 lowered = normalized.lower()
                 fragment_of_base = any(
                     (lowered != b and lowered.startswith(b[: max(1, len(b) - 2)]))
@@ -3895,6 +3901,23 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
                     for b in base_lower
                 )
                 if fragment_of_base:
+                    continue
+                # Drop obvious truncated tokens relative to base words.
+                truncated_token = False
+                for w in words:
+                    lw = w.lower()
+                    for bw in base_words:
+                        if not bw:
+                            continue
+                        if bw.startswith(lw) and len(bw) - len(lw) >= 2:
+                            truncated_token = True
+                            break
+                        if lw.startswith(bw) and len(lw) - len(bw) >= 3:
+                            truncated_token = True
+                            break
+                    if truncated_token:
+                        break
+                if truncated_token:
                     continue
                 variants.append(normalized)
         except Exception as exc:  # noqa: BLE001

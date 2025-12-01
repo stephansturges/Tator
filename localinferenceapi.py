@@ -1727,6 +1727,39 @@ def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, in
     return output_text, input_width, input_height
 
 
+def _generate_qwen_text(prompt: str, *, max_new_tokens: int = 128) -> str:
+    """Text-only generation with Qwen for small helper tasks (no images)."""
+    model, processor = _ensure_qwen_ready()
+    messages: List[Dict[str, Any]] = []
+    sys_prompt = (active_qwen_metadata or {}).get("system_prompt")
+    if sys_prompt:
+        messages.append(
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": sys_prompt}],
+            }
+        )
+    messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = processor(
+        text=[text],
+        padding=True,
+        return_tensors="pt",
+    )
+    device = qwen_device or _resolve_qwen_device()
+    inputs = inputs.to(device)
+    with torch.inference_mode():
+        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+    input_len = inputs["input_ids"].shape[1]
+    generated_ids = outputs[:, input_len:]
+    decoded = processor.batch_decode(
+        generated_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    return decoded.strip()
+
+
 def resolve_image_payload(
     image_base64: Optional[str],
     image_token: Optional[str],
@@ -2228,6 +2261,8 @@ SAM3_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_ROOT = SAM3_JOB_ROOT / "datasets"
 SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
+PROMPT_HELPER_JOB_ROOT = Path(os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs"))
+PROMPT_HELPER_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_LITE_JOB_ROOT = Path(os.environ.get("SAM3_LITE_TRAINING_ROOT", "./uploads/sam3lite_runs"))
 SAM3_LITE_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_LITE_CONFIG_TEMPLATE = Path(__file__).resolve().parent / "sam3_lite" / "config" / "default.yaml"
@@ -2314,6 +2349,19 @@ class SegmentationBuildJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class PromptHelperJob:
+    job_id: str
+    status: str = "queued"
+    message: str = "Queued"
+    progress: float = 0.0
+    request: Dict[str, Any] = field(default_factory=dict)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -2322,6 +2370,8 @@ SAM3_LITE_TRAINING_JOBS: Dict[str, Sam3LiteTrainingJob] = {}
 SAM3_LITE_TRAINING_JOBS_LOCK = threading.Lock()
 SEGMENTATION_BUILD_JOBS: Dict[str, SegmentationBuildJob] = {}
 SEGMENTATION_BUILD_JOBS_LOCK = threading.Lock()
+PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
+PROMPT_HELPER_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
@@ -3736,6 +3786,372 @@ def list_sam3lite_datasets():
 @app.post("/sam3lite/datasets/{dataset_id}/convert")
 def sam3lite_convert_dataset(dataset_id: str):
     return sam3_convert_dataset(dataset_id)
+
+
+def _find_coco_split(dataset_root: Path) -> Tuple[Path, Path]:
+    """Return (annotations_path, images_dir) preferring val split, then train."""
+    val_ann = dataset_root / "val" / "_annotations.coco.json"
+    if val_ann.exists():
+        return val_ann, val_ann.parent / "images"
+    train_ann = dataset_root / "train" / "_annotations.coco.json"
+    if train_ann.exists():
+        return train_ann, train_ann.parent / "images"
+    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_annotations_missing")
+
+
+def _yolo_to_xyxy(width: int, height: int, bbox: Sequence[float]) -> Tuple[float, float, float, float]:
+    cx, cy, bw, bh = map(float, bbox[:4])
+    x1 = max(0.0, (cx - bw / 2.0) * width)
+    y1 = max(0.0, (cy - bh / 2.0) * height)
+    x2 = min(float(width), (cx + bw / 2.0) * width)
+    y2 = min(float(height), (cy + bh / 2.0) * height)
+    return x1, y1, x2, y2
+
+
+def _xywh_to_xyxy(bbox: Sequence[float]) -> Tuple[float, float, float, float]:
+    x, y, w, h = map(float, bbox[:4])
+    return x, y, x + w, y + h
+
+
+def _iou(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    if inter_area <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter_area
+    if union <= 0:
+        return 0.0
+    return inter_area / union
+
+
+def _humanize_class_name(name: str) -> str:
+    return re.sub(r"[\\-_]+", " ", name).strip()
+
+
+def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_qwen: bool) -> List[str]:
+    base: List[str] = []
+    cleaned = class_name.strip()
+    if cleaned:
+        base.append(cleaned)
+    human = _humanize_class_name(cleaned)
+    if human and human.lower() != cleaned.lower():
+        base.append(human)
+    variants: List[str] = []
+    if use_qwen and max_synonyms > 0:
+        try:
+            text = _generate_qwen_text(
+                (
+                    f"Suggest up to {max_synonyms} short, natural phrases humans use for the object class "
+                    f"'{human or cleaned}'. Return a comma-separated list, 1-3 words each, no numbering."
+                ),
+                max_new_tokens=96,
+            )
+            raw_parts = re.split(r"[\\n;,]+", text)
+            for part in raw_parts:
+                normalized = part.strip().strip('"').strip("'")
+                if not normalized:
+                    continue
+                variants.append(normalized)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Prompt helper: Qwen generation failed for %s: %s", class_name, exc)
+    seen = set()
+    ordered: List[str] = []
+    for item in [*base, *variants]:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(item)
+    if max_synonyms <= 0:
+        return ordered[:1]
+    # Always keep the first/base entry, then up to max_synonyms additional candidates.
+    head = ordered[:1]
+    tail = ordered[1 : 1 + max_synonyms]
+    return head + tail
+
+
+def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
+    ann_path, images_dir = _find_coco_split(dataset_root)
+    try:
+        with ann_path.open("r", encoding="utf-8") as handle:
+            coco = json.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+    images = {
+        img["id"]: {
+            **img,
+            "path": (images_dir / img["file_name"]).resolve(),
+        }
+        for img in coco.get("images", [])
+        if "id" in img and "file_name" in img
+    }
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]] = {}
+    for ann in coco.get("annotations", []):
+        try:
+            img_id = int(ann["image_id"])
+            cat_id = int(ann["category_id"])
+            bbox = ann.get("bbox")
+        except Exception:
+            continue
+        if bbox is None:
+            continue
+        gt_by_image_cat.setdefault(img_id, {}).setdefault(cat_id, []).append(list(bbox))
+    return coco, gt_by_image_cat, images
+
+
+def _sample_images_for_category(cat_id: int, img_ids: List[int], sample_size: int, seed: int) -> List[int]:
+    if not img_ids:
+        return []
+    rnd = random.Random(seed + cat_id * 9973)
+    if len(img_ids) <= sample_size:
+        return list(img_ids)
+    return rnd.sample(img_ids, sample_size)
+
+
+def _evaluate_prompt_for_class(
+    prompt: str,
+    *,
+    cat_id: int,
+    image_ids: List[int],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    images: Dict[int, Dict[str, Any]],
+    score_threshold: float,
+    max_dets: int,
+    iou_threshold: float,
+    image_cache: Dict[int, Image.Image],
+) -> Dict[str, Any]:
+    total_gt = 0
+    total_preds = 0
+    matches = 0
+    det_images = 0
+    iou_sum = 0.0
+    score_sum = 0.0
+    matched_scores = 0
+    for img_id in image_ids:
+        info = images.get(img_id)
+        if not info:
+            continue
+        path = info.get("path")
+        width = info.get("width")
+        height = info.get("height")
+        if not path or width is None or height is None:
+            continue
+        gts = [*gt_by_image_cat.get(img_id, {}).get(cat_id, [])]
+        gt_boxes = [_xywh_to_xyxy(b) for b in gts]
+        total_gt += len(gt_boxes)
+        if not gt_boxes:
+            continue
+        try:
+            pil_img = image_cache[img_id]
+        except KeyError:
+            try:
+                pil_img = Image.open(path).convert("RGB")
+            except Exception:
+                continue
+            image_cache[img_id] = pil_img
+        preds = _run_sam3_text_inference(
+            pil_img,
+            prompt,
+            threshold=score_threshold,
+            mask_threshold=0.0,
+            limit=max_dets,
+        )
+        pred_boxes: List[Tuple[float, float, float, float, Optional[float]]] = []
+        for det in preds:
+            try:
+                x1, y1, x2, y2 = _yolo_to_xyxy(pil_img.width, pil_img.height, det.bbox)
+                pred_boxes.append((x1, y1, x2, y2, det.score))
+            except Exception:
+                continue
+        if not pred_boxes:
+            continue
+        pred_boxes.sort(key=lambda b: (b[4] if b[4] is not None else 0.0), reverse=True)
+        total_preds += len(pred_boxes)
+        gt_used = [False] * len(gt_boxes)
+        matched_in_image = 0
+        for x1, y1, x2, y2, score in pred_boxes:
+            best_iou = 0.0
+            best_idx = -1
+            for idx, gt_box in enumerate(gt_boxes):
+                if gt_used[idx]:
+                    continue
+                iou = _iou((x1, y1, x2, y2), gt_box)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = idx
+            if best_iou >= iou_threshold and best_idx >= 0:
+                gt_used[best_idx] = True
+                matches += 1
+                matched_in_image += 1
+                iou_sum += best_iou
+                if score is not None:
+                    score_sum += score
+                    matched_scores += 1
+        if matched_in_image > 0:
+            det_images += 1
+    precision = matches / total_preds if total_preds else 0.0
+    recall = matches / total_gt if total_gt else 0.0
+    det_rate = det_images / len(image_ids) if image_ids else 0.0
+    avg_iou = iou_sum / matches if matches else None
+    avg_score = score_sum / matched_scores if matched_scores else None
+    return {
+        "prompt": prompt,
+        "precision": precision,
+        "recall": recall,
+        "det_rate": det_rate,
+        "avg_iou": avg_iou,
+        "avg_score": avg_score,
+        "preds": total_preds,
+        "matches": matches,
+        "gts": total_gt,
+    }
+
+
+class PromptHelperRequest(BaseModel):
+    dataset_id: str
+    sample_per_class: int = Field(10, ge=1, le=1000)
+    max_synonyms: int = Field(3, ge=0, le=10)
+    score_threshold: float = Field(0.2, ge=0.0, le=1.0)
+    max_dets: int = Field(100, ge=1, le=2000)
+    iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    seed: int = 42
+    use_qwen: bool = True
+
+
+def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "message": job.message,
+        "progress": job.progress,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "request": job.request,
+        "result": job.result,
+        "error": job.error,
+    }
+
+
+def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -> None:
+    with PROMPT_HELPER_JOBS_LOCK:
+        PROMPT_HELPER_JOBS[job.job_id] = job
+    job.status = "running"
+    job.message = "Loading dataset…"
+    job.request = payload.dict()
+    job.updated_at = time.time()
+    try:
+        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        categories = coco.get("categories") or []
+        cat_to_images: Dict[int, set[int]] = {}
+        for ann in coco.get("annotations", []):
+            try:
+                cat_id = int(ann["category_id"])
+                img_id = int(ann["image_id"])
+            except Exception:
+                continue
+            cat_to_images.setdefault(cat_id, set()).add(img_id)
+        results: List[Dict[str, Any]] = []
+        total_classes = len(categories) or 1
+        image_cache: Dict[int, Image.Image] = {}
+        for idx, cat in enumerate(categories):
+            cat_id = int(cat.get("id", idx))
+            class_name = str(cat.get("name", f"class_{cat_id}"))
+            job.message = f"Evaluating {class_name} ({idx + 1}/{total_classes})…"
+            job.progress = (idx) / total_classes
+            job.updated_at = time.time()
+            candidates = _generate_prompt_variants_for_class(
+                class_name,
+                payload.max_synonyms,
+                payload.use_qwen,
+            )
+            sampled_images = _sample_images_for_category(
+                cat_id,
+                list(cat_to_images.get(cat_id, set())),
+                payload.sample_per_class,
+                payload.seed,
+            )
+            candidate_results: List[Dict[str, Any]] = []
+            for prompt in candidates:
+                metrics = _evaluate_prompt_for_class(
+                    prompt,
+                    cat_id=cat_id,
+                    image_ids=sampled_images,
+                    gt_by_image_cat=gt_by_image_cat,
+                    images=images,
+                    score_threshold=payload.score_threshold,
+                    max_dets=payload.max_dets,
+                    iou_threshold=payload.iou_threshold,
+                    image_cache=image_cache,
+                )
+                candidate_results.append(metrics)
+            candidate_results.sort(key=lambda m: (m["det_rate"], m["recall"], m["precision"]), reverse=True)
+            results.append(
+                {
+                    "class_id": cat_id,
+                    "class_name": class_name,
+                    "images_sampled": len(sampled_images),
+                    "candidates": candidate_results,
+                }
+            )
+            job.progress = (idx + 1) / total_classes
+            job.updated_at = time.time()
+        job.status = "completed"
+        job.message = "Done"
+        job.result = {
+            "classes": results,
+            "config": payload.dict(),
+            "dataset_id": payload.dataset_id,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Prompt helper job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Failed"
+    finally:
+        job.updated_at = time.time()
+
+
+def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
+    job_id = f"ph_{uuid.uuid4().hex[:8]}"
+    job = PromptHelperJob(job_id=job_id)
+    with PROMPT_HELPER_JOBS_LOCK:
+        PROMPT_HELPER_JOBS[job.job_id] = job
+    thread = threading.Thread(target=_run_prompt_helper_job, args=(job, payload), daemon=True)
+    thread.start()
+    return job
+
+
+@app.post("/sam3/prompt_helper/jobs")
+def start_prompt_helper_job(payload: PromptHelperRequest):
+    job = _start_prompt_helper_job(payload)
+    return _serialize_prompt_helper_job(job)
+
+
+@app.get("/sam3/prompt_helper/jobs")
+def list_prompt_helper_jobs():
+    with PROMPT_HELPER_JOBS_LOCK:
+        jobs = list(PROMPT_HELPER_JOBS.values())
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return [_serialize_prompt_helper_job(j) for j in jobs]
+
+
+@app.get("/sam3/prompt_helper/jobs/{job_id}")
+def get_prompt_helper_job(job_id: str):
+    with PROMPT_HELPER_JOBS_LOCK:
+        job = PROMPT_HELPER_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_job_not_found")
+    return _serialize_prompt_helper_job(job)
 
 
 @app.post("/segmentation/build/jobs")

@@ -990,6 +990,8 @@ const qwenTrainState = {
         promptVariants: null,
         promptRandomize: null,
         logAll: null,
+        valScoreThresh: null,
+        valMaxDets: null,
         segHead: null,
         segTrain: null,
         startButton: null,
@@ -3673,6 +3675,14 @@ async function startSam3Training() {
     if (sam3TrainElements.logAll && sam3TrainElements.logAll.checked) {
         payload.log_every_batch = true;
     }
+    const valScore = maybeNumber(sam3TrainElements.valScoreThresh);
+    if (valScore !== null) {
+        payload.val_score_thresh = valScore;
+    }
+    const valMaxDets = maybeNumber(sam3TrainElements.valMaxDets);
+    if (valMaxDets !== null) {
+        payload.val_max_dets = valMaxDets;
+    }
     const wantsSegTrain = sam3TrainElements.segTrain ? sam3TrainElements.segTrain.checked : false;
     const bboxOnly = sam3TrainElements.bboxOnly ? sam3TrainElements.bboxOnly.checked : false;
     if (bboxOnly) {
@@ -3960,6 +3970,8 @@ async function initSam3TrainUi() {
         sam3TrainElements.promptVariants = document.getElementById("sam3PromptVariants");
         sam3TrainElements.promptRandomize = document.getElementById("sam3PromptRandomize");
         sam3TrainElements.logAll = document.getElementById("sam3LogAll");
+        sam3TrainElements.valScoreThresh = document.getElementById("sam3ValScoreThresh");
+        sam3TrainElements.valMaxDets = document.getElementById("sam3ValMaxDets");
         sam3TrainElements.trendSmooth = document.getElementById("sam3TrendSmooth");
         sam3TrainElements.trendSmoothValue = document.getElementById("sam3TrendSmoothValue");
         sam3TrainElements.segHead = document.getElementById("sam3SegHead");

@@ -176,8 +176,8 @@ def _patch_logging_smoothing() -> None:
         pass
 
     # Monkeypatch COCO writer to filter low-score detections and allow higher max dets.
-    SCORE_THRESH = 0.2
-    MAX_DETS = 1000
+    SCORE_THRESH = float(os.environ.get("SAM3_VAL_SCORE_THRESH", "0.2"))
+    MAX_DETS = int(os.environ.get("SAM3_VAL_MAX_DETS", "1000"))
 
     if not getattr(coco_writer, "_tator_patch", False):
         coco_writer._tator_patch = True
@@ -186,7 +186,7 @@ def _patch_logging_smoothing() -> None:
 
         def _gather_and_merge_predictions_filtered(self):
             logging.info(
-                "Prediction Dumper: Gathering predictions with score>=%.2f and maxdets=%s",
+                "Prediction Dumper: Gathering predictions with score>=%.3f and maxdets=%s",
                 SCORE_THRESH,
                 MAX_DETS,
             )

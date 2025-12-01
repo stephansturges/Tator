@@ -1161,12 +1161,17 @@ hr {
 }
 
 #tabPromptHelper .training-status-section {
-    flex: 1 1 820px;
+    flex: 1 1 1100px;
     max-width: none;
 }
 
 #tabPromptHelper .training-form-section {
     flex: 0 0 400px;
+}
+
+#tabPromptHelper .training-card textarea {
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .training-log {

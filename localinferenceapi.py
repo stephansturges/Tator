@@ -3859,13 +3859,14 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
     human = _humanize_class_name(cleaned)
     if human and human.lower() != cleaned.lower():
         base.append(human)
+    base_lower = {b.lower() for b in base if b}
     variants: List[str] = []
     if use_qwen and max_synonyms > 0:
         try:
             text = _generate_qwen_text(
                 (
-                    f"Suggest up to {max_synonyms} short, natural phrases humans use for the object class "
-                    f"'{human or cleaned}'. Return a comma-separated list, 1-3 words each, no numbering, no JSON."
+                    f"Suggest up to {max_synonyms} short, complete phrases humans use for the object class "
+                    f"'{human or cleaned}'. Return a comma-separated list, 1-3 full words each. No truncation, no numbering, no JSON."
                 ),
                 max_new_tokens=96,
                 use_system_prompt=False,
@@ -3886,6 +3887,14 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
                     continue
                 words = normalized.split()
                 if len(words) > 4:
+                    continue
+                lowered = normalized.lower()
+                fragment_of_base = any(
+                    (lowered != b and lowered.startswith(b[: max(1, len(b) - 2)]))
+                    or (b.startswith(lowered) and (len(b) - len(lowered) <= 2))
+                    for b in base_lower
+                )
+                if fragment_of_base:
                     continue
                 variants.append(normalized)
         except Exception as exc:  # noqa: BLE001

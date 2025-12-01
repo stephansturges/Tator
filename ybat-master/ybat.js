@@ -1040,10 +1040,15 @@ const sam3TrainState = {
         useQwen: null,
         generateButton: null,
         evaluateButton: null,
+        presetName: null,
+        presetSaveBtn: null,
+        presetSelect: null,
+        presetLoadBtn: null,
         status: null,
         summary: null,
         prompts: null,
         results: null,
+        logs: null,
         message: null,
         applyButton: null,
     };
@@ -1056,6 +1061,7 @@ const sam3TrainState = {
         lastJob: null,
         suggestions: [],
         promptsByClass: {},
+        presets: [],
     };
 
     let promptHelperInitialized = false;
@@ -3338,6 +3344,109 @@ async function loadPromptHelperDatasets() {
     }
 }
 
+async function loadPromptHelperPresets() {
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/presets`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        promptHelperState.presets = Array.isArray(data) ? data : [];
+        if (promptHelperElements.presetSelect) {
+            promptHelperElements.presetSelect.innerHTML = "";
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "Select preset…";
+            promptHelperElements.presetSelect.appendChild(placeholder);
+            promptHelperState.presets.forEach((p) => {
+                const opt = document.createElement("option");
+                opt.value = p.id;
+                const ds = p.dataset_id ? ` • ${p.dataset_id}` : "";
+                opt.textContent = `${p.label || p.id}${ds}`;
+                promptHelperElements.presetSelect.appendChild(opt);
+            });
+        }
+    } catch (err) {
+        console.error("Failed to load prompt helper presets", err);
+    }
+}
+
+async function savePromptHelperPreset() {
+    const datasetId = promptHelperState.selectedId;
+    if (!datasetId) {
+        setPromptHelperMessage("Select a dataset first.", "warn");
+        return;
+    }
+    const promptsMap = collectPromptsFromUi();
+    if (!Object.keys(promptsMap).length) {
+        setPromptHelperMessage("Add prompts before saving.", "warn");
+        return;
+    }
+    const label = promptHelperElements.presetName?.value?.trim() || "";
+    try {
+        const form = new FormData();
+        form.append("dataset_id", datasetId);
+        form.append("label", label);
+        form.append("prompts_json", JSON.stringify(promptsMap));
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/presets`, {
+            method: "POST",
+            body: form,
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || `HTTP ${resp.status}`);
+        }
+        const preset = await resp.json();
+        setPromptHelperMessage(`Saved preset ${preset.label || preset.id}.`, "success");
+        await loadPromptHelperPresets();
+        if (promptHelperElements.presetSelect) {
+            promptHelperElements.presetSelect.value = preset.id;
+        }
+    } catch (err) {
+        console.error("Prompt helper preset save failed", err);
+        setPromptHelperMessage(`Save failed: ${err.message || err}`, "error");
+    }
+}
+
+async function loadPromptHelperPresetIntoUi() {
+    const presetId = promptHelperElements.presetSelect?.value;
+    if (!presetId) {
+        setPromptHelperMessage("Choose a preset to load.", "warn");
+        return;
+    }
+    const datasetId = promptHelperState.selectedId;
+    if (!datasetId) {
+        setPromptHelperMessage("Select a dataset first.", "warn");
+        return;
+    }
+    if (!promptHelperState.suggestions.length) {
+        setPromptHelperMessage("Generate prompts first, then load a preset to edit/evaluate.", "warn");
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/presets/${encodeURIComponent(presetId)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const preset = await resp.json();
+        if (preset.dataset_id && preset.dataset_id !== datasetId) {
+            setPromptHelperMessage(`Preset is for dataset ${preset.dataset_id}; switch dataset to use it.`, "warn");
+            return;
+        }
+        const map = preset.prompts_by_class || {};
+        const normalized = {};
+        Object.entries(map).forEach(([k, v]) => {
+            const vals = Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean) : [];
+            if (vals.length) {
+                normalized[parseInt(k, 10)] = vals;
+            }
+        });
+        promptHelperState.promptsByClass = normalized;
+        renderPromptHelperPrompts();
+        setPromptHelperMessage(`Loaded preset ${preset.label || preset.id}.`, "success");
+        if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = false;
+    } catch (err) {
+        console.error("Prompt helper preset load failed", err);
+        setPromptHelperMessage(`Load failed: ${err.message || err}`, "error");
+    }
+}
+
 function formatMetric(value, digits = 3) {
     if (value === null || value === undefined || Number.isNaN(value)) return "–";
     return Number(value).toFixed(digits);
@@ -3460,6 +3569,7 @@ function renderPromptHelperResults(job) {
         const thead = document.createElement("thead");
         thead.innerHTML = `
                 <tr>
+                    <th>Score</th>
                     <th>Prompt</th>
                     <th>Detects/img</th>
                     <th>Precision</th>
@@ -3476,6 +3586,7 @@ function renderPromptHelperResults(job) {
             const row = document.createElement("tr");
             const detsPerImg = cls.images_sampled ? (cand.matches || 0) / cls.images_sampled : 0;
             row.innerHTML = `
+                    <td>${formatMetric(cand.score, 3)}</td>
                     <td>${cand.prompt}</td>
                     <td>${formatMetric(detsPerImg, 2)}</td>
                     <td>${formatMetric(cand.precision, 3)}</td>
@@ -3694,6 +3805,10 @@ async function initPromptHelperUi() {
     promptHelperElements.useQwen = document.getElementById("promptHelperUseQwen");
     promptHelperElements.generateButton = document.getElementById("promptHelperGenerateBtn");
     promptHelperElements.evaluateButton = document.getElementById("promptHelperEvaluateBtn");
+    promptHelperElements.presetName = document.getElementById("promptHelperPresetName");
+    promptHelperElements.presetSaveBtn = document.getElementById("promptHelperPresetSave");
+    promptHelperElements.presetSelect = document.getElementById("promptHelperPresetSelect");
+    promptHelperElements.presetLoadBtn = document.getElementById("promptHelperPresetLoad");
     promptHelperElements.status = document.getElementById("promptHelperStatus");
     promptHelperElements.summary = document.getElementById("promptHelperSummary");
     promptHelperElements.prompts = document.getElementById("promptHelperPrompts");
@@ -3733,10 +3848,21 @@ async function initPromptHelperUi() {
             startPromptHelperJob().catch((err) => console.error("Prompt helper start failed", err));
         });
     }
+    if (promptHelperElements.presetSaveBtn) {
+        promptHelperElements.presetSaveBtn.addEventListener("click", () => {
+            savePromptHelperPreset().catch((err) => console.error("Prompt helper preset save failed", err));
+        });
+    }
+    if (promptHelperElements.presetLoadBtn) {
+        promptHelperElements.presetLoadBtn.addEventListener("click", () => {
+            loadPromptHelperPresetIntoUi().catch((err) => console.error("Prompt helper preset load failed", err));
+        });
+    }
     if (promptHelperElements.applyButton) {
         promptHelperElements.applyButton.addEventListener("click", applyPromptHelperMapping);
     }
     await loadPromptHelperDatasets();
+    await loadPromptHelperPresets();
     setPromptHelperMessage("Generate suggestions, edit prompts, then evaluate with SAM3.", "info");
 }
 

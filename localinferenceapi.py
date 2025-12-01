@@ -2108,6 +2108,8 @@ class Sam3TrainRequest(BaseModel):
     language_backbone_lr: Optional[float] = None
     prompt_variants: Optional[Dict[str, Any]] = None
     prompt_randomize: Optional[bool] = None
+    val_score_thresh: Optional[float] = None
+    val_max_dets: Optional[int] = None
 
 
 class Sam3LiteTrainRequest(BaseModel):
@@ -5530,6 +5532,11 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
         try:
             cfg.trainer.meters.val.roboflow100.detection.dump_dir = f"{cfg.launcher.experiment_log_dir}/dumps/local"
             cfg.trainer.meters.val.roboflow100.detection.pred_file_evaluators[0].gt_path = cfg.paths.val_ann_file
+            # Apply val filtering/tuning
+            if payload.val_score_thresh is not None:
+                cfg.trainer.meters.val.roboflow100.detection.min_confidence = float(payload.val_score_thresh)
+            if payload.val_max_dets is not None:
+                cfg.trainer.meters.val.roboflow100.detection.max_dets = int(payload.val_max_dets)
         except Exception:
             pass
     # Prompt vocab overrides: allow multiple variants per class and optional randomization during training

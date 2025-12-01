@@ -3827,6 +3827,10 @@ function renderPromptRecipeResults(job) {
         stepCard.className = "training-card";
         const body = document.createElement("div");
         body.className = "training-card__body";
+        const title = document.createElement("div");
+        title.className = "training-card__title";
+        title.textContent = "Recommended recipe (only steps that add coverage)";
+        body.appendChild(title);
         const table = document.createElement("table");
         table.className = "metric-table";
         const thead = document.createElement("thead");
@@ -3837,8 +3841,7 @@ function renderPromptRecipeResults(job) {
                 <th>Thr</th>
                 <th>Gain</th>
                 <th>Cov%</th>
-                <th>FPs</th>
-                <th>Dup</th>
+                <th>Cum FPs</th>
                 <th>Prec</th>
                 <th>Rec</th>
                 <th>Det rate</th>
@@ -3847,7 +3850,7 @@ function renderPromptRecipeResults(job) {
         table.appendChild(thead);
         const tbody = document.createElement("tbody");
         steps.forEach((step, idx) => {
-            const cov = Number.isFinite(step.coverage_after) ? (step.coverage_after * 100).toFixed(1) : "0";
+            const cov = Number.isFinite(step.cum_coverage) ? (step.cum_coverage * 100).toFixed(1) : "0";
             const row = document.createElement("tr");
             row.innerHTML = `
                 <td>${idx + 1}</td>
@@ -3855,8 +3858,7 @@ function renderPromptRecipeResults(job) {
                 <td>${step.threshold ?? "–"}</td>
                 <td>${step.gain ?? 0}</td>
                 <td>${cov}</td>
-                <td>${step.fps ?? 0}</td>
-                <td>${step.duplicates ?? 0}</td>
+                <td>${step.cum_fps ?? step.fps ?? 0}</td>
                 <td>${formatMetric(step.precision, 3)}</td>
                 <td>${formatMetric(step.recall, 3)}</td>
                 <td>${formatMetric(step.det_rate, 3)}</td>

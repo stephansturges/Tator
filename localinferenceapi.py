@@ -4504,12 +4504,30 @@ def _build_prompt_recipe(
     images: Dict[int, Dict[str, Any]],
     image_ids: List[int],
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    # Pick the best threshold per prompt (highest matched GTs, then lowest FPs, then higher precision).
+    best_by_prompt: Dict[str, Dict[str, Any]] = {}
+    for cand in candidates:
+        prompt = cand.get("prompt") or ""
+        matched_count = len(cand.get("matched_gt_keys") or [])
+        fps = cand.get("fps", 0)
+        precision = cand.get("precision", 0.0)
+        current = best_by_prompt.get(prompt)
+        if current is None:
+            best_by_prompt[prompt] = cand
+            continue
+        curr_matched = len(current.get("matched_gt_keys") or [])
+        curr_fps = current.get("fps", 0)
+        curr_precision = current.get("precision", 0.0)
+        better = (matched_count, -fps, precision) > (curr_matched, -curr_fps, curr_precision)
+        if better:
+            best_by_prompt[prompt] = cand
+    ordered_candidates = list(best_by_prompt.values())
+
     remaining = set(all_gt_keys)
     steps: List[Dict[str, Any]] = []
     total_fps = 0
     total_duplicates = 0
     used_prompt_keys: set[Tuple[str, float]] = set()
-    ordered_candidates = list(candidates)
     while remaining and ordered_candidates:
         best = None
         best_score = (-1, -1, -1, -1)
@@ -4520,7 +4538,7 @@ def _build_prompt_recipe(
             cand_matches = cand.get("matched_gt_keys") or set()
             gain = len(cand_matches & remaining)
             zero_fp = cand.get("fps", 0) == 0
-            if gain == 0 and zero_fp:
+            if gain <= 0:
                 continue
             score_tuple = (
                 1 if zero_fp else 0,
@@ -4543,6 +4561,7 @@ def _build_prompt_recipe(
         total_fps += max(0, cand.get("fps", 0))
         remaining -= matched_keys
         covered_after = len(all_gt_keys) - len(remaining)
+        cum_coverage = covered_after / len(all_gt_keys) if all_gt_keys else 0.0
         steps.append(
             {
                 "prompt": cand.get("prompt"),
@@ -4557,6 +4576,8 @@ def _build_prompt_recipe(
                 "avg_score": cand.get("avg_score"),
                 "duplicates": duplicate_hits,
                 "covered_after": covered_after,
+                "cum_coverage": cum_coverage,
+                "cum_fps": total_fps,
                 "_matches_by_image": cand.get("matches_by_image") or {},
             }
         )

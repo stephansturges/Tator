@@ -848,28 +848,8 @@
                             <strong>Flow:</strong> generate/edit prompts, then run evaluation. Scoring samples images per class, runs SAM3 text prompts one at a time, and reports precision/recall-style stats against ground truth boxes.
                         </div>
                         <div class="training-message" id="promptHelperMessage" role="status"></div>
-                    </section>
-                    <section class="training-status-section">
-                        <h2>Prompts & Results</h2>
-                        <div class="training-help" id="promptHelperStatus">Idle</div>
-                        <div class="training-actions">
-                            <button type="button" class="training-button" id="promptHelperApplyBtn" disabled>Apply top prompts to SAM3 training</button>
-                        </div>
-                        <div class="training-subsection">
-                            <h4>Prompts to evaluate</h4>
-                            <div id="promptHelperPrompts"></div>
-                        </div>
-                        <div class="training-subsection">
-                            <h4>Evaluation log</h4>
-                            <div id="promptHelperLogs" class="training-log"></div>
-                        </div>
-                        <div class="training-summary" id="promptHelperSummary"></div>
-                        <div id="promptHelperResults" class="training-history"></div>
-                    </section>
-                </div>
-                <div class="training-wrapper">
-                    <section class="training-form-section">
-                        <h2>Prompt Search (beta)</h2>
+                        <div class="training-divider"></div>
+                        <h3>Prompt Search (beta)</h3>
                         <p class="training-help">Use your edited prompts above, then run a targeted search that samples positives and negatives to find the safest wording (prioritizes recall but penalizes prompts below a precision floor).</p>
                         <div class="training-grid">
                             <div>
@@ -910,13 +890,30 @@
                         </div>
                     </section>
                     <section class="training-status-section">
-                        <h2>Search Results</h2>
-                        <div class="training-help" id="promptSearchStatus">Idle</div>
-                        <div class="training-subsection">
-                            <h4>Search log</h4>
-                            <div id="promptSearchLogs" class="training-log"></div>
+                        <h2>Prompts & Results</h2>
+                        <div class="training-help" id="promptHelperStatus">Idle</div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="promptHelperApplyBtn" disabled>Apply top prompts to SAM3 training</button>
                         </div>
-                        <div id="promptSearchResults" class="training-history"></div>
+                        <div class="training-subsection">
+                            <h4>Prompts to evaluate</h4>
+                            <div id="promptHelperPrompts"></div>
+                        </div>
+                        <div class="training-subsection">
+                            <h4>Evaluation log</h4>
+                            <div id="promptHelperLogs" class="training-log"></div>
+                        </div>
+                        <div class="training-summary" id="promptHelperSummary"></div>
+                        <div id="promptHelperResults" class="training-history"></div>
+                        <div class="training-subsection">
+                            <h4>Prompt Search (beta)</h4>
+                            <div class="training-help" id="promptSearchStatus">Idle</div>
+                            <div class="training-subsection">
+                                <h5>Search log</h5>
+                                <div id="promptSearchLogs" class="training-log"></div>
+                            </div>
+                            <div id="promptSearchResults" class="training-history"></div>
+                        </div>
                     </section>
                 </div>
             </div>

@@ -876,7 +876,8 @@ hr {
     gap: 24px;
     padding: 24px 28px 40px;
     box-sizing: border-box;
-    max-width: 1200px;
+    width: 100%;
+    max-width: 1600px;
     margin: 0 auto;
     align-items: flex-start;
 }

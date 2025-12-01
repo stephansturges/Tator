@@ -65,6 +65,7 @@
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
+            <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">Prompt Helper</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
             <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
@@ -722,6 +723,13 @@
                                 • To simulate larger batches without extra VRAM, keep batch size at 1 and raise grad accumulation (e.g., 2–4).<br />
                                 • Typical recipe: resolution 1008, LR scale 0.05, grad accumulation 2, batch sizes 1/1, epochs 20.
                             </div>
+                        <div class="training-note">
+                            <strong>Text prompt alignment (read this):</strong><br />
+                            • SAM3 class scores come from text embeddings. If you leave variants blank, we use your raw class names as prompts.<br />
+                            • Weird names (e.g., <code>light_vehicle</code>) often don’t match the base model. Add synonyms per class or unfreeze the language backbone (set a small LR, or uncheck “Freeze language”).<br />
+                            • Freezing the language encoder is only sensible if you stick to the base vocabulary and just fine-tune boxes/masks.<br />
+                            • COCO eval is class-ID based; bad prompt alignment ⇒ wrong class IDs ⇒ low AP even if boxes look reasonable.
+                        </div>
                         <div class="training-message" id="sam3Message" role="status"></div>
                     </section>
                     <section class="training-status-section">
@@ -772,6 +780,67 @@
                             <div class="training-help">Lists folders under <code>uploads/sam3_runs/</code>; delete logs/dumps/checkpoints you no longer need.</div>
                             <div id="sam3StorageList" class="storage-list"></div>
                         </div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabPromptHelper" data-tab-panel="prompt-helper">
+                <div class="training-wrapper">
+                    <section class="training-form-section">
+                        <h2>Prompt Helper (SAM3)</h2>
+                        <p class="training-help">Generate alternative text prompts for your dataset classes and score them with SAM3 on a sampled subset to find the best wording.</p>
+                        <div class="training-field">
+                            <label>Dataset</label>
+                            <div class="sam3-dataset-row">
+                                <select id="promptHelperDatasetSelect"></select>
+                                <button type="button" class="training-button" id="promptHelperDatasetRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help" id="promptHelperDatasetSummary">Pick a converted SAM3/Qwen dataset.</div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="promptHelperSampleSize">Images per class</label>
+                                <input type="number" id="promptHelperSampleSize" min="1" value="20" title="How many images per class to sample for scoring prompts." />
+                            </div>
+                            <div>
+                                <label for="promptHelperMaxSynonyms">Max extra prompts per class</label>
+                                <input type="number" id="promptHelperMaxSynonyms" min="0" max="10" value="3" title="Number of alternative phrases to try (original name is always included)." />
+                            </div>
+                            <div>
+                                <label for="promptHelperScoreThresh">Score threshold</label>
+                                <input type="number" id="promptHelperScoreThresh" step="0.01" min="0" max="1" value="0.2" title="Drop detections below this score when scoring prompts." />
+                            </div>
+                            <div>
+                                <label for="promptHelperMaxDets">Max detections/image</label>
+                                <input type="number" id="promptHelperMaxDets" min="1" value="100" title="Keep only the top N detections per image when scoring prompts." />
+                            </div>
+                            <div>
+                                <label for="promptHelperIouThresh">IoU threshold</label>
+                                <input type="number" id="promptHelperIouThresh" step="0.05" min="0" max="1" value="0.5" title="IoU threshold for a match when comparing SAM3 boxes to ground truth." />
+                            </div>
+                            <div>
+                                <label for="promptHelperSeed">Random seed</label>
+                                <input type="number" id="promptHelperSeed" value="42" title="Controls image sampling so reruns are reproducible." />
+                            </div>
+                        </div>
+                        <div class="training-toggle-row">
+                            <label title="Use Qwen to brainstorm human-friendly phrases. Turn off to only use your raw class names + simple cleaned variants."><input type="checkbox" id="promptHelperUseQwen" checked /> Use Qwen to propose phrases</label>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="promptHelperStartBtn">Generate + evaluate</button>
+                        </div>
+                        <div class="training-note">
+                            <strong>How scoring works:</strong> we sample images per class, run SAM3 text prompts (one prompt at a time), and compute precision/recall-style scores vs. ground truth boxes. Higher detects/image and recall mean better alignment. The seed keeps sampling deterministic.
+                        </div>
+                        <div class="training-message" id="promptHelperMessage" role="status"></div>
+                    </section>
+                    <section class="training-status-section">
+                        <h2>Results</h2>
+                        <div class="training-help" id="promptHelperStatus">Idle</div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="promptHelperApplyBtn" disabled>Apply top prompts to SAM3 training</button>
+                        </div>
+                        <div class="training-summary" id="promptHelperSummary"></div>
+                        <div id="promptHelperResults" class="training-history"></div>
                     </section>
                 </div>
             </div>

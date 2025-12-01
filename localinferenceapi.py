@@ -4339,6 +4339,7 @@ def _evaluate_prompt_candidate(
     iou_threshold: float,
     max_dets: int,
     image_cache: Dict[int, Image.Image],
+    cached_detections: Optional[Dict[int, List[Tuple[float, float, float, float, Optional[float]]]]] = None,
 ) -> Dict[str, Any]:
     total_gt = sum(len(gt_index.get(img_id, [])) for img_id in image_ids)
     total_preds = 0
@@ -4361,31 +4362,36 @@ def _evaluate_prompt_candidate(
             continue
         gts = gt_index.get(img_id, [])
         gt_used = [False] * len(gts)
-        try:
-            pil_img = image_cache[img_id]
-        except KeyError:
-            try:
-                pil_img = Image.open(path).convert("RGB")
-            except Exception:
-                continue
-            image_cache[img_id] = pil_img
-        preds = _run_sam3_text_inference(
-            pil_img,
-            prompt,
-            threshold=threshold,
-            mask_threshold=0.0,
-            limit=max_dets,
-        )
         pred_boxes: List[Tuple[float, float, float, float, Optional[float]]] = []
-        for det in preds:
+        if cached_detections is not None:
+            pred_boxes = cached_detections.get(img_id, [])
+        if not pred_boxes:
             try:
-                x1, y1, x2, y2 = _yolo_to_xyxy(pil_img.width, pil_img.height, det.bbox)
-                pred_boxes.append((x1, y1, x2, y2, det.score))
-            except Exception:
-                continue
+                pil_img = image_cache[img_id]
+            except KeyError:
+                try:
+                    pil_img = Image.open(path).convert("RGB")
+                except Exception:
+                    continue
+                image_cache[img_id] = pil_img
+            preds = _run_sam3_text_inference(
+                pil_img,
+                prompt,
+                threshold=threshold,
+                mask_threshold=0.0,
+                limit=max_dets,
+            )
+            for det in preds:
+                try:
+                    x1, y1, x2, y2 = _yolo_to_xyxy(pil_img.width, pil_img.height, det.bbox)
+                    pred_boxes.append((x1, y1, x2, y2, det.score))
+                except Exception:
+                    continue
         if not pred_boxes:
             continue
-        pred_boxes.sort(key=lambda b: (b[4] if b[4] is not None else 0.0), reverse=True)
+        filtered = [b for b in pred_boxes if (b[4] if b[4] is not None else 0.0) >= threshold]
+        filtered.sort(key=lambda b: (b[4] if b[4] is not None else 0.0), reverse=True)
+        pred_boxes = filtered[:max_dets] if max_dets else filtered
         total_preds += len(pred_boxes)
         matched_in_image = 0
         fp_in_image = 0
@@ -4443,6 +4449,52 @@ def _evaluate_prompt_candidate(
         "matched_gt_keys": matched_gt_keys,
         "matches_by_image": matches_by_image,
     }
+
+
+def _collect_prompt_detections(
+    prompt: str,
+    min_threshold: float,
+    *,
+    image_ids: List[int],
+    images: Dict[int, Dict[str, Any]],
+    image_cache: Dict[int, Image.Image],
+    max_dets: int,
+) -> Dict[int, List[Tuple[float, float, float, float, Optional[float]]]]:
+    results: Dict[int, List[Tuple[float, float, float, float, Optional[float]]]] = {}
+    for img_id in image_ids:
+        info = images.get(img_id)
+        if not info:
+            continue
+        path = info.get("path")
+        width = info.get("width")
+        height = info.get("height")
+        if not path or width is None or height is None:
+            continue
+        try:
+            pil_img = image_cache[img_id]
+        except KeyError:
+            try:
+                pil_img = Image.open(path).convert("RGB")
+            except Exception:
+                continue
+            image_cache[img_id] = pil_img
+        preds = _run_sam3_text_inference(
+            pil_img,
+            prompt,
+            threshold=min_threshold,
+            mask_threshold=0.0,
+            limit=max_dets,
+        )
+        boxes: List[Tuple[float, float, float, float, Optional[float]]] = []
+        for det in preds:
+            try:
+                x1, y1, x2, y2 = _yolo_to_xyxy(pil_img.width, pil_img.height, det.bbox)
+                boxes.append((x1, y1, x2, y2, det.score))
+            except Exception:
+                continue
+        if boxes:
+            results[img_id] = boxes
+    return results
 
 
 def _build_prompt_recipe(
@@ -4930,6 +4982,15 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         candidates: List[Dict[str, Any]] = []
         for idx, prompt_entry in enumerate(payload.prompts):
             thresholds = thresholds_cache.get(prompt_entry.prompt) or [payload.score_threshold]
+            min_threshold = min(thresholds) if thresholds else payload.score_threshold
+            detections = _collect_prompt_detections(
+                prompt_entry.prompt,
+                min_threshold,
+                image_ids=eval_ids,
+                images=images,
+                image_cache=image_cache,
+                max_dets=payload.max_dets,
+            )
             for thr in thresholds:
                 try:
                     job.logs.append(
@@ -4952,6 +5013,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
                     iou_threshold=payload.iou_threshold,
                     max_dets=payload.max_dets,
                     image_cache=image_cache,
+                    cached_detections=detections,
                 )
                 metrics["class_name"] = class_name
                 metrics["class_id"] = payload.class_id

@@ -851,6 +851,11 @@
                         <div class="training-divider"></div>
                         <h3>Prompt Search (beta)</h3>
                         <p class="training-help">Use your edited prompts above, then run a targeted search that samples positives and negatives to find the safest wording (prioritizes recall but penalizes prompts below a precision floor).</p>
+                        <div class="training-field">
+                            <label for="promptSearchClassSelect">Class to search</label>
+                            <select id="promptSearchClassSelect"></select>
+                            <div class="training-help">Default is all classes. Pick one to iterate faster on a single label.</div>
+                        </div>
                         <div class="training-grid">
                             <div>
                                 <label for="promptSearchSampleSize">Positive images/class</label>

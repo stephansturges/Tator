@@ -4211,6 +4211,7 @@ class PromptHelperSearchRequest(BaseModel):
     seed: int = 42
     precision_floor: float = Field(0.9, ge=0.0, le=1.0)
     prompts_by_class: Dict[int, List[str]]
+    class_id: Optional[int] = None
 
 
 def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
@@ -4364,6 +4365,7 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
         dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
         coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
         categories = coco.get("categories") or []
+        target_class_id = payload.class_id
         if not payload.prompts_by_class:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="search_prompts_required")
         cat_to_images: Dict[int, set[int]] = {}
@@ -4389,6 +4391,11 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="search_prompts_empty")
         all_img_ids = list(images.keys())
         image_cache: Dict[int, Image.Image] = {}
+        if target_class_id is not None:
+            categories = [c for c in categories if int(c.get("id", categories.index(c))) == target_class_id]
+            if not categories:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="search_class_not_found")
+
         total_steps = 0
         for idx, cat in enumerate(categories):
             cat_id = int(cat.get("id", idx))

@@ -3869,8 +3869,12 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
         try:
             text = _generate_qwen_text(
                 (
-                    f"Suggest up to {max_synonyms} short, complete phrases humans use for the object class "
-                    f"'{human or cleaned}'. Return a comma-separated list, 1-3 full words each. No truncation, no numbering, no JSON."
+                    f"Generate up to {max_synonyms} alternative, common English labels for the object class "
+                    f"'{human or cleaned}'. Each label must be 1-3 full words, each word at least 3 letters. "
+                    "No abbreviations, no partial/truncated words, no numbering, no JSON. Avoid repeating the original name. "
+                    "Use labels typical of object-detection datasets (e.g., car -> car, automobile, sedan; "
+                    "person -> person, human, individual; utility pole -> utility pole, telephone pole, power pole). "
+                    "Return a single comma-separated list."
                 ),
                 max_new_tokens=96,
                 use_system_prompt=False,

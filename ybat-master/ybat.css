@@ -1169,6 +1169,26 @@ hr {
     flex: 0 0 400px;
 }
 
+.training-log {
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 10px;
+    padding: 10px;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.training-log-line {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.training-log-line:last-child {
+    border-bottom: none;
+}
 
 .training-progress {
     height: 8px;

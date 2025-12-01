@@ -3413,6 +3413,9 @@ function renderPromptHelperResults(job) {
     promptHelperElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""}`;
     promptHelperElements.summary.textContent = "";
     promptHelperElements.results.innerHTML = "";
+    if (promptHelperElements.logs) {
+        promptHelperElements.logs.innerHTML = "";
+    }
     if (job.error) {
         const errEl = document.createElement("div");
         errEl.className = "training-message error";
@@ -3427,6 +3430,17 @@ function renderPromptHelperResults(job) {
     }
     const cfg = result.config || {};
     promptHelperElements.summary.textContent = `Dataset ${result.dataset_id || ""} • ${cfg.sample_per_class || "?"} images/class • score ≥ ${cfg.score_threshold ?? "?"} • max dets ${cfg.max_dets ?? "?"} • IoU ${cfg.iou_threshold ?? "?"} • seed ${cfg.seed ?? "?"}`;
+    if (Array.isArray(job.logs) && promptHelperElements.logs) {
+        const logFrag = document.createDocumentFragment();
+        job.logs.slice(-200).forEach((entry) => {
+            const div = document.createElement("div");
+            div.className = "training-log-line";
+            const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
+            div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
+            logFrag.appendChild(div);
+        });
+        promptHelperElements.logs.appendChild(logFrag);
+    }
     const frag = document.createDocumentFragment();
     result.classes.forEach((cls) => {
         const card = document.createElement("div");
@@ -3494,9 +3508,22 @@ async function pollPromptHelperJob(force = false) {
         const job = await resp.json();
         promptHelperState.lastJob = job;
         console.info("[prompt-helper] poll", job);
+        if (promptHelperElements.logs && Array.isArray(job.logs)) {
+            const logFrag = document.createDocumentFragment();
+            job.logs.slice(-200).forEach((entry) => {
+                const div = document.createElement("div");
+                div.className = "training-log-line";
+                const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
+                div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
+                logFrag.appendChild(div);
+            });
+            promptHelperElements.logs.innerHTML = "";
+            promptHelperElements.logs.appendChild(logFrag);
+        }
         if (promptHelperElements.status) {
             const pct = job.progress ? Math.round(job.progress * 100) : 0;
-            promptHelperElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%)`;
+            const steps = job.total_steps ? ` • ${job.completed_steps || 0}/${job.total_steps}` : "";
+            promptHelperElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%${steps})`;
         }
         if (job.status === "completed" || job.status === "failed") {
             if (promptHelperState.pollHandle) {
@@ -3670,6 +3697,7 @@ async function initPromptHelperUi() {
     promptHelperElements.summary = document.getElementById("promptHelperSummary");
     promptHelperElements.prompts = document.getElementById("promptHelperPrompts");
     promptHelperElements.results = document.getElementById("promptHelperResults");
+    promptHelperElements.logs = document.getElementById("promptHelperLogs");
     promptHelperElements.message = document.getElementById("promptHelperMessage");
     promptHelperElements.applyButton = document.getElementById("promptHelperApplyBtn");
     if (promptHelperElements.evaluateButton) {

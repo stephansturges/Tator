@@ -2362,6 +2362,9 @@ class PromptHelperJob:
     progress: float = 0.0
     request: Dict[str, Any] = field(default_factory=dict)
     result: Optional[Dict[str, Any]] = None
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    total_steps: int = 0
+    completed_steps: int = 0
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -4100,10 +4103,13 @@ def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
         "status": job.status,
         "message": job.message,
         "progress": job.progress,
+        "total_steps": job.total_steps,
+        "completed_steps": job.completed_steps,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "request": job.request,
         "result": job.result,
+        "logs": job.logs,
         "error": job.error,
     }
 
@@ -4140,6 +4146,26 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
         results: List[Dict[str, Any]] = []
         total_classes = len(categories) or 1
         image_cache: Dict[int, Image.Image] = {}
+        # Precompute total steps for progress: each prompt * each sampled image.
+        total_steps = 0
+        for idx, cat in enumerate(categories):
+            cat_id = int(cat.get("id", idx))
+            prompts = prompts_map.get(cat_id)
+            if not prompts:
+                prompts = _generate_prompt_variants_for_class(
+                    str(cat.get("name", f"class_{cat_id}")),
+                    payload.max_synonyms,
+                    payload.use_qwen,
+                )
+            sample_ids = _sample_images_for_category(
+                cat_id,
+                list(cat_to_images.get(cat_id, set())),
+                payload.sample_per_class,
+                payload.seed,
+            )
+            total_steps += len(prompts) * max(1, len(sample_ids))
+        job.total_steps = total_steps
+        job.completed_steps = 0
         for idx, cat in enumerate(categories):
             cat_id = int(cat.get("id", idx))
             class_name = str(cat.get("name", f"class_{cat_id}"))
@@ -4161,6 +4187,13 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
             )
             candidate_results: List[Dict[str, Any]] = []
             for prompt in candidates:
+                step_label = f"{class_name}: '{prompt}'"
+                try:
+                    job.logs.append({"ts": time.time(), "msg": f"Running {step_label} on {len(sampled_images)} images"})
+                    if len(job.logs) > MAX_JOB_LOGS:
+                        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                except Exception:
+                    pass
                 metrics = _evaluate_prompt_for_class(
                     prompt,
                     cat_id=cat_id,
@@ -4173,6 +4206,10 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
                     image_cache=image_cache,
                 )
                 candidate_results.append(metrics)
+                job.completed_steps += max(1, len(sampled_images))
+                if job.total_steps:
+                    job.progress = min(1.0, job.completed_steps / job.total_steps)
+                job.updated_at = time.time()
             candidate_results.sort(key=lambda m: (m["det_rate"], m["recall"], m["precision"]), reverse=True)
             results.append(
                 {

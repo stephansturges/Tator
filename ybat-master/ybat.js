@@ -2411,6 +2411,33 @@ function computeSam3Progress(job) {
     return Math.max(0, Math.min(1, overall));
 }
 
+function computeMetricProgress(job) {
+    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
+    if (!metrics.length) return null;
+    const last = metrics[metrics.length - 1] || {};
+    const batchesPerEpoch = Number.isFinite(last.batches_per_epoch) ? Number(last.batches_per_epoch) : null;
+    const totalEpochs = Number.isFinite(last.total_epochs) ? Number(last.total_epochs) : null;
+    const batch = Number.isFinite(last.batch) ? Number(last.batch) : null;
+    const epoch = Number.isFinite(last.epoch) ? Number(last.epoch) : null;
+    if (!batchesPerEpoch || !totalEpochs || !batch || !epoch) return null;
+    const done = Math.max(0, (epoch - 1) * batchesPerEpoch + batch);
+    const total = Math.max(1, batchesPerEpoch * totalEpochs);
+    return Math.max(0, Math.min(1, done / total));
+}
+
+function computeMetricEta(job, progressOverride = null) {
+    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
+    if (!metrics.length) return null;
+    const firstTs = metrics.find((m) => Number.isFinite(m?.timestamp))?.timestamp;
+    const lastTs = [...metrics].reverse().find((m) => Number.isFinite(m?.timestamp))?.timestamp;
+    if (!Number.isFinite(firstTs) || !Number.isFinite(lastTs) || lastTs <= firstTs) return null;
+    const progress = progressOverride !== null ? progressOverride : computeMetricProgress(job);
+    if (!Number.isFinite(progress) || progress <= 0) return null;
+    const elapsed = lastTs - firstTs;
+    const remaining = elapsed * (1 - progress) / progress;
+    return remaining > 0 ? remaining : null;
+}
+
 function computeSam3LiteProgress(job) {
     const fallback = Number.isFinite(job?.progress) ? job.progress : 0;
     const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
@@ -3388,7 +3415,8 @@ async function refreshSam3History() {
 function updateSam3Ui(job) {
     if (!job || !sam3TrainElements.statusText) return;
     sam3TrainState.lastJobSnapshot = job;
-    const progressVal = computeSam3Progress(job);
+    const metricProgress = computeMetricProgress(job);
+    const progressVal = metricProgress !== null ? metricProgress : computeSam3Progress(job);
     const pctVal = Math.max(0, Math.min(100, progressVal * 100));
     const pct = Number.isFinite(pctVal) ? pctVal : 0;
     const pctText = pct.toFixed(1).replace(/\.0$/, "");
@@ -3418,7 +3446,7 @@ function updateSam3Ui(job) {
         sam3TrainElements.progressFill.setAttribute("aria-valuenow", pctText);
     }
     if (sam3TrainElements.etaText) {
-        const remaining = updateSam3Eta(progressVal);
+        const remaining = computeMetricEta(job, metricProgress !== null ? metricProgress : progressVal);
         if (job.status === "succeeded") {
             sam3TrainElements.etaText.textContent = "ETA: complete";
         } else if (remaining !== null && remaining > 0) {
@@ -3426,8 +3454,6 @@ function updateSam3Ui(job) {
         } else {
             sam3TrainElements.etaText.textContent = "ETA: estimating…";
         }
-    } else {
-        updateSam3Eta(progressVal);
     }
     if (sam3TrainElements.cancelButton) {
         sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);

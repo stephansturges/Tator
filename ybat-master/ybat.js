@@ -1077,6 +1077,7 @@ const sam3TrainState = {
         logs: null,
         results: null,
         message: null,
+        classSelect: null,
     };
 
     const promptSearchState = {
@@ -3666,6 +3667,9 @@ function renderPromptSearchResults(job) {
         `precision floor ${cfg.precision_floor ?? "?"}`,
         `seed ${cfg.seed ?? "?"}`,
     ];
+    if (cfg.class_id !== undefined && cfg.class_id !== null) {
+        summaryBits.unshift(`Class ${cfg.class_id}`);
+    }
     if (promptSearchElements.status) {
         promptSearchElements.status.title = "Search score boosts recall/det-rate but penalizes prompts that fall below the precision floor.";
         promptSearchElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""}`;
@@ -3794,6 +3798,12 @@ async function startPromptSearchJob() {
     const maxDets = readNumberInput(promptSearchElements.maxDets, { integer: true }) ?? 100;
     const iouThreshold = readNumberInput(promptSearchElements.iouThresh, { integer: false }) ?? 0.5;
     const seed = readNumberInput(promptSearchElements.seed, { integer: true }) ?? 42;
+    const targetVal = promptSearchElements.classSelect?.value;
+    let classId = null;
+    if (targetVal && targetVal !== "all") {
+        const parsed = parseInt(targetVal, 10);
+        if (!Number.isNaN(parsed)) classId = parsed;
+    }
     try {
         setPromptSearchMessage("Starting prompt search…", "info");
         if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = true;
@@ -3808,6 +3818,7 @@ async function startPromptSearchJob() {
             seed,
             precision_floor: precisionFloor,
             prompts_by_class: promptsMap,
+            class_id: classId,
         };
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/search`, {
             method: "POST",
@@ -3909,6 +3920,7 @@ async function generatePromptHelperPrompts() {
                 promptHelperState.promptsByClass[cls.class_id] = cls.default_prompts;
             }
         });
+        populatePromptSearchClassSelect();
         promptHelperState.lastJob = null;
         promptHelperState.activeJobId = null;
         renderPromptHelperPrompts();
@@ -4038,6 +4050,7 @@ async function initPromptHelperUi() {
     promptHelperElements.logs = document.getElementById("promptHelperLogs");
     promptHelperElements.message = document.getElementById("promptHelperMessage");
     promptHelperElements.applyButton = document.getElementById("promptHelperApplyBtn");
+    populatePromptSearchClassSelect();
     promptSearchElements.sampleSize = document.getElementById("promptSearchSampleSize");
     promptSearchElements.negatives = document.getElementById("promptSearchNegatives");
     promptSearchElements.precisionFloor = document.getElementById("promptSearchPrecisionFloor");
@@ -4046,6 +4059,7 @@ async function initPromptHelperUi() {
     promptSearchElements.iouThresh = document.getElementById("promptSearchIouThresh");
     promptSearchElements.seed = document.getElementById("promptSearchSeed");
     promptSearchElements.runButton = document.getElementById("promptSearchRunBtn");
+    promptSearchElements.classSelect = document.getElementById("promptSearchClassSelect");
     promptSearchElements.status = document.getElementById("promptSearchStatus");
     promptSearchElements.logs = document.getElementById("promptSearchLogs");
     promptSearchElements.results = document.getElementById("promptSearchResults");
@@ -4069,6 +4083,7 @@ async function initPromptHelperUi() {
             if (promptSearchElements.logs) promptSearchElements.logs.innerHTML = "";
             if (promptSearchElements.status) promptSearchElements.status.textContent = "Idle";
             setPromptSearchMessage("");
+            populatePromptSearchClassSelect();
         });
     }
     if (promptHelperElements.datasetRefresh) {
@@ -4108,6 +4123,23 @@ async function initPromptHelperUi() {
     await loadPromptHelperPresets();
     setPromptHelperMessage("Generate suggestions, edit prompts, then evaluate with SAM3.", "info");
     setPromptSearchMessage("Use the prompts above, then run a targeted search for the best wording.", "info");
+}
+
+function populatePromptSearchClassSelect() {
+    if (!promptSearchElements.classSelect) return;
+    const select = promptSearchElements.classSelect;
+    select.innerHTML = "";
+    const allOpt = document.createElement("option");
+    allOpt.value = "all";
+    allOpt.textContent = "All classes";
+    select.appendChild(allOpt);
+    (promptHelperState.suggestions || []).forEach((cls) => {
+        const opt = document.createElement("option");
+        opt.value = cls.class_id;
+        opt.textContent = cls.class_name || cls.class_id;
+        select.appendChild(opt);
+    });
+    select.value = "all";
 }
 
 function renderSam3History(list) {

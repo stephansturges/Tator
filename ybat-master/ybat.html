@@ -830,6 +830,20 @@
                             <button type="button" class="training-button" id="promptHelperGenerateBtn">Generate prompts</button>
                             <button type="button" class="training-button" id="promptHelperEvaluateBtn" disabled>Evaluate with SAM3</button>
                         </div>
+                        <div class="training-field">
+                            <label>Prompt presets</label>
+                            <div class="training-grid">
+                                <div>
+                                    <input type="text" id="promptHelperPresetName" placeholder="Preset name (optional)" />
+                                    <button type="button" class="training-button" id="promptHelperPresetSave">Save prompts</button>
+                                </div>
+                                <div>
+                                    <select id="promptHelperPresetSelect"></select>
+                                    <button type="button" class="training-button" id="promptHelperPresetLoad">Load preset</button>
+                                </div>
+                            </div>
+                            <div class="training-help">Save/load prompt sets for reuse with this dataset.</div>
+                        </div>
                         <div class="training-note">
                             <strong>Flow:</strong> generate/edit prompts, then run evaluation. Scoring samples images per class, runs SAM3 text prompts one at a time, and reports precision/recall-style stats against ground truth boxes.
                         </div>

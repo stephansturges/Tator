@@ -2382,6 +2382,8 @@ PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
 PROMPT_HELPER_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
+PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
+PROMPT_HELPER_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
@@ -3977,6 +3979,48 @@ def _suggest_prompts_for_dataset(payload: PromptHelperSuggestRequest) -> Dict[st
     }
 
 
+def _list_prompt_helper_presets() -> List[Dict[str, Any]]:
+    presets: List[Dict[str, Any]] = []
+    for path in PROMPT_HELPER_PRESET_ROOT.glob("*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            presets.append(data)
+        except Exception:
+            continue
+    presets.sort(key=lambda p: p.get("created_at", 0), reverse=True)
+    return presets
+
+
+def _load_prompt_helper_preset(preset_id: str) -> Dict[str, Any]:
+    path = (PROMPT_HELPER_PRESET_ROOT / f"{preset_id}.json").resolve()
+    if not str(path).startswith(str(PROMPT_HELPER_PRESET_ROOT.resolve())) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_preset_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"prompt_helper_preset_load_failed:{exc}") from exc
+
+
+def _save_prompt_helper_preset(label: str, dataset_id: str, prompts_by_class: Dict[int, List[str]]) -> Dict[str, Any]:
+    preset_id = f"phset_{uuid.uuid4().hex[:8]}"
+    created_at = time.time()
+    payload = {
+        "id": preset_id,
+        "label": label or preset_id,
+        "dataset_id": dataset_id,
+        "created_at": created_at,
+        "prompts_by_class": prompts_by_class,
+    }
+    path = (PROMPT_HELPER_PRESET_ROOT / f"{preset_id}.json").resolve()
+    if not str(path).startswith(str(PROMPT_HELPER_PRESET_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return payload
+
+
 def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
     ann_path, images_dir = _find_coco_split(dataset_root)
     try:
@@ -4101,6 +4145,8 @@ def _evaluate_prompt_for_class(
     det_rate = det_images / len(image_ids) if image_ids else 0.0
     avg_iou = iou_sum / matches if matches else None
     avg_score = score_sum / matched_scores if matched_scores else None
+    f1 = (2 * precision * recall) / (precision + recall + 1e-8) if (precision + recall) > 0 else 0.0
+    overall_score = f1 * (0.5 + 0.5 * det_rate)
     return {
         "prompt": prompt,
         "precision": precision,
@@ -4108,6 +4154,8 @@ def _evaluate_prompt_for_class(
         "det_rate": det_rate,
         "avg_iou": avg_iou,
         "avg_score": avg_score,
+        "score": overall_score,
+        "f1": f1,
         "preds": total_preds,
         "matches": matches,
         "gts": total_gt,
@@ -4118,6 +4166,13 @@ class PromptHelperSuggestRequest(BaseModel):
     dataset_id: str
     max_synonyms: int = Field(3, ge=0, le=10)
     use_qwen: bool = True
+
+class PromptHelperPreset(BaseModel):
+    id: str
+    label: str
+    dataset_id: str
+    created_at: float
+    prompts_by_class: Dict[int, List[str]]
 
 
 class PromptHelperRequest(BaseModel):
@@ -4246,7 +4301,7 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
                 if job.total_steps:
                     job.progress = min(1.0, job.completed_steps / job.total_steps)
                 job.updated_at = time.time()
-            candidate_results.sort(key=lambda m: (m["det_rate"], m["recall"], m["precision"]), reverse=True)
+            candidate_results.sort(key=lambda m: (m.get("score", 0.0), m.get("recall", 0.0), m.get("precision", 0.0)), reverse=True)
             results.append(
                 {
                     "class_id": cat_id,
@@ -4292,6 +4347,45 @@ def prompt_helper_suggest(payload: PromptHelperSuggestRequest):
 def start_prompt_helper_job(payload: PromptHelperRequest):
     job = _start_prompt_helper_job(payload)
     return _serialize_prompt_helper_job(job)
+
+
+@app.get("/sam3/prompt_helper/presets")
+def list_prompt_helper_presets():
+    return _list_prompt_helper_presets()
+
+
+@app.get("/sam3/prompt_helper/presets/{preset_id}")
+def get_prompt_helper_preset(preset_id: str):
+    return _load_prompt_helper_preset(preset_id)
+
+
+@app.post("/sam3/prompt_helper/presets")
+def create_prompt_helper_preset(
+    dataset_id: str = Form(...),
+    label: str = Form(""),
+    prompts_json: str = Form(...),
+):
+    try:
+        prompts_by_class = json.loads(prompts_json)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_prompts:{exc}") from exc
+    if not isinstance(prompts_by_class, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompts_must_be_object")
+    normalized: Dict[int, List[str]] = {}
+    for key, vals in prompts_by_class.items():
+        try:
+            cid = int(key)
+        except Exception:
+            continue
+        if not isinstance(vals, (list, tuple)):
+            continue
+        cleaned = [str(v).strip() for v in vals if isinstance(v, str) and str(v).strip()]
+        if cleaned:
+            normalized[cid] = cleaned
+    if not normalized:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="no_prompts_provided")
+    preset = _save_prompt_helper_preset(label, dataset_id, normalized)
+    return preset
 
 
 @app.get("/sam3/prompt_helper/jobs")

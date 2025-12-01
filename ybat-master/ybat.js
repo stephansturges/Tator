@@ -3365,7 +3365,8 @@ function renderPromptHelperPrompts() {
         const metaBits = [];
         if (cls.image_count) metaBits.push(`${cls.image_count} images`);
         if (cls.gt_count) metaBits.push(`${cls.gt_count} boxes`);
-        title.textContent = `${cls.class_name || cls.class_id}${metaBits.length ? ` (${metaBits.join(" / ")})` : ""}`;
+        const name = cls.class_name || cls.class_id;
+        title.innerHTML = `<strong>${name}</strong>${metaBits.length ? ` <span class="training-help">(${metaBits.join(" / ")})</span>` : ""}`;
         header.appendChild(title);
         card.appendChild(header);
         const body = document.createElement("div");

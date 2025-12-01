@@ -1174,6 +1174,11 @@ hr {
     box-sizing: border-box;
 }
 
+#tabPromptHelper .training-card__title {
+    font-size: 16px;
+    font-weight: 700;
+}
+
 .training-log {
     background: #0f172a;
     color: #e2e8f0;

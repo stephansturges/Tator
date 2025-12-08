@@ -65,7 +65,6 @@
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
-            <button class="tab-button" data-tab="sam3lite-train" id="tabSam3LiteTrainButton" type="button">Train SAM3-Lite</button>
             <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">Prompt Helper</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
             <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
@@ -89,6 +88,13 @@
                             <label for="imageList"></label>
                             <select name="imageList" id="imageList" size="10" multiple></select>
                             <div id="imageInformation"></div>
+                            <div id="datasetTypeBadge" class="training-help"></div>
+                            <div class="training-actions">
+                                <button type="button" id="polygonDrawToggle" class="training-button secondary" aria-pressed="true">
+                                    Polygon draw: On (P)
+                                </button>
+                            </div>
+                            <div class="training-help">Seg mode only: P toggles polygon drawing. When off, clicks select/move polygons without adding new ones.</div>
                             <label for="classes">Classes:</label>
                             <input type="file" id="classes" name="classes" accept="text/plain" class="file-input-hidden" />
                             <label for="classes" id="classesSelect" class="training-button" role="button" tabindex="0">Load Classes…</label>
@@ -167,12 +173,36 @@
                                         <input type="number" id="sam3MaskThreshold" step="0.05" min="0" max="1" value="0.5" />
                                         <label for="sam3MaxResults">Max results</label>
                                         <input type="number" id="sam3MaxResults" min="1" max="100" value="20" />
+                                        <label for="sam3MinSize">Min size (px²)</label>
+                                        <input type="number" id="sam3MinSize" min="0" value="0" title="Ignore detections smaller than this pixel area. 0 keeps all." />
+                                        <label for="sam3MaxPoints">Max points/polygon</label>
+                                        <input type="number" id="sam3MaxPoints" min="10" max="5000" value="500" title="Simplification cap per polygon. Lower for smoother shapes; higher preserves detail." />
+                                        <label for="sam3SimplifyEpsilon">Simplify epsilon (px)</label>
+                                        <input type="number" id="sam3SimplifyEpsilon" min="0" step="0.1" value="1.0" title="Douglas–Peucker epsilon in pixels on the downsampled mask: higher = smoother polygons, lower = more detail." />
                                     </div>
                                     <label for="sam3ClassSelect">Assign detections to class</label>
                                     <select id="sam3ClassSelect"></select>
                                     <div class="sam3-text-buttons">
                                         <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
                                         <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
+                                        <label for="sam3RecipeFile" class="training-button secondary">Load recipe JSON</label>
+                                        <input type="file" id="sam3RecipeFile" accept="application/json" class="file-input-hidden" />
+                                        <button type="button" id="sam3RecipeApplyButton" class="training-button secondary">Apply recipe to image</button>
+                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr;">
+                                            <div>
+                                                <label for="sam3RecipePresetSelect">Recipe presets</label>
+                                                <select id="sam3RecipePresetSelect"></select>
+                                            </div>
+                                            <div>
+                                                <label for="sam3RecipePresetName">Save preset as</label>
+                                                <input type="text" id="sam3RecipePresetName" placeholder="Optional label" />
+                                            </div>
+                                        </div>
+                                        <div class="training-actions">
+                                            <button type="button" id="sam3RecipePresetSave" class="training-button secondary">Save recipe preset</button>
+                                            <button type="button" id="sam3RecipePresetLoad" class="training-button secondary">Load preset</button>
+                                        </div>
+                                        <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
                                     </div>
                                 </section>
                             </section>
@@ -934,6 +964,9 @@
                         <div class="training-actions">
                             <button type="button" class="training-button" id="promptRecipeExpandBtn">Expand prompts with Qwen</button>
                             <button type="button" class="training-button" id="promptRecipeRunBtn">Mine recipe</button>
+                            <button type="button" class="training-button secondary" id="promptRecipeApplyBtn" title="Copy the last mined recipe prompts/thresholds into the prompt editor so you can save as a preset.">
+                                Apply last recipe to prompts
+                            </button>
                         </div>
                         <div class="training-message" id="promptRecipeMessage" role="status"></div>
                         <div class="training-note">Uses prompts for the selected class (edit in the list above). Runs on positives + optional negatives; tries each threshold per prompt and proposes an ordered recipe.</div>
@@ -971,166 +1004,6 @@
                                 </div>
                                 <div id="promptRecipeResults" class="training-history"></div>
                             </div>
-                        </div>
-                    </section>
-                </div>
-            </div>
-            <div class="tab-panel" id="tabSam3LiteTrain" data-tab-panel="sam3lite-train">
-                <div class="training-wrapper">
-                    <section class="training-form-section">
-                        <h2>Train SAM3-Lite (box-only)</h2>
-                        <p class="training-help">Runs the in-repo SAM3-lite trainer (no external sam3 checkout). Uses the same datasets and class-balance strategies.</p>
-                        <div class="training-field">
-                            <label>Dataset</label>
-                            <div class="sam3-dataset-row">
-                                <select id="sam3LiteDatasetSelect"></select>
-                                <button type="button" class="training-button" id="sam3LiteDatasetRefresh">Refresh</button>
-                                <button type="button" class="training-button" id="sam3LiteDatasetConvert">Convert</button>
-                            </div>
-                            <div class="training-help" id="sam3LiteDatasetSummary">We’ll auto-convert to COCO when needed.</div>
-                        </div>
-                        <div class="training-field">
-                            <label for="sam3LiteRunName">Run name / log dir</label>
-                            <input type="text" id="sam3LiteRunName" placeholder="Optional; defaults to job id" />
-                            <div class="training-help">Logs + checkpoints land in <code>uploads/sam3lite_runs/&lt;run_name&gt;</code>.</div>
-                        </div>
-                        <div class="training-grid">
-                            <div>
-                                <label for="sam3LiteTrainBatch">Train batch size</label>
-                                <input type="number" id="sam3LiteTrainBatch" min="1" value="1" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteValBatch">Val batch size</label>
-                                <input type="number" id="sam3LiteValBatch" min="1" value="1" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteTrainWorkers">Train workers</label>
-                                <input type="number" id="sam3LiteTrainWorkers" min="0" value="4" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteValWorkers">Val workers</label>
-                                <input type="number" id="sam3LiteValWorkers" min="0" value="2" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteEpochs">Max epochs</label>
-                                <input type="number" id="sam3LiteEpochs" min="1" value="20" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteResolution">Resolution</label>
-                                <input type="number" id="sam3LiteResolution" min="256" value="1008" step="16" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteLrScale">LR scale</label>
-                                <input type="number" id="sam3LiteLrScale" step="0.01" value="0.1" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteGradAccum">Grad accumulation</label>
-                                <input type="number" id="sam3LiteGradAccum" min="1" value="1" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteValFreq">Val every N epochs</label>
-                                <input type="number" id="sam3LiteValFreq" min="1" value="10" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteTargetEpochSize">Target epoch size</label>
-                                <input type="number" id="sam3LiteTargetEpochSize" min="1" value="1000" title="Number of batches to treat as one epoch. Caps epoch length even if the dataset would yield more batches. Lower = shorter epochs and faster feedback; higher = longer epochs." />
-                            </div>
-                            <div>
-                                <label for="sam3LiteBalanceStrategy" title="Choose how to rebalance rare classes.">
-                                    Balance strategy
-                                </label>
-                                <select id="sam3LiteBalanceStrategy">
-                                    <option value="none" selected>None (uniform sampling)</option>
-                                    <option value="inv_sqrt">Mild: 1/sqrt(freq)</option>
-                                    <option value="clipped_inv">Clipped inverse-freq</option>
-                                    <option value="effective_num">Effective number of samples</option>
-                                    <option value="focal">Focal sampling</option>
-                                </select>
-                                <div id="sam3LiteBalanceDescription" class="training-help"></div>
-                            </div>
-                            <div class="balance-param-row sam3lite-balance-param" data-param="power">
-                                <label for="sam3LiteBalancePower" title="Exponent for inverse-frequency weighting (1/freq^power). Lower = milder.">
-                                    Inverse power
-                                </label>
-                                <input type="number" id="sam3LiteBalancePower" step="0.1" min="0" value="0.5" />
-                            </div>
-                            <div class="balance-param-row sam3lite-balance-param" data-param="clip">
-                                <label for="sam3LiteBalanceClip" title="Clamp the ratio between highest and lowest weights. e.g., 10 means rare classes get at most 10x the weight of common classes.">
-                                    Clip ratio (max/min)
-                                </label>
-                                <input type="number" id="sam3LiteBalanceClip" step="1" min="1" value="10" />
-                            </div>
-                            <div class="balance-param-row sam3lite-balance-param" data-param="beta">
-                                <label for="sam3LiteBalanceBeta" title="Beta for effective number of samples weighting. Higher (0.99-0.999) = stronger emphasis on rare classes.">
-                                    Beta (effective num)
-                                </label>
-                                <input type="number" id="sam3LiteBalanceBeta" step="0.001" min="0" max="0.9999" value="0.99" />
-                            </div>
-                            <div class="balance-param-row sam3lite-balance-param" data-param="gamma">
-                                <label for="sam3LiteBalanceGamma" title="Gamma for focal-style sampling. Higher = more boost to rare/low-freq classes.">
-                                    Gamma (focal)
-                                </label>
-                                <input type="number" id="sam3LiteBalanceGamma" step="0.1" min="0" value="0.5" />
-                            </div>
-                            <div>
-                                <label for="sam3LiteWarmup">Warmup steps</label>
-                                <input type="number" id="sam3LiteWarmup" min="0" value="20" title="Warmup steps: start the LR near zero and ramp up over this many steps. Higher = gentler/safer start, lower = hotter start. 0 disables warmup." />
-                            </div>
-                            <div>
-                                <label for="sam3LiteTimescale">Scheduler timescale</label>
-                                <input type="number" id="sam3LiteTimescale" min="1" value="20" title="Scheduler timescale: stretches the LR schedule. Higher = slower decay, steadier training. Lower = faster decay, spikier early changes." />
-                            </div>
-                        </div>
-                        <div class="training-toggle-row">
-                            <!-- Instance interactivity removed: no supporting dataset; keeping UI simpler. -->
-                        </div>
-                        <button type="button" id="sam3LiteStartBtn" class="training-button">Start SAM3-Lite Training</button>
-                        <div class="training-note">
-                            <strong>Tuning tips:</strong><br />
-                            • Lower LR scale (e.g., 0.05 or 0.02) to reduce early loss spikes.<br />
-                            • Warmup steps: start near-zero LR and ramp up over these steps; higher is gentler/safer, lower is hotter/risks spikes (try 20–100).<br />
-                            • Timescale: stretches the LR schedule; higher keeps LR steady longer, lower decays faster (try 20–40 for short runs).<br />
-                            • To simulate larger batches without extra VRAM, keep batch size at 1 and raise grad accumulation (e.g., 2–4).<br />
-                        </div>
-                        <div class="training-message" id="sam3LiteMessage" role="status"></div>
-                    </section>
-                    <section class="training-status-section">
-                        <h2>Training Status</h2>
-                        <div class="training-progress" id="sam3LiteProgressBar">
-                            <div class="training-progress-fill" id="sam3LiteProgressFill"></div>
-                        </div>
-                        <div class="training-status-text" id="sam3LiteStatusText">Idle</div>
-                        <div class="training-actions">
-                            <button type="button" class="training-button training-button-danger" id="sam3LiteCancelBtn" disabled>Cancel Job</button>
-                        </div>
-                        <div class="training-summary" id="sam3LiteSummary"></div>
-                        <div class="training-summary" id="sam3LiteBalanceSummary"></div>
-                        <div class="training-actions">
-                            <button type="button" class="training-button" id="sam3LiteActivateBtn" disabled>Activate checkpoint</button>
-                        </div>
-                        <div class="training-chart">
-                            <h3>Loss</h3>
-                            <canvas id="sam3LiteLossChart" height="120"></canvas>
-                            <div class="training-chart-legend">
-                                <span class="legend-item legend-blue">Blue: rolling average loss (last ~10 logged batches).</span>
-                                <span class="legend-item legend-orange">Orange: logged batch loss (printed every Nth minibatch).</span>
-                            </div>
-                        </div>
-                        <div class="training-logs">
-                            <h3>Logs</h3>
-                            <pre id="sam3LiteLog"></pre>
-                        </div>
-                        <div class="training-history">
-                            <h3>Recent SAM3-Lite Jobs</h3>
-                            <div id="sam3LiteTrainingHistory"></div>
-                        </div>
-                        <div class="training-history">
-                            <div class="storage-header">
-                                <h3>Run storage (logs & checkpoints)</h3>
-                                <button type="button" class="training-button" id="sam3LiteStorageRefresh">Refresh</button>
-                            </div>
-                            <div class="training-help">Lists folders under <code>uploads/sam3lite_runs/</code>; delete logs/dumps/checkpoints you no longer need.</div>
-                            <div id="sam3LiteStorageList" class="storage-list"></div>
                         </div>
                     </section>
                 </div>
@@ -1351,6 +1224,18 @@
                     </div>
                     <div id="settingsStatus" class="settings-status" role="status" aria-live="polite"></div>
                     <p class="settings-help">Tip: when tunnelling to a remote GPU box (e.g. <code>ssh -L 8000:127.0.0.1:8000 user@gpu-host</code>), set the URL to <code>http://localhost:8000</code> so the browser routes through the tunnel.</p>
+                    <div class="training-divider"></div>
+                    <h3>Backend Fuzzer</h3>
+                    <p class="settings-help">Runs a quick smoke test with random data against key API endpoints (SAM/Qwen). Useful to sanity-check that the backend is alive and models are loaded. Tests may fail if weights are missing.</p>
+                    <div class="training-grid">
+                        <label><input type="checkbox" id="fuzzerIncludeQwen" checked /> Include Qwen tests</label>
+                        <label><input type="checkbox" id="fuzzerIncludeSam3" /> Include SAM3 tests</label>
+                    </div>
+                    <div class="settings-actions">
+                        <button type="button" id="runBackendFuzzer" class="training-button">Run fuzzer</button>
+                    </div>
+                    <div id="backendFuzzerStatus" class="settings-status" role="status" aria-live="polite"></div>
+                    <pre id="backendFuzzerLog" class="training-log" style="max-height: 220px; overflow-y: auto;"></pre>
                 </div>
             </div>
         </div>

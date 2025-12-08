@@ -2035,6 +2035,8 @@ class YoloBboxOutput(BaseModel):
     bbox: List[float]
     uuid: Optional[str] = None
     image_token: Optional[str] = None
+    mask: Optional[Dict[str, Any]] = None
+    simplify_epsilon: Optional[float] = None
 
 
 class YoloBboxClassOutput(BaseModel):
@@ -2042,6 +2044,8 @@ class YoloBboxClassOutput(BaseModel):
     bbox: List[float]
     uuid: Optional[str] = None
     image_token: Optional[str] = None
+    mask: Optional[Dict[str, Any]] = None
+    simplify_epsilon: Optional[float] = None
 
 
 class Sam3TextPrompt(BaseModel):
@@ -7871,10 +7875,19 @@ def sam_point(prompt: PointPrompt):
         point_labels=labels,
         multimask_output=False,
     )
-    mask = masks[0]
-    left, top, right, bottom = mask_to_bounding_box(mask)
+    mask_arr = np.asarray(masks[0])
+    if mask_arr.dtype != np.uint8:
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+    left, top, right, bottom = mask_to_bounding_box(mask_arr)
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
-    return YoloBboxOutput(class_id="0", bbox=yolo_box, uuid=prompt.uuid, image_token=token)
+    return YoloBboxOutput(
+        class_id="0",
+        bbox=yolo_box,
+        uuid=prompt.uuid,
+        image_token=token,
+        mask=encode_binary_mask(mask_arr),
+        simplify_epsilon=None,
+    )
 
 
 @app.post("/sam_bbox_auto", response_model=SamPointAutoResponse)
@@ -7910,8 +7923,10 @@ def sam_bbox_auto(prompt: BboxPrompt):
         box=sub_box,
         multimask_output=False,
     )
-    mask = masks[0]
-    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+    mask_arr = np.asarray(masks[0])
+    if mask_arr.dtype != np.uint8:
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask_arr)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
@@ -7938,6 +7953,8 @@ def sam_bbox_auto(prompt: BboxPrompt):
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
+        mask=encode_binary_mask(mask_arr),
+        simplify_epsilon=None,
     )
 
 
@@ -7963,8 +7980,10 @@ def sam_point_auto(prompt: PointPrompt):
         point_labels=labels,
         multimask_output=False,
     )
-    mask = masks[0]
-    left, top, right, bottom = mask_to_bounding_box(mask)
+    mask_arr = np.asarray(masks[0])
+    if mask_arr.dtype != np.uint8:
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+    left, top, right, bottom = mask_to_bounding_box(mask_arr)
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
     li = max(0, int(left))
     ti = max(0, int(top))
@@ -7980,7 +7999,14 @@ def sam_point_auto(prompt: PointPrompt):
     feats = feats / feats.norm(dim=-1, keepdim=True)
     feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
     pred_cls = clf.predict(feats_np)[0]
-    return SamPointAutoResponse(prediction=str(pred_cls), bbox=yolo_box, uuid=prompt.uuid, image_token=token)
+    return SamPointAutoResponse(
+        prediction=str(pred_cls),
+        bbox=yolo_box,
+        uuid=prompt.uuid,
+        image_token=token,
+        mask=encode_binary_mask(mask_arr),
+        simplify_epsilon=None,
+    )
 
 
 @app.post("/sam_point_multi", response_model=YoloBboxOutput)
@@ -8007,10 +8033,19 @@ def sam_point_multi(prompt: MultiPointPrompt):
         point_labels=labels,
         multimask_output=False,
     )
-    mask = masks[0]
-    left, top, right, bottom = mask_to_bounding_box(mask)
+    mask_arr = np.asarray(masks[0])
+    if mask_arr.dtype != np.uint8:
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+    left, top, right, bottom = mask_to_bounding_box(mask_arr)
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
-    return YoloBboxOutput(class_id="0", bbox=yolo_box, uuid=prompt.uuid, image_token=token)
+    return YoloBboxOutput(
+        class_id="0",
+        bbox=yolo_box,
+        uuid=prompt.uuid,
+        image_token=token,
+        mask=encode_binary_mask(mask_arr),
+        simplify_epsilon=None,
+    )
 
 
 @app.post("/sam_point_multi_auto", response_model=SamPointAutoResponse)
@@ -8040,8 +8075,10 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
         point_labels=labels,
         multimask_output=False,
     )
-    mask = masks[0]
-    left, top, right, bottom = mask_to_bounding_box(mask)
+    mask_arr = np.asarray(masks[0])
+    if mask_arr.dtype != np.uint8:
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+    left, top, right, bottom = mask_to_bounding_box(mask_arr)
     yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
     li = max(0, int(left))
     ti = max(0, int(top))
@@ -8057,7 +8094,14 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
     feats = feats / feats.norm(dim=-1, keepdim=True)
     feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
     pred_cls = clf.predict(feats_np)[0]
-    return SamPointAutoResponse(prediction=str(pred_cls), bbox=yolo_box, uuid=prompt.uuid, image_token=token)
+    return SamPointAutoResponse(
+        prediction=str(pred_cls),
+        bbox=yolo_box,
+        uuid=prompt.uuid,
+        image_token=token,
+        mask=encode_binary_mask(mask_arr),
+        simplify_epsilon=None,
+    )
 
 
 @app.post("/sam_bbox", response_model=YoloBboxOutput)
@@ -8088,8 +8132,10 @@ def sam_bbox(prompt: BboxPrompt):
         box=sub_box,
         multimask_output=False,
     )
-    mask = masks[0]
-    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+    mask_arr = np.asarray(masks[0])
+    if mask_arr.dtype != np.uint8:
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask_arr)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
@@ -8107,6 +8153,8 @@ def sam_bbox(prompt: BboxPrompt):
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
+        mask=encode_binary_mask(mask_arr),
+        simplify_epsilon=None,
     )
 
 
@@ -8145,8 +8193,10 @@ def sam_bbox_auto_class(prompt: BboxPrompt):
         box=sub_box,
         multimask_output=False,
     )
-    mask = masks[0]
-    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+    mask_arr = np.asarray(masks[0])
+    if mask_arr.dtype != np.uint8:
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask_arr)
     yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
@@ -8173,6 +8223,8 @@ def sam_bbox_auto_class(prompt: BboxPrompt):
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
+        mask=encode_binary_mask(mask_arr),
+        simplify_epsilon=None,
     )
 
 @app.post("/crop_zip_init")

@@ -11816,6 +11816,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     const drawNewBbox = (context) => {
         const isSegDataset = datasetType === "seg";
+        const segBboxMode = isSegDataset && !polygonDrawEnabled;
         if (isSegDataset && polygonDrawEnabled && !samMode) {
             drawNewPolygon(context);
             return;
@@ -11823,7 +11824,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const canPreview =
             mouse.buttonL === true &&
             currentClass !== null &&
-            (currentBbox === null || isSegDataset);
+            (currentBbox === null || isSegDataset) &&
+            (segBboxMode || datasetType !== "seg" || samMode);
         if (canPreview) {
             const width = (mouse.realX - mouse.startRealX);
             const height = (mouse.realY - mouse.startRealY);
@@ -12102,7 +12104,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 mouse.buttonR = true;
             } else if (event.which === 1) {
                 mouse.buttonL = true;
-                if (datasetType !== "seg") {
+                const segBboxMode = datasetType === "seg" && !polygonDrawEnabled;
+                if (datasetType !== "seg" || segBboxMode) {
                     const insideExisting = currentBbox && isPointInsideBbox(currentBbox.bbox, mouse.realX, mouse.realY);
                     if (!insideExisting) {
                         currentBbox = null;
@@ -12114,6 +12117,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (isSegDataset) {
             const handled = await handlePolygonPointer(event, oldRealX, oldRealY);
             if (handled) {
+                if (event.type === "mouseup" || event.type === "mouseout") {
+                    mouse.buttonR = false;
+                    mouse.buttonL = false;
+                }
+                return;
+            }
+            // If polygon drawing is off, allow bbox flows to continue in seg mode.
+            if (!samMode && polygonDrawEnabled) {
                 if (event.type === "mouseup" || event.type === "mouseout") {
                     mouse.buttonR = false;
                     mouse.buttonL = false;
@@ -12201,7 +12212,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             changeCursorByLocation();
             panImage(oldRealX, oldRealY);
             return;
-        } else if (datasetType === "seg") {
+        } else if (datasetType === "seg" && polygonDrawEnabled) {
             return;
         }
         moveBbox();
@@ -12451,7 +12462,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     };
 
     const setBboxMarkedState = () => {
-        if (datasetType === "seg") {
+        if (datasetType === "seg" && polygonDrawEnabled) {
             if (currentBbox && currentBbox.bbox) {
                 currentBbox.bbox.marked = true;
             }

@@ -12069,6 +12069,29 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 mouse.buttonR = true;
             } else if (event.which === 1) {
                 mouse.buttonL = true;
+                if (datasetType === "seg" && samMode) {
+                    const hit = findPolygonAt(mouse.realX, mouse.realY);
+                    if (hit) {
+                        currentBbox = {
+                            bbox: hit.bbox,
+                            index: hit.index,
+                            originalX: hit.bbox.x,
+                            originalY: hit.bbox.y,
+                            originalWidth: hit.bbox.width,
+                            originalHeight: hit.bbox.height,
+                            moving: false,
+                            resizing: null,
+                        };
+                        // Do not start a new box when clicking an existing polygon.
+                        mouse.buttonL = false;
+                        mouse.buttonR = false;
+                        return;
+                    }
+                    // Clear selection so a new box can be drawn/previewed.
+                    currentBbox = null;
+                    polygonDrag = null;
+                    polygonDraft = null;
+                }
             }
         }
         const isSegDataset = datasetType === "seg";

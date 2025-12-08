@@ -10772,6 +10772,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 }
                 return;
             }
+            if (datasetType === "seg") {
+                const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                delete pendingApiBboxes[returnedUUID];
+                if (!applied) {
+                    setSamStatus("SAM auto point returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
+                }
+                return;
+            }
             currentBbox = {
                 bbox: targetBbox,
                 index: -1,
@@ -10852,6 +10863,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 console.warn("No pending bbox found for uuid:", returnedUUID);
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
+                }
+                return;
+            }
+            if (datasetType === "seg") {
+                const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                delete pendingApiBboxes[returnedUUID];
+                if (!applied) {
+                    setSamStatus("SAM auto bbox returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
                 }
                 return;
             }
@@ -11243,6 +11265,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (!targetBbox) {
                 console.warn("No pending bbox found for uuid:", returnedUUID);
                 removePendingBbox(placeholderContext);
+                return;
+            }
+            if (datasetType === "seg") {
+                const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                delete pendingApiBboxes[returnedUUID];
+                if (!applied) {
+                    setSamStatus("SAM multi-point returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
+                }
                 return;
             }
             currentBbox = {

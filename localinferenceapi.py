@@ -7990,7 +7990,15 @@ def sam_point_auto(prompt: PointPrompt):
     ri = min(pil_img.width, int(right))
     bi = min(pil_img.height, int(bottom))
     if ri <= li or bi <= ti:
-        return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="empty_mask", image_token=token)
+        return SamPointAutoResponse(
+            prediction="unknown",
+            bbox=yolo_box,
+            uuid=prompt.uuid,
+            error="empty_mask",
+            image_token=token,
+            mask=encode_binary_mask(mask_arr),
+            simplify_epsilon=None,
+        )
     subarr = np_img[ti:bi, li:ri, :]
     final_pil = Image.fromarray(subarr)
     inp = clip_preprocess(final_pil).unsqueeze(0).to(device)

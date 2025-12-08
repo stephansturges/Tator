@@ -11811,12 +11811,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     context.stroke();
                     if (isCurrent) {
                         bbox.points.forEach((pt, idx) => {
-                            const x = zoomX(pt.x);
-                            const y = zoomY(pt.y);
+                            const x = pt.x;
+                            const y = pt.y;
                             drawCornerHandle(context, x, y, strokeColor);
                             if (idx === 0) {
                                 context.beginPath();
-                                context.arc(x, y, Math.max(4, 5 * scale), 0, Math.PI * 2);
+                                context.arc(zoomX(x), zoomY(y), Math.max(4, 5 * scale), 0, Math.PI * 2);
                                 context.stroke();
                             }
                         });

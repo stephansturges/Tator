@@ -11970,6 +11970,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
+    function isPointInsideBbox(bbox, x, y) {
+        if (!bbox) return false;
+        const x1 = bbox.x;
+        const y1 = bbox.y;
+        const x2 = bbox.x + bbox.width;
+        const y2 = bbox.y + bbox.height;
+        return x >= x1 && x <= x2 && y >= y1 && y <= y2;
+    }
+
     function drawCornerHandle(context, x, y, strokeColor) {
         context.save();
         const radius = Math.max(3, 5 * scale);
@@ -12109,6 +12118,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     currentBbox = null;
                     polygonDrag = null;
                     polygonDraft = null;
+                }
+                if (datasetType !== "seg") {
+                    const insideExisting = currentBbox && isPointInsideBbox(currentBbox.bbox, mouse.realX, mouse.realY);
+                    if (!insideExisting) {
+                        currentBbox = null;
+                    }
                 }
             }
         }

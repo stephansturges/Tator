@@ -11988,7 +11988,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 mouse.buttonL = true;
             }
         }
-        else if (event.type === "mouseup" || event.type === "mouseout") {
+        if (datasetType === "seg") {
+            await handlePolygonPointer(event, oldRealX, oldRealY);
+            if (event.type === "mouseup" || event.type === "mouseout") {
+                mouse.buttonR = false;
+                mouse.buttonL = false;
+            }
+            return;
+        } else if (event.type === "mouseup" || event.type === "mouseout") {
             if (mouse.buttonL && currentImage !== null && currentClass !== null) {
                 if (multiPointMode) {
                     mouse.buttonL = false;
@@ -12057,9 +12064,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             mouse.buttonR = false;
             mouse.buttonL = false;
         }
-    
+
         if (datasetType === "seg") {
-            await handlePolygonPointer(event, oldRealX, oldRealY);
+            // Already handled above.
             return;
         }
         moveBbox();

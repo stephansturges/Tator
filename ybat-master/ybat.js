@@ -10571,9 +10571,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (polygonDrawToggle) {
             polygonDrawToggle.addEventListener("click", () => {
                 if (datasetType !== "seg") {
-                    return;
+                    setDatasetType("seg");
+                    setPolygonDrawEnabled(true, { silent: true });
+                } else {
+                    setPolygonDrawEnabled(!polygonDrawEnabled);
                 }
-                setPolygonDrawEnabled(!polygonDrawEnabled);
             });
         }
 
@@ -13351,10 +13353,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
 
             if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 80 || event.key === "p" || event.key === "P")) {
-                if (datasetType === "seg") {
-                    setPolygonDrawEnabled(!polygonDrawEnabled);
+                if (datasetType !== "seg") {
+                    setDatasetType("seg");
+                    setPolygonDrawEnabled(true);
                     event.preventDefault();
+                    return;
                 }
+                setPolygonDrawEnabled(!polygonDrawEnabled);
+                event.preventDefault();
                 return;
             }
 

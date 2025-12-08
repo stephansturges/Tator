@@ -419,7 +419,7 @@ class _Sam3Backend:
                 checkpoint_path=active_sam3_checkpoint,
                 load_from_HF=active_sam3_checkpoint is None,
                 enable_inst_interactivity=True,
-                enable_segmentation=active_sam3_enable_segmentation and source != "sam3lite",
+                enable_segmentation=active_sam3_enable_segmentation,
                 bpe_path=str(SAM3_BPE_PATH),
             )
             if self.device:
@@ -1457,6 +1457,10 @@ def _sam3_text_detections(
     limit: Optional[int],
     *,
     min_score: Optional[float] = None,
+    masks_arr: Optional[np.ndarray] = None,
+    min_size: Optional[float] = None,
+    simplify_epsilon: Optional[float] = None,
+    collected_masks: Optional[List[np.ndarray]] = None,
 ) -> List[QwenDetection]:
     width, height = pil_img.width, pil_img.height
     boxes_source = payload.get("boxes")
@@ -1474,8 +1478,7 @@ def _sam3_text_detections(
         scores_iter = []
     else:
         scores_iter = scores_source
-    masks_arr: Optional[np.ndarray] = None
-    if masks is not None:
+    if masks_arr is None and masks is not None:
         if isinstance(masks, torch.Tensor):
             masks_arr = masks.cpu().numpy()
         else:
@@ -1498,7 +1501,35 @@ def _sam3_text_detections(
                 score_val = None
         if min_score is not None and score_val is not None and score_val < min_score:
             continue
-        detections.append(QwenDetection(bbox=yolo_box, qwen_label=text_prompt, source="sam3_text", score=score_val))
+        area = max(0.0, (x_max - x_min) * (y_max - y_min))
+        if masks_arr is not None and idx < len(masks_arr):
+            try:
+                area = float(np.count_nonzero(masks_arr[idx]))
+            except Exception:
+                area = area
+        if min_size is not None:
+            try:
+                if area < float(min_size):
+                    continue
+            except Exception:
+                pass
+        mask_payload = None
+        mask_value = None
+        if masks_arr is not None and idx < len(masks_arr):
+            mask_value = masks_arr[idx]
+            mask_payload = encode_binary_mask(mask_value)
+        if collected_masks is not None:
+            collected_masks.append(mask_value)
+        detections.append(
+            QwenDetection(
+                bbox=yolo_box,
+                qwen_label=text_prompt,
+                source="sam3_text",
+                score=score_val,
+                mask=mask_payload,
+                simplify_epsilon=simplify_epsilon,
+            )
+        )
         if numeric_limit and len(detections) >= numeric_limit:
             break
     if detections or masks_arr is None:
@@ -1516,7 +1547,29 @@ def _sam3_text_detections(
                 score_val = None
         if min_score is not None and score_val is not None and score_val < min_score:
             continue
-        detections.append(QwenDetection(bbox=yolo_box, qwen_label=text_prompt, source="sam3_text", score=score_val))
+        area = max(0.0, (x_max - x_min) * (y_max - y_min))
+        try:
+            area = float(np.count_nonzero(mask))
+        except Exception:
+            area = area
+        if min_size is not None:
+            try:
+                if area < float(min_size):
+                    continue
+            except Exception:
+                pass
+        detections.append(
+            QwenDetection(
+                bbox=yolo_box,
+                qwen_label=text_prompt,
+                source="sam3_text",
+                score=score_val,
+                mask=encode_binary_mask(mask),
+                simplify_epsilon=simplify_epsilon,
+            )
+        )
+        if collected_masks is not None:
+            collected_masks.append(mask)
         if numeric_limit and len(detections) >= numeric_limit:
             break
     return detections
@@ -1528,7 +1581,15 @@ def _run_sam3_text_inference(
     threshold: float,
     mask_threshold: float,
     limit: Optional[int],
-) -> List[QwenDetection]:
+    *,
+    return_masks: bool = False,
+    min_size: Optional[float] = None,
+    simplify_epsilon: Optional[float] = None,
+) -> List[QwenDetection] | Tuple[List[QwenDetection], Optional[List[np.ndarray]]]:
+    """
+    Run SAM3 text inference. By default returns detections list; callers that need masks should
+    inspect the second element when `return_masks=True`.
+    """
     _, processor, _ = _ensure_sam3_text_runtime()
     try:
         processor.set_confidence_threshold(float(threshold))
@@ -1544,6 +1605,7 @@ def _run_sam3_text_inference(
         except (TypeError, ValueError):
             normalized_limit = None
     state = processor.set_image(pil_img)
+    masks_arr: Optional[np.ndarray] = None
     try:
         output = processor.set_text_prompt(state=state, prompt=text_prompt)
     except KeyError:
@@ -1575,7 +1637,43 @@ def _run_sam3_text_inference(
         except Exception as exc:  # noqa: BLE001
             logger.warning("SAM3 box-only text prompt fallback failed: %s", exc)
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_grounding_failed:{exc}") from exc
-    return _sam3_text_detections(pil_img, output, text_prompt, normalized_limit, min_score=float(threshold))
+    try:
+        if output and hasattr(output, "pred_masks"):
+            masks = output.pred_masks
+            if masks is not None:
+                try:
+                    masks_arr = masks.cpu().numpy()
+                except Exception:
+                    try:
+                        masks_arr = np.asarray(masks)
+                    except Exception:
+                        masks_arr = None
+        if masks_arr is not None:
+            try:
+                masks_arr = (masks_arr >= float(mask_threshold)).astype(np.uint8)
+            except Exception:
+                # If thresholding fails, keep the raw masks.
+                pass
+    except Exception:
+        masks_arr = None
+    collected_masks: Optional[List[np.ndarray]] = [] if return_masks else None
+    preds = _sam3_text_detections(
+        pil_img,
+        output,
+        text_prompt,
+        normalized_limit,
+        min_score=float(threshold),
+        masks_arr=masks_arr,
+        min_size=min_size,
+        simplify_epsilon=simplify_epsilon,
+        collected_masks=collected_masks,
+    )
+    aligned_masks: Optional[List[np.ndarray]]
+    if collected_masks is None:
+        aligned_masks = None
+    else:
+        aligned_masks = collected_masks
+    return (preds, aligned_masks) if return_masks else preds
 
 
 def _ensure_qwen_ready():
@@ -1824,7 +1922,7 @@ class PointPrompt(BaseModel):
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def _ensure_point_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1842,7 +1940,7 @@ class BboxPrompt(BaseModel):
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def _ensure_bbox_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1857,7 +1955,7 @@ class SamPreloadRequest(BaseModel):
     image_name: Optional[str] = None
     slot: Optional[str] = "current"
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def _ensure_preload_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1925,7 +2023,7 @@ class MultiPointPrompt(BaseModel):
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def _ensure_multi_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1952,16 +2050,32 @@ class Sam3TextPrompt(BaseModel):
     text_prompt: str
     threshold: float = 0.5
     mask_threshold: float = 0.5
+    simplify_epsilon: Optional[float] = None
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
     max_results: Optional[int] = None
+    min_size: Optional[int] = None
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def _ensure_text_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
         if not values.get("text_prompt"):
             raise ValueError("text_prompt_required")
+        min_size = values.get("min_size")
+        if min_size is not None:
+            try:
+                min_size_int = max(0, int(min_size))
+            except (TypeError, ValueError):
+                min_size_int = 0
+            values["min_size"] = min_size_int
+        eps = values.get("simplify_epsilon")
+        if eps is not None:
+            try:
+                eps_val = float(eps)
+            except (TypeError, ValueError):
+                eps_val = None
+            values["simplify_epsilon"] = eps_val if eps_val is None or eps_val >= 0 else 0.0
         return values
 
 
@@ -1973,6 +2087,8 @@ class SamPointAutoResponse(BaseModel):
     error: Optional[str] = None
     image_token: Optional[str] = None
     score: Optional[float] = None
+    mask: Optional[Dict[str, Any]] = None
+    simplify_epsilon: Optional[float] = None
 
 
 class QwenDetection(BaseModel):
@@ -1980,6 +2096,8 @@ class QwenDetection(BaseModel):
     qwen_label: Optional[str] = None
     source: Literal["bbox", "point", "bbox_sam", "sam3_text"]
     score: Optional[float] = None
+    mask: Optional[Dict[str, Any]] = None
+    simplify_epsilon: Optional[float] = None
 
 
 class QwenInferenceRequest(BaseModel):
@@ -1994,7 +2112,7 @@ class QwenInferenceRequest(BaseModel):
     image_name: Optional[str] = None
     max_results: Optional[int] = 8
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def _validate_qwen_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -2031,6 +2149,8 @@ class Sam3TextPromptResponse(BaseModel):
     detections: List[QwenDetection] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     image_token: Optional[str] = None
+    # Optional masks aligned to detections (packed and base64-encoded to stay compact)
+    masks: Optional[List[Dict[str, Any]]] = None
 
 
 class Sam3TextPromptAutoResponse(BaseModel):
@@ -2044,7 +2164,7 @@ class QwenPromptSection(BaseModel):
     default_image_type: str = "image"
     default_extra_context: str = ""
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def _validate_qwen_section(cls, values):  # noqa: N805
         template = values.get("base_prompt") or ""
         if "{items}" not in template:
@@ -2150,34 +2270,6 @@ class Sam3TrainRequest(BaseModel):
     val_max_dets: Optional[int] = None
 
 
-class Sam3LiteTrainRequest(BaseModel):
-    dataset_id: str
-    run_name: Optional[str] = None
-    experiment_log_dir: Optional[str] = None
-    train_batch_size: Optional[int] = None
-    val_batch_size: Optional[int] = None
-    num_train_workers: Optional[int] = None
-    num_val_workers: Optional[int] = None
-    max_epochs: Optional[int] = None
-    resolution: Optional[int] = None
-    lr_scale: Optional[float] = None
-    gradient_accumulation_steps: Optional[int] = None
-    val_epoch_freq: Optional[int] = None
-    target_epoch_size: Optional[int] = None
-    scheduler_warmup: Optional[int] = None
-    scheduler_timescale: Optional[int] = None
-    num_gpus: Optional[int] = None
-    enable_inst_interactivity: Optional[bool] = None
-    balance_classes: Optional[bool] = None
-    balance_strategy: Optional[str] = None
-    balance_power: Optional[float] = None
-    balance_clip: Optional[float] = None
-    balance_beta: Optional[float] = None
-    balance_gamma: Optional[float] = None
-    train_limit: Optional[int] = None
-    log_freq: Optional[int] = None
-
-
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None
     label: Optional[str] = None
@@ -2268,11 +2360,6 @@ SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
 PROMPT_HELPER_JOB_ROOT = Path(os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs"))
 PROMPT_HELPER_JOB_ROOT.mkdir(parents=True, exist_ok=True)
-SAM3_LITE_JOB_ROOT = Path(os.environ.get("SAM3_LITE_TRAINING_ROOT", "./uploads/sam3lite_runs"))
-SAM3_LITE_JOB_ROOT.mkdir(parents=True, exist_ok=True)
-SAM3_LITE_CONFIG_TEMPLATE = Path(__file__).resolve().parent / "sam3_lite" / "config" / "default.yaml"
-SAM3_LITE_MAX_LOG_LINES = 500
-SAM3_LITE_MAX_METRIC_POINTS = 2000
 SEG_BUILDER_ROOT = Path(os.environ.get("SEGMENTATION_ROOT", "./uploads/seg_runs"))
 SEG_BUILDER_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_REPO_ROOT = Path(__file__).resolve().parent.resolve()
@@ -2305,24 +2392,6 @@ class QwenTrainingJob:
 
 @dataclass
 class Sam3TrainingJob:
-    job_id: str
-    status: str = "queued"
-    progress: float = 0.0
-    message: str = "Queued"
-    config: Dict[str, Any] = field(default_factory=dict)
-    logs: List[Dict[str, Any]] = field(default_factory=list)
-    metrics: List[Dict[str, Any]] = field(default_factory=list)
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-    cancel_event: threading.Event = field(default_factory=threading.Event)
-    process: Optional[subprocess.Popen] = None
-    log_seq: int = 0
-
-
-@dataclass
-class Sam3LiteTrainingJob:
     job_id: str
     status: str = "queued"
     progress: float = 0.0
@@ -2374,8 +2443,6 @@ QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
 SAM3_TRAINING_JOBS_LOCK = threading.Lock()
-SAM3_LITE_TRAINING_JOBS: Dict[str, Sam3LiteTrainingJob] = {}
-SAM3_LITE_TRAINING_JOBS_LOCK = threading.Lock()
 SEGMENTATION_BUILD_JOBS: Dict[str, SegmentationBuildJob] = {}
 SEGMENTATION_BUILD_JOBS_LOCK = threading.Lock()
 PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
@@ -2384,6 +2451,8 @@ UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
 PROMPT_HELPER_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
+PROMPT_RECIPE_PRESET_ROOT = UPLOAD_ROOT / "prompt_recipe_presets"
+PROMPT_RECIPE_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
@@ -2549,71 +2618,6 @@ def _sam3_job_update(
 
 
 def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "result": job.result,
-        "error": job.error,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-    }
-
-
-def _sam3lite_job_log(job: Sam3LiteTrainingJob, message: str) -> None:
-    job.log_seq += 1
-    entry = {"timestamp": time.time(), "message": message, "seq": job.log_seq}
-    job.logs.append(entry)
-    if len(job.logs) > SAM3_LITE_MAX_LOG_LINES:
-        job.logs[:] = job.logs[-SAM3_LITE_MAX_LOG_LINES :]
-    job.updated_at = time.time()
-    try:
-        logger.info("[sam3lite-train %s] %s", job.job_id[:8], message)
-    except Exception:
-        pass
-
-
-def _sam3lite_job_append_metric(job: Sam3LiteTrainingJob, metric: Dict[str, Any]) -> None:
-    if not metric:
-        return
-    job.metrics.append(metric)
-    if SAM3_LITE_MAX_METRIC_POINTS and len(job.metrics) > SAM3_LITE_MAX_METRIC_POINTS:
-        job.metrics[:] = job.metrics[-SAM3_LITE_MAX_METRIC_POINTS :]
-    job.updated_at = time.time()
-
-
-def _sam3lite_job_update(
-    job: Sam3LiteTrainingJob,
-    *,
-    status: Optional[str] = None,
-    message: Optional[str] = None,
-    progress: Optional[float] = None,
-    error: Optional[str] = None,
-    result: Optional[Dict[str, Any]] = None,
-    log_message: bool = True,
-) -> None:
-    if status is not None:
-        job.status = status
-    if message is not None:
-        if message != job.message:
-            job.message = message
-            if log_message:
-                _sam3lite_job_log(job, message)
-        else:
-            job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if result is not None:
-        job.result = result
-    job.updated_at = time.time()
-
-
-def _serialize_sam3lite_job(job: Sam3LiteTrainingJob) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -2850,38 +2854,21 @@ def _dir_size_bytes(path: Path) -> int:
 
 def _active_run_paths_for_variant(variant: str) -> set[Path]:
     paths: set[Path] = set()
-    if variant == "sam3":
-        with SAM3_TRAINING_JOBS_LOCK:
-            jobs = list(SAM3_TRAINING_JOBS.values())
-        for job in jobs:
-            if job.status not in {"running", "queued", "cancelling"}:
-                continue
+    with SAM3_TRAINING_JOBS_LOCK:
+        jobs = list(SAM3_TRAINING_JOBS.values())
+    for job in jobs:
+        if job.status not in {"running", "queued", "cancelling"}:
+            continue
+        exp_dir = None
+        try:
+            exp_dir = job.config.get("paths", {}).get("experiment_log_dir")
+        except Exception:
             exp_dir = None
+        if exp_dir:
             try:
-                exp_dir = job.config.get("paths", {}).get("experiment_log_dir")
+                paths.add(Path(exp_dir).resolve())
             except Exception:
-                exp_dir = None
-            if exp_dir:
-                try:
-                    paths.add(Path(exp_dir).resolve())
-                except Exception:
-                    continue
-    else:
-        with SAM3_LITE_TRAINING_JOBS_LOCK:
-            jobs = list(SAM3_LITE_TRAINING_JOBS.values())
-        for job in jobs:
-            if job.status not in {"running", "queued", "cancelling"}:
                 continue
-            exp_dir = None
-            try:
-                exp_dir = job.config.get("experiment_log_dir")
-            except Exception:
-                exp_dir = None
-            if exp_dir:
-                try:
-                    paths.add(Path(exp_dir).resolve())
-                except Exception:
-                    continue
     return paths
 
 
@@ -2943,7 +2930,7 @@ def _describe_run_dir(run_dir: Path, variant: str, active_paths: set[Path]) -> D
 
 
 def _list_sam3_runs(variant: str) -> List[Dict[str, Any]]:
-    root = SAM3_JOB_ROOT if variant == "sam3" else SAM3_LITE_JOB_ROOT
+    root = SAM3_JOB_ROOT
     if not root.exists():
         return []
     active_paths = _active_run_paths_for_variant(variant)
@@ -2964,7 +2951,7 @@ def _list_sam3_runs(variant: str) -> List[Dict[str, Any]]:
 
 
 def _run_dir_for_request(run_id: str, variant: str) -> Path:
-    root = SAM3_JOB_ROOT if variant == "sam3" else SAM3_LITE_JOB_ROOT
+    root = SAM3_JOB_ROOT
     candidate = (root / run_id).resolve()
     if not str(candidate).startswith(str(root.resolve())):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_run_id")
@@ -3788,16 +3775,6 @@ def sam3_convert_dataset(dataset_id: str):
     return meta
 
 
-@app.get("/sam3lite/datasets")
-def list_sam3lite_datasets():
-    return _list_sam3_datasets()
-
-
-@app.post("/sam3lite/datasets/{dataset_id}/convert")
-def sam3lite_convert_dataset(dataset_id: str):
-    return sam3_convert_dataset(dataset_id)
-
-
 def _find_coco_split(dataset_root: Path) -> Tuple[Path, Path]:
     """Return (annotations_path, images_dir) preferring val split, then train."""
     val_ann = dataset_root / "val" / "_annotations.coco.json"
@@ -4016,6 +3993,60 @@ def _save_prompt_helper_preset(label: str, dataset_id: str, prompts_by_class: Di
     path = (PROMPT_HELPER_PRESET_ROOT / f"{preset_id}.json").resolve()
     if not str(path).startswith(str(PROMPT_HELPER_PRESET_ROOT.resolve())):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return payload
+
+
+def _list_prompt_recipe_presets() -> List[Dict[str, Any]]:
+    presets: List[Dict[str, Any]] = []
+    for path in PROMPT_RECIPE_PRESET_ROOT.glob("*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            presets.append(data)
+        except Exception:
+            continue
+    presets.sort(key=lambda p: p.get("created_at", 0), reverse=True)
+    return presets
+
+
+def _load_prompt_recipe_preset(preset_id: str) -> Dict[str, Any]:
+    path = (PROMPT_RECIPE_PRESET_ROOT / f"{preset_id}.json").resolve()
+    if not str(path).startswith(str(PROMPT_RECIPE_PRESET_ROOT.resolve())) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_recipe_preset_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"prompt_recipe_preset_load_failed:{exc}"
+        ) from exc
+
+
+def _save_prompt_recipe_preset(
+    label: str,
+    class_name: str,
+    class_id: Optional[int],
+    steps: List[Dict[str, Any]],
+    dataset_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not steps:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_recipe_preset_empty_steps")
+    preset_id = f"prset_{uuid.uuid4().hex[:8]}"
+    created_at = time.time()
+    payload = {
+        "id": preset_id,
+        "label": label or preset_id,
+        "class_name": class_name,
+        "class_id": class_id,
+        "steps": [{"prompt": s.get("prompt"), "threshold": s.get("threshold")} for s in steps],
+        "dataset_id": dataset_id,
+        "created_at": created_at,
+    }
+    path = (PROMPT_RECIPE_PRESET_ROOT / f"{preset_id}.json").resolve()
+    if not str(path).startswith(str(PROMPT_RECIPE_PRESET_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_recipe_preset_path_invalid")
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     return payload
@@ -4503,6 +4534,7 @@ def _build_prompt_recipe(
     per_image_gt: Dict[int, int],
     images: Dict[int, Dict[str, Any]],
     image_ids: List[int],
+    gt_index: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]],
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     # Pick the best threshold per prompt (highest matched GTs, then lowest FPs, then higher precision).
     best_by_prompt: Dict[str, Dict[str, Any]] = {}
@@ -4523,53 +4555,104 @@ def _build_prompt_recipe(
             best_by_prompt[prompt] = cand
     ordered_candidates = list(best_by_prompt.values())
 
-    remaining = set(all_gt_keys)
+    # Simulate per-image early stop: run prompts only on images with uncovered GTs; negatives always contribute FPs.
+    remaining_by_image: Dict[int, set[str]] = {
+        img_id: {key for key, _ in entries} for img_id, entries in gt_index.items() if entries
+    }
+    remaining_total = sum(len(v) for v in remaining_by_image.values())
+    active_images = {img_id for img_id, keys in remaining_by_image.items() if keys}
+    negative_images = {img_id for img_id in image_ids if per_image_gt.get(img_id, 0) == 0}
     steps: List[Dict[str, Any]] = []
     total_fps = 0
     total_duplicates = 0
     used_prompt_keys: set[Tuple[str, float]] = set()
-    while remaining and ordered_candidates:
+    while remaining_total > 0 and ordered_candidates:
         best = None
         best_score = (-1, -1, -1, -1)
         for cand in ordered_candidates:
             prompt_key = (cand.get("prompt"), cand.get("threshold"))
             if prompt_key in used_prompt_keys:
                 continue
-            cand_matches = cand.get("matched_gt_keys") or set()
-            gain = len(cand_matches & remaining)
-            zero_fp = cand.get("fps", 0) == 0
-            if gain <= 0:
+            matches_by_image = cand.get("matches_by_image") or {}
+            step_gain = 0
+            step_fps = 0
+            step_duplicates = 0
+            step_matches_total = 0
+            step_hits_by_image: Dict[int, Dict[str, Any]] = {}
+            for img_id in negative_images:
+                img_hits = matches_by_image.get(img_id)
+                if not img_hits:
+                    continue
+                matched_total = len(img_hits.get("matched") or [])
+                fps_count = max(0, img_hits.get("fps", 0))
+                step_matches_total += matched_total
+                step_fps += fps_count
+                if matched_total or fps_count:
+                    step_hits_by_image[img_id] = {
+                        "matched": [],
+                        "matched_total": matched_total,
+                        "fps": fps_count,
+                    }
+            for img_id in active_images:
+                img_hits = matches_by_image.get(img_id)
+                if not img_hits:
+                    continue
+                matched_list = img_hits.get("matched") or []
+                matched_set = set(matched_list)
+                unmatched = remaining_by_image.get(img_id, set())
+                new_hits = matched_set & unmatched
+                matched_total = len(matched_set)
+                fps_count = max(0, img_hits.get("fps", 0))
+                step_gain += len(new_hits)
+                step_duplicates += max(0, matched_total - len(new_hits))
+                step_matches_total += matched_total
+                step_fps += fps_count
+                step_hits_by_image[img_id] = {
+                    "matched": list(new_hits),
+                    "matched_total": matched_total,
+                    "fps": fps_count,
+                }
+            if step_gain <= 0:
                 continue
+            zero_fp = step_fps == 0
             score_tuple = (
                 1 if zero_fp else 0,
-                gain,
-                cand.get("recall", 0.0),
+                step_gain,
+                -step_fps,
                 cand.get("precision", 0.0),
             )
             if score_tuple > best_score:
-                best = cand
+                best = (cand, step_hits_by_image, step_gain, step_fps, step_duplicates, step_matches_total)
                 best_score = score_tuple
         if not best:
             break
-        cand = best
+        cand, step_hits_by_image, gain, step_fps, duplicate_hits, step_matches_total = best
         prompt_key = (cand.get("prompt"), cand.get("threshold"))
         used_prompt_keys.add(prompt_key)
-        matched_keys = set(cand.get("matched_gt_keys") or [])
-        gain = len(matched_keys & remaining)
-        duplicate_hits = max(0, len(matched_keys) - gain)
+        for img_id, hit_info in step_hits_by_image.items():
+            new_hits = set(hit_info.get("matched") or [])
+            if not new_hits:
+                continue
+            current_unmatched = remaining_by_image.get(img_id)
+            if current_unmatched is None:
+                continue
+            remaining_by_image[img_id] = current_unmatched - new_hits
+        active_images = {img_id for img_id, keys in remaining_by_image.items() if keys}
+        remaining_total = max(0, remaining_total - gain)
         total_duplicates += duplicate_hits
-        total_fps += max(0, cand.get("fps", 0))
-        remaining -= matched_keys
-        covered_after = len(all_gt_keys) - len(remaining)
+        total_fps += max(0, step_fps)
+        covered_after = len(all_gt_keys) - remaining_total
         cum_coverage = covered_after / len(all_gt_keys) if all_gt_keys else 0.0
+        preds_in_step = step_matches_total + step_fps
+        seq_precision = step_matches_total / preds_in_step if preds_in_step else 0.0
         steps.append(
             {
                 "prompt": cand.get("prompt"),
                 "threshold": cand.get("threshold"),
                 "gain": gain,
-                "matches": len(matched_keys),
-                "fps": cand.get("fps", 0),
-                "precision": cand.get("precision"),
+                "matches": step_matches_total,
+                "fps": step_fps,
+                "precision": seq_precision,
                 "recall": cand.get("recall"),
                 "det_rate": cand.get("det_rate"),
                 "avg_iou": cand.get("avg_iou"),
@@ -4578,10 +4661,11 @@ def _build_prompt_recipe(
                 "covered_after": covered_after,
                 "cum_coverage": cum_coverage,
                 "cum_fps": total_fps,
-                "_matches_by_image": cand.get("matches_by_image") or {},
+                "_matches_by_image": step_hits_by_image,
+                "_prompt_precision": cand.get("precision"),
             }
         )
-    coverage_rate = (len(all_gt_keys) - len(remaining)) / len(all_gt_keys) if all_gt_keys else 0.0
+    coverage_rate = (len(all_gt_keys) - remaining_total) / len(all_gt_keys) if all_gt_keys else 0.0
     recipe = {
         "steps": [
             {
@@ -4592,7 +4676,7 @@ def _build_prompt_recipe(
         ],
         "summary": {
             "total_gt": len(all_gt_keys),
-            "covered": len(all_gt_keys) - len(remaining),
+            "covered": len(all_gt_keys) - remaining_total,
             "coverage_rate": coverage_rate,
             "fps": total_fps,
             "duplicates": total_duplicates,
@@ -4602,12 +4686,15 @@ def _build_prompt_recipe(
     coverage_map: Dict[int, Dict[str, Any]] = {}
     for img_id in image_ids:
         info = images.get(img_id, {})
+        remaining_keys = remaining_by_image.get(img_id, set())
+        is_positive = per_image_gt.get(img_id, 0) > 0
         entry = {
             "image_id": img_id,
             "file_name": info.get("file_name"),
             "gt": per_image_gt.get(img_id, 0),
             "hits": [],
-            "covered": False,
+            "type": "pos" if is_positive else "neg",
+            "covered": per_image_gt.get(img_id, 0) == 0 or len(remaining_keys) == 0,
         }
         coverage_map[img_id] = entry
         coverage_by_image.append(entry)
@@ -4628,8 +4715,6 @@ def _build_prompt_recipe(
                     "fps": fp_count,
                 }
             )
-            if matched_list:
-                target["covered"] = True
     return recipe, coverage_by_image
 
 
@@ -5051,6 +5136,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
             per_image_gt,
             images,
             eval_ids,
+            gt_index,
         )
         job.status = "completed"
         job.message = "Done"
@@ -5061,6 +5147,9 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
             "class_name": class_name,
             "positive_images": len(pos_ids),
             "negative_images": len(neg_ids),
+            "positive_image_ids": pos_ids,
+            "negative_image_ids": neg_ids,
+            "evaluated_image_ids": eval_ids,
             "gt_count": len(all_gt_keys),
             "config": payload.dict(),
             "candidates": [
@@ -5203,6 +5292,43 @@ def start_prompt_helper_search(payload: PromptHelperSearchRequest):
 def start_prompt_helper_recipe(payload: PromptRecipeRequest):
     job = _start_prompt_recipe_job(payload)
     return _serialize_prompt_helper_job(job)
+
+
+@app.get("/sam3/recipe_presets")
+def list_prompt_recipe_presets():
+    return _list_prompt_recipe_presets()
+
+
+@app.get("/sam3/recipe_presets/{preset_id}")
+def load_prompt_recipe_preset(preset_id: str):
+    return _load_prompt_recipe_preset(preset_id)
+
+
+class PromptRecipePresetSave(BaseModel):
+    label: Optional[str] = None
+    class_name: str
+    class_id: Optional[int] = None
+    dataset_id: Optional[str] = None
+    steps: List[Dict[str, Any]]
+
+
+@app.post("/sam3/recipe_presets")
+def save_prompt_recipe_preset(payload: PromptRecipePresetSave):
+    class_name = (payload.class_name or "").strip()
+    if not class_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_recipe_preset_class_missing")
+    cleaned_steps: List[Dict[str, Any]] = []
+    for step in payload.steps:
+        prompt = (step.get("prompt") or "").strip()
+        thr = step.get("threshold")
+        try:
+            thr_val = float(thr)
+        except Exception:
+            continue
+        if not prompt or thr_val < 0.0 or thr_val > 1.0:
+            continue
+        cleaned_steps.append({"prompt": prompt, "threshold": thr_val})
+    return _save_prompt_recipe_preset(payload.label or "", class_name, payload.class_id, cleaned_steps, payload.dataset_id)
 
 
 @app.get("/sam3/prompt_helper/presets")
@@ -5465,6 +5591,11 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     categories = [{"id": cid, "name": name} for name, cid in label_to_id.items()]
     signature = _compute_dir_signature(dataset_root)
     existing_meta = _load_sam3_dataset_metadata(dataset_root)
+    # Preserve previously recorded metadata and infer dataset type (bbox vs seg) so downstream
+    # training can enable masks when appropriate.
+    dataset_type = (existing_meta or {}).get("type", "bbox")
+    dataset_label = (existing_meta or {}).get("label", dataset_root.name)
+    dataset_source = (existing_meta or {}).get("source", "yolo")
     if (
         existing_meta
         and existing_meta.get("signature") == signature
@@ -5494,7 +5625,7 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
         return None
 
     def _convert_split(split_images: Path, split_labels: Path, split_name: str) -> str:
-        nonlocal image_id_counter, annotation_id
+        nonlocal image_id_counter, annotation_id, dataset_type
         images: List[Dict[str, Any]] = []
         annotations: List[Dict[str, Any]] = []
         for label_file in sorted(split_labels.rglob("*.txt")):
@@ -5545,6 +5676,9 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
                     continue
                 if width is None or height is None:
                     continue
+                # YOLO-seg polygons append x/y pairs after the box fields; treat presence as segmentation type.
+                if len(parts) > 5:
+                    dataset_type = "seg"
                 abs_w = w * width
                 abs_h = h * height
                 x1 = cx * width - abs_w / 2.0
@@ -5580,9 +5714,9 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     coco_val = _convert_split(val_images, val_labels, "val")
     sam3_meta = {
         "id": dataset_root.name,
-        "label": dataset_root.name,
-        "source": "yolo",
-        "type": "bbox",
+        "label": dataset_label,
+        "source": dataset_source,
+        "type": dataset_type,
         "dataset_root": str(dataset_root),
         "signature": signature,
         "classes": labelmap,
@@ -6143,14 +6277,6 @@ def _get_sam3_job(job_id: str) -> Sam3TrainingJob:
         return job
 
 
-def _get_sam3lite_job(job_id: str) -> Sam3LiteTrainingJob:
-    with SAM3_LITE_TRAINING_JOBS_LOCK:
-        job = SAM3_LITE_TRAINING_JOBS.get(job_id)
-        if not job:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3lite_job_not_found")
-        return job
-
-
 @app.post("/qwen/train/dataset/upload")
 async def upload_qwen_dataset(file: UploadFile = File(...), run_name: Optional[str] = Form(None)):
     if not file.filename:
@@ -6347,6 +6473,27 @@ def mask_to_bounding_box(mask: np.ndarray) -> tuple[int,int,int,int]:
     y_min,y_max = np.where(rows)[0][[0,-1]]
     x_min,x_max = np.where(cols)[0][[0,-1]]
     return (int(x_min), int(y_min), int(x_max), int(y_max))
+
+
+def encode_binary_mask(mask: np.ndarray) -> Optional[Dict[str, Any]]:
+    try:
+        mask_arr = np.asarray(mask)
+    except Exception:
+        return None
+    if mask_arr.ndim == 3 and mask_arr.shape[0] == 1:
+        mask_arr = mask_arr[0]
+    if mask_arr.ndim == 3 and mask_arr.shape[-1] == 1:
+        mask_arr = mask_arr[..., 0]
+    if mask_arr.ndim != 2:
+        return None
+    mask_bool = mask_arr.astype(bool)
+    height, width = mask_bool.shape
+    packed = np.packbits(mask_bool.astype(np.uint8), axis=None)
+    try:
+        encoded = base64.b64encode(packed.tobytes()).decode("ascii")
+    except Exception:
+        return None
+    return {"size": [int(height), int(width)], "counts": encoded}
 
 def to_yolo(w: int, h: int, left: int, top: int, right: int, bottom: int) -> List[float]:
     w_abs = float(right - left)
@@ -6790,193 +6937,6 @@ def cancel_training_job(job_id: str):
     return {"status": next_status}
 
 
-def _save_sam3lite_config(cfg: Dict[str, Any]) -> Path:
-    exp_dir = Path(cfg["experiment_log_dir"])
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    cfg_path = exp_dir / "config.yaml"
-    with cfg_path.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(cfg, handle, sort_keys=False)
-    return cfg_path
-
-
-def _build_sam3lite_config(payload: Sam3LiteTrainRequest, meta: Dict[str, Any], job_id: str) -> Tuple[Dict[str, Any], int]:
-    base_cfg: Dict[str, Any] = {}
-    if SAM3_LITE_CONFIG_TEMPLATE.exists():
-        try:
-            base_cfg = yaml.safe_load(SAM3_LITE_CONFIG_TEMPLATE.read_text()) or {}
-        except Exception:
-            base_cfg = {}
-    defaults = {
-        "max_epochs": 20,
-        "train_batch_size": 1,
-        "val_batch_size": 1,
-        "num_train_workers": 4,
-        "num_val_workers": 2,
-        "resolution": 1008,
-        "lr_scale": 1.0,
-        "gradient_accumulation_steps": 1,
-        "val_epoch_freq": 10,
-        "target_epoch_size": 1000,
-        "scheduler_warmup": 20,
-        "scheduler_timescale": 20,
-        "log_freq": 10,
-    }
-    run_name = _safe_run_name(payload.run_name, f"sam3lite_run_{job_id}")
-    exp_dir = Path(payload.experiment_log_dir) if payload.experiment_log_dir else (SAM3_LITE_JOB_ROOT / run_name)
-    train_ann = Path(meta["coco_train_json"]).resolve()
-    val_ann = Path(meta["coco_val_json"]).resolve()
-    num_gpus = max(1, int(payload.num_gpus or 1))
-    strategy = payload.balance_strategy or "none"
-    class_balance = bool(payload.balance_classes) if payload.balance_classes is not None else strategy != "none"
-    cfg: Dict[str, Any] = deepcopy(base_cfg) if base_cfg else {}
-    cfg.update({
-        "run_name": run_name,
-        "experiment_log_dir": str(exp_dir.resolve()),
-        "paths": {
-            "train_img_folder": str(train_ann.parent),
-            "train_ann_file": str(train_ann),
-            "val_img_folder": str(val_ann.parent),
-            "val_ann_file": str(val_ann),
-            "signature": meta.get("signature"),
-        },
-        "dataset": {
-            "class_balance": class_balance,
-            "balance_strategy": strategy,
-            "balance_power": payload.balance_power,
-            "balance_clip": payload.balance_clip,
-            "balance_beta": payload.balance_beta,
-            "balance_gamma": payload.balance_gamma,
-            "classes": meta.get("classes"),
-            "train_limit": int(payload.train_limit) if payload.train_limit is not None else None,
-        },
-        "trainer": {
-            "max_epochs": int(payload.max_epochs) if payload.max_epochs is not None else defaults["max_epochs"],
-            "train_batch_size": int(payload.train_batch_size) if payload.train_batch_size is not None else defaults["train_batch_size"],
-            "val_batch_size": int(payload.val_batch_size) if payload.val_batch_size is not None else defaults["val_batch_size"],
-            "num_train_workers": int(payload.num_train_workers) if payload.num_train_workers is not None else defaults["num_train_workers"],
-            "num_val_workers": int(payload.num_val_workers) if payload.num_val_workers is not None else defaults["num_val_workers"],
-            "gradient_accumulation_steps": int(payload.gradient_accumulation_steps) if payload.gradient_accumulation_steps is not None else defaults["gradient_accumulation_steps"],
-            "target_epoch_size": int(payload.target_epoch_size) if payload.target_epoch_size is not None else defaults["target_epoch_size"],
-            "val_epoch_freq": int(payload.val_epoch_freq) if payload.val_epoch_freq is not None else defaults["val_epoch_freq"],
-            "lr_scale": float(payload.lr_scale) if payload.lr_scale is not None else float(defaults["lr_scale"]),
-            "scheduler_warmup": int(payload.scheduler_warmup) if payload.scheduler_warmup is not None else defaults["scheduler_warmup"],
-            "scheduler_timescale": int(payload.scheduler_timescale) if payload.scheduler_timescale is not None else defaults["scheduler_timescale"],
-            "resolution": int(payload.resolution) if payload.resolution is not None else defaults["resolution"],
-            "enable_inst_interactivity": bool(payload.enable_inst_interactivity) if payload.enable_inst_interactivity is not None else False,
-            "num_gpus": num_gpus,
-            "log_freq": int(payload.log_freq) if payload.log_freq is not None else defaults["log_freq"],
-        },
-        "launcher": {
-            "num_nodes": 1,
-            "gpus_per_node": num_gpus,
-        },
-        "metadata": {
-            "dataset_id": payload.dataset_id,
-            "created_at": time.time(),
-        },
-    })
-    return cfg, num_gpus
-
-
-def _start_sam3lite_training_worker(job: Sam3LiteTrainingJob, cfg: Dict[str, Any], num_gpus: int) -> None:
-    def worker() -> None:
-        proc: Optional[subprocess.Popen[str]] = None
-        try:
-            _sam3lite_job_update(job, status="running", progress=0.02, message="Preparing SAM3-lite training job ...")
-            config_path = _save_sam3lite_config(cfg)
-            exp_dir = Path(cfg["experiment_log_dir"])
-            log_dir = exp_dir / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                sys.executable,
-                "-m",
-                "sam3_lite.train",
-                "--config",
-                str(config_path),
-                "--log-dir",
-                str(log_dir),
-                "--num-gpus",
-                str(num_gpus),
-            ]
-            env = os.environ.copy()
-            env.setdefault("PYTHONUNBUFFERED", "1")
-            env.setdefault("PYTHONPATH", f"{SAM3_REPO_ROOT}:{env.get('PYTHONPATH','')}")
-            _sam3lite_job_log(job, f"Spawned {' '.join(cmd)}")
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
-            )
-            job.process = proc
-            progress_re = re.compile(r"\[sam3lite-progress\s+([0-9.]+)\]", re.IGNORECASE)
-            metric_re = re.compile(r"\[sam3lite-metric\](.*)", re.IGNORECASE)
-            result_re = re.compile(r"\[sam3lite-result\](.*)", re.IGNORECASE)
-            latest_result: Dict[str, Any] = {}
-            if proc.stdout:
-                for raw_line in proc.stdout:
-                    if job.cancel_event.is_set() and proc.poll() is None:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
-                        break
-                    cleaned = raw_line.rstrip("\\n")
-                    if not cleaned:
-                        continue
-                    _sam3lite_job_log(job, cleaned[-300:])
-                    prog_match = progress_re.search(cleaned)
-                    if prog_match:
-                        try:
-                            prog_val = float(prog_match.group(1))
-                            _sam3lite_job_update(job, progress=max(0.0, min(1.0, prog_val)), log_message=False)
-                        except Exception:
-                            pass
-                    metric_match = metric_re.search(cleaned)
-                    if metric_match:
-                        try:
-                            payload = metric_match.group(1).strip()
-                            metric_obj = json.loads(payload)
-                            _sam3lite_job_append_metric(job, metric_obj if isinstance(metric_obj, dict) else {"value": metric_obj})
-                        except Exception:
-                            pass
-                    result_match = result_re.search(cleaned)
-                    if result_match:
-                        try:
-                            payload = result_match.group(1).strip()
-                            latest_result = json.loads(payload)
-                        except Exception:
-                            pass
-            return_code = proc.wait() if proc else 1
-            if job.cancel_event.is_set():
-                _sam3lite_job_update(job, status="cancelled", message="Training cancelled by user")
-                return
-            if return_code == 0:
-                result_payload = latest_result or {
-                    "config_path": str(config_path),
-                    "experiment_log_dir": str(exp_dir),
-                }
-                if "checkpoint" not in result_payload:
-                    ckpt_path = Path(result_payload["experiment_log_dir"]) / "checkpoints" / "last.ckpt"
-                    result_payload["checkpoint"] = str(ckpt_path)
-                _sam3lite_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
-            else:
-                _sam3lite_job_update(job, status="failed", message="Training crashed", error=f"return_code={return_code}")
-        except Exception as exc:  # noqa: BLE001
-            _sam3lite_job_update(job, status="failed", message="Training crashed", error=str(exc))
-        finally:
-            if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-
-    thread = threading.Thread(target=worker, name=f"sam3lite-train-{job.job_id}", daemon=True)
-    thread.start()
-
-
 def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: str) -> Tuple[OmegaConf, int]:
     cfg = OmegaConf.load(str(SAM3_CONFIG_TEMPLATE))
     if not hasattr(cfg.scratch, "enable_segmentation_head"):
@@ -7221,13 +7181,13 @@ def cancel_sam3_training_job(job_id: str):
 
 @app.get("/sam3/storage/runs")
 def list_sam3_runs(variant: str = Query("sam3")):
-    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
-    return _list_sam3_runs(normalized)
+    # SAM3-lite removed; always use sam3
+    return _list_sam3_runs("sam3")
 
 
 @app.delete("/sam3/storage/runs/{run_id}")
 def delete_sam3_run(run_id: str, variant: str = Query("sam3"), scope: str = Query("all")):
-    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
+    normalized = "sam3"
     if scope not in SAM3_STORAGE_SCOPES:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_scope")
     run_dir = _run_dir_for_request(run_id, normalized)
@@ -7240,8 +7200,7 @@ def delete_sam3_run(run_id: str, variant: str = Query("sam3"), scope: str = Quer
 
 @app.post("/sam3/storage/runs/{run_id}/promote")
 def promote_sam3_run(run_id: str, variant: str = Query("sam3")):
-    normalized = "sam3lite" if variant and variant.lower().strip() == "sam3lite" else "sam3"
-    return _promote_run(run_id, normalized)
+    return _promote_run(run_id, "sam3")
 
 
 @app.get("/sam3/models/available")
@@ -7250,17 +7209,7 @@ def list_sam3_available_models(
     promoted_only: bool = Query(False),
 ):
     """List run checkpoints for prompt model selection."""
-    variant_norm = (variant or "sam3").strip().lower()
-    variant_list = []
-    if variant_norm in {"all", "*"}:
-        variant_list = ["sam3", "sam3lite"]
-    elif variant_norm == "sam3lite":
-        variant_list = ["sam3lite"]
-    else:
-        variant_list = ["sam3"]
-    runs = []
-    for v in variant_list:
-        runs.extend(_list_sam3_runs(v))
+    runs = _list_sam3_runs("sam3")
     models: List[Dict[str, Any]] = []
     # Always expose the base/active env model if available
     # Env/base model entry (always listed)
@@ -7325,52 +7274,6 @@ def list_sam3_available_models(
     return models
 
 
-@app.post("/sam3lite/train/jobs")
-def create_sam3lite_training_job(payload: Sam3LiteTrainRequest):
-    meta = _resolve_sam3_dataset_meta(payload.dataset_id)
-    job_id = uuid.uuid4().hex
-    cfg, num_gpus = _build_sam3lite_config(payload, meta, job_id)
-    job = Sam3LiteTrainingJob(job_id=job_id, config=cfg)
-    with SAM3_LITE_TRAINING_JOBS_LOCK:
-        SAM3_LITE_TRAINING_JOBS[job_id] = job
-        _sam3lite_job_log(job, "Job queued")
-    logger.info("[sam3lite-train %s] dataset=%s gpus=%s", job_id[:8], payload.dataset_id, num_gpus)
-    _start_sam3lite_training_worker(job, cfg, num_gpus)
-    return {"job_id": job_id}
-
-
-@app.get("/sam3lite/train/jobs")
-def list_sam3lite_training_jobs():
-    with SAM3_LITE_TRAINING_JOBS_LOCK:
-        jobs = sorted(SAM3_LITE_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
-        return [_serialize_sam3lite_job(job) for job in jobs]
-
-
-@app.get("/sam3lite/train/jobs/{job_id}")
-def get_sam3lite_training_job(job_id: str):
-    job = _get_sam3lite_job(job_id)
-    return _serialize_sam3lite_job(job)
-
-
-@app.post("/sam3lite/train/jobs/{job_id}/cancel")
-def cancel_sam3lite_training_job(job_id: str):
-    job = _get_sam3lite_job(job_id)
-    with SAM3_LITE_TRAINING_JOBS_LOCK:
-        if job.status in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
-        if job.cancel_event.is_set():
-            return {"status": job.status}
-        job.cancel_event.set()
-        if job.process and job.process.poll() is None:
-            try:
-                job.process.terminate()
-            except Exception:  # noqa: BLE001
-                pass
-        next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
-        _sam3lite_job_update(job, status=next_status, message="Cancellation requested ...")
-    return {"status": job.status}
-
-
 @app.get("/sam3/models/status")
 def sam3_model_status():
     return {
@@ -7405,59 +7308,6 @@ def activate_sam3_model(payload: Sam3ModelActivateRequest):
         "checkpoint": active_sam3_checkpoint,
         "source": source,
         "enable_segmentation": active_sam3_enable_segmentation,
-    }
-    _reset_sam3_runtime()
-    return {"active": active_sam3_metadata}
-
-
-@app.get("/sam3lite/models/status")
-def sam3lite_model_status():
-    meta = active_sam3_metadata if isinstance(active_sam3_metadata, dict) else {}
-    if isinstance(meta, dict):
-        meta = dict(meta)
-        meta.setdefault("source", "sam3")
-    return {"checkpoint": active_sam3_checkpoint, "active": meta}
-
-
-@app.post("/sam3lite/models/activate")
-def activate_sam3lite_model(payload: Sam3ModelActivateRequest):
-    global active_sam3_checkpoint, active_sam3_model_id, active_sam3_metadata, active_sam3_enable_segmentation
-    checkpoint_path = payload.checkpoint_path
-    resolved_path: Optional[Path] = None
-    if checkpoint_path:
-        resolved_path = Path(checkpoint_path).resolve()
-        if not resolved_path.exists():
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_not_found")
-        checkpoint_path = str(resolved_path)
-        # Validate checkpoint compatibility with SAM3 loader to avoid activating unusable weights.
-        if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None:
-            raise HTTPException(
-                status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}",
-            )
-        try:
-            _ = build_sam3_image_model(
-                device="cpu",
-                checkpoint_path=checkpoint_path,
-                load_from_HF=False,
-                enable_segmentation=False,
-                enable_inst_interactivity=False,
-                bpe_path=str(SAM3_BPE_PATH),
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail=f"sam3lite_checkpoint_incompatible:{exc}",
-            ) from exc
-    active_sam3_checkpoint = checkpoint_path
-    active_sam3_enable_segmentation = False
-    active_sam3_model_id = payload.label or (resolved_path.stem if resolved_path else "sam3lite")
-    active_sam3_metadata = {
-        "id": active_sam3_model_id,
-        "label": payload.label or active_sam3_model_id,
-        "checkpoint": active_sam3_checkpoint,
-        "source": "sam3lite",
-        "enable_segmentation": False,
     }
     _reset_sam3_runtime()
     return {"active": active_sam3_metadata}
@@ -7883,17 +7733,38 @@ def sam3_text_prompt(payload: Sam3TextPrompt):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_text_requires_sam3")
     pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
     effective_limit = payload.max_results if payload.max_results is not None else 20
-    detections = _run_sam3_text_inference(
+    detections, masks_arr = _run_sam3_text_inference(
         pil_img,
         payload.text_prompt,
         payload.threshold,
         payload.mask_threshold,
         effective_limit,
+        return_masks=True,
+        min_size=payload.min_size,
+        simplify_epsilon=payload.simplify_epsilon,
     )
     warnings: List[str] = []
     if not detections:
         warnings.append("no_results")
-    return Sam3TextPromptResponse(detections=detections, warnings=warnings, image_token=token)
+    encoded_masks = None
+    if detections:
+        encoded_masks = []
+        for idx, det in enumerate(detections):
+            payload = det.mask if isinstance(det, QwenDetection) else None
+            if payload is None and masks_arr is not None and idx < len(masks_arr) and masks_arr[idx] is not None:
+                try:
+                    payload = encode_binary_mask(masks_arr[idx])
+                except Exception:
+                    payload = None
+            encoded_masks.append(payload)
+        if all(m is None for m in encoded_masks):
+            encoded_masks = None
+    return Sam3TextPromptResponse(
+        detections=detections,
+        warnings=warnings,
+        image_token=token,
+        masks=encoded_masks,
+    )
 
 
 @app.post("/sam3/text_prompt_auto", response_model=Sam3TextPromptAutoResponse)
@@ -7909,19 +7780,33 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
         )
     pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
     effective_limit = payload.max_results if payload.max_results is not None else 20
-    detections = _run_sam3_text_inference(
+    detections, masks_arr = _run_sam3_text_inference(
         pil_img,
         payload.text_prompt,
         payload.threshold,
         payload.mask_threshold,
         effective_limit,
+        return_masks=True,
+        min_size=payload.min_size,
+        simplify_epsilon=payload.simplify_epsilon,
     )
+    # TODO: enrich with masks for polygon mode consumers.
     responses: List[SamPointAutoResponse] = []
     warnings: List[str] = []
     if not detections:
         warnings.append("no_results")
-    for det in detections:
-        x_min, y_min, x_max, y_max = yolo_to_corners(det.bbox, pil_img.width, pil_img.height)
+    for idx, det in enumerate(detections):
+        mask = masks_arr[idx] if masks_arr is not None and idx < len(masks_arr) else None
+        mask_payload = det.mask if hasattr(det, "mask") else None
+        if mask_payload is None and mask is not None:
+            mask_payload = encode_binary_mask(mask)
+        if mask is not None:
+            try:
+                x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+            except Exception:
+                x_min, y_min, x_max, y_max = yolo_to_corners(det.bbox, pil_img.width, pil_img.height)
+        else:
+            x_min, y_min, x_max, y_max = yolo_to_corners(det.bbox, pil_img.width, pil_img.height)
         li = max(0, int(x_min))
         ti = max(0, int(y_min))
         ri = min(pil_img.width, int(x_max))
@@ -7935,6 +7820,8 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
                     error="empty_mask",
                     image_token=token,
                     score=det.score,
+                    mask=mask_payload,
+                    simplify_epsilon=getattr(det, "simplify_epsilon", None),
                 )
             )
             continue
@@ -7958,6 +7845,8 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
                 uuid=str(uuid.uuid4()),
                 image_token=token,
                 score=det.score,
+                mask=mask_payload,
+                simplify_epsilon=getattr(det, "simplify_epsilon", None),
             )
         )
     return Sam3TextPromptAutoResponse(detections=responses, warnings=warnings, image_token=token)

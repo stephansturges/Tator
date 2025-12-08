@@ -198,7 +198,6 @@
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
     const TAB_PROMPT_HELPER = "prompt-helper";
-    const TAB_SAM3_LITE_TRAIN = "sam3lite-train";
     const TAB_DATASETS = "datasets";
     const TAB_SAM3_PROMPT_MODELS = "sam3-prompt-models";
     const TAB_ACTIVE = "active";
@@ -235,7 +234,6 @@
     let activeTab = TAB_LABELING;
     let trainingUiInitialized = false;
     let sam3TrainUiInitialized = false;
-    let sam3LiteTrainUiInitialized = false;
     let segBuilderUiInitialized = false;
     let activeUiInitialized = false;
     let loadedClassList = [];
@@ -749,7 +747,6 @@
         trainingButton: null,
         qwenTrainButton: null,
         sam3TrainButton: null,
-        sam3LiteTrainButton: null,
         sam3PromptModelsButton: null,
         datasetsButton: null,
         activeButton: null,
@@ -760,7 +757,6 @@
         trainingPanel: null,
         qwenTrainPanel: null,
         sam3TrainPanel: null,
-        sam3LiteTrainPanel: null,
         sam3PromptModelsPanel: null,
         datasetsPanel: null,
         activePanel: null,
@@ -812,6 +808,18 @@
         status: null,
         classSelect: null,
     };
+    const sam3RecipeElements = {
+        fileInput: null,
+        applyButton: null,
+        status: null,
+        presetSelect: null,
+        presetNameInput: null,
+        presetSaveButton: null,
+        presetLoadButton: null,
+    };
+    const sam3RecipeState = {
+        recipe: null,
+    };
     const DEFAULT_QWEN_METADATA = {
         id: "default",
         label: "Base Qwen",
@@ -839,6 +847,13 @@
     let sam3TextUiInitialized = false;
 
     let settingsUiInitialized = false;
+    const backendFuzzerElements = {
+        runButton: null,
+        status: null,
+        log: null,
+        includeQwen: null,
+        includeSam3: null,
+    };
 
     const trainingElements = {
         clipBackboneSelect: null,
@@ -1111,63 +1126,6 @@ const sam3TrainState = {
 
     let promptHelperInitialized = false;
 
-    const sam3LiteTrainElements = {
-        datasetSelect: null,
-        datasetSummary: null,
-        datasetRefresh: null,
-        datasetConvert: null,
-        runName: null,
-        trainBatch: null,
-        valBatch: null,
-        trainWorkers: null,
-        valWorkers: null,
-        epochs: null,
-        resolution: null,
-        lrScale: null,
-        gradAccum: null,
-        valFreq: null,
-        targetEpochSize: null,
-        warmupSteps: null,
-        schedulerTimescale: null,
-        balanceStrategy: null,
-        balancePower: null,
-        balanceClip: null,
-        balanceBeta: null,
-        balanceGamma: null,
-        segHead: null,
-        segTrain: null,
-        bboxOnly: null,
-        startButton: null,
-        cancelButton: null,
-        statusText: null,
-        progressFill: null,
-        message: null,
-        summary: null,
-        balanceDescription: null,
-        log: null,
-        history: null,
-        activateButton: null,
-    };
-
-    const sam3LiteTrainState = {
-        datasets: [],
-        selectedId: null,
-        activeJobId: null,
-        pollHandle: null,
-        lastJobSnapshot: null,
-        latestCheckpoint: null,
-        lastSeenJob: {},
-    };
-
-    const sam3LiteStorageElements = {
-        list: null,
-        refresh: null,
-    };
-
-    const sam3LiteStorageState = {
-        items: [],
-    };
-
     const segBuilderElements = {
         datasetSelect: null,
         datasetSummary: null,
@@ -1302,6 +1260,10 @@ const sam3TrainState = {
 
     async function uploadCurrentDatasetToCache() {
         try {
+            if (datasetType === "seg") {
+                setDatasetUploadMessage("Uploading current dataset is only supported for bbox mode right now.", "warn");
+                return;
+            }
             setDatasetUploadMessage("Packaging current dataset…", "info");
             const result = await uploadQwenDatasetStream();
             const label = result?.run_name || "dataset";
@@ -1517,40 +1479,6 @@ const sam3TrainState = {
                 desc = "Uniform sampling (no class rebalance).";
             }
             sam3TrainElements.balanceDescription.textContent = desc;
-        }
-    }
-
-    function updateSam3LiteBalanceParamVisibility(strategy) {
-        const chosen = strategy || (sam3LiteTrainElements.balanceStrategy && sam3LiteTrainElements.balanceStrategy.value) || "none";
-        const rows = document.querySelectorAll(".sam3lite-balance-param");
-        rows.forEach((row) => {
-            const param = row.dataset ? row.dataset.param : null;
-            let show = false;
-            if (param === "power") {
-                show = ["inv_sqrt", "clipped_inv"].includes(chosen);
-            } else if (param === "clip") {
-                show = chosen === "clipped_inv";
-            } else if (param === "beta") {
-                show = chosen === "effective_num";
-            } else if (param === "gamma") {
-                show = chosen === "focal";
-            }
-            row.style.display = show ? "" : "none";
-        });
-        if (sam3LiteTrainElements.balanceDescription) {
-            let desc = "";
-            if (chosen === "inv_sqrt") {
-                desc = "Weights = sum(1 / freq^power). Power < 1 gives mild up-weighting of rare classes (default power 0.5).";
-            } else if (chosen === "clipped_inv") {
-                desc = "Inverse-frequency with a cap: weight ∝ 1/freq^power, then clipped so max/min ≤ clip ratio.";
-            } else if (chosen === "effective_num") {
-                desc = "Effective number of samples: weight ∝ (1-β)/(1-β^n). Higher β (e.g., 0.99–0.999) boosts rare classes smoothly.";
-            } else if (chosen === "focal") {
-                desc = "Focal-style sampling: weight ∝ (freq / max_freq)^(-γ). Higher γ boosts rare/low-freq classes.";
-            } else {
-                desc = "Uniform sampling (no class rebalance).";
-            }
-            sam3LiteTrainElements.balanceDescription.textContent = desc;
         }
     }
 
@@ -2437,12 +2365,6 @@ const sam3EtaState = {
     startTime: null,
 };
 
-const sam3LiteEtaState = {
-    lastProgress: null,
-    lastTimestamp: null,
-    smoothedRate: null,
-};
-
 function initSam3LossChart() {
     if (!sam3TrainElements.lossCanvas || sam3LossState.chart) return;
     const ctx = sam3TrainElements.lossCanvas.getContext("2d");
@@ -2554,27 +2476,6 @@ function computeMetricEta(job, progressOverride = null) {
     return remaining > 0 ? remaining : null;
 }
 
-function computeSam3LiteProgress(job) {
-    const fallback = Number.isFinite(job?.progress) ? job.progress : 0;
-    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
-    if (!metrics.length) return Math.max(0, Math.min(1, fallback));
-    const last = metrics[metrics.length - 1] || {};
-    const epoch = Number.isFinite(last.epoch) ? Number(last.epoch) : null;
-    const totalEpochs = Number.isFinite(last.total_epochs) ? Number(last.total_epochs) : null;
-    const batch = Number.isFinite(last.batch) ? Number(last.batch) : null;
-    const batchesPerEpochMetric = Number.isFinite(last.batches_per_epoch) ? Number(last.batches_per_epoch) : null;
-    const batchesPerEpoch =
-        batchesPerEpochMetric ||
-        (Number.isFinite(job?.config?.trainer?.target_epoch_size) ? Number(job.config.trainer.target_epoch_size) : null);
-    if (!epoch || !batch || !batchesPerEpoch || !totalEpochs) {
-        return Math.max(0, Math.min(1, fallback));
-    }
-    const epochIdx0 = Math.max(0, epoch - 1);
-    const fracEpoch = Math.max(0, Math.min(1, batch / Math.max(1, batchesPerEpoch)));
-    const overall = (epochIdx0 + fracEpoch) / Math.max(1, totalEpochs);
-    return Math.max(0, Math.min(1, overall));
-}
-
 function updateSam3Eta(progress) {
     const now = Date.now();
     if (!Number.isFinite(progress) || progress <= 0) {
@@ -2589,34 +2490,6 @@ function updateSam3Eta(progress) {
     if (elapsed <= 0) return null;
     const remaining = elapsed * (1 - progress) / progress;
     return remaining > 0 ? remaining : null;
-}
-
-function resetSam3LiteEta() {
-    sam3LiteEtaState.lastProgress = null;
-    sam3LiteEtaState.lastTimestamp = null;
-    sam3LiteEtaState.smoothedRate = null;
-}
-
-function updateSam3LiteEta(progress) {
-    const now = Date.now();
-    if (sam3LiteEtaState.lastProgress === null || progress < sam3LiteEtaState.lastProgress) {
-        sam3LiteEtaState.lastProgress = progress;
-        sam3LiteEtaState.lastTimestamp = now;
-        sam3LiteEtaState.smoothedRate = null;
-        return;
-    }
-    const deltaP = progress - sam3LiteEtaState.lastProgress;
-    const deltaT = (now - sam3LiteEtaState.lastTimestamp) / 1000;
-    if (deltaP > 0.0005 && deltaT > 0.5) {
-        const instRate = deltaP / deltaT;
-        if (instRate > 0) {
-            sam3LiteEtaState.smoothedRate = sam3LiteEtaState.smoothedRate
-                ? sam3LiteEtaState.smoothedRate * 0.7 + instRate * 0.3
-                : instRate;
-        }
-        sam3LiteEtaState.lastProgress = progress;
-        sam3LiteEtaState.lastTimestamp = now;
-    }
 }
 
 function getMinMax(arr, accessor) {
@@ -2851,184 +2724,6 @@ function recomputeSam3Trend() {
     });
 }
 
-const sam3LiteLossState = {
-    jobId: null,
-    avgPoints: [],
-    instPoints: [],
-    lastMetricCount: 0,
-    chart: null,
-};
-
-function initSam3LiteLossChart() {
-    if (!sam3LiteTrainElements.lossCanvas || sam3LiteLossState.chart) return;
-    const ctx = sam3LiteTrainElements.lossCanvas.getContext("2d");
-    sam3LiteLossState.chart = { ctx };
-}
-
-function resetSam3LiteLossChart(jobId = null) {
-    sam3LiteLossState.jobId = jobId;
-    sam3LiteLossState.avgPoints = [];
-    sam3LiteLossState.instPoints = [];
-    sam3LiteLossState.lastMetricCount = 0;
-    const canvas = sam3LiteTrainElements.lossCanvas;
-    if (canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-            const width = canvas.width || canvas.clientWidth || 0;
-            const height = canvas.height || canvas.clientHeight || 0;
-            ctx.clearRect(0, 0, width, height);
-        }
-    }
-}
-
-function drawSam3LiteLossChart() {
-    const canvas = sam3LiteTrainElements.lossCanvas;
-    const hasAvg = sam3LiteLossState.avgPoints && sam3LiteLossState.avgPoints.length;
-    const hasInst = sam3LiteLossState.instPoints && sam3LiteLossState.instPoints.length;
-    if (!canvas || (!hasAvg && !hasInst)) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const width = Math.max(canvas.clientWidth || 400, 320);
-    const height = Math.max(canvas.clientHeight || 200, 160);
-    const dpr = window.devicePixelRatio || 1;
-    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-        canvas.width = width * dpr;
-        canvas.height = height * dpr;
-    }
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, width, height);
-
-    const padding = { top: 14, right: 14, bottom: 18, left: 48 };
-    const chartWidth = Math.max(1, width - padding.left - padding.right);
-    const chartHeight = Math.max(1, height - padding.top - padding.bottom);
-
-    const seriesX = [];
-    if (hasAvg) {
-        seriesX.push(sam3LiteLossState.avgPoints[0].x, sam3LiteLossState.avgPoints[sam3LiteLossState.avgPoints.length - 1].x);
-    }
-    if (hasInst) {
-        seriesX.push(sam3LiteLossState.instPoints[0].x, sam3LiteLossState.instPoints[sam3LiteLossState.instPoints.length - 1].x);
-    }
-    const minX = Math.min(...seriesX);
-    const maxX = Math.max(...seriesX);
-    const xRange = Math.max(1, maxX - minX);
-
-    const allPoints = [];
-    if (hasAvg) allPoints.push(...sam3LiteLossState.avgPoints);
-    if (hasInst) allPoints.push(...sam3LiteLossState.instPoints);
-    const [yMinRaw, yMaxRaw] = allPoints.length ? getMinMax(allPoints, (p) => p.y) : [0, 1];
-    const yMin = Math.max(0, Math.min(yMinRaw, yMaxRaw - 1e-6));
-    const yMax = Math.max(yMin + 1e-6, yMaxRaw);
-    const yRange = yMax - yMin;
-
-    const tickCount = 4;
-    const avgTickStep = yRange / tickCount;
-    const avgTicks = [];
-    for (let i = 0; i <= tickCount; i += 1) {
-        avgTicks.push(yMin + avgTickStep * i);
-    }
-
-    ctx.strokeStyle = "#e2e8f0";
-    ctx.lineWidth = 1;
-    ctx.textAlign = "right";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = "#94a3b8";
-    ctx.font = "12px sans-serif";
-    avgTicks.forEach((tick) => {
-        const norm = (tick - yMin) / yRange;
-        const y = padding.top + (1 - norm) * chartHeight;
-        ctx.beginPath();
-        ctx.moveTo(padding.left, y);
-        ctx.lineTo(width - padding.right, y);
-        ctx.stroke();
-        ctx.fillText(tick.toExponential(1), padding.left - 6, y);
-    });
-
-    ctx.strokeStyle = "#94a3b8";
-    ctx.beginPath();
-    ctx.moveTo(padding.left, padding.top);
-    ctx.lineTo(padding.left, padding.top + chartHeight);
-    ctx.stroke();
-
-    if (hasAvg) {
-        ctx.strokeStyle = "#2563eb";
-        ctx.lineWidth = 2;
-        ctx.lineJoin = "round";
-        ctx.lineCap = "round";
-        ctx.beginPath();
-        sam3LiteLossState.avgPoints.forEach((point, idx) => {
-            const normX = (point.x - minX) / xRange;
-            const normY = (point.y - yMin) / yRange;
-            const xPos = padding.left + normX * chartWidth;
-            const yPos = padding.top + (1 - normY) * chartHeight;
-            if (idx === 0) {
-                ctx.moveTo(xPos, yPos);
-            } else {
-                ctx.lineTo(xPos, yPos);
-            }
-        });
-        ctx.stroke();
-    }
-
-    if (hasInst) {
-        ctx.strokeStyle = "#f97316";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        sam3LiteLossState.instPoints.forEach((point, idx) => {
-            const normX = (point.x - minX) / xRange;
-            const normY = (point.y - yMin) / yRange;
-            const xPos = padding.left + normX * chartWidth;
-            const yPos = padding.top + (1 - normY) * chartHeight;
-            if (idx === 0) {
-                ctx.moveTo(xPos, yPos);
-            } else {
-                ctx.lineTo(xPos, yPos);
-            }
-        });
-        ctx.stroke();
-    }
-    ctx.restore();
-}
-
-function updateSam3LiteLossChartFromMetrics(metrics, jobId) {
-    if (!sam3LiteTrainElements.lossCanvas) return;
-    if (jobId && sam3LiteLossState.jobId !== jobId) {
-        resetSam3LiteLossChart(jobId);
-    }
-    const entries = Array.isArray(metrics) ? metrics : [];
-    if (!entries.length) return;
-    if (entries.length < sam3LiteLossState.lastMetricCount) {
-        resetSam3LiteLossChart(jobId || sam3LiteLossState.jobId);
-    }
-    const newEntries = entries.slice(sam3LiteLossState.lastMetricCount);
-    sam3LiteLossState.lastMetricCount = entries.length;
-    if (!newEntries.length) return;
-    initSam3LiteLossChart();
-    newEntries.forEach((entry) => {
-        if (!entry || typeof entry !== "object") return;
-        const inst = entry.loss !== undefined ? Number(entry.loss) : entry.train_loss_batch !== undefined ? Number(entry.train_loss_batch) : Number(entry.train_loss);
-        const avg =
-            entry.loss_avg !== undefined
-                ? Number(entry.loss_avg)
-                : entry.train_loss_avg10 !== undefined
-                  ? Number(entry.train_loss_avg10)
-                  : entry.train_loss_avg !== undefined
-                    ? Number(entry.train_loss_avg)
-                    : null;
-        const stepVal = Number.isFinite(entry.step) ? entry.step : Math.max(sam3LiteLossState.avgPoints.length, sam3LiteLossState.instPoints.length);
-        if (Number.isFinite(avg)) {
-            sam3LiteLossState.avgPoints.push({ x: stepVal, y: avg });
-        }
-        if (Number.isFinite(inst)) {
-            sam3LiteLossState.instPoints.push({ x: stepVal, y: inst });
-        }
-    });
-    if (sam3LiteLossState.avgPoints.length || sam3LiteLossState.instPoints.length) {
-        drawSam3LiteLossChart();
-    }
-}
 function readNumberInput(input, { integer = false } = {}) {
     if (!input) {
         return undefined;
@@ -3789,6 +3484,7 @@ function renderPromptRecipeResults(job) {
     if (!promptRecipeElements.results || !promptRecipeElements.status) return;
     promptRecipeElements.results.innerHTML = "";
     if (promptRecipeElements.logs) promptRecipeElements.logs.innerHTML = "";
+    if (promptRecipeElements.applyButton) promptRecipeElements.applyButton.disabled = true;
     if (job.error) {
         const err = document.createElement("div");
         err.className = "training-message error";
@@ -3799,10 +3495,17 @@ function renderPromptRecipeResults(job) {
     const result = job.result;
     if (!result) return;
     const recipe = result.recipe || {};
+    const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+    const stepCount = steps.length;
     const summary = recipe.summary || {};
+    const posIds = Array.isArray(result.positive_image_ids) ? result.positive_image_ids : [];
+    const negIds = Array.isArray(result.negative_image_ids) ? result.negative_image_ids : [];
+    const seedVal = result.config ? result.config.seed : null;
+    const recipeLabel = result.class_name || result.class_id || "recipe";
     if (promptRecipeElements.status) {
         promptRecipeElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""}`;
-        promptRecipeElements.status.title = "Recipe tries to cover all GTs in the sample with zero/low FPs.";
+        promptRecipeElements.status.title =
+            "Simulated per-image early stop: run prompts in order, skip covered images to avoid extra FPs, best threshold per prompt, drop zero-gain steps.";
     }
     const frag = document.createDocumentFragment();
     const summaryCard = document.createElement("div");
@@ -3812,16 +3515,77 @@ function renderPromptRecipeResults(job) {
     const coverageRate = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0";
     summaryBody.innerHTML = `
         <div><strong>Class:</strong> ${escapeHtml(result.class_name || result.class_id)}</div>
+        <div><strong>Recipe:</strong> ${stepCount} step${stepCount === 1 ? "" : "s"} (best threshold per prompt; dropped no-gain steps)</div>
+        <div><strong>Simulation:</strong> Per-image early stop; negatives run every step. Precision per step uses only images still active.</div>
+        <div><strong>Sample:</strong> ${posIds.length} pos / ${negIds.length} neg${Number.isFinite(seedVal) ? ` (seed ${seedVal})` : ""}</div>
         <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${coverageRate}%)
         • FPs: ${summary.fps || 0}
         • Duplicates: ${summary.duplicates || 0}
         • Pos imgs: ${result.positive_images || 0}
         • Neg imgs: ${result.negative_images || 0}</div>
     `;
+    if (posIds.length || negIds.length) {
+        const samplePreview = document.createElement("div");
+        samplePreview.className = "training-help";
+        const preview = (arr) => {
+            if (!arr.length) return "none";
+            const slice = arr.slice(0, 12).join(", ");
+            return arr.length > 12 ? `${slice} … (${arr.length} total)` : slice;
+        };
+        samplePreview.textContent = `Pos IDs: ${preview(posIds)} • Neg IDs: ${preview(negIds)}`;
+        summaryBody.appendChild(samplePreview);
+        const copyRow = document.createElement("div");
+        copyRow.className = "training-actions";
+        const makeCopyBtn = (label, ids) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "training-button secondary";
+            btn.textContent = label;
+            btn.addEventListener("click", async () => {
+                const text = ids.join(",");
+                try {
+                    await navigator.clipboard.writeText(text);
+                    setPromptRecipeMessage(`Copied ${label.toLowerCase()}.`, "success");
+                } catch (err) {
+                    setPromptRecipeMessage(`Copy failed: ${err.message || err}`, "error");
+                }
+            });
+            return btn;
+        };
+        if (posIds.length) copyRow.appendChild(makeCopyBtn("Copy pos IDs", posIds));
+        if (negIds.length) copyRow.appendChild(makeCopyBtn("Copy neg IDs", negIds));
+        summaryBody.appendChild(copyRow);
+    }
+    if (steps.length) {
+        const downloadRow = document.createElement("div");
+        downloadRow.className = "training-actions";
+        const dlBtn = document.createElement("button");
+        dlBtn.type = "button";
+        dlBtn.className = "training-button secondary";
+        dlBtn.textContent = "Download recipe JSON";
+        dlBtn.addEventListener("click", () => {
+            const payload = {
+                id: `recipe_${Date.now()}`,
+                label: `${recipeLabel}_recipe`,
+                class_name: result.class_name,
+                class_id: result.class_id,
+                seed: seedVal,
+                steps: steps.map((s) => ({ prompt: s.prompt, threshold: s.threshold })),
+            };
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${recipeLabel}_recipe.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+        downloadRow.appendChild(dlBtn);
+        summaryBody.appendChild(downloadRow);
+    }
     summaryCard.appendChild(summaryBody);
     frag.appendChild(summaryCard);
 
-    const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
     if (steps.length) {
         const stepCard = document.createElement("div");
         stepCard.className = "training-card";
@@ -3829,8 +3593,27 @@ function renderPromptRecipeResults(job) {
         body.className = "training-card__body";
         const title = document.createElement("div");
         title.className = "training-card__title";
-        title.textContent = "Recommended recipe (only steps that add coverage)";
+        title.textContent = "Best sequence (run top-to-bottom)";
         body.appendChild(title);
+        const helper = document.createElement("div");
+        helper.className = "training-help";
+        helper.textContent =
+            "Run prompts in order. Stops running later prompts on images once their GTs are covered (to reduce FPs). Adds = new GTs covered by this step. Cov% is cumulative. FPs shows step vs running total. Prec is recalculated on images still active at this step.";
+        body.appendChild(helper);
+        const sequenceLabel = steps
+            .map((step) => {
+                const thr = typeof step.threshold === "number" ? step.threshold.toFixed(2) : step.threshold;
+                const thrLabel = thr !== undefined && thr !== null ? ` @ ${thr}` : "";
+                return `${step.prompt || ""}${thrLabel}`.trim();
+            })
+            .filter(Boolean)
+            .join(" → ");
+        if (sequenceLabel) {
+            const sequence = document.createElement("div");
+            sequence.className = "training-help";
+            sequence.textContent = `Use this order: ${sequenceLabel}`;
+            body.appendChild(sequence);
+        }
         const table = document.createElement("table");
         table.className = "metric-table";
         const thead = document.createElement("thead");
@@ -3839,29 +3622,37 @@ function renderPromptRecipeResults(job) {
                 <th>#</th>
                 <th>Prompt</th>
                 <th>Thr</th>
-                <th>Gain</th>
-                <th>Cov%</th>
-                <th>Cum FPs</th>
+                <th>Adds</th>
+                <th>Cov after %</th>
+                <th>FPs (step)</th>
+                <th>FPs (total)</th>
                 <th>Prec</th>
-                <th>Rec</th>
-                <th>Det rate</th>
             </tr>
         `;
         table.appendChild(thead);
         const tbody = document.createElement("tbody");
         steps.forEach((step, idx) => {
-            const cov = Number.isFinite(step.cum_coverage) ? (step.cum_coverage * 100).toFixed(1) : "0";
+            const gain = step.gain ?? 0;
+            const gainText = gain > 0 ? `+${gain}` : gain;
+            const cov =
+                Number.isFinite(step.coverage_after) && step.coverage_after > 0
+                    ? (step.coverage_after * 100).toFixed(1)
+                    : Number.isFinite(step.cum_coverage)
+                    ? (step.cum_coverage * 100).toFixed(1)
+                    : "0";
+            const stepFps = step.fps ?? 0;
+            const totalFps = step.cum_fps ?? stepFps;
             const row = document.createElement("tr");
+            if (idx === 0) row.classList.add("metric-table__highlight");
             row.innerHTML = `
                 <td>${idx + 1}</td>
                 <td>${escapeHtml(step.prompt || "")}</td>
                 <td>${step.threshold ?? "–"}</td>
-                <td>${step.gain ?? 0}</td>
+                <td>${gainText}</td>
                 <td>${cov}</td>
-                <td>${step.cum_fps ?? step.fps ?? 0}</td>
+                <td>${stepFps}</td>
+                <td>${totalFps}</td>
                 <td>${formatMetric(step.precision, 3)}</td>
-                <td>${formatMetric(step.recall, 3)}</td>
-                <td>${formatMetric(step.det_rate, 3)}</td>
             `;
             tbody.appendChild(row);
         });
@@ -3877,6 +3668,11 @@ function renderPromptRecipeResults(job) {
         candCard.className = "training-card";
         const body = document.createElement("div");
         body.className = "training-card__body";
+        const helper = document.createElement("div");
+        helper.className = "training-help";
+        helper.textContent =
+            "All tested prompts/thresholds (no early-stop simulation). We already used the best threshold per prompt in the sequence above.";
+        body.appendChild(helper);
         const table = document.createElement("table");
         table.className = "metric-table";
         const thead = document.createElement("thead");
@@ -3913,7 +3709,12 @@ function renderPromptRecipeResults(job) {
             tbody.appendChild(row);
         });
         table.appendChild(tbody);
-        body.appendChild(table);
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = `Show tested prompts (${candidates.length})`;
+        details.appendChild(summary);
+        details.appendChild(table);
+        body.appendChild(details);
         candCard.appendChild(body);
         frag.appendChild(candCard);
     }
@@ -3924,6 +3725,10 @@ function renderPromptRecipeResults(job) {
         covCard.className = "training-card";
         const body = document.createElement("div");
         body.className = "training-card__body";
+        const helper = document.createElement("div");
+        helper.className = "training-help";
+        helper.textContent = "Per-image hits on the sampled set (debug view).";
+        body.appendChild(helper);
         const list = document.createElement("div");
         coverage.slice(0, 40).forEach((entry) => {
             const hits = (entry.hits || [])
@@ -3931,7 +3736,8 @@ function renderPromptRecipeResults(job) {
                 .join(", ");
             const div = document.createElement("div");
             div.className = "training-history-item";
-            div.textContent = `${entry.file_name || entry.image_id}: GT ${entry.gt || 0}, hits [${hits || "none"}]`;
+            const kind = entry.type === "neg" ? "NEG" : "POS";
+            div.textContent = `[${kind}] ${entry.file_name || entry.image_id}: GT ${entry.gt || 0}, hits [${hits || "none"}]`;
             list.appendChild(div);
         });
         if (coverage.length > 40) {
@@ -3940,7 +3746,12 @@ function renderPromptRecipeResults(job) {
             more.textContent = `Showing first 40 of ${coverage.length} images.`;
             list.appendChild(more);
         }
-        body.appendChild(list);
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = `Per-image coverage (${coverage.length} images)`;
+        details.appendChild(summary);
+        details.appendChild(list);
+        body.appendChild(details);
         covCard.appendChild(body);
         frag.appendChild(covCard);
     }
@@ -3956,6 +3767,9 @@ function renderPromptRecipeResults(job) {
             logFrag.appendChild(div);
         });
         promptRecipeElements.logs.appendChild(logFrag);
+    }
+    if (promptRecipeElements.applyButton && job.status === "completed") {
+        promptRecipeElements.applyButton.disabled = false;
     }
 }
 
@@ -4080,6 +3894,7 @@ async function startPromptRecipeJob() {
     try {
         setPromptRecipeMessage("Starting recipe mining…", "info");
         if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = true;
+        if (promptRecipeElements.applyButton) promptRecipeElements.applyButton.disabled = true;
         if (promptRecipeElements.status) promptRecipeElements.status.textContent = "Starting recipe job…";
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/recipe`, {
             method: "POST",
@@ -4150,6 +3965,65 @@ async function expandPromptRecipePrompts() {
         console.error("Prompt recipe expand failed", err);
         setPromptRecipeMessage(err.message || "Expand failed", "error");
     }
+}
+
+async function applyLastPromptRecipeToPrompts() {
+    const job = promptRecipeState.lastJob;
+    const datasetId = promptHelperState.selectedId;
+    if (!job || !job.result) {
+        setPromptRecipeMessage("Run recipe mining first.", "warn");
+        return;
+    }
+    if (!datasetId) {
+        setPromptRecipeMessage("Select a dataset first.", "warn");
+        return;
+    }
+    const result = job.result;
+    const classId = result.class_id;
+    const steps = result.recipe && Array.isArray(result.recipe.steps) ? result.recipe.steps : [];
+    if (classId === undefined || classId === null) {
+        setPromptRecipeMessage("No class in the last recipe result.", "warn");
+        return;
+    }
+    if (!steps.length) {
+        setPromptRecipeMessage("Recipe is empty; nothing to apply.", "warn");
+        return;
+    }
+    const orderedPrompts = [];
+    const seen = new Set();
+    steps.forEach((step) => {
+        const p = (step.prompt || "").trim();
+        if (!p) return;
+        const key = p.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        orderedPrompts.push(p);
+    });
+    if (!orderedPrompts.length) {
+        setPromptRecipeMessage("No prompts to apply from recipe.", "warn");
+        return;
+    }
+    const thresholds = [];
+    const thrSeen = new Set();
+    steps.forEach((step) => {
+        if (typeof step.threshold !== "number") return;
+        const key = step.threshold.toFixed(4);
+        if (thrSeen.has(key)) return;
+        thrSeen.add(key);
+        thresholds.push(step.threshold);
+    });
+    promptHelperState.promptsByClass[classId] = orderedPrompts;
+    const target = document.getElementById(`promptHelperInput-${classId}`);
+    if (target) {
+        target.value = orderedPrompts.join(", ");
+    }
+    if (promptRecipeElements.thresholds && thresholds.length) {
+        promptRecipeElements.thresholds.value = thresholds.map((t) => t.toFixed(2)).join(", ");
+    }
+    setPromptRecipeMessage(
+        `Applied recipe to prompts for class ${classId}. Save a preset to keep it.`,
+        "success"
+    );
 }
 
 async function startPromptSearchJob() {
@@ -4450,10 +4324,18 @@ async function initPromptHelperUi() {
     promptRecipeElements.expandCount = document.getElementById("promptRecipeExpandCount");
     promptRecipeElements.expandButton = document.getElementById("promptRecipeExpandBtn");
     promptRecipeElements.runButton = document.getElementById("promptRecipeRunBtn");
+    promptRecipeElements.applyButton = document.getElementById("promptRecipeApplyBtn");
     promptRecipeElements.status = document.getElementById("promptRecipeStatus");
     promptRecipeElements.logs = document.getElementById("promptRecipeLogs");
     promptRecipeElements.results = document.getElementById("promptRecipeResults");
     promptRecipeElements.message = document.getElementById("promptRecipeMessage");
+    if (promptRecipeElements.applyButton) {
+        promptRecipeElements.applyButton.disabled = true;
+    }
+
+    sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
+    sam3RecipeElements.applyButton = document.getElementById("sam3RecipeApplyButton");
+    sam3RecipeElements.status = document.getElementById("sam3RecipeStatus");
     if (promptHelperElements.evaluateButton) {
         promptHelperElements.evaluateButton.disabled = true;
     }
@@ -4477,6 +4359,10 @@ async function initPromptHelperUi() {
             if (promptRecipeElements.logs) promptRecipeElements.logs.innerHTML = "";
             if (promptRecipeElements.status) promptRecipeElements.status.textContent = "Idle";
             setPromptRecipeMessage("");
+            if (promptRecipeElements.applyButton) promptRecipeElements.applyButton.disabled = true;
+            sam3RecipeState.recipe = null;
+            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
+            if (sam3RecipeElements.status) sam3RecipeElements.status.textContent = "";
             if (promptRecipeState.pollHandle) {
                 clearInterval(promptRecipeState.pollHandle);
                 promptRecipeState.pollHandle = null;
@@ -4534,6 +4420,11 @@ async function initPromptHelperUi() {
     if (promptRecipeElements.runButton) {
         promptRecipeElements.runButton.addEventListener("click", () => {
             startPromptRecipeJob().catch((err) => console.error("Prompt recipe start failed", err));
+        });
+    }
+    if (promptRecipeElements.applyButton) {
+        promptRecipeElements.applyButton.addEventListener("click", () => {
+            applyLastPromptRecipeToPrompts().catch((err) => console.error("Prompt recipe apply failed", err));
         });
     }
     if (promptRecipeElements.expandButton) {
@@ -4681,7 +4572,7 @@ function renderRunStorage(entries, elements) {
             btn.textContent = label;
             btn.className = `training-button${danger ? " training-button-danger" : ""}`;
             btn.disabled = !!entry.active;
-            btn.addEventListener("click", () => deleteRunStorage(entry.id, entry.variant, scope));
+            btn.addEventListener("click", () => deleteRunStorage(entry.id, scope));
             actions.appendChild(btn);
         });
         item.appendChild(main);
@@ -4690,24 +4581,22 @@ function renderRunStorage(entries, elements) {
     });
 }
 
-async function refreshRunStorage(variant = "sam3") {
-    const elements = variant === "sam3lite" ? sam3LiteStorageElements : sam3StorageElements;
-    const state = variant === "sam3lite" ? sam3LiteStorageState : sam3StorageState;
-    if (!elements.list) return;
+async function refreshRunStorage() {
+    if (!sam3StorageElements.list) return;
     try {
-        const resp = await fetch(`${API_ROOT}/sam3/storage/runs?variant=${encodeURIComponent(variant)}`);
+        const resp = await fetch(`${API_ROOT}/sam3/storage/runs?variant=sam3`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        state.items = Array.isArray(data) ? data : [];
-        renderRunStorage(state.items, elements);
+        sam3StorageState.items = Array.isArray(data) ? data : [];
+        renderRunStorage(sam3StorageState.items, sam3StorageElements);
     } catch (err) {
         console.error("Failed to load run storage", err);
     }
 }
 
-async function deleteRunStorage(runId, variant, scope) {
+async function deleteRunStorage(runId, scope) {
     if (scope === "promote") {
-        const qs = new URLSearchParams({ variant });
+        const qs = new URLSearchParams({ variant: "sam3" });
         try {
             const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}/promote?${qs.toString()}`, {
                 method: "POST",
@@ -4715,24 +4604,15 @@ async function deleteRunStorage(runId, variant, scope) {
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const msg = `Promoted ${runId}: kept ${data.kept || "checkpoint"}, freed ${formatBytes(data.freed_bytes || 0)}.`;
-            if (variant === "sam3") {
-                setSam3Message(msg, "success");
-            } else {
-                setSam3LiteMessage(msg, "success");
-            }
+            setSam3Message(msg, "success");
         } catch (err) {
             console.error("Promote run failed", err);
-            if (variant === "sam3") {
-                setSam3Message(`Promote failed: ${err.message || err}`, "error");
-            } else {
-                setSam3LiteMessage(`Promote failed: ${err.message || err}`, "error");
-            }
+            setSam3Message(`Promote failed: ${err.message || err}`, "error");
         }
     } else {
         const label = scope === "all" ? "entire run folder" : scope;
         let confirmText = `Delete ${label} for ${runId}?`;
-        const entry =
-            (variant === "sam3" ? sam3StorageState.items : sam3LiteStorageState.items).find((r) => r.id === runId) || null;
+        const entry = sam3StorageState.items.find((r) => r.id === runId) || null;
         if (entry && entry.promoted) {
             confirmText = `This run is promoted.\n${confirmText}\nClick OK to delete anyway.`;
             const second = typeof window !== "undefined" ? window.confirm(confirmText) : true;
@@ -4740,27 +4620,19 @@ async function deleteRunStorage(runId, variant, scope) {
         } else if (typeof window !== "undefined" && !window.confirm(confirmText)) {
             return;
         }
-        const qs = new URLSearchParams({ variant, scope });
+        const qs = new URLSearchParams({ variant: "sam3", scope });
         try {
             const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}?${qs.toString()}`, {
                 method: "DELETE",
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            if (variant === "sam3") {
-                setSam3Message(`Deleted ${label} for ${runId}.`, "success");
-            } else {
-                setSam3LiteMessage(`Deleted ${label} for ${runId}.`, "success");
-            }
+            setSam3Message(`Deleted ${label} for ${runId}.`, "success");
         } catch (err) {
             console.error("Delete run failed", err);
-            if (variant === "sam3") {
-                setSam3Message(`Delete failed: ${err.message || err}`, "error");
-            } else {
-                setSam3LiteMessage(`Delete failed: ${err.message || err}`, "error");
-            }
+            setSam3Message(`Delete failed: ${err.message || err}`, "error");
         }
     }
-    await refreshRunStorage(variant);
+    await refreshRunStorage();
 }
 
 async function refreshSam3History() {
@@ -5285,98 +5157,99 @@ async function initSam3TrainUi() {
     sam3TrainElements.valBatch = document.getElementById("sam3ValBatch");
     sam3TrainElements.trainWorkers = document.getElementById("sam3TrainWorkers");
     sam3TrainElements.valWorkers = document.getElementById("sam3ValWorkers");
-        sam3TrainElements.epochs = document.getElementById("sam3Epochs");
-        sam3TrainElements.resolution = document.getElementById("sam3Resolution");
-        sam3TrainElements.lrScale = document.getElementById("sam3LrScale");
+    sam3TrainElements.epochs = document.getElementById("sam3Epochs");
+    sam3TrainElements.resolution = document.getElementById("sam3Resolution");
+    sam3TrainElements.lrScale = document.getElementById("sam3LrScale");
     sam3TrainElements.gradAccum = document.getElementById("sam3GradAccum");
     sam3TrainElements.valFreq = document.getElementById("sam3ValFreq");
     sam3TrainElements.capEpoch = document.getElementById("sam3CapEpoch");
     sam3TrainElements.targetEpochSize = document.getElementById("sam3TargetEpochSize");
     sam3TrainElements.capVal = document.getElementById("sam3CapVal");
     sam3TrainElements.valCapSize = document.getElementById("sam3ValCapSize");
-        sam3TrainElements.balanceStrategy = document.getElementById("sam3BalanceStrategy");
-        sam3TrainElements.balancePower = document.getElementById("sam3BalancePower");
-        sam3TrainElements.balanceClip = document.getElementById("sam3BalanceClip");
-        sam3TrainElements.balanceBeta = document.getElementById("sam3BalanceBeta");
-        sam3TrainElements.balanceGamma = document.getElementById("sam3BalanceGamma");
-        sam3TrainElements.balanceDescription = document.getElementById("sam3BalanceDescription");
-        sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
-        sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
-        sam3TrainElements.freezeLanguage = document.getElementById("sam3FreezeLanguage");
-        sam3TrainElements.languageLr = document.getElementById("sam3LanguageLr");
-        sam3TrainElements.promptVariants = document.getElementById("sam3PromptVariants");
-        sam3TrainElements.promptRandomize = document.getElementById("sam3PromptRandomize");
-        sam3TrainElements.logAll = document.getElementById("sam3LogAll");
-        sam3TrainElements.valScoreThresh = document.getElementById("sam3ValScoreThresh");
-        sam3TrainElements.valMaxDets = document.getElementById("sam3ValMaxDets");
-        sam3TrainElements.trendSmooth = document.getElementById("sam3TrendSmooth");
-        sam3TrainElements.trendSmoothValue = document.getElementById("sam3TrendSmoothValue");
-        sam3TrainElements.segHead = document.getElementById("sam3SegHead");
-        sam3TrainElements.segTrain = document.getElementById("sam3SegTrain");
-        sam3TrainElements.bboxOnly = document.getElementById("sam3BBoxOnly");
-        sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
-        sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
-        sam3TrainElements.statusText = document.getElementById("sam3StatusText");
-        sam3TrainElements.etaText = document.getElementById("sam3EtaText");
-        sam3TrainElements.progressFill = document.getElementById("sam3ProgressFill");
-        sam3TrainElements.message = document.getElementById("sam3Message");
-        sam3TrainElements.summary = document.getElementById("sam3Summary");
-        sam3TrainElements.balanceSummary = document.getElementById("sam3BalanceSummary");
-        sam3TrainElements.log = document.getElementById("sam3Log");
-        sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
-        sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
-        sam3TrainElements.valMetrics = document.getElementById("sam3ValMetrics");
-        sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
+    sam3TrainElements.balanceStrategy = document.getElementById("sam3BalanceStrategy");
+    sam3TrainElements.balancePower = document.getElementById("sam3BalancePower");
+    sam3TrainElements.balanceClip = document.getElementById("sam3BalanceClip");
+    sam3TrainElements.balanceBeta = document.getElementById("sam3BalanceBeta");
+    sam3TrainElements.balanceGamma = document.getElementById("sam3BalanceGamma");
+    sam3TrainElements.balanceDescription = document.getElementById("sam3BalanceDescription");
+    sam3TrainElements.warmupSteps = document.getElementById("sam3Warmup");
+    sam3TrainElements.schedulerTimescale = document.getElementById("sam3Timescale");
+    sam3TrainElements.freezeLanguage = document.getElementById("sam3FreezeLanguage");
+    sam3TrainElements.languageLr = document.getElementById("sam3LanguageLr");
+    sam3TrainElements.promptVariants = document.getElementById("sam3PromptVariants");
+    sam3TrainElements.promptRandomize = document.getElementById("sam3PromptRandomize");
+    sam3TrainElements.logAll = document.getElementById("sam3LogAll");
+    sam3TrainElements.valScoreThresh = document.getElementById("sam3ValScoreThresh");
+    sam3TrainElements.valMaxDets = document.getElementById("sam3ValMaxDets");
+    sam3TrainElements.trendSmooth = document.getElementById("sam3TrendSmooth");
+    sam3TrainElements.trendSmoothValue = document.getElementById("sam3TrendSmoothValue");
+    sam3TrainElements.segHead = document.getElementById("sam3SegHead");
+    sam3TrainElements.segTrain = document.getElementById("sam3SegTrain");
+    sam3TrainElements.bboxOnly = document.getElementById("sam3BBoxOnly");
+    sam3TrainElements.startButton = document.getElementById("sam3StartBtn");
+    sam3TrainElements.cancelButton = document.getElementById("sam3CancelBtn");
+    sam3TrainElements.statusText = document.getElementById("sam3StatusText");
+    sam3TrainElements.etaText = document.getElementById("sam3EtaText");
+    sam3TrainElements.progressFill = document.getElementById("sam3ProgressFill");
+    sam3TrainElements.message = document.getElementById("sam3Message");
+    sam3TrainElements.summary = document.getElementById("sam3Summary");
+    sam3TrainElements.balanceSummary = document.getElementById("sam3BalanceSummary");
+    sam3TrainElements.log = document.getElementById("sam3Log");
+    sam3TrainElements.history = document.getElementById("sam3TrainingHistory");
+    sam3TrainElements.lossCanvas = document.getElementById("sam3LossChart");
+    sam3TrainElements.valMetrics = document.getElementById("sam3ValMetrics");
+    sam3TrainElements.activateButton = document.getElementById("sam3ActivateBtn");
     sam3StorageElements.list = document.getElementById("sam3StorageList");
     sam3StorageElements.refresh = document.getElementById("sam3StorageRefresh");
-        if (sam3TrainElements.balanceStrategy) {
-            sam3TrainElements.balanceStrategy.addEventListener("change", () => updateBalanceParamVisibility());
-            updateBalanceParamVisibility();
-        }
-        if (sam3TrainElements.trendSmooth && sam3TrainElements.trendSmoothValue) {
-            const setTrendLabel = (val) => {
-                sam3TrainElements.trendSmoothValue.textContent = Number(val).toFixed(2);
-            };
-            sam3TrainElements.trendSmooth.addEventListener("input", (e) => {
-                const val = parseFloat(e.target.value);
-                if (!Number.isFinite(val)) return;
-                sam3TrainState.trendAlpha = Math.max(0.001, Math.min(0.9, val));
-                setTrendLabel(sam3TrainState.trendAlpha);
-                recomputeSam3Trend();
-                drawSam3LossChart();
-            });
-            setTrendLabel(sam3TrainState.trendAlpha || sam3TrainElements.trendSmooth.value || 0.05);
-        }
-        if (sam3TrainElements.freezeLanguage && sam3TrainElements.languageLr) {
-            sam3TrainElements.freezeLanguage.addEventListener("change", () => {
-                const frozen = sam3TrainElements.freezeLanguage.checked;
-                sam3TrainElements.languageLr.disabled = frozen;
-                if (frozen) {
-                    sam3TrainElements.languageLr.value = "";
-                }
-            });
-        }
-        if (sam3TrainElements.segTrain && sam3TrainElements.segHead) {
-            sam3TrainElements.segTrain.addEventListener("change", () => {
-                if (sam3TrainElements.segTrain.checked) {
-                    sam3TrainElements.segHead.checked = true;
-                }
-            });
-        }
-        if (sam3TrainElements.bboxOnly && sam3TrainElements.segHead && sam3TrainElements.segTrain) {
-            sam3TrainElements.bboxOnly.addEventListener("change", () => {
-                const bboxMode = sam3TrainElements.bboxOnly.checked;
-                if (bboxMode) {
-                    sam3TrainElements.segHead.checked = false;
-                    sam3TrainElements.segTrain.checked = false;
-                }
-            });
-        }
-        if (sam3TrainElements.datasetSelect) {
-            sam3TrainElements.datasetSelect.addEventListener("change", () => {
-                sam3TrainState.selectedId = sam3TrainElements.datasetSelect.value;
-                const entry = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId);
-                updateSam3DatasetSummary(entry);
+
+    if (sam3TrainElements.balanceStrategy) {
+        sam3TrainElements.balanceStrategy.addEventListener("change", () => updateBalanceParamVisibility());
+        updateBalanceParamVisibility();
+    }
+    if (sam3TrainElements.trendSmooth && sam3TrainElements.trendSmoothValue) {
+        const setTrendLabel = (val) => {
+            sam3TrainElements.trendSmoothValue.textContent = Number(val).toFixed(2);
+        };
+        sam3TrainElements.trendSmooth.addEventListener("input", (e) => {
+            const val = parseFloat(e.target.value);
+            if (!Number.isFinite(val)) return;
+            sam3TrainState.trendAlpha = Math.max(0.001, Math.min(0.9, val));
+            setTrendLabel(sam3TrainState.trendAlpha);
+            recomputeSam3Trend();
+            drawSam3LossChart();
+        });
+        setTrendLabel(sam3TrainState.trendAlpha || sam3TrainElements.trendSmooth.value || 0.05);
+    }
+    if (sam3TrainElements.freezeLanguage && sam3TrainElements.languageLr) {
+        sam3TrainElements.freezeLanguage.addEventListener("change", () => {
+            const frozen = sam3TrainElements.freezeLanguage.checked;
+            sam3TrainElements.languageLr.disabled = frozen;
+            if (frozen) {
+                sam3TrainElements.languageLr.value = "";
+            }
+        });
+    }
+    if (sam3TrainElements.segTrain && sam3TrainElements.segHead) {
+        sam3TrainElements.segTrain.addEventListener("change", () => {
+            if (sam3TrainElements.segTrain.checked) {
+                sam3TrainElements.segHead.checked = true;
+            }
+        });
+    }
+    if (sam3TrainElements.bboxOnly && sam3TrainElements.segHead && sam3TrainElements.segTrain) {
+        sam3TrainElements.bboxOnly.addEventListener("change", () => {
+            const bboxMode = sam3TrainElements.bboxOnly.checked;
+            if (bboxMode) {
+                sam3TrainElements.segHead.checked = false;
+                sam3TrainElements.segTrain.checked = false;
+            }
+        });
+    }
+    if (sam3TrainElements.datasetSelect) {
+        sam3TrainElements.datasetSelect.addEventListener("change", () => {
+            sam3TrainState.selectedId = sam3TrainElements.datasetSelect.value;
+            const entry = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId);
+            updateSam3DatasetSummary(entry);
             resetSam3Eta();
         });
     }
@@ -5408,420 +5281,11 @@ async function initSam3TrainUi() {
         sam3TrainElements.activateButton.addEventListener("click", () => activateSam3Checkpoint());
     }
     if (sam3StorageElements.refresh) {
-        sam3StorageElements.refresh.addEventListener("click", () => refreshRunStorage("sam3"));
+        sam3StorageElements.refresh.addEventListener("click", () => refreshRunStorage());
     }
     await loadSam3Datasets();
     await refreshSam3History();
-    await refreshRunStorage("sam3");
-}
-
-function setSam3LiteMessage(text, tone = "info") {
-    if (!sam3LiteTrainElements.message) return;
-    sam3LiteTrainElements.message.textContent = text || "";
-    sam3LiteTrainElements.message.className = `training-message ${tone}`;
-}
-
-function updateSam3LiteDatasetSummary(entry) {
-    if (!sam3LiteTrainElements.datasetSummary) return;
-    if (!entry) {
-        sam3LiteTrainElements.datasetSummary.textContent = "Pick a dataset to train.";
-        return;
-    }
-    const coco = entry.coco_ready ? "COCO ready" : "Convert required";
-    const src = entry.source || "unknown";
-    const counts = [];
-    if (entry.image_count) counts.push(`${entry.image_count} images`);
-    if (entry.train_count) counts.push(`train ${entry.train_count}`);
-    if (entry.val_count) counts.push(`val ${entry.val_count}`);
-    const countText = counts.length ? ` • ${counts.join(" / ")}` : "";
-    sam3LiteTrainElements.datasetSummary.textContent = `${entry.label || entry.id} (${src}, ${coco})${countText}`;
-}
-
-async function loadSam3LiteDatasets() {
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3lite/datasets`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        sam3LiteTrainState.datasets = Array.isArray(data) ? data : [];
-        if (!sam3LiteTrainState.selectedId && sam3LiteTrainState.datasets.length) {
-            sam3LiteTrainState.selectedId = sam3LiteTrainState.datasets[0].id;
-        }
-        if (sam3LiteTrainElements.datasetSelect) {
-            sam3LiteTrainElements.datasetSelect.innerHTML = "";
-            sam3LiteTrainState.datasets.forEach((entry) => {
-                const opt = document.createElement("option");
-                opt.value = entry.id;
-                opt.textContent = `${entry.label || entry.id}${entry.coco_ready ? "" : " (needs convert)"}`;
-                if (entry.id === sam3LiteTrainState.selectedId) {
-                    opt.selected = true;
-                }
-                sam3LiteTrainElements.datasetSelect.appendChild(opt);
-            });
-        }
-        const selected = sam3LiteTrainState.datasets.find((d) => d.id === sam3LiteTrainState.selectedId) || sam3LiteTrainState.datasets[0];
-        sam3LiteTrainState.selectedId = selected ? selected.id : null;
-        updateSam3LiteDatasetSummary(selected);
-        resetSam3LiteEta();
-    } catch (err) {
-        console.error("Failed to load SAM3-lite datasets", err);
-        setSam3LiteMessage(`Failed to load datasets: ${err.message || err}`, "error");
-    }
-}
-
-async function convertSam3LiteDataset() {
-    const datasetId = sam3LiteTrainState.selectedId;
-    if (!datasetId) {
-        setSam3LiteMessage("Select a dataset first.", "warn");
-        return;
-    }
-    setSam3LiteMessage("Converting dataset to COCO…", "info");
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3lite/datasets/${encodeURIComponent(datasetId)}/convert`, { method: "POST" });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const meta = await resp.json();
-        setSam3LiteMessage("Dataset converted.", "success");
-        await loadSam3LiteDatasets();
-        return meta;
-    } catch (err) {
-        console.error("SAM3-lite convert failed", err);
-        setSam3LiteMessage(`Convert failed: ${err.message || err}`, "error");
-        throw err;
-    }
-}
-
-function renderSam3LiteHistory(list) {
-    if (!sam3LiteTrainElements.history) return;
-    sam3LiteTrainElements.history.innerHTML = "";
-    if (!Array.isArray(list) || !list.length) {
-        const empty = document.createElement("div");
-        empty.className = "training-history-item";
-        empty.textContent = "No SAM3-lite training jobs yet.";
-        sam3LiteTrainElements.history.appendChild(empty);
-        return;
-    }
-    list.forEach((job) => {
-        const item = document.createElement("div");
-        item.className = "training-history-item";
-        const left = document.createElement("div");
-        const created = formatTimestamp(job.created_at || 0);
-        left.innerHTML = `<strong>${escapeHtml(job.job_id.slice(0, 8))}</strong><div class="training-help">${escapeHtml(job.status)} • ${escapeHtml(created)}</div>`;
-        item.appendChild(left);
-        item.addEventListener("click", () => {
-            if (job.job_id) {
-                pollSam3LiteTrainingJob(job.job_id, { force: true }).catch((err) => console.error("SAM3-lite poll history failed", err));
-            }
-        });
-        sam3LiteTrainElements.history.appendChild(item);
-    });
-}
-
-async function refreshSam3LiteHistory() {
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        renderSam3LiteHistory(data);
-        const latestRunning = Array.isArray(data)
-            ? data.find((j) => ["running", "queued", "cancelling"].includes(j.status))
-            : null;
-        if (latestRunning && latestRunning.job_id) {
-            pollSam3LiteTrainingJob(latestRunning.job_id, { force: true, silent: true }).catch((err) =>
-                console.error("SAM3-lite poll history failed", err),
-            );
-        }
-    } catch (err) {
-        console.error("Failed to load SAM3-lite training history", err);
-    }
-}
-
-function updateSam3LiteUi(job) {
-    if (!job || !sam3LiteTrainElements.statusText) return;
-    sam3LiteTrainState.lastJobSnapshot = job;
-    const progressVal = computeSam3LiteProgress(job);
-    const pctVal = Math.max(0, Math.min(100, progressVal * 100));
-    const pct = Number.isFinite(pctVal) ? pctVal : 0;
-    const pctText = pct.toFixed(1).replace(/\.0$/, "");
-    const lastMetric = job.metrics && job.metrics.length ? job.metrics[job.metrics.length - 1] : null;
-    const batch = lastMetric && Number.isFinite(lastMetric.batch) ? lastMetric.batch : null;
-    const batchesPerEpoch = lastMetric && Number.isFinite(lastMetric.batches_per_epoch) ? lastMetric.batches_per_epoch : null;
-    const epoch = lastMetric && Number.isFinite(lastMetric.epoch) ? lastMetric.epoch : null;
-    const totalEpochs = lastMetric && Number.isFinite(lastMetric.total_epochs) ? lastMetric.total_epochs : null;
-    let statusText = job.status === "running" || job.status === "queued" ? `Training running, ${pctText}% done` : job.status;
-    if (Number.isFinite(epoch) && Number.isFinite(batch) && Number.isFinite(batchesPerEpoch)) {
-        const epochPart = Number.isFinite(totalEpochs) ? `epoch ${epoch}/${totalEpochs}` : `epoch ${epoch}`;
-        statusText += ` (${epochPart}, batch ${batch}/${batchesPerEpoch})`;
-    }
-    sam3LiteTrainElements.statusText.textContent = statusText;
-    if (sam3LiteTrainElements.progressFill) {
-        sam3LiteTrainElements.progressFill.style.width = `${pct}%`;
-        sam3LiteTrainElements.progressFill.setAttribute("aria-valuenow", pctText);
-    }
-    if (sam3LiteTrainElements.cancelButton) {
-        sam3LiteTrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);
-    }
-    if (sam3LiteTrainElements.log) {
-        const logs = Array.isArray(job.logs) ? job.logs : [];
-        const linesDisplay = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean).slice(-200);
-        sam3LiteTrainElements.log.textContent = linesDisplay.join("\n");
-        updateSam3LiteLossChartFromMetrics(job.metrics, job.job_id);
-    }
-    if (sam3LiteTrainElements.summary) {
-        if (job.result && job.result.checkpoint) {
-            const ckpt = escapeHtml(job.result.checkpoint);
-            sam3LiteTrainElements.summary.innerHTML = `Checkpoint: <code>${ckpt}</code>`;
-            sam3LiteTrainState.latestCheckpoint = job.result.checkpoint;
-            sam3LiteTrainElements.summary.style.display = "block";
-        } else {
-            sam3LiteTrainElements.summary.textContent = "";
-            sam3LiteTrainState.latestCheckpoint = null;
-            sam3LiteTrainElements.summary.style.display = "none";
-        }
-    }
-    if (sam3LiteTrainElements.balanceSummary) {
-        const info = job.result && job.result.balance_info ? String(job.result.balance_info) : "";
-        if (info) {
-            sam3LiteTrainElements.balanceSummary.textContent = info;
-            sam3LiteTrainElements.balanceSummary.style.display = "block";
-        } else {
-            sam3LiteTrainElements.balanceSummary.textContent = "";
-            sam3LiteTrainElements.balanceSummary.style.display = "none";
-        }
-    }
-    if (sam3LiteTrainElements.activateButton) {
-        sam3LiteTrainElements.activateButton.disabled = !sam3LiteTrainState.latestCheckpoint;
-    }
-}
-
-async function pollSam3LiteTrainingJob(jobId, options = {}) {
-    if (!jobId) return;
-    sam3LiteTrainState.activeJobId = jobId;
-    sam3LiteTrainState.lastSeenJob = sam3LiteTrainState.lastSeenJob || {};
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs/${jobId}`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const job = await resp.json();
-        updateSam3LiteUi(job);
-        const running = ["queued", "running", "cancelling"].includes(job.status);
-        if (running || options.force) {
-            if (sam3LiteTrainState.pollHandle) {
-                clearTimeout(sam3LiteTrainState.pollHandle);
-            }
-            sam3LiteTrainState.pollHandle = window.setTimeout(() => {
-                pollSam3LiteTrainingJob(jobId).catch((err) => console.error("SAM3-lite poll failed", err));
-            }, 1500);
-        } else {
-            sam3LiteTrainState.pollHandle = null;
-            refreshSam3LiteHistory();
-        }
-        sam3LiteTrainState.lastSeenJob[jobId] = job;
-    } catch (err) {
-        console.error("SAM3-lite job poll failed", err);
-        if (!options.silent) {
-            setSam3LiteMessage(`Polling failed: ${err.message || err}`, "error");
-        }
-    }
-}
-
-async function startSam3LiteTraining() {
-    const datasetId = sam3LiteTrainState.selectedId;
-    if (!datasetId) {
-        setSam3LiteMessage("Select a dataset first.", "warn");
-        return;
-    }
-    try {
-        await convertSam3LiteDataset();
-    } catch {
-        return;
-    }
-    const payload = { dataset_id: datasetId };
-    const maybeNumber = (input) => {
-        if (!input || !input.value) return null;
-        const num = Number(input.value);
-        return Number.isFinite(num) ? num : null;
-    };
-    if (sam3LiteTrainElements.runName && sam3LiteTrainElements.runName.value.trim()) {
-        payload.run_name = sam3LiteTrainElements.runName.value.trim();
-    }
-    const fields = [
-        ["train_batch_size", sam3LiteTrainElements.trainBatch],
-        ["val_batch_size", sam3LiteTrainElements.valBatch],
-        ["num_train_workers", sam3LiteTrainElements.trainWorkers],
-        ["num_val_workers", sam3LiteTrainElements.valWorkers],
-        ["max_epochs", sam3LiteTrainElements.epochs],
-        ["resolution", sam3LiteTrainElements.resolution],
-        ["lr_scale", sam3LiteTrainElements.lrScale],
-        ["gradient_accumulation_steps", sam3LiteTrainElements.gradAccum],
-        ["val_epoch_freq", sam3LiteTrainElements.valFreq],
-        ["target_epoch_size", sam3LiteTrainElements.targetEpochSize],
-        ["scheduler_warmup", sam3LiteTrainElements.warmupSteps],
-        ["scheduler_timescale", sam3LiteTrainElements.schedulerTimescale],
-    ];
-    const strategy = sam3LiteTrainElements.balanceStrategy ? sam3LiteTrainElements.balanceStrategy.value : "none";
-    if (strategy && strategy !== "none") {
-        payload.balance_strategy = strategy;
-        payload.balance_classes = true;
-        const power = maybeNumber(sam3LiteTrainElements.balancePower);
-        const clip = maybeNumber(sam3LiteTrainElements.balanceClip);
-        const beta = maybeNumber(sam3LiteTrainElements.balanceBeta);
-        const gamma = maybeNumber(sam3LiteTrainElements.balanceGamma);
-        if (power !== null && ["inv_sqrt", "clipped_inv"].includes(strategy)) {
-            payload.balance_power = power;
-        }
-        if (clip !== null && strategy === "clipped_inv" && clip >= 1) {
-            payload.balance_clip = clip;
-        }
-        if (beta !== null && strategy === "effective_num") {
-            payload.balance_beta = beta;
-        }
-        if (gamma !== null && strategy === "focal") {
-            payload.balance_gamma = gamma;
-        }
-    } else {
-        payload.balance_classes = false;
-    }
-    fields.forEach(([key, el]) => {
-        const val = maybeNumber(el);
-        if (val !== null) payload[key] = val;
-    });
-    setSam3LiteMessage("Starting SAM3-lite training…", "info");
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-        if (!resp.ok) {
-            const text = await resp.text();
-            throw new Error(text || `HTTP ${resp.status}`);
-        }
-        const data = await resp.json();
-        sam3LiteTrainState.activeJobId = data.job_id;
-        resetSam3LiteLossChart(data.job_id);
-        resetSam3LiteEta();
-        pollSam3LiteTrainingJob(data.job_id, { force: true }).catch((err) => console.error("SAM3-lite poll start failed", err));
-        setSam3LiteMessage("Job queued.", "success");
-        refreshSam3LiteHistory();
-    } catch (err) {
-        console.error("SAM3-lite training start failed", err);
-        setSam3LiteMessage(err.message || "Failed to start training", "error");
-    }
-}
-
-async function cancelSam3LiteTraining() {
-    if (!sam3LiteTrainState.activeJobId) {
-        setSam3LiteMessage("No active job.", "warn");
-        return;
-    }
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3lite/train/jobs/${sam3LiteTrainState.activeJobId}/cancel`, { method: "POST" });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        setSam3LiteMessage("Cancellation requested…", "info");
-    } catch (err) {
-        console.error("SAM3-lite cancel failed", err);
-        setSam3LiteMessage(`Cancel failed: ${err.message || err}`, "error");
-    }
-}
-
-async function activateSam3LiteCheckpoint() {
-    const ckpt =
-        sam3LiteTrainState.latestCheckpoint ||
-        (sam3LiteTrainState.lastJobSnapshot && sam3LiteTrainState.lastJobSnapshot.result && sam3LiteTrainState.lastJobSnapshot.result.checkpoint);
-    if (!ckpt) {
-        setSam3LiteMessage("No checkpoint to activate.", "warn");
-        return;
-    }
-    const payload = {
-        checkpoint_path: ckpt,
-        label: sam3LiteTrainElements.runName && sam3LiteTrainElements.runName.value.trim() ? sam3LiteTrainElements.runName.value.trim() : undefined,
-        enable_segmentation: false,
-    };
-    try {
-        const resp = await fetch(`${API_ROOT}/sam3lite/models/activate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        setSam3LiteMessage("Activated SAM3-lite checkpoint.", "success");
-    } catch (err) {
-        console.error("SAM3-lite activate failed", err);
-        setSam3LiteMessage(`Activate failed: ${err.message || err}`, "error");
-    }
-}
-
-async function initSam3LiteTrainUi() {
-    if (sam3LiteTrainUiInitialized) return;
-    sam3LiteTrainUiInitialized = true;
-    sam3LiteTrainState.lastSeenJob = {};
-    sam3LiteTrainElements.datasetSelect = document.getElementById("sam3LiteDatasetSelect");
-    sam3LiteTrainElements.datasetSummary = document.getElementById("sam3LiteDatasetSummary");
-    sam3LiteTrainElements.datasetRefresh = document.getElementById("sam3LiteDatasetRefresh");
-    sam3LiteTrainElements.datasetConvert = document.getElementById("sam3LiteDatasetConvert");
-    sam3LiteTrainElements.runName = document.getElementById("sam3LiteRunName");
-    sam3LiteTrainElements.trainBatch = document.getElementById("sam3LiteTrainBatch");
-    sam3LiteTrainElements.valBatch = document.getElementById("sam3LiteValBatch");
-    sam3LiteTrainElements.trainWorkers = document.getElementById("sam3LiteTrainWorkers");
-    sam3LiteTrainElements.valWorkers = document.getElementById("sam3LiteValWorkers");
-    sam3LiteTrainElements.epochs = document.getElementById("sam3LiteEpochs");
-    sam3LiteTrainElements.resolution = document.getElementById("sam3LiteResolution");
-    sam3LiteTrainElements.lrScale = document.getElementById("sam3LiteLrScale");
-    sam3LiteTrainElements.gradAccum = document.getElementById("sam3LiteGradAccum");
-    sam3LiteTrainElements.valFreq = document.getElementById("sam3LiteValFreq");
-    sam3LiteTrainElements.targetEpochSize = document.getElementById("sam3LiteTargetEpochSize");
-    sam3LiteTrainElements.balanceStrategy = document.getElementById("sam3LiteBalanceStrategy");
-    sam3LiteTrainElements.balancePower = document.getElementById("sam3LiteBalancePower");
-    sam3LiteTrainElements.balanceClip = document.getElementById("sam3LiteBalanceClip");
-    sam3LiteTrainElements.balanceBeta = document.getElementById("sam3LiteBalanceBeta");
-    sam3LiteTrainElements.balanceGamma = document.getElementById("sam3LiteBalanceGamma");
-    sam3LiteTrainElements.balanceDescription = document.getElementById("sam3LiteBalanceDescription");
-    sam3LiteTrainElements.warmupSteps = document.getElementById("sam3LiteWarmup");
-    sam3LiteTrainElements.schedulerTimescale = document.getElementById("sam3LiteTimescale");
-        sam3LiteTrainElements.startButton = document.getElementById("sam3LiteStartBtn");
-    sam3LiteTrainElements.cancelButton = document.getElementById("sam3LiteCancelBtn");
-    sam3LiteTrainElements.statusText = document.getElementById("sam3LiteStatusText");
-    sam3LiteTrainElements.progressFill = document.getElementById("sam3LiteProgressFill");
-    sam3LiteTrainElements.message = document.getElementById("sam3LiteMessage");
-    sam3LiteTrainElements.summary = document.getElementById("sam3LiteSummary");
-    sam3LiteTrainElements.balanceSummary = document.getElementById("sam3LiteBalanceSummary");
-    sam3LiteTrainElements.log = document.getElementById("sam3LiteLog");
-    sam3LiteTrainElements.history = document.getElementById("sam3LiteTrainingHistory");
-    sam3LiteTrainElements.lossCanvas = document.getElementById("sam3LiteLossChart");
-    sam3LiteTrainElements.activateButton = document.getElementById("sam3LiteActivateBtn");
-    sam3LiteStorageElements.list = document.getElementById("sam3LiteStorageList");
-    sam3LiteStorageElements.refresh = document.getElementById("sam3LiteStorageRefresh");
-    if (sam3LiteTrainElements.balanceStrategy) {
-        sam3LiteTrainElements.balanceStrategy.addEventListener("change", () => updateSam3LiteBalanceParamVisibility());
-        updateSam3LiteBalanceParamVisibility();
-    }
-    if (sam3LiteTrainElements.datasetSelect) {
-        sam3LiteTrainElements.datasetSelect.addEventListener("change", () => {
-            sam3LiteTrainState.selectedId = sam3LiteTrainElements.datasetSelect.value;
-            const entry = sam3LiteTrainState.datasets.find((d) => d.id === sam3LiteTrainState.selectedId);
-            updateSam3LiteDatasetSummary(entry);
-            resetSam3LiteEta();
-        });
-    }
-    if (sam3LiteTrainElements.datasetRefresh) {
-        sam3LiteTrainElements.datasetRefresh.addEventListener("click", () => loadSam3LiteDatasets());
-    }
-    if (sam3LiteTrainElements.datasetConvert) {
-        sam3LiteTrainElements.datasetConvert.addEventListener("click", () => convertSam3LiteDataset().catch(() => {}));
-    }
-    if (sam3LiteTrainElements.startButton) {
-        sam3LiteTrainElements.startButton.addEventListener("click", () => startSam3LiteTraining());
-    }
-    if (sam3LiteTrainElements.cancelButton) {
-        sam3LiteTrainElements.cancelButton.addEventListener("click", () => cancelSam3LiteTraining());
-    }
-    if (sam3LiteTrainElements.activateButton) {
-        sam3LiteTrainElements.activateButton.addEventListener("click", () => activateSam3LiteCheckpoint());
-    }
-    if (sam3LiteStorageElements.refresh) {
-        sam3LiteStorageElements.refresh.addEventListener("click", () => refreshRunStorage("sam3lite"));
-    }
-    await loadSam3LiteDatasets();
-    await refreshSam3LiteHistory();
-    await refreshRunStorage("sam3lite");
+    await refreshRunStorage();
 }
 
 async function cancelQwenDatasetUpload(jobId) {
@@ -7442,7 +6906,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
         tabElements.promptHelperButton = document.getElementById("tabPromptHelperButton");
-        tabElements.sam3LiteTrainButton = document.getElementById("tabSam3LiteTrainButton");
         tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
         tabElements.datasetsButton = document.getElementById("tabDatasetsButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
@@ -7454,7 +6917,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
         tabElements.promptHelperPanel = document.getElementById("tabPromptHelper");
-        tabElements.sam3LiteTrainPanel = document.getElementById("tabSam3LiteTrain");
         tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
         tabElements.datasetsPanel = document.getElementById("tabDatasets");
         tabElements.activePanel = document.getElementById("tabActive");
@@ -7475,9 +6937,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.promptHelperButton) {
             tabElements.promptHelperButton.addEventListener("click", () => setActiveTab(TAB_PROMPT_HELPER));
-        }
-        if (tabElements.sam3LiteTrainButton) {
-            tabElements.sam3LiteTrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_LITE_TRAIN));
         }
         if (tabElements.sam3PromptModelsButton) {
             tabElements.sam3PromptModelsButton.addEventListener("click", () => setActiveTab(TAB_SAM3_PROMPT_MODELS));
@@ -7518,9 +6977,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.promptHelperButton) {
             tabElements.promptHelperButton.classList.toggle("active", tabName === TAB_PROMPT_HELPER);
         }
-        if (tabElements.sam3LiteTrainButton) {
-            tabElements.sam3LiteTrainButton.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
-        }
         if (tabElements.sam3PromptModelsButton) {
             tabElements.sam3PromptModelsButton.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
         }
@@ -7553,9 +7009,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.promptHelperPanel) {
             tabElements.promptHelperPanel.classList.toggle("active", tabName === TAB_PROMPT_HELPER);
-        }
-        if (tabElements.sam3LiteTrainPanel) {
-            tabElements.sam3LiteTrainPanel.classList.toggle("active", tabName === TAB_SAM3_LITE_TRAIN);
         }
         if (tabElements.sam3PromptModelsPanel) {
             tabElements.sam3PromptModelsPanel.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
@@ -7595,9 +7048,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabName === TAB_PROMPT_HELPER && previous !== TAB_PROMPT_HELPER) {
             initPromptHelperUi().catch((err) => console.error("Prompt helper init failed", err));
-        }
-        if (tabName === TAB_SAM3_LITE_TRAIN && previous !== TAB_SAM3_LITE_TRAIN) {
-            initSam3LiteTrainUi().catch((err) => console.error("SAM3-lite UI init failed", err));
         }
         if (tabName === TAB_SAM3_PROMPT_MODELS && previous !== TAB_SAM3_PROMPT_MODELS) {
             initSam3PromptModelsUi();
@@ -8823,6 +8273,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         settingsElements.applyButton = document.getElementById("settingsApply");
         settingsElements.testButton = document.getElementById("settingsTest");
         settingsElements.status = document.getElementById("settingsStatus");
+        backendFuzzerElements.runButton = document.getElementById("runBackendFuzzer");
+        backendFuzzerElements.status = document.getElementById("backendFuzzerStatus");
+        backendFuzzerElements.log = document.getElementById("backendFuzzerLog");
+        backendFuzzerElements.includeQwen = document.getElementById("fuzzerIncludeQwen");
+        backendFuzzerElements.includeSam3 = document.getElementById("fuzzerIncludeSam3");
         if (settingsElements.apiInput) {
             settingsElements.apiInput.value = API_ROOT;
         }
@@ -8833,6 +8288,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (settingsElements.testButton) {
             settingsElements.testButton.addEventListener("click", () => testApiRootCandidate(settingsElements.apiInput?.value || API_ROOT));
         }
+        if (backendFuzzerElements.runButton) {
+            backendFuzzerElements.runButton.addEventListener("click", () => {
+                runBackendFuzzer().catch((err) => console.error("Backend fuzzer failed", err));
+            });
+        }
     }
 
     function setSettingsStatus(message, variant = "info") {
@@ -8841,6 +8301,118 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         settingsElements.status.textContent = message || "";
         settingsElements.status.className = variant ? `settings-status ${variant}` : "settings-status";
+    }
+
+    async function runBackendFuzzer() {
+        if (!backendFuzzerElements.runButton || !backendFuzzerElements.status || !backendFuzzerElements.log) {
+            return;
+        }
+        backendFuzzerElements.runButton.disabled = true;
+        backendFuzzerElements.status.textContent = "Running fuzzer…";
+        backendFuzzerElements.log.textContent = "";
+        const includeQwen = Boolean(backendFuzzerElements.includeQwen?.checked);
+        const includeSam3 = Boolean(backendFuzzerElements.includeSam3?.checked);
+        const tests = [];
+        const addLog = (line) => {
+            backendFuzzerElements.log.textContent += `${line}\n`;
+        };
+        const randomImage = () => {
+            const canvasEl = document.createElement("canvas");
+            canvasEl.width = 96;
+            canvasEl.height = 96;
+            const ctx = canvasEl.getContext("2d");
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(0, 0, 96, 96);
+            for (let i = 0; i < 20; i++) {
+                ctx.fillStyle = `hsl(${Math.random() * 360},80%,60%)`;
+                ctx.fillRect(Math.random() * 80, Math.random() * 80, 8 + Math.random() * 8, 8 + Math.random() * 8);
+            }
+            const dataUrl = canvasEl.toDataURL("image/png");
+            return dataUrl.split(",")[1];
+        };
+        const baseImage = randomImage();
+        const addTest = (name, fn) => tests.push({ name, fn });
+        addTest("Settings ping", async () => {
+            await testApiRootCandidate(API_ROOT);
+        });
+        addTest("SAM point (sam1)", async () => {
+            const payload = {
+                point_x: 32,
+                point_y: 32,
+                image_base64: baseImage,
+                sam_variant: "sam1",
+            };
+            const resp = await fetch(`${API_ROOT}/sam_point`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("SAM point multi (sam1)", async () => {
+            const payload = {
+                positive_points: [[20, 20], [60, 60]],
+                negative_points: [],
+                image_base64: baseImage,
+                sam_variant: "sam1",
+            };
+            const resp = await fetch(`${API_ROOT}/sam_point_multi`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        if (includeQwen) {
+            addTest("Qwen infer (bbox)", async () => {
+                const payload = {
+                    prompt: "a colorful object",
+                    image_base64: baseImage,
+                    prompt_type: "bbox",
+                    max_results: 3,
+                };
+                const resp = await fetch(`${API_ROOT}/qwen/infer`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+        }
+        if (includeSam3) {
+            addTest("SAM3 text prompt", async () => {
+                const payload = {
+                    text_prompt: "object",
+                    threshold: 0.3,
+                    mask_threshold: 0.5,
+                    max_results: 5,
+                    min_size: 0,
+                    simplify_epsilon: 1.0,
+                    image_base64: baseImage,
+                    sam_variant: "sam3",
+                };
+                const resp = await fetch(`${API_ROOT}/sam3/text_prompt`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+        }
+        let failures = 0;
+        for (const test of tests) {
+            addLog(`▶ ${test.name}`);
+            try {
+                await test.fn();
+                addLog(`✔ ${test.name}`);
+            } catch (err) {
+                failures += 1;
+                addLog(`✖ ${test.name}: ${err?.message || err}`);
+            }
+        }
+        backendFuzzerElements.status.textContent = failures === 0 ? "Fuzzer finished: all tests passed" : `Fuzzer finished: ${failures} failed`;
+        backendFuzzerElements.status.className = failures === 0 ? "settings-status success" : "settings-status warn";
+        backendFuzzerElements.runButton.disabled = false;
     }
 
     function initQwenPanel() {
@@ -8904,18 +8476,42 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.thresholdInput = document.getElementById("sam3Threshold");
         sam3TextElements.maskThresholdInput = document.getElementById("sam3MaskThreshold");
         sam3TextElements.maxResultsInput = document.getElementById("sam3MaxResults");
+        sam3TextElements.minSizeInput = document.getElementById("sam3MinSize");
+        sam3TextElements.maxPointsInput = document.getElementById("sam3MaxPoints");
+        sam3TextElements.epsilonInput = document.getElementById("sam3SimplifyEpsilon");
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
+        sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
+        sam3RecipeElements.applyButton = document.getElementById("sam3RecipeApplyButton");
+        sam3RecipeElements.status = document.getElementById("sam3RecipeStatus");
+        sam3RecipeElements.presetSelect = document.getElementById("sam3RecipePresetSelect");
+        sam3RecipeElements.presetNameInput = document.getElementById("sam3RecipePresetName");
+        sam3RecipeElements.presetSaveButton = document.getElementById("sam3RecipePresetSave");
+        sam3RecipeElements.presetLoadButton = document.getElementById("sam3RecipePresetLoad");
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest({ auto: false }));
         }
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
         }
+        if (sam3RecipeElements.fileInput) {
+            sam3RecipeElements.fileInput.addEventListener("change", handleSam3RecipeFile);
+        }
+        if (sam3RecipeElements.applyButton) {
+            sam3RecipeElements.applyButton.addEventListener("click", runSam3RecipeOnImage);
+            sam3RecipeElements.applyButton.disabled = true;
+        }
+        if (sam3RecipeElements.presetSaveButton) {
+            sam3RecipeElements.presetSaveButton.addEventListener("click", saveSam3RecipePreset);
+        }
+        if (sam3RecipeElements.presetLoadButton) {
+            sam3RecipeElements.presetLoadButton.addEventListener("click", loadSam3RecipePreset);
+        }
         updateSam3ClassOptions({ resetOverride: true });
         updateSam3TextButtons();
+        loadSam3RecipePresets().catch((err) => console.error("Load recipe presets failed", err));
     }
 
     function setSam3TextStatus(message, variant = "info") {
@@ -8930,6 +8526,138 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (variant === "warn" || variant === "error" || variant === "success") {
             statusEl.classList.add(variant);
+        }
+    }
+
+    function setSam3RecipeStatus(message, variant = "info") {
+        const statusEl = sam3RecipeElements.status;
+        if (!statusEl) return;
+        statusEl.textContent = message || "";
+        statusEl.classList.remove("warn", "error", "success");
+        if (variant === "warn" || variant === "error" || variant === "success") {
+            statusEl.classList.add(variant);
+        }
+    }
+
+    function parseRecipeJson(text) {
+        try {
+            const data = JSON.parse(text);
+            if (!data || typeof data !== "object") throw new Error("invalid_json");
+            const steps = Array.isArray(data.steps) ? data.steps : [];
+            const cleanedSteps = steps
+                .map((s) => ({
+                    prompt: typeof s.prompt === "string" ? s.prompt.trim() : "",
+                    threshold:
+                        typeof s.threshold === "number" && s.threshold >= 0 && s.threshold <= 1
+                            ? s.threshold
+                            : null,
+                }))
+                .filter((s) => s.prompt && s.threshold !== null);
+            if (!cleanedSteps.length) throw new Error("no_steps");
+            const targetClass = (data.class_name || data.class || data.target_class || "").trim();
+            const targetId = data.class_id;
+            return {
+                label: data.label || data.id || "recipe",
+                class_name: targetClass,
+                class_id: targetId,
+                steps: cleanedSteps,
+            };
+        } catch (err) {
+            throw new Error("parse_failed");
+        }
+    }
+
+    async function handleSam3RecipeFile(event) {
+        const file = event.target?.files?.[0];
+        if (!file) {
+            return;
+        }
+        try {
+            const text = await file.text();
+            const recipe = parseRecipeJson(text);
+            // Validate class exists in labelmap.
+            const classNames = orderedClassNames();
+            const targetName = recipe.class_name;
+            const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
+            if (targetName) {
+                const found = lowerToName.get(targetName.toLowerCase());
+                if (!found) {
+                    throw new Error(`class_missing:${targetName}`);
+                }
+                recipe.class_name = found;
+            } else if (typeof recipe.class_id === "number" && classNames[recipe.class_id]) {
+                recipe.class_name = classNames[recipe.class_id];
+            } else {
+                throw new Error("class_missing");
+            }
+            sam3RecipeState.recipe = recipe;
+            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
+            if (sam3RecipeElements.presetNameInput) {
+                sam3RecipeElements.presetNameInput.value = recipe.label || recipe.class_name;
+            }
+            setSam3RecipeStatus(`Loaded recipe for ${recipe.class_name} (${recipe.steps.length} steps).`, "success");
+        } catch (err) {
+            console.error("Failed to load recipe", err);
+            const msg =
+                (err && err.message && err.message.startsWith("class_missing"))
+                    ? `Class not in label map: ${err.message.split(":")[1] || ""}`
+                    : "Invalid recipe JSON.";
+            setSam3RecipeStatus(msg, "error");
+            sam3RecipeState.recipe = null;
+            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
+        } finally {
+            if (sam3RecipeElements.fileInput) sam3RecipeElements.fileInput.value = "";
+        }
+    }
+
+    async function runSam3RecipeOnImage() {
+        const recipe = sam3RecipeState.recipe;
+        if (!recipe || !recipe.steps || !recipe.steps.length) {
+            setSam3RecipeStatus("Load a recipe JSON first.", "warn");
+            return;
+        }
+        if (!currentImage) {
+            setSam3RecipeStatus("Open an image first.", "warn");
+            return;
+        }
+        const classNames = orderedClassNames();
+        if (!classNames.includes(recipe.class_name)) {
+            setSam3RecipeStatus(`Class ${recipe.class_name} not in current label map.`, "error");
+            return;
+        }
+        if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
+        setSam3RecipeStatus(`Running recipe on ${currentImage.name}…`, "info");
+        let totalAdded = 0;
+        let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
+        if (Number.isNaN(maskThreshold)) {
+            maskThreshold = 0.5;
+        }
+        maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
+        const minSize = Math.max(0, getMinMaskArea());
+        const simplifyEps = Math.max(0, getSimplifyEpsilon());
+        try {
+            for (const step of recipe.steps) {
+                const result = await invokeSam3TextPrompt(
+                    {
+                        text_prompt: step.prompt,
+                        threshold: step.threshold,
+                        mask_threshold: maskThreshold,
+                        max_results: 100,
+                        min_size: minSize,
+                        simplify_epsilon: simplifyEps,
+                    },
+                    { auto: false }
+                );
+                const detections = Array.isArray(result?.detections) ? result.detections : [];
+                const added = applySegAwareDetections(detections, recipe.class_name, "SAM3 recipe");
+                totalAdded += added;
+            }
+            setSam3RecipeStatus(`Recipe applied: added ${totalAdded} boxes to ${recipe.class_name}.`, "success");
+        } catch (err) {
+            console.error("Recipe apply failed", err);
+            setSam3RecipeStatus(`Recipe failed: ${err.message || err}`, "error");
+        } finally {
+            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
         }
     }
 
@@ -9362,11 +9090,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             maskThreshold = 0.5;
         }
         maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
+        let minSize = parseInt(sam3TextElements.minSizeInput?.value || "0", 10);
+        if (Number.isNaN(minSize) || minSize < 0) {
+            minSize = 0;
+        }
         let maxResults = parseInt(sam3TextElements.maxResultsInput?.value || "20", 10);
         if (Number.isNaN(maxResults)) {
             maxResults = 20;
         }
         maxResults = Math.min(Math.max(maxResults, 1), 100);
+        let simplifyEps = parseFloat(sam3TextElements.epsilonInput?.value || "1.0");
+        if (Number.isNaN(simplifyEps) || simplifyEps < 0) {
+            simplifyEps = 1.0;
+        }
         sam3TextRequestActive = true;
         updateSam3TextButtons();
         setSam3TextStatus("Running SAM3…", "info");
@@ -9377,27 +9113,38 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     text_prompt: prompt,
                     threshold,
                     mask_threshold: maskThreshold,
+                    min_size: minSize,
+                    simplify_epsilon: simplifyEps,
                     max_results: maxResults,
                 },
                 { auto }
             );
-            if (currentImage && result?.image_token) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
-            }
-            if (auto) {
-                const added = applySam3AutoDetections(result?.detections || [], targetClass);
-                if (added) {
-                    setSam3TextStatus(`SAM3 auto added ${added} bbox${added === 1 ? "" : "es"}.`, "success");
-                } else {
-                    const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
-                        ? "CLIP classifier unavailable; no auto boxes were added."
-                        : "SAM3 auto returned no usable boxes.";
-                    setSam3TextStatus(warning, "warn");
+        if (currentImage && result?.image_token) {
+            rememberSamToken(currentImage.name, samVariant, result.image_token);
+        }
+        if (Array.isArray(result?.masks) && Array.isArray(result?.detections)) {
+            result.detections.forEach((det, idx) => {
+                if (det && !det.mask && result.masks[idx]) {
+                    det.mask = result.masks[idx];
+                }
+            });
+        }
+        if (auto) {
+            const added = applySam3AutoDetections(result?.detections || [], targetClass);
+            if (added) {
+                const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+                setSam3TextStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
+            } else {
+                const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
+                    ? "CLIP classifier unavailable; no auto boxes were added."
+                    : "SAM3 auto returned no usable boxes.";
+                setSam3TextStatus(warning, "warn");
                 }
             } else {
-                const applied = applyDetectionsToClass(result?.detections || [], targetClass, "SAM3");
+                const applied = applySegAwareDetections(result?.detections || [], targetClass, "SAM3");
                 if (applied) {
-                    setSam3TextStatus(`SAM3 added ${applied} bbox${applied === 1 ? "" : "es"} to ${targetClass}.`, "success");
+                    const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+                    setSam3TextStatus(`SAM3 added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, "success");
                 } else {
                     const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
                         ? "SAM3 found no matches for that prompt."
@@ -9500,6 +9247,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const absX = cx * currentImage.width - absW / 2;
         const absY = cy * currentImage.height - absH / 2;
         const bboxRecord = {
+            type: "bbox",
             x: absX,
             y: absY,
             width: absW,
@@ -9523,7 +9271,485 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return bboxRecord;
     }
 
+    function addPolygonFromYoloRect(yoloBox, className) {
+        if (!currentImage || !Array.isArray(yoloBox) || yoloBox.length < 4) {
+            return null;
+        }
+        const [cx, cy, wNorm, hNorm] = yoloBox.map(Number);
+        if ([cx, cy, wNorm, hNorm].some((val) => Number.isNaN(val))) {
+            return null;
+        }
+        const absW = wNorm * currentImage.width;
+        const absH = hNorm * currentImage.height;
+        const absX = cx * currentImage.width - absW / 2;
+        const absY = cy * currentImage.height - absH / 2;
+        const pts = [
+            { x: absX, y: absY },
+            { x: absX + absW, y: absY },
+            { x: absX + absW, y: absY + absH },
+            { x: absX, y: absY + absH },
+        ].map(clampPointToImage);
+        const xs = pts.map((p) => p.x);
+        const ys = pts.map((p) => p.y);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        const bboxRecord = {
+            type: "polygon",
+            points: pts,
+            x: minX,
+            y: minY,
+            width: Math.max(0, maxX - minX),
+            height: Math.max(0, maxY - minY),
+            marked: false,
+            class: className,
+            uuid: generateUUID(),
+        };
+        stampBboxCreation(bboxRecord);
+        if (!bboxes[currentImage.name]) {
+            bboxes[currentImage.name] = {};
+        }
+        if (!bboxes[currentImage.name][className]) {
+            bboxes[currentImage.name][className] = [];
+        }
+        bboxes[currentImage.name][className].push(bboxRecord);
+        setDatasetType("seg");
+        return bboxRecord;
+    }
+
+    function decodePackedMask(maskPayload) {
+        if (!maskPayload || typeof maskPayload.counts !== "string") {
+            return null;
+        }
+        const size = Array.isArray(maskPayload.size) ? maskPayload.size : [];
+        if (size.length !== 2) {
+            return null;
+        }
+        const height = parseInt(size[0], 10);
+        const width = parseInt(size[1], 10);
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+            return null;
+        }
+        let packed;
+        try {
+            const raw = atob(maskPayload.counts);
+            packed = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) {
+                packed[i] = raw.charCodeAt(i);
+            }
+        } catch (error) {
+            console.warn("Failed to decode mask payload", error);
+            return null;
+        }
+        const total = width * height;
+        const data = new Uint8Array(total);
+        let cursor = 0;
+        for (let byteIdx = 0; byteIdx < packed.length && cursor < total; byteIdx++) {
+            const byte = packed[byteIdx];
+            for (let bit = 7; bit >= 0 && cursor < total; bit--) {
+                data[cursor++] = (byte >> bit) & 1;
+            }
+        }
+        return { data, width, height };
+    }
+
+    function getMinMaskArea() {
+        const raw = sam3TextElements.minSizeInput?.value || "0";
+        const parsed = parseFloat(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+            return 0;
+        }
+        return parsed;
+    }
+
+    function getMaxPolygonPoints() {
+        const raw = sam3TextElements.maxPointsInput?.value || "500";
+        const parsed = parseInt(raw, 10);
+        if (!Number.isFinite(parsed) || parsed <= 3) {
+            return 500;
+        }
+        return Math.min(parsed, 5000);
+    }
+
+    function getSimplifyEpsilon() {
+        const raw = sam3TextElements.epsilonInput?.value || "1.0";
+        const parsed = parseFloat(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+            return 1.0;
+        }
+        return parsed;
+    }
+
+    function simplifyPolygonPoints(points, { maxPoints = 400 } = {}) {
+        if (!Array.isArray(points) || points.length === 0) {
+            return [];
+        }
+        const deduped = [];
+        points.forEach((pt) => {
+            const last = deduped[deduped.length - 1];
+            if (!last || Math.abs(last.x - pt.x) > 1e-6 || Math.abs(last.y - pt.y) > 1e-6) {
+                deduped.push(pt);
+            }
+        });
+        if (deduped.length > 1) {
+            const first = deduped[0];
+            const last = deduped[deduped.length - 1];
+            if (Math.abs(first.x - last.x) < 1e-6 && Math.abs(first.y - last.y) < 1e-6) {
+                deduped.pop();
+            }
+        }
+        const reduced = [];
+        for (let i = 0; i < deduped.length; i++) {
+            const prev = deduped[(i - 1 + deduped.length) % deduped.length];
+            const curr = deduped[i];
+            const next = deduped[(i + 1) % deduped.length];
+            const cross = (curr.x - prev.x) * (next.y - curr.y) - (curr.y - prev.y) * (next.x - curr.x);
+            if (Math.abs(cross) > 1e-6) {
+                reduced.push(curr);
+            }
+        }
+        let result = reduced;
+        if (result.length > maxPoints) {
+            const step = Math.ceil(result.length / maxPoints);
+            result = result.filter((_, idx) => idx % step === 0);
+        }
+        return result;
+    }
+
+    function polygonArea(points) {
+        if (!Array.isArray(points) || points.length < 3) {
+            return 0;
+        }
+        let area = 0;
+        for (let i = 0; i < points.length; i++) {
+            const j = (i + 1) % points.length;
+            area += points[i].x * points[j].y - points[j].x * points[i].y;
+        }
+        return Math.abs(area / 2);
+    }
+
+    function douglasPeucker(points, epsilon) {
+        if (!Array.isArray(points) || points.length < 3) {
+            return points || [];
+        }
+        const sqEps = epsilon * epsilon;
+        const distSqToSegment = (p, a, b) => {
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            if (dx === 0 && dy === 0) {
+                const ddx = p.x - a.x;
+                const ddy = p.y - a.y;
+                return ddx * ddx + ddy * ddy;
+            }
+            const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)));
+            const projX = a.x + t * dx;
+            const projY = a.y + t * dy;
+            const ddx = p.x - projX;
+            const ddy = p.y - projY;
+            return ddx * ddx + ddy * ddy;
+        };
+        const simplifySection = (pts, start, end, out) => {
+            if (end <= start + 1) {
+                return;
+            }
+            const a = pts[start];
+            const b = pts[end];
+            let maxDist = -1;
+            let idx = -1;
+            for (let i = start + 1; i < end; i++) {
+                const d = distSqToSegment(pts[i], a, b);
+                if (d > maxDist) {
+                    maxDist = d;
+                    idx = i;
+                }
+            }
+            if (maxDist > sqEps) {
+                simplifySection(pts, start, idx, out);
+                out.push(pts[idx]);
+                simplifySection(pts, idx, end, out);
+            }
+        };
+        const output = [points[0]];
+        simplifySection(points, 0, points.length - 1, output);
+        output.push(points[points.length - 1]);
+        return output;
+    }
+
+    function maskPayloadToPolygons(maskPayload, { maxPointsPerPolygon = 500, maxDim = 512, simplifyEpsilon = 1.0 } = {}) {
+        const decoded = decodePackedMask(maskPayload);
+        if (!decoded) {
+            return [];
+        }
+        let { data, width, height } = decoded;
+        let scaleX = 1;
+        let scaleY = 1;
+        const maxSide = Math.max(width, height);
+        if (maxSide > maxDim) {
+            const scale = maxSide / maxDim;
+            const newW = Math.max(1, Math.round(width / scale));
+            const newH = Math.max(1, Math.round(height / scale));
+            const resized = new Uint8Array(newW * newH);
+            const stride = width;
+            for (let y = 0; y < newH; y++) {
+                const srcY = Math.min(height - 1, Math.round(y * scale));
+                for (let x = 0; x < newW; x++) {
+                    const srcX = Math.min(width - 1, Math.round(x * scale));
+                    resized[y * newW + x] = data[srcY * stride + srcX] ? 1 : 0;
+                }
+            }
+            scaleX = width / newW;
+            scaleY = height / newH;
+            data = resized;
+            width = newW;
+            height = newH;
+        }
+        const closed = new Uint8Array(width * height);
+        const getVal = (x, y) => (y >= 0 && y < height && x >= 0 && x < width && data[y * width + x]) ? 1 : 0;
+        // Morphological close (3x3) with fallback to original if it erases everything
+        let closedOnes = 0;
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                let ones = 0;
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        if (getVal(x + dx, y + dy)) ones++;
+                    }
+                }
+                const val = ones >= 5 ? 1 : 0;
+                closed[y * width + x] = val;
+                closedOnes += val;
+            }
+        }
+        if (closedOnes === 0) {
+            for (let i = 0; i < data.length; i++) {
+                closed[i] = data[i];
+            }
+        }
+        const visited = new Uint8Array(width * height);
+        const components = [];
+        const dirs4 = [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+        ];
+        const floodFill = (sx, sy) => {
+            const stack = [[sx, sy]];
+            const pixels = [];
+            visited[sy * width + sx] = 1;
+            while (stack.length) {
+                const [cx, cy] = stack.pop();
+                pixels.push([cx, cy]);
+                for (const [dx, dy] of dirs4) {
+                    const nx = cx + dx;
+                    const ny = cy + dy;
+                    if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                    const idx = ny * width + nx;
+                    if (visited[idx] || !closed[idx]) continue;
+                    visited[idx] = 1;
+                    stack.push([nx, ny]);
+                }
+            }
+            return pixels;
+        };
+        const addEdge = (edgeMap, start, end) => {
+            const key = `${start[0]},${start[1]}`;
+            let bucket = edgeMap.get(key);
+            if (!bucket) {
+                bucket = [];
+                edgeMap.set(key, bucket);
+            }
+            bucket.push({ end, used: false });
+        };
+        const buildPolygonFromEdges = (edgeMap) => {
+            const polygons = [];
+            for (const [startKey, edges] of edgeMap.entries()) {
+                for (const edge of edges) {
+                    if (edge.used) continue;
+                    const startParts = startKey.split(",").map((v) => parseInt(v, 10));
+                    if (startParts.length !== 2 || startParts.some((v) => Number.isNaN(v))) {
+                        continue;
+                    }
+                    const polygon = [];
+                    let current = [startParts[0], startParts[1]];
+                    let guard = 0;
+                    const guardLimit = edgeMap.size * 8 + 1000;
+                    while (guard < guardLimit) {
+                        polygon.push({ x: current[0] * scaleX, y: current[1] * scaleY });
+                        const key = `${current[0]},${current[1]}`;
+                        const bucket = edgeMap.get(key);
+                        if (!bucket) break;
+                        const nextEdge = bucket.find((e) => !e.used);
+                        if (!nextEdge) break;
+                        nextEdge.used = true;
+                        current = nextEdge.end;
+                        if (current[0] === startParts[0] && current[1] === startParts[1]) {
+                            polygon.push({ x: current[0] * scaleX, y: current[1] * scaleY });
+                            break;
+                        }
+                        guard++;
+                    }
+                    if (polygon.length >= 3) {
+                        const simplified = douglasPeucker(polygon, simplifyEpsilon);
+                        let capped = simplified;
+                        if (capped.length > maxPointsPerPolygon) {
+                            const step = Math.ceil(capped.length / maxPointsPerPolygon);
+                            capped = capped.filter((_, idx) => idx % step === 0);
+                        }
+                        if (capped.length >= 3) {
+                            polygons.push(capped);
+                        }
+                    }
+                }
+            }
+            return polygons;
+        };
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const idx = y * width + x;
+                if (!closed[idx] || visited[idx]) continue;
+                const pixels = floodFill(x, y);
+                components.push(pixels);
+            }
+        }
+        const allPolys = [];
+        for (const pixels of components) {
+            const compSet = new Set(pixels.map((p) => `${p[0]},${p[1]}`));
+            const edgeMap = new Map();
+            for (const [px, py] of pixels) {
+                const idx = py * width + px;
+                const neighbors = [
+                    [px, py - 1],
+                    [px + 1, py],
+                    [px, py + 1],
+                    [px - 1, py],
+                ];
+                const pts = [
+                    [px, py],
+                    [px + 1, py],
+                    [px + 1, py + 1],
+                    [px, py + 1],
+                ];
+                const inside = compSet.has(`${px},${py}`);
+                for (let k = 0; k < neighbors.length; k++) {
+                    const neighborKey = `${neighbors[k][0]},${neighbors[k][1]}`;
+                    const neighborInside = compSet.has(neighborKey);
+                    if (inside && !neighborInside) {
+                        const start = pts[k];
+                        const end = pts[(k + 1) % pts.length];
+                        addEdge(edgeMap, start, end);
+                    }
+                }
+            }
+            const polys = buildPolygonFromEdges(edgeMap);
+            polys.forEach((p) => allPolys.push(p));
+        }
+        // Deduplicate near-identical polygons
+        const deduped = [];
+        const seen = new Set();
+        for (const poly of allPolys) {
+            if (!poly || poly.length < 3) continue;
+            const area = polygonArea(poly);
+            const key = `${poly.length}:${poly[0].x.toFixed(1)},${poly[0].y.toFixed(1)}:${area.toFixed(1)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            deduped.push(poly);
+        }
+        return deduped;
+    }
+
+    function addPolygonFromMask(maskPayload, className, { simplifyEpsilon = null, maxPointsPerPolygon = null, minArea = null } = {}) {
+        if (!currentImage) {
+            return null;
+        }
+        const epsilon = Number.isFinite(simplifyEpsilon) && simplifyEpsilon >= 0 ? simplifyEpsilon : getSimplifyEpsilon();
+        const maxPts = Number.isFinite(maxPointsPerPolygon) && maxPointsPerPolygon > 3 ? maxPointsPerPolygon : getMaxPolygonPoints();
+        const minMaskArea = Number.isFinite(minArea) && minArea >= 0 ? minArea : Math.max(0, getMinMaskArea());
+        const polygons = maskPayloadToPolygons(maskPayload, {
+            maxPointsPerPolygon: maxPts,
+            simplifyEpsilon: epsilon,
+        });
+        if (!Array.isArray(polygons) || polygons.length === 0) {
+            return null;
+        }
+        const scored = polygons
+            .map((pts) => {
+                const clamped = pts.map(clampPointToImage);
+                return { pts: clamped, area: polygonArea(clamped) };
+            })
+            .filter((entry) => entry.area > 0);
+        if (scored.length === 0) {
+            return null;
+        }
+        scored.sort((a, b) => b.area - a.area);
+        const maxPolygons = 5;
+        const minAreaThresh = minMaskArea;
+        let firstRecord = null;
+        if (!bboxes[currentImage.name]) {
+            bboxes[currentImage.name] = {};
+        }
+        if (!bboxes[currentImage.name][className]) {
+            bboxes[currentImage.name][className] = [];
+        }
+        for (let i = 0; i < scored.length && i < maxPolygons; i++) {
+            const chosen = scored[i].pts;
+            if (!chosen || chosen.length < 3) {
+                continue;
+            }
+            if (scored[i].area < minAreaThresh) {
+                continue;
+            }
+            const xs = chosen.map((p) => p.x);
+            const ys = chosen.map((p) => p.y);
+            const minX = Math.min(...xs);
+            const maxX = Math.max(...xs);
+            const minY = Math.min(...ys);
+            const maxY = Math.max(...ys);
+            const bboxRecord = {
+                type: "polygon",
+                points: chosen,
+                x: minX,
+                y: minY,
+                width: Math.max(0, maxX - minX),
+                height: Math.max(0, maxY - minY),
+                marked: false,
+                class: className,
+                uuid: generateUUID(),
+            };
+            stampBboxCreation(bboxRecord);
+            bboxes[currentImage.name][className].push(bboxRecord);
+            if (!firstRecord) {
+                firstRecord = bboxRecord;
+            }
+        }
+        if (firstRecord) {
+            setDatasetType("seg");
+        }
+        return firstRecord;
+    }
+
+    function addDetectionAnnotation(entry, className) {
+        if (datasetType === "seg") {
+            if (entry?.mask) {
+                const epsVal = Number(entry.simplify_epsilon);
+                const created = addPolygonFromMask(entry.mask, className, {
+                    simplifyEpsilon: Number.isFinite(epsVal) && epsVal >= 0 ? epsVal : null,
+                });
+                if (created) {
+                    return created;
+                }
+            }
+            return addPolygonFromYoloRect(entry.bbox, className);
+        }
+        return addYoloBoxFromQwen(entry.bbox, className);
+    }
+
     function applyDetectionsToClass(entries, className, sourceLabel = "Detector") {
+        return applySegAwareDetections(entries, className, sourceLabel);
+    }
+
+    function applySegAwareDetections(entries, className, sourceLabel = "Detector") {
         if (!currentImage || !className || !Array.isArray(entries) || entries.length === 0) {
             return 0;
         }
@@ -9532,7 +9758,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (!entry || !entry.bbox) {
                 return;
             }
-            const created = addYoloBoxFromQwen(entry.bbox, className);
+            const created = addDetectionAnnotation(entry, className);
             if (!created) {
                 return;
             }
@@ -9542,13 +9768,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             added += 1;
         });
         if (added > 0) {
-            setSamStatus(`${sourceLabel} added ${added} bbox${added === 1 ? "" : "es"} to ${className}`, { variant: "success", duration: 4500 });
+            const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+            setSamStatus(`${sourceLabel} added ${added} ${shapeLabel}${added === 1 ? "" : "es"} to ${className}`, { variant: "success", duration: 4500 });
         }
         return added;
     }
 
     function applyQwenBoxes(boxes, className) {
-        return applyDetectionsToClass(boxes, className, "Qwen");
+        return applySegAwareDetections(boxes, className, "Qwen");
     }
 
     function applySam3AutoDetections(entries, fallbackClass = null) {
@@ -9569,7 +9796,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (!targetClass) {
                 return;
             }
-            const created = addYoloBoxFromQwen(entry.bbox, targetClass);
+            const created = addDetectionAnnotation(entry, targetClass);
             if (!created) {
                 return;
             }
@@ -9579,7 +9806,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             added += 1;
         });
         if (added > 0) {
-            setSamStatus(`SAM3 auto added ${added} bbox${added === 1 ? "" : "es"}.`, { variant: "success", duration: 4500 });
+            const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+            setSamStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, { variant: "success", duration: 4500 });
         }
         return added;
     }
@@ -10298,6 +10526,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         bboxesFolderSelectButton = document.getElementById("bboxesSelectFolder");
         samStatusEl = document.getElementById("samStatus");
         samStatusProgressEl = document.getElementById("samStatusProgress");
+        polygonDrawToggle = document.getElementById("polygonDrawToggle");
         predictorElements.countInput = document.getElementById("predictorCount");
         predictorElements.applyButton = document.getElementById("predictorApply");
         predictorElements.message = document.getElementById("predictorMessage");
@@ -10336,6 +10565,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (multiPointModeCheckbox) {
             multiPointModeCheckbox.addEventListener("change", () => {
                 updateMultiPointState(multiPointModeCheckbox.checked);
+            });
+        }
+
+        if (polygonDrawToggle) {
+            polygonDrawToggle.addEventListener("click", () => {
+                if (datasetType !== "seg") {
+                    return;
+                }
+                setPolygonDrawEnabled(!polygonDrawEnabled);
             });
         }
 
@@ -10379,6 +10617,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         updatePointModeState(Boolean(pointModeCheckbox?.checked));
         updateMultiPointState(Boolean(multiPointModeCheckbox?.checked));
         updateSamPreloadState(Boolean(samPreloadCheckbox?.checked));
+        setPolygonDrawEnabled(datasetType === "seg", { silent: true });
+        applyDatasetModeConstraints();
     });
 
     // Helper that extracts base64 from currentImage
@@ -10435,6 +10675,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
      * Existing SAM / CLIP calls
      *****************************************************/
     async function samBboxPrompt(bbox) {
+        if (datasetType === "seg") {
+            setSamStatus("Use bbox mode for box prompts; polygons are not yet SAM-backed.", { variant: "warn", duration: 4000 });
+            return;
+        }
         const statusToken = beginSamActionStatus("Running SAM box prompt…");
         const imageName = currentImage ? currentImage.name : null;
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
@@ -10680,6 +10924,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function samBboxAutoPrompt(bbox) {
+        if (datasetType === "seg") {
+            setSamStatus("Auto bbox prompt is disabled in polygon mode.", { variant: "warn", duration: 4000 });
+            return;
+        }
         const statusToken = beginSamActionStatus("Running SAM auto box…");
         const imageName = currentImage ? currentImage.name : null;
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
@@ -11216,7 +11464,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     let images = {};
     let classes = {};
     let bboxes = {};
+    let datasetType = "bbox"; // "bbox" or "seg"
+    let datasetTypeBadge = null;
     let bboxCreationCounter = 0;
+    let polygonDraft = null; // {points: [{x,y}], className}
+    let polygonDrag = null; // {bbox, className, index, vertexIndex}
+    let polygonDrawEnabled = true;
+    let polygonDrawToggle = null;
 
     const stampBboxCreation = (bbox) => {
         if (!bbox || typeof bbox !== "object") {
@@ -11230,6 +11484,90 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         return bbox;
     };
+
+    const setPolygonDrawEnabled = (nextEnabled, { silent = false } = {}) => {
+        const normalized = Boolean(nextEnabled) && datasetType === "seg";
+        polygonDrawEnabled = normalized;
+        if (polygonDrawToggle) {
+            const label = normalized ? "Polygon draw: On (P)" : "Polygon draw: Off (P)";
+            polygonDrawToggle.textContent = label;
+            polygonDrawToggle.ariaPressed = normalized ? "true" : "false";
+            polygonDrawToggle.disabled = datasetType !== "seg";
+        }
+        if (!normalized) {
+            polygonDraft = null;
+            polygonDrag = null;
+        }
+        if (!silent && datasetType === "seg") {
+            const msg = normalized ? "Polygon drawing enabled (click to add points, double-click to close, Esc to cancel)." : "Polygon drawing paused; click existing polygons to select/move. Press P to toggle back on.";
+            setSamStatus(msg, { variant: "info", duration: 3000 });
+        }
+    };
+
+    const setDatasetType = (nextType) => {
+        const normalized = nextType === "seg" ? "seg" : "bbox";
+        datasetType = normalized;
+        // Clear polygon draft when switching to bbox
+        if (datasetType === "bbox") {
+            polygonDraft = null;
+            polygonDrag = null;
+            setPolygonDrawEnabled(false, { silent: true });
+        } else if (datasetType === "seg") {
+            setPolygonDrawEnabled(true, { silent: true });
+        }
+        applyDatasetModeConstraints();
+        if (!datasetTypeBadge) {
+            datasetTypeBadge = document.getElementById("datasetTypeBadge");
+        }
+        if (datasetTypeBadge) {
+            const label = normalized === "seg" ? "Polygon / YOLO-seg mode" : "BBox mode";
+            datasetTypeBadge.textContent = `Dataset mode: ${label}`;
+            datasetTypeBadge.title =
+                normalized === "seg"
+                    ? "Polygon mode: click to add points, double-click to close, drag vertices to edit."
+                    : "BBox mode";
+        }
+    };
+
+    function applyDatasetModeConstraints() {
+        const isSeg = datasetType === "seg";
+        if (autoModeCheckbox) {
+            autoModeCheckbox.disabled = isSeg;
+            if (isSeg) {
+                autoModeCheckbox.checked = false;
+                updateAutoModeState(false);
+            }
+        }
+        if (samModeCheckbox) {
+            samModeCheckbox.disabled = false; // still allow SAM text prompts in seg mode
+        }
+        if (pointModeCheckbox) {
+            pointModeCheckbox.disabled = isSeg || !samMode;
+            if (isSeg) {
+                pointModeCheckbox.checked = false;
+                updatePointModeState(false);
+            }
+        }
+        if (multiPointModeCheckbox) {
+            multiPointModeCheckbox.disabled = isSeg || !samMode;
+            if (isSeg) {
+                multiPointModeCheckbox.checked = false;
+                updateMultiPointModeState(false);
+            }
+        }
+        if (polygonDrawToggle) {
+            polygonDrawToggle.disabled = !isSeg;
+            if (!isSeg) {
+                setPolygonDrawEnabled(false, { silent: true });
+            }
+        }
+        if (samStatusEl) {
+            const modeNote = isSeg
+                ? "Polygon mode: click to add vertices, double-click to close. Bbox-only tools are disabled."
+                : "BBox mode: drag to create boxes; enable SAM/Auto for tweaks.";
+            samStatusEl.dataset.modeNote = modeNote;
+        }
+    }
 
     const findLatestCreatedBbox = (imageName) => {
         const classBuckets = bboxes[imageName];
@@ -11300,6 +11638,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             listenImageSearch();
             listenImageCrop();
             ensureBatchTweakElements();
+            datasetTypeBadge = document.getElementById("datasetTypeBadge");
+            setDatasetType(datasetType);
         }
     };
 
@@ -11371,6 +11711,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     };
 
     const drawNewBbox = (context) => {
+        if (datasetType === "seg") {
+            drawNewPolygon(context);
+            return;
+        }
         if (mouse.buttonL === true && currentClass !== null && currentBbox === null) {
             const width = (mouse.realX - mouse.startRealX);
             const height = (mouse.realY - mouse.startRealY);
@@ -11396,6 +11740,37 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     };
 
+    const drawNewPolygon = (context) => {
+        if (!polygonDraft || !Array.isArray(polygonDraft.points) || polygonDraft.points.length === 0) {
+            return;
+        }
+        const strokeColor = getColorFromClass(polygonDraft.className || currentClass || "");
+        const fillColor = withAlpha(strokeColor, 0.2);
+        context.save();
+        context.strokeStyle = strokeColor;
+        context.fillStyle = fillColor;
+        context.lineWidth = Math.max(1, 1.2 * scale);
+        context.beginPath();
+        polygonDraft.points.forEach((pt, idx) => {
+            const x = zoomX(pt.x);
+            const y = zoomY(pt.y);
+            if (idx === 0) {
+                context.moveTo(x, y);
+            } else {
+                context.lineTo(x, y);
+            }
+        });
+        context.stroke();
+        polygonDraft.points.forEach((pt) => {
+            const x = zoomX(pt.x);
+            const y = zoomY(pt.y);
+            context.beginPath();
+            context.arc(x, y, Math.max(3, 4 * scale), 0, Math.PI * 2);
+            context.fill();
+        });
+        context.restore();
+    };
+
     const drawExistingBboxes = (context) => {
         const currentBboxes = bboxes[currentImage.name];
         if (!currentBboxes) {
@@ -11417,29 +11792,56 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 context.lineWidth = lineWidth;
                 context.strokeStyle = strokeColor;
                 context.fillStyle = fillColor;
-                context.fillRect(
-                    zoomX(bbox.x),
-                    zoomY(bbox.y),
-                    zoom(bbox.width),
-                    zoom(bbox.height)
-                );
-                context.strokeRect(
-                    zoomX(bbox.x),
-                    zoomY(bbox.y),
-                    zoom(bbox.width),
-                    zoom(bbox.height)
-                );
-                drawX(context, bbox.x, bbox.y, bbox.width, bbox.height);
-
-                if (isCurrent && currentBbox.resizing) {
-                    const handlePoint = getCornerCoordinates(bbox, currentBbox.resizing);
-                    if (handlePoint) {
-                        drawCornerHandle(context, handlePoint.x, handlePoint.y, strokeColor);
+                const isPolygon = bbox.type === "polygon" || (Array.isArray(bbox.points) && bbox.points.length >= 3);
+                if (isPolygon) {
+                    context.beginPath();
+                    bbox.points.forEach((pt, idx) => {
+                        const x = zoomX(pt.x);
+                        const y = zoomY(pt.y);
+                        if (idx === 0) {
+                            context.moveTo(x, y);
+                        } else {
+                            context.lineTo(x, y);
+                        }
+                    });
+                    context.closePath();
+                    context.fill();
+                    context.stroke();
+                    if (isCurrent) {
+                        bbox.points.forEach((pt, idx) => {
+                            const x = zoomX(pt.x);
+                            const y = zoomY(pt.y);
+                            drawCornerHandle(context, x, y, strokeColor);
+                            if (idx === 0) {
+                                context.beginPath();
+                                context.arc(x, y, Math.max(4, 5 * scale), 0, Math.PI * 2);
+                                context.stroke();
+                            }
+                        });
                     }
-                }
-
-                if (bbox.marked === true) {
-                    setBboxCoordinates(bbox.x, bbox.y, bbox.width, bbox.height);
+                } else {
+                    context.fillRect(
+                        zoomX(bbox.x),
+                        zoomY(bbox.y),
+                        zoom(bbox.width),
+                        zoom(bbox.height)
+                    );
+                    context.strokeRect(
+                        zoomX(bbox.x),
+                        zoomY(bbox.y),
+                        zoom(bbox.width),
+                        zoom(bbox.height)
+                    );
+                    drawX(context, bbox.x, bbox.y, bbox.width, bbox.height);
+                    if (isCurrent && currentBbox.resizing) {
+                        const handlePoint = getCornerCoordinates(bbox, currentBbox.resizing);
+                        if (handlePoint) {
+                            drawCornerHandle(context, handlePoint.x, handlePoint.y, strokeColor);
+                        }
+                    }
+                    if (bbox.marked === true) {
+                        setBboxCoordinates(bbox.x, bbox.y, bbox.width, bbox.height);
+                    }
                 }
                 context.restore();
             });
@@ -11654,14 +12056,195 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             mouse.buttonL = false;
         }
     
+        if (datasetType === "seg") {
+            await handlePolygonPointer(event, oldRealX, oldRealY);
+            return;
+        }
         moveBbox();
         resizeBbox();
         changeCursorByLocation();
         panImage(oldRealX, oldRealY);
     }
 
+    function pointInPolygon(x, y, points) {
+        if (!Array.isArray(points) || points.length < 3) return false;
+        let inside = false;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+            const xi = points[i].x, yi = points[i].y;
+            const xj = points[j].x, yj = points[j].y;
+            const intersect = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-9) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    function findPolygonAt(x, y) {
+        if (!currentImage || !bboxes[currentImage.name]) return null;
+        const imgBxs = bboxes[currentImage.name];
+        let found = null;
+        Object.keys(imgBxs).forEach((className) => {
+            imgBxs[className].forEach((ann, idx) => {
+                if (found || ann.type !== "polygon" || !Array.isArray(ann.points)) return;
+                const distThreshold = Math.max(6, 10 / scale);
+                // Prefer vertex hit
+                ann.points.forEach((pt, vIdx) => {
+                    const dx = pt.x - x;
+                    const dy = pt.y - y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist <= distThreshold && !found) {
+                        found = { bbox: ann, className, index: idx, vertexIndex: vIdx };
+                    }
+                });
+                if (!found && pointInPolygon(x, y, ann.points)) {
+                    found = { bbox: ann, className, index: idx, vertexIndex: null };
+                }
+            });
+        });
+        return found;
+    }
+
+    function clampPointToImage(pt) {
+        if (!currentImage) return pt;
+        const w = currentImage.width || currentImage.object?.naturalWidth || 0;
+        const h = currentImage.height || currentImage.object?.naturalHeight || 0;
+        return {
+            x: Math.max(0, Math.min(w, pt.x)),
+            y: Math.max(0, Math.min(h, pt.y)),
+        };
+    }
+
+    function finalizePolygonDraft() {
+        if (!polygonDraft || !currentImage || !currentClass) {
+            polygonDraft = null;
+            return;
+        }
+        const pts = (polygonDraft.points || []).map(clampPointToImage);
+        if (pts.length < 3) {
+            polygonDraft = null;
+            return;
+        }
+        const xs = pts.map((p) => p.x);
+        const ys = pts.map((p) => p.y);
+        const minX = Math.max(0, Math.min(...xs));
+        const maxX = Math.min(currentImage.width, Math.max(...xs));
+        const minY = Math.max(0, Math.min(...ys));
+        const maxY = Math.min(currentImage.height, Math.max(...ys));
+        const bboxRecord = {
+            type: "polygon",
+            points: pts,
+            x: minX,
+            y: minY,
+            width: Math.max(0, maxX - minX),
+            height: Math.max(0, maxY - minY),
+            marked: false,
+            class: polygonDraft.className || currentClass,
+        };
+        stampBboxCreation(bboxRecord);
+        if (!bboxes[currentImage.name]) {
+            bboxes[currentImage.name] = {};
+        }
+        const targetClass = polygonDraft.className || currentClass;
+        if (!bboxes[currentImage.name][targetClass]) {
+            bboxes[currentImage.name][targetClass] = [];
+        }
+        // Deduplicate exact same polygon for the same class
+        const existing = bboxes[currentImage.name][targetClass].some((ann) => {
+            if (ann.type !== "polygon" || !Array.isArray(ann.points) || ann.points.length !== pts.length) return false;
+            return ann.points.every((pt, idx) => Math.abs(pt.x - pts[idx].x) < 1e-3 && Math.abs(pt.y - pts[idx].y) < 1e-3);
+        });
+        if (!existing) {
+            bboxes[currentImage.name][targetClass].push(bboxRecord);
+            currentBbox = {
+                bbox: bboxRecord,
+                index: bboxes[currentImage.name][targetClass].length - 1,
+                originalX: bboxRecord.x,
+                originalY: bboxRecord.y,
+                originalWidth: bboxRecord.width,
+                originalHeight: bboxRecord.height,
+                moving: false,
+                resizing: null,
+            };
+        } else {
+            currentBbox = null;
+        }
+        setDatasetType("seg");
+        polygonDraft = null;
+    }
+
+    async function handlePolygonPointer(event, prevX, prevY) {
+        if (!currentClass || !currentImage) {
+            return;
+        }
+        if (mouse.buttonR) {
+            panImage(prevX, prevY);
+        }
+        if (event.type === "mousedown") {
+            if (event.which === 3) {
+                // Right click: cancel or finalize draft
+                if (polygonDraft && polygonDraft.points.length >= 3) {
+                    finalizePolygonDraft();
+                } else {
+                    polygonDraft = null;
+                }
+                polygonDrag = null;
+                currentBbox = null;
+                return;
+            }
+            if (event.which === 1) {
+                const hit = findPolygonAt(mouse.realX, mouse.realY);
+                if (hit) {
+                    currentBbox = {
+                        bbox: hit.bbox,
+                        index: hit.index,
+                        originalX: hit.bbox.x,
+                        originalY: hit.bbox.y,
+                        originalWidth: hit.bbox.width,
+                        originalHeight: hit.bbox.height,
+                        moving: false,
+                        resizing: null,
+                    };
+                    if (hit.vertexIndex !== null && hit.vertexIndex !== undefined) {
+                        polygonDrag = { ...hit, vertexIndex: hit.vertexIndex };
+                    } else {
+                        polygonDrag = { ...hit, vertexIndex: null };
+                    }
+                    return;
+                }
+                if (!polygonDrawEnabled) {
+                    polygonDraft = null;
+                    polygonDrag = null;
+                    currentBbox = null;
+                    return;
+                }
+                // Double click closes polygon
+                if (polygonDraft && event.detail > 1 && polygonDraft.points.length >= 3) {
+                    finalizePolygonDraft();
+                    return;
+                }
+                if (!polygonDraft) {
+                    polygonDraft = { className: currentClass, points: [] };
+                }
+                polygonDraft.points.push({ x: mouse.realX, y: mouse.realY });
+            }
+        } else if (event.type === "mousemove") {
+            if (polygonDrag && polygonDrag.vertexIndex !== null && polygonDrag.vertexIndex !== undefined) {
+                const pts = polygonDrag.bbox.points;
+                pts[polygonDrag.vertexIndex] = clampPointToImage({ x: mouse.realX, y: mouse.realY });
+                const xs = pts.map((p) => p.x);
+                const ys = pts.map((p) => p.y);
+                polygonDrag.bbox.x = Math.min(...xs);
+                polygonDrag.bbox.y = Math.min(...ys);
+                polygonDrag.bbox.width = Math.max(...xs) - polygonDrag.bbox.x;
+                polygonDrag.bbox.height = Math.max(...ys) - polygonDrag.bbox.y;
+            }
+        } else if (event.type === "mouseup" || event.type === "mouseout") {
+            polygonDrag = null;
+        }
+    }
+
     const storeNewBbox = (movedWidth, movedHeight) => {
         const bbox = {
+            type: "bbox",
             x: Math.min(mouse.startRealX, mouse.realX),
             y: Math.min(mouse.startRealY, mouse.realY),
             width: movedWidth,
@@ -11714,6 +12297,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     };
 
     const setBboxMarkedState = () => {
+        if (datasetType === "seg") {
+            if (currentBbox && currentBbox.bbox) {
+                currentBbox.bbox.marked = true;
+            }
+            return;
+        }
         if (!currentBbox || (!currentBbox.moving && !currentBbox.resizing)) {
             const currentBxs = bboxes[currentImage.name];
             let wasInside = false;
@@ -11752,6 +12341,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     };
 
     async function runMagicTweakForBbox(targetBbox, { updateSelection = false } = {}) {
+        if (datasetType === "seg") {
+            setSamStatus("Tweak is only available in bbox mode.", { variant: "warn", duration: 3000 });
+            return false;
+        }
         if (!targetBbox) {
             return false;
         }
@@ -11821,6 +12414,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     async function runBatchTweakForCurrentCategory() {
         if (batchTweakRunning) {
             setSamStatus("Batch tweak already running", { variant: "info", duration: 2500 });
+            return;
+        }
+        if (datasetType === "seg") {
+            setSamStatus("Batch tweak is only available in bbox mode.", { variant: "warn", duration: 3000 });
             return;
         }
         if (!currentImage || !currentImage.name) {
@@ -12475,6 +13072,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     const resetBboxes = () => {
         bboxes = {};
+        setDatasetType("bbox");
     };
 
     const storeBbox = (filename, text) => {
@@ -12496,31 +13094,75 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     if (extension === "txt") {
                         const rows = text.split(/[\r\n]+/);
                         for (let i = 0; i < rows.length; i++) {
-                            const cols = rows[i].split(" ");
-                            cols[0] = parseInt(cols[0]);
-                            for (let className in classes) {
-                                if (classes[className] === cols[0]) {
-                                    if (typeof bbox[className] === "undefined") {
-                                        bbox[className] = [];
+                            const cols = rows[i].trim().split(/\s+/).filter(Boolean);
+                            if (cols.length < 5) continue;
+                            const clsIdx = parseInt(cols[0], 10);
+                            let className = null;
+                            for (const name in classes) {
+                                if (classes[name] === clsIdx) {
+                                    className = name;
+                                    break;
+                                }
+                            }
+                            if (!className) continue;
+                            if (typeof bbox[className] === "undefined") {
+                                bbox[className] = [];
+                            }
+                            // YOLO-seg: class + polygon coords (x y ...), YOLO-bbox: class cx cy w h
+                            if (cols.length >= 7) {
+                                const pts = [];
+                                for (let j = 1; j + 1 < cols.length; j += 2) {
+                                    const px = parseFloat(cols[j]) * image.width;
+                                    const py = parseFloat(cols[j + 1]) * image.height;
+                                    if (Number.isFinite(px) && Number.isFinite(py)) {
+                                        pts.push({ x: px, y: py });
                                     }
-                                    const width = cols[3] * image.width;
-                                    const x = cols[1] * image.width - width * 0.5;
-                                    const height = cols[4] * image.height;
-                                    const y = cols[2] * image.height - height * 0.5;
+                                }
+                                if (pts.length >= 3) {
+                                    const xs = pts.map((p) => p.x);
+                                    const ys = pts.map((p) => p.y);
+                                    const minX = Math.max(0, Math.min(...xs));
+                                    const maxX = Math.min(image.width, Math.max(...xs));
+                                    const minY = Math.max(0, Math.min(...ys));
+                                    const maxY = Math.min(image.height, Math.max(...ys));
                                     const bboxRecord = {
-                                        x: Math.floor(x),
-                                        y: Math.floor(y),
-                                        width: Math.floor(width),
-                                        height: Math.floor(height),
+                                        type: "polygon",
+                                        points: pts,
+                                        x: minX,
+                                        y: minY,
+                                        width: Math.max(0, maxX - minX),
+                                        height: Math.max(0, maxY - minY),
                                         marked: false,
                                         class: className
                                     };
                                     stampBboxCreation(bboxRecord);
                                     bbox[className].push(bboxRecord);
+                                    setDatasetType("seg");
                                     noteImportedBbox();
-                                    break;
+                                    continue;
                                 }
                             }
+                            // Fallback to bbox
+                            const cx = parseFloat(cols[1]);
+                            const cy = parseFloat(cols[2]);
+                            const wNorm = parseFloat(cols[3]);
+                            const hNorm = parseFloat(cols[4]);
+                            const width = wNorm * image.width;
+                            const x = cx * image.width - width * 0.5;
+                            const height = hNorm * image.height;
+                            const y = cy * image.height - height * 0.5;
+                            const bboxRecord = {
+                                type: "bbox",
+                                x: Math.floor(x),
+                                y: Math.floor(y),
+                                width: Math.floor(width),
+                                height: Math.floor(height),
+                                marked: false,
+                                class: className
+                            };
+                            stampBboxCreation(bboxRecord);
+                            bbox[className].push(bboxRecord);
+                            noteImportedBbox();
                         }
                     } else if (extension === "xml") {
                         const parser = new DOMParser();
@@ -12539,6 +13181,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                                     const bndBoxMaxX = bndBox.getElementsByTagName("xmax")[0].childNodes[0].nodeValue;
                                     const bndBoxMaxY = bndBox.getElementsByTagName("ymax")[0].childNodes[0].nodeValue;
                                     const bboxRecord = {
+                                        type: "bbox",
                                         x: parseInt(bndBoxX),
                                         y: parseInt(bndBoxY),
                                         width: parseInt(bndBoxMaxX) - parseInt(bndBoxX),
@@ -12590,6 +13233,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                         const bboxWidth = json.annotations[i].bbox[2];
                         const bboxHeight = json.annotations[i].bbox[3];
                         const bboxRecord = {
+                            type: "bbox",
                             x: bboxX,
                             y: bboxY,
                             width: bboxWidth,
@@ -12607,8 +13251,41 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     };
 
+    function summarizeGeometry() {
+        let polygonCount = 0;
+        let bboxCount = 0;
+        Object.values(bboxes).forEach((classBuckets) => {
+            Object.values(classBuckets || {}).forEach((items) => {
+                (items || []).forEach((ann) => {
+                    if (ann && ann.type === "polygon") {
+                        polygonCount += 1;
+                    } else {
+                        bboxCount += 1;
+                    }
+                });
+            });
+        });
+        return { polygonCount, bboxCount };
+    }
+
+    function validateGeometryForSave() {
+        const { polygonCount, bboxCount } = summarizeGeometry();
+        if (datasetType === "seg" && bboxCount > 0) {
+            return { ok: false, message: "This dataset is in polygon mode but contains bboxes. Remove or convert them before saving." };
+        }
+        if (datasetType === "bbox" && polygonCount > 0) {
+            return { ok: false, message: "This dataset is in bbox mode but contains polygons. Switch to seg mode or remove polygons before saving." };
+        }
+        return { ok: true, polygonCount, bboxCount };
+    }
+
     const listenBboxSave = () => {
         document.getElementById("saveBboxes").addEventListener("click", () => {
+            const validation = validateGeometryForSave();
+            if (!validation.ok) {
+                alert(validation.message);
+                return;
+            }
             const zip = new JSZip();
             for (let imageName in bboxes) {
                 const image = images[imageName];
@@ -12619,11 +13296,23 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 for (let className in bboxes[imageName]) {
                     for (let i = 0; i < bboxes[imageName][className].length; i++) {
                         const bbox = bboxes[imageName][className][i];
-                        const x = (bbox.x + bbox.width / 2) / image.width;
-                        const y = (bbox.y + bbox.height / 2) / image.height;
-                        const w = bbox.width / image.width;
-                        const h = bbox.height / image.height;
-                        result.push(`${classes[className]} ${x} ${y} ${w} ${h}`);
+                        const classIdx = classes[className];
+                        if (datasetType === "seg" && Array.isArray(bbox.points) && bbox.points.length >= 3) {
+                            const coords = bbox.points
+                                .map((pt) => {
+                                    const nx = pt.x / image.width;
+                                    const ny = pt.y / image.height;
+                                    return `${nx} ${ny}`;
+                                })
+                                .join(" ");
+                            result.push(`${classIdx} ${coords}`);
+                        } else {
+                            const x = (bbox.x + bbox.width / 2) / image.width;
+                            const y = (bbox.y + bbox.height / 2) / image.height;
+                            const w = bbox.width / image.width;
+                            const h = bbox.height / image.height;
+                            result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
+                        }
                     }
                 }
                 zip.file(name.join("."), result.join("\n"));
@@ -12652,6 +13341,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 return;
             }
             const key = event.keyCode || event.charCode;
+
+            if (datasetType === "seg" && (key === 27 || event.key === "Escape")) {
+                polygonDraft = null;
+                polygonDrag = null;
+                currentBbox = null;
+                event.preventDefault();
+                return;
+            }
+
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 80 || event.key === "p" || event.key === "P")) {
+                if (datasetType === "seg") {
+                    setPolygonDrawEnabled(!polygonDrawEnabled);
+                    event.preventDefault();
+                }
+                return;
+            }
 
             if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 90 || event.key === "z" || event.key === "Z")) {
                 if (!modeSnapshot) {
@@ -12908,6 +13613,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
       setupTabNavigation();
       const btn = document.getElementById("cropImages");
       btn.addEventListener("click", async () => {
+        if (datasetType === "seg") {
+          alert("Crop & Save is only available for bbox datasets.");
+          return;
+        }
         const imageNames = Object.keys(bboxes);
         if (!imageNames.length) {
           alert("No bounding boxes to crop.");
@@ -13104,6 +13813,107 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 document.body.removeChild(overlay);
             }
         };
+    }
+
+    async function loadSam3RecipePresets() {
+        if (!sam3RecipeElements.presetSelect) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/recipe_presets`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            sam3RecipeElements.presetSelect.innerHTML = "";
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "Select recipe preset…";
+            sam3RecipeElements.presetSelect.appendChild(placeholder);
+            (Array.isArray(data) ? data : []).forEach((p) => {
+                const opt = document.createElement("option");
+                opt.value = p.id;
+                const cls = p.class_name ? ` • ${p.class_name}` : "";
+                opt.textContent = `${p.label || p.id}${cls}`;
+                sam3RecipeElements.presetSelect.appendChild(opt);
+            });
+        } catch (err) {
+            console.error("Load recipe presets failed", err);
+            setSam3RecipeStatus("Failed to load recipe presets.", "warn");
+        }
+    }
+
+    async function saveSam3RecipePreset() {
+        const recipe = sam3RecipeState.recipe;
+        if (!recipe || !recipe.steps || !recipe.steps.length) {
+            setSam3RecipeStatus("Load a recipe first, then save.", "warn");
+            return;
+        }
+        try {
+            const payload = {
+                label: sam3RecipeElements.presetNameInput?.value || recipe.label || "",
+                class_name: recipe.class_name,
+                class_id: recipe.class_id,
+                steps: recipe.steps,
+            };
+            const resp = await fetch(`${API_ROOT}/sam3/recipe_presets`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            await loadSam3RecipePresets();
+            setSam3RecipeStatus("Saved recipe preset.", "success");
+        } catch (err) {
+            console.error("Save recipe preset failed", err);
+            setSam3RecipeStatus(err.message || "Save failed.", "error");
+        }
+    }
+
+    async function loadSam3RecipePreset() {
+        const presetId = sam3RecipeElements.presetSelect?.value;
+        if (!presetId) {
+            setSam3RecipeStatus("Choose a recipe preset to load.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/recipe_presets/${encodeURIComponent(presetId)}`);
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            const parsed = {
+                label: data.label || data.id,
+                class_name: data.class_name,
+                class_id: data.class_id,
+                steps: Array.isArray(data.steps)
+                    ? data.steps
+                          .map((s) => ({
+                              prompt: typeof s.prompt === "string" ? s.prompt.trim() : "",
+                              threshold: typeof s.threshold === "number" ? s.threshold : null,
+                          }))
+                          .filter((s) => s.prompt && s.threshold !== null)
+                    : [],
+            };
+            if (!parsed.steps.length) throw new Error("Preset has no steps.");
+            // Validate class exists in label map.
+            const classNames = orderedClassNames();
+            const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
+            const target = parsed.class_name || (typeof parsed.class_id === "number" ? classNames[parsed.class_id] : null);
+            if (!target || !lowerToName.has(target.toLowerCase())) {
+                throw new Error(`Class not in label map: ${parsed.class_name || parsed.class_id || ""}`);
+            }
+            parsed.class_name = lowerToName.get(target.toLowerCase());
+            sam3RecipeState.recipe = parsed;
+            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
+            if (sam3RecipeElements.presetNameInput) sam3RecipeElements.presetNameInput.value = parsed.label || parsed.class_name;
+            setSam3RecipeStatus(`Loaded preset for ${parsed.class_name} (${parsed.steps.length} steps).`, "success");
+        } catch (err) {
+            console.error("Load recipe preset failed", err);
+            setSam3RecipeStatus(err.message || "Load failed.", "error");
+            sam3RecipeState.recipe = null;
+            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
+        }
     }
 
 })();

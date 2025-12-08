@@ -10591,7 +10591,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             polygonSimplifyInput.addEventListener("input", () => {
                 const val = parseFloat(polygonSimplifyInput.value);
                 const msg = Number.isFinite(val)
-                    ? `Polygon detail: ${val.toFixed(1)} (right = simpler, left = more detail)`
+                    ? `Polygon detail: ${val.toFixed(1)} (left = simpler, right = more detail)`
                     : "Polygon detail";
                 setSamStatus(msg, { variant: "info", duration: 1500 });
             });
@@ -12133,14 +12133,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const isSegDataset = datasetType === "seg";
         if (isSegDataset) {
             const handled = await handlePolygonPointer(event, oldRealX, oldRealY);
-            if (!samMode || handled) {
+            if (!samMode && handled) {
                 if (event.type === "mouseup" || event.type === "mouseout") {
                     mouse.buttonR = false;
                     mouse.buttonL = false;
                 }
-                if (!samMode || handled) {
-                    return;
-                }
+                return;
             }
         }
         if (event.type === "mouseup" || event.type === "mouseout") {

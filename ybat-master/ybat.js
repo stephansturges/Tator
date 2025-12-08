@@ -10673,14 +10673,42 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return resp;
     }
 
+    function applySamResultToSegDataset(result, targetBbox, classNameOverride = null) {
+        if (!currentImage) return false;
+        const className = classNameOverride || (targetBbox ? targetBbox.class : currentClass);
+        if (!className) return false;
+        const epsVal = Number.isFinite(Number(result?.simplify_epsilon)) && Number(result.simplify_epsilon) >= 0
+            ? Number(result.simplify_epsilon)
+            : null;
+        let created = null;
+        if (result?.mask) {
+            created = addPolygonFromMask(result.mask, className, { simplifyEpsilon: epsVal });
+        }
+        if (!created && result?.bbox) {
+            created = addPolygonFromYoloRect(result.bbox, className);
+        }
+        if (!created) {
+            return false;
+        }
+        const bucket = bboxes[currentImage.name]?.[className] || [];
+        const idx = bucket.indexOf(created);
+        currentBbox = {
+            bbox: created,
+            index: idx >= 0 ? idx : bucket.length - 1,
+            originalX: created.x,
+            originalY: created.y,
+            originalWidth: created.width,
+            originalHeight: created.height,
+            moving: false,
+            resizing: null,
+        };
+        return true;
+    }
+
     /*****************************************************
      * Existing SAM / CLIP calls
      *****************************************************/
     async function samBboxPrompt(bbox) {
-        if (datasetType === "seg") {
-            setSamStatus("Use bbox mode for box prompts; polygons are not yet SAM-backed.", { variant: "warn", duration: 4000 });
-            return;
-        }
         const statusToken = beginSamActionStatus("Running SAM box prompt…");
         const imageName = currentImage ? currentImage.name : null;
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
@@ -10719,6 +10747,28 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 console.warn("No pending bbox found for uuid:", returnedUUID);
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
+                }
+                return;
+            }
+            if (datasetType === "seg") {
+                const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                delete pendingApiBboxes[returnedUUID];
+                if (!applied) {
+                    setSamStatus("SAM returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
+                }
+                return;
+            }
+            if (datasetType === "seg") {
+                const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                delete pendingApiBboxes[returnedUUID];
+                if (!applied) {
+                    setSamStatus("SAM returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
                 }
                 return;
             }
@@ -11544,15 +11594,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             samModeCheckbox.disabled = false; // still allow SAM text prompts in seg mode
         }
         if (pointModeCheckbox) {
-            pointModeCheckbox.disabled = isSeg || !samMode;
-            if (isSeg) {
+            pointModeCheckbox.disabled = !samMode;
+            if (!samMode) {
                 pointModeCheckbox.checked = false;
                 updatePointModeState(false);
             }
         }
         if (multiPointModeCheckbox) {
-            multiPointModeCheckbox.disabled = isSeg || !samMode;
-            if (isSeg) {
+            multiPointModeCheckbox.disabled = !samMode;
+            if (!samMode) {
                 multiPointModeCheckbox.checked = false;
                 updateMultiPointModeState(false);
             }
@@ -11988,7 +12038,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 mouse.buttonL = true;
             }
         }
-        if (datasetType === "seg") {
+        const isSegDataset = datasetType === "seg";
+        if (isSegDataset && !samMode) {
             await handlePolygonPointer(event, oldRealX, oldRealY);
             if (event.type === "mouseup" || event.type === "mouseout") {
                 mouse.buttonR = false;

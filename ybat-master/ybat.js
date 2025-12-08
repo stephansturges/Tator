@@ -12109,10 +12109,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                             moving: false,
                             resizing: null,
                         };
-                        // Do not start a new box when clicking an existing polygon.
-                        mouse.buttonL = false;
-                        mouse.buttonR = false;
-                        return;
+                        // Keep left button active so user can immediately drag a new box if desired.
+                        polygonDrag = null;
                     }
                     // Clear selection so a new box can be drawn/previewed.
                     currentBbox = null;

@@ -9376,7 +9376,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const rawSlider = polygonSimplifyInput ? parseFloat(polygonSimplifyInput.value) : null;
         const sliderValid = Number.isFinite(rawSlider);
         const sliderMin = 0;
-        const sliderMax = 5;
+        const sliderMax = 20;
         const clampedSlider = sliderValid ? Math.max(sliderMin, Math.min(sliderMax, rawSlider)) : null;
         // Invert: slider left (low) => higher detail (lower epsilon), slider right (high) => more simplification.
         const sliderEps = clampedSlider !== null ? sliderMax - clampedSlider : null;
@@ -12131,14 +12131,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
         }
         const isSegDataset = datasetType === "seg";
-        if (isSegDataset && !samMode) {
-            await handlePolygonPointer(event, oldRealX, oldRealY);
-            if (event.type === "mouseup" || event.type === "mouseout") {
-                mouse.buttonR = false;
-                mouse.buttonL = false;
+        if (isSegDataset) {
+            const handled = await handlePolygonPointer(event, oldRealX, oldRealY);
+            if (!samMode || handled) {
+                if (event.type === "mouseup" || event.type === "mouseout") {
+                    mouse.buttonR = false;
+                    mouse.buttonL = false;
+                }
+                if (!samMode || handled) {
+                    return;
+                }
             }
-            return;
-        } else if (event.type === "mouseup" || event.type === "mouseout") {
+        }
+        if (event.type === "mouseup" || event.type === "mouseout") {
             if (mouse.buttonL && currentImage !== null && currentClass !== null) {
                 if (multiPointMode) {
                     mouse.buttonL = false;
@@ -12325,22 +12330,23 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     async function handlePolygonPointer(event, prevX, prevY) {
         if (!currentClass || !currentImage) {
-            return;
+            return false;
         }
+        const samActive = samMode === true;
         if (mouse.buttonR) {
             panImage(prevX, prevY);
         }
         if (event.type === "mousedown") {
             if (event.which === 3) {
                 // Right click: cancel or finalize draft
-                if (polygonDraft && polygonDraft.points.length >= 3) {
+                if (!samActive && polygonDraft && polygonDraft.points.length >= 3) {
                     finalizePolygonDraft();
-                } else {
+                } else if (!samActive) {
                     polygonDraft = null;
                 }
                 polygonDrag = null;
                 currentBbox = null;
-                return;
+                return true;
             }
             if (event.which === 1) {
                 const hit = findPolygonAt(mouse.realX, mouse.realY);
@@ -12355,23 +12361,29 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                         moving: false,
                         resizing: null,
                     };
-                    if (hit.vertexIndex !== null && hit.vertexIndex !== undefined) {
+                    if (!samActive && hit.vertexIndex !== null && hit.vertexIndex !== undefined) {
                         polygonDrag = { ...hit, vertexIndex: hit.vertexIndex };
                     } else {
                         polygonDrag = { ...hit, vertexIndex: null };
                     }
-                    return;
+                    return true;
+                }
+                if (samActive) {
+                    // In SAM mode, do not start polygon drafting; allow bbox drawing.
+                    polygonDrag = null;
+                    polygonDraft = null;
+                    return false;
                 }
                 if (!polygonDrawEnabled) {
                     polygonDraft = null;
                     polygonDrag = null;
                     currentBbox = null;
-                    return;
+                    return false;
                 }
                 // Double click closes polygon
                 if (polygonDraft && event.detail > 1 && polygonDraft.points.length >= 3) {
                     finalizePolygonDraft();
-                    return;
+                    return true;
                 }
                 if (!polygonDraft) {
                     polygonDraft = { className: currentClass, points: [] };
@@ -12392,6 +12404,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         } else if (event.type === "mouseup" || event.type === "mouseout") {
             polygonDrag = null;
         }
+        return false;
     }
 
     const storeNewBbox = (movedWidth, movedHeight) => {

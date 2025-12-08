@@ -11815,14 +11815,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     };
 
     const drawNewBbox = (context) => {
-        if (datasetType === "seg") {
+        const isSegDataset = datasetType === "seg";
+        if (isSegDataset && !samMode) {
             drawNewPolygon(context);
             return;
         }
         const canPreview =
             mouse.buttonL === true &&
             currentClass !== null &&
-            (currentBbox === null || datasetType === "seg");
+            (currentBbox === null || isSegDataset);
         if (canPreview) {
             const width = (mouse.realX - mouse.startRealX);
             const height = (mouse.realY - mouse.startRealY);
@@ -12101,27 +12102,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 mouse.buttonR = true;
             } else if (event.which === 1) {
                 mouse.buttonL = true;
-                if (datasetType === "seg" && samMode) {
-                    const hit = findPolygonAt(mouse.realX, mouse.realY);
-                    if (hit) {
-                        currentBbox = {
-                            bbox: hit.bbox,
-                            index: hit.index,
-                            originalX: hit.bbox.x,
-                            originalY: hit.bbox.y,
-                            originalWidth: hit.bbox.width,
-                            originalHeight: hit.bbox.height,
-                            moving: false,
-                            resizing: null,
-                        };
-                        // Keep left button active so user can immediately drag a new box if desired.
-                        polygonDrag = null;
-                    }
-                    // Clear selection so a new box can be drawn/previewed.
-                    currentBbox = null;
-                    polygonDrag = null;
-                    polygonDraft = null;
-                }
                 if (datasetType !== "seg") {
                     const insideExisting = currentBbox && isPointInsideBbox(currentBbox.bbox, mouse.realX, mouse.realY);
                     if (!insideExisting) {
@@ -12131,7 +12111,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
         }
         const isSegDataset = datasetType === "seg";
-        if (isSegDataset && !samMode) {
+        if (isSegDataset) {
             const handled = await handlePolygonPointer(event, oldRealX, oldRealY);
             if (handled) {
                 if (event.type === "mouseup" || event.type === "mouseout") {
@@ -12213,8 +12193,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
         // In seg+SAM mode, allow bbox flows (preview, pan) to run; in plain seg mode we already returned above.
         if (datasetType === "seg" && samMode) {
-            moveBbox();
-            resizeBbox();
+            const polygonSelected = currentBbox && (currentBbox.bbox?.type === "polygon" || (Array.isArray(currentBbox.bbox?.points) && currentBbox.bbox.points.length >= 3));
+            if (!polygonSelected) {
+                moveBbox();
+                resizeBbox();
+            }
             changeCursorByLocation();
             panImage(oldRealX, oldRealY);
             return;
@@ -12355,6 +12338,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (event.which === 1) {
                 const hit = findPolygonAt(mouse.realX, mouse.realY);
                 if (hit) {
+                    currentClass = hit.className || currentClass;
                     currentBbox = {
                         bbox: hit.bbox,
                         index: hit.index,
@@ -12374,6 +12358,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 }
                 if (samActive) {
                     // In SAM mode, do not start polygon drafting; allow bbox drawing.
+                    currentBbox = null;
                     polygonDrag = null;
                     polygonDraft = null;
                     return false;

@@ -9376,7 +9376,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const rawSlider = polygonSimplifyInput ? parseFloat(polygonSimplifyInput.value) : null;
         const sliderValid = Number.isFinite(rawSlider);
         const sliderMin = 0;
-        const sliderMax = 20;
+        const sliderMax = 30;
         const clampedSlider = sliderValid ? Math.max(sliderMin, Math.min(sliderMax, rawSlider)) : null;
         // Invert: slider left (low) => higher detail (lower epsilon), slider right (high) => more simplification.
         const sliderEps = clampedSlider !== null ? sliderMax - clampedSlider : null;
@@ -11816,7 +11816,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     const drawNewBbox = (context) => {
         const isSegDataset = datasetType === "seg";
-        if (isSegDataset && !samMode) {
+        if (isSegDataset && polygonDrawEnabled && !samMode) {
             drawNewPolygon(context);
             return;
         }

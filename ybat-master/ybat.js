@@ -9373,15 +9373,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     function getSimplifyEpsilon() {
-        const raw =
-            (polygonSimplifyInput && polygonSimplifyInput.value) ||
-            sam3TextElements.epsilonInput?.value ||
-            "1.0";
-        const parsed = parseFloat(raw);
-        if (!Number.isFinite(parsed) || parsed < 0) {
-            return 1.0;
-        }
-        return parsed;
+        const rawSlider = polygonSimplifyInput ? parseFloat(polygonSimplifyInput.value) : null;
+        const sliderValid = Number.isFinite(rawSlider);
+        const sliderMin = 0;
+        const sliderMax = 5;
+        const clampedSlider = sliderValid ? Math.max(sliderMin, Math.min(sliderMax, rawSlider)) : null;
+        // Invert: slider left (low) => higher detail (lower epsilon), slider right (high) => more simplification.
+        const sliderEps = clampedSlider !== null ? sliderMax - clampedSlider : null;
+        const rawFallback = sam3TextElements.epsilonInput?.value || "1.0";
+        const parsedFallback = parseFloat(rawFallback);
+        const fallbackEps = Number.isFinite(parsedFallback) && parsedFallback >= 0 ? parsedFallback : 1.0;
+        return sliderEps !== null ? sliderEps : fallbackEps;
     }
 
     function simplifyPolygonPoints(points, { maxPoints = 400 } = {}) {
@@ -9666,7 +9668,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!currentImage) {
             return null;
         }
-        const epsilon = Number.isFinite(simplifyEpsilon) && simplifyEpsilon >= 0 ? simplifyEpsilon : getSimplifyEpsilon();
+        const uiEpsilon = getSimplifyEpsilon();
+        const epsilon = Number.isFinite(uiEpsilon) && uiEpsilon >= 0
+            ? uiEpsilon
+            : (Number.isFinite(simplifyEpsilon) && simplifyEpsilon >= 0 ? simplifyEpsilon : 1.0);
         const maxPts = Number.isFinite(maxPointsPerPolygon) && maxPointsPerPolygon > 3 ? maxPointsPerPolygon : getMaxPolygonPoints();
         const minMaskArea = Number.isFinite(minArea) && minArea >= 0 ? minArea : Math.max(0, getMinMaskArea());
         const polygons = maskPayloadToPolygons(maskPayload, {
@@ -10586,7 +10591,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             polygonSimplifyInput.addEventListener("input", () => {
                 const val = parseFloat(polygonSimplifyInput.value);
                 const msg = Number.isFinite(val)
-                    ? `Polygon detail: ${val.toFixed(1)} (lower = more points)`
+                    ? `Polygon detail: ${val.toFixed(1)} (right = simpler, left = more detail)`
                     : "Polygon detail";
                 setSamStatus(msg, { variant: "info", duration: 1500 });
             });

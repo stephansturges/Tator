@@ -12131,9 +12131,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
         }
         const isSegDataset = datasetType === "seg";
-        if (isSegDataset) {
+        if (isSegDataset && !samMode) {
             const handled = await handlePolygonPointer(event, oldRealX, oldRealY);
-            if (!samMode && handled) {
+            if (handled) {
                 if (event.type === "mouseup" || event.type === "mouseout") {
                     mouse.buttonR = false;
                     mouse.buttonL = false;
@@ -12211,8 +12211,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             mouse.buttonL = false;
         }
 
-        if (datasetType === "seg") {
-            // Already handled above.
+        // In seg+SAM mode, allow bbox flows (preview, pan) to run; in plain seg mode we already returned above.
+        if (datasetType === "seg" && samMode) {
+            moveBbox();
+            resizeBbox();
+            changeCursorByLocation();
+            panImage(oldRealX, oldRealY);
+            return;
+        } else if (datasetType === "seg") {
             return;
         }
         moveBbox();

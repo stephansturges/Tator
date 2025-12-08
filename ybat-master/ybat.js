@@ -9373,7 +9373,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     function getSimplifyEpsilon() {
-        const raw = sam3TextElements.epsilonInput?.value || "1.0";
+        const raw =
+            (polygonSimplifyInput && polygonSimplifyInput.value) ||
+            sam3TextElements.epsilonInput?.value ||
+            "1.0";
         const parsed = parseFloat(raw);
         if (!Number.isFinite(parsed) || parsed < 0) {
             return 1.0;
@@ -9683,7 +9686,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return null;
         }
         scored.sort((a, b) => b.area - a.area);
-        const maxPolygons = 5;
+        const maxPolygons = 1;
         const minAreaThresh = minMaskArea;
         let firstRecord = null;
         if (!bboxes[currentImage.name]) {
@@ -10520,6 +10523,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         multiPointModeCheckbox = document.getElementById("multiPointMode");
         samVariantSelect = document.getElementById("samVariant");
         samPreloadCheckbox = document.getElementById("samPreload");
+        polygonSimplifyInput = document.getElementById("polygonSimplifyEpsilon");
         imagesSelectButton = document.getElementById("imagesSelect");
         classesSelectButton = document.getElementById("classesSelect");
         bboxesSelectButton = document.getElementById("bboxesSelect");
@@ -10576,6 +10580,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 } else {
                     setPolygonDrawEnabled(!polygonDrawEnabled);
                 }
+            });
+        }
+        if (polygonSimplifyInput) {
+            polygonSimplifyInput.addEventListener("input", () => {
+                const val = parseFloat(polygonSimplifyInput.value);
+                const msg = Number.isFinite(val)
+                    ? `Polygon detail: ${val.toFixed(1)} (lower = more points)`
+                    : "Polygon detail";
+                setSamStatus(msg, { variant: "info", duration: 1500 });
             });
         }
 
@@ -11551,6 +11564,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     let bboxes = {};
     let datasetType = "bbox"; // "bbox" or "seg"
     let datasetTypeBadge = null;
+    let polygonSimplifyInput = null;
     let bboxCreationCounter = 0;
     let polygonDraft = null; // {points: [{x,y}], className}
     let polygonDrag = null; // {bbox, className, index, vertexIndex}
@@ -11800,7 +11814,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             drawNewPolygon(context);
             return;
         }
-        if (mouse.buttonL === true && currentClass !== null && currentBbox === null) {
+        const canPreview =
+            mouse.buttonL === true &&
+            currentClass !== null &&
+            (currentBbox === null || datasetType === "seg");
+        if (canPreview) {
             const width = (mouse.realX - mouse.startRealX);
             const height = (mouse.realY - mouse.startRealY);
             const strokeColor = getColorFromClass(currentClass);

@@ -6705,7 +6705,7 @@ def cancel_agent_mining_job(job_id: str):
 @app.get("/agent_mining/results/latest")
 def get_latest_agent_mining_result():
     with AGENT_MINING_JOBS_LOCK:
-        jobs = [j for j in AGENT_MINING_JOBS.values() if j.status == "completed" and j.result]
+        jobs = [j for j in AGENT_MINING_JOBS.values() if j.status in {"running", "completed", "failed", "cancelled"}]
     if not jobs:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_result_not_found")
     jobs.sort(key=lambda j: j.updated_at, reverse=True)

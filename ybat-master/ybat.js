@@ -11351,7 +11351,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!silent) setAgentStatus("Fetching latest result…", "info");
         if (!silent && agentElements.refreshButton) agentElements.refreshButton.disabled = true;
         try {
-            const resp = await fetch(`${API_ROOT}/agent_mining/results/latest`);
+            const jobId = agentState.lastJob?.job_id;
+            const url = jobId ? `${API_ROOT}/agent_mining/jobs/${jobId}` : `${API_ROOT}/agent_mining/results/latest`;
+            const resp = await fetch(url);
             if (!resp.ok) throw new Error(await resp.text());
             const job = await resp.json();
             agentState.lastJob = job;

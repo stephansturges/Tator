@@ -225,10 +225,15 @@ training.txr
 logs/
 lightning_logs/
 *.log
+PCS.txt
+crashlog.txt
+fuzz_long.log
 check_cuda.sh
 sam3integration.txt
 sam3/
 sam3_lite/
+/.vscode/
+/.idea/
 
 # Front-end scratch artifacts
 ybat-master/ybat_*.js

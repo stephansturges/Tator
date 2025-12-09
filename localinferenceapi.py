@@ -6642,11 +6642,27 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             selected_cats[-1]["recipe"] = recipe
             selected_cats[-1]["coverage_by_image"] = coverage_by_image
             job.progress = 0.35 + 0.6 * ((idx + 1) / max(1, len(categories)))
+            summary = (recipe or {}).get("summary") or {}
+            covered = summary.get("covered")
+            total_gt = summary.get("total_gt")
+            coverage_rate = summary.get("coverage_rate")
+            fps = summary.get("fps")
+            cov_pct_str = ""
+            if coverage_rate is not None:
+                try:
+                    cov_pct_str = f"{coverage_rate * 100:.1f}%"
+                except Exception:
+                    cov_pct_str = ""
             job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} complete ({len(eval_candidates)} candidates)"
             job.logs.append(
                 {
                     "ts": time.time(),
-                    "msg": f"Class {cat_name} complete with {len(eval_candidates)} candidates; recipe steps: {len(recipe.get('steps', [])) if recipe else 0}; text_prompts={len(text_prompts or [])} exemplars={len(exemplars or [])}",
+                    "msg": (
+                        f"Class {cat_name} complete with {len(eval_candidates)} candidates; "
+                        f"recipe steps: {len(recipe.get('steps', [])) if recipe else 0}; "
+                        f"text_prompts={len(text_prompts or [])} exemplars={len(exemplars or [])}; "
+                        f"coverage={covered}/{total_gt} ({cov_pct_str}) fps={fps}"
+                    ),
                 }
             )
             if len(job.logs) > MAX_JOB_LOGS:
@@ -6671,6 +6687,23 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             "classes": selected_cats,
             "note": "Agent mining runner initialized with splits, exemplars, and baseline candidate evals.",
         }
+        try:
+            coverages = []
+            for cls in selected_cats:
+                summary = (cls.get("recipe") or {}).get("summary") or {}
+                rate = summary.get("coverage_rate")
+                if rate is not None:
+                    coverages.append(rate)
+            if coverages:
+                avg_cov = sum(coverages) / len(coverages)
+                job.logs.append(
+                    {
+                        "ts": time.time(),
+                        "msg": f"Job summary: avg coverage {avg_cov * 100:.1f}% across {len(coverages)} classes",
+                    }
+                )
+        except Exception:
+            pass
         job.status = "completed"
         job.message = "Split and exemplars ready"
         job.progress = 1.0

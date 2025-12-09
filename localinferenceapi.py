@@ -1718,9 +1718,15 @@ def _run_sam3_visual_inference(
     masks_arr: Optional[np.ndarray] = None
     mask_logits = None
     if isinstance(output, Mapping):
-        mask_logits = output.get("masks_logits") or output.get("masks")
+        if "masks_logits" in output and output.get("masks_logits") is not None:
+            mask_logits = output.get("masks_logits")
+        elif "masks" in output and output.get("masks") is not None:
+            mask_logits = output.get("masks")
     if mask_logits is None and isinstance(state, Mapping):
-        mask_logits = state.get("masks_logits") or state.get("masks")
+        if "masks_logits" in state and state.get("masks_logits") is not None:
+            mask_logits = state.get("masks_logits")
+        elif "masks" in state and state.get("masks") is not None:
+            mask_logits = state.get("masks")
     try:
         threshold_val = float(mask_threshold)
     except Exception:

@@ -6379,6 +6379,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             if cat_filter and cat_id not in cat_filter:
                 continue
             cat_name = str(cat.get("name", f"class_{cat_id}"))
+            job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} (prep)"
+            job.logs.append({"ts": time.time(), "msg": f"Preparing class {cat_name} ({idx + 1}/{len(categories)})"})
+            if len(job.logs) > MAX_JOB_LOGS:
+                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
             train_gt = 0
             val_gt = 0
             for img_id, cat_map in gt_by_image_cat.items():
@@ -6431,6 +6435,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 job.updated_at = time.time()
                 return
             # Evaluate text prompts and exemplar prompts on the validation split using cached detections.
+            job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} (eval prompts)"
             gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
             gt_index_val = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in val_id_set}
             per_image_gt_val = {img_id: per_image_gt_all.get(img_id, 0) for img_id in val_ids}
@@ -6561,6 +6566,15 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             selected_cats[-1]["recipe"] = recipe
             selected_cats[-1]["coverage_by_image"] = coverage_by_image
             job.progress = 0.35 + 0.6 * ((idx + 1) / max(1, len(categories)))
+            job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} complete ({len(eval_candidates)} candidates)"
+            job.logs.append(
+                {
+                    "ts": time.time(),
+                    "msg": f"Class {cat_name} complete with {len(eval_candidates)} candidates; recipe steps: {len(recipe.get('steps', [])) if recipe else 0}",
+                }
+            )
+            if len(job.logs) > MAX_JOB_LOGS:
+                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
             job.updated_at = time.time()
 
         job.progress = max(job.progress, 0.9)

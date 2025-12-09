@@ -8000,21 +8000,26 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_visual_requires_sam3")
     pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
     effective_limit = payload.max_results if payload.max_results is not None else 20
-    detections, masks_arr = _run_sam3_visual_inference(
-        pil_img,
-        (
-            float(payload.bbox_left),
-            float(payload.bbox_top),
-            float(payload.bbox_width),
-            float(payload.bbox_height),
-        ),
-        payload.threshold,
-        payload.mask_threshold,
-        effective_limit,
-        return_masks=True,
-        min_size=payload.min_size,
-        simplify_epsilon=payload.simplify_epsilon,
-    )
+    try:
+        detections, masks_arr = _run_sam3_visual_inference(
+            pil_img,
+            (
+                float(payload.bbox_left),
+                float(payload.bbox_top),
+                float(payload.bbox_width),
+                float(payload.bbox_height),
+            ),
+            payload.threshold,
+            payload.mask_threshold,
+            effective_limit,
+            return_masks=True,
+            min_size=payload.min_size,
+            simplify_epsilon=payload.simplify_epsilon,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_failed:{exc}") from exc
     warnings: List[str] = []
     if not detections:
         warnings.append("no_results")

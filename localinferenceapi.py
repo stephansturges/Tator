@@ -6338,6 +6338,12 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 "msg": f"Prepared split with {len(split.get('train') or [])} train / {len(split.get('val') or [])} val images",
             }
         )
+        job.logs.append(
+            {
+                "ts": time.time(),
+                "msg": f"Config: thresholds={payload.thresholds} mask_thr={payload.mask_threshold} min_size={payload.min_size} simplify={payload.simplify_epsilon} max_results={payload.max_results} clip_guard={payload.use_clip_fp_guard}",
+            }
+        )
         if len(job.logs) > MAX_JOB_LOGS:
             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
         if job.cancel_event.is_set():
@@ -6418,6 +6424,12 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     exemplars,
                     images,
                     max_regions=max(16, payload.exemplar_per_class * 2),
+                )
+                job.logs.append(
+                    {
+                        "ts": time.time(),
+                        "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
+                    }
                 )
             selected_cats.append(
                 {
@@ -6570,7 +6582,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             job.logs.append(
                 {
                     "ts": time.time(),
-                    "msg": f"Class {cat_name} complete with {len(eval_candidates)} candidates; recipe steps: {len(recipe.get('steps', [])) if recipe else 0}",
+                    "msg": f"Class {cat_name} complete with {len(eval_candidates)} candidates; recipe steps: {len(recipe.get('steps', [])) if recipe else 0}; text_prompts={len(text_prompts or [])} exemplars={len(exemplars or [])}",
                 }
             )
             if len(job.logs) > MAX_JOB_LOGS:

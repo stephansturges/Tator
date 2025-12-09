@@ -1676,6 +1676,88 @@ def _run_sam3_text_inference(
     return (preds, aligned_masks) if return_masks else preds
 
 
+def _run_sam3_visual_inference(
+    pil_img: Image.Image,
+    bbox_xywh: Tuple[float, float, float, float],
+    threshold: float,
+    mask_threshold: float,
+    limit: Optional[int],
+    *,
+    return_masks: bool = False,
+    min_size: Optional[float] = None,
+    simplify_epsilon: Optional[float] = None,
+) -> List[QwenDetection] | Tuple[List[QwenDetection], Optional[List[np.ndarray]]]:
+    """
+    Run SAM3 with a single positive visual (box) prompt. By default returns detections list;
+    callers that need masks should inspect the second element when `return_masks=True`.
+    """
+    _, processor, _ = _ensure_sam3_text_runtime()
+    try:
+        processor.set_confidence_threshold(float(threshold))
+    except Exception:
+        pass
+    normalized_limit: Optional[int]
+    if limit is None:
+        normalized_limit = None
+    else:
+        try:
+            normalized_limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            normalized_limit = None
+    state = processor.set_image(pil_img)
+    img_w, img_h = float(pil_img.width), float(pil_img.height)
+    x, y, w, h = bbox_xywh
+    cx = (x + w / 2.0) / img_w
+    cy = (y + h / 2.0) / img_h
+    w_norm = w / img_w
+    h_norm = h / img_h
+    try:
+        output = processor.add_geometric_prompt([cx, cy, w_norm, h_norm], True, state=state)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_prompt_failed:{exc}") from exc
+    masks_arr: Optional[np.ndarray] = None
+    mask_logits = None
+    if isinstance(output, Mapping):
+        mask_logits = output.get("masks_logits") or output.get("masks")
+    if mask_logits is None and isinstance(state, Mapping):
+        mask_logits = state.get("masks_logits") or state.get("masks")
+    try:
+        threshold_val = float(mask_threshold)
+    except Exception:
+        threshold_val = 0.5
+    if isinstance(mask_logits, torch.Tensor):
+        try:
+            masks_arr = (mask_logits > threshold_val).cpu().numpy()
+        except Exception:
+            try:
+                masks_arr = mask_logits.cpu().numpy()
+            except Exception:
+                masks_arr = None
+    elif mask_logits is not None:
+        try:
+            masks_arr = np.asarray(mask_logits) > threshold_val
+        except Exception:
+            masks_arr = None
+    collected_masks: Optional[List[np.ndarray]] = [] if return_masks else None
+    detections = _sam3_text_detections(
+        pil_img,
+        output if isinstance(output, Mapping) else {},
+        "visual",
+        normalized_limit,
+        min_score=float(threshold),
+        masks_arr=masks_arr,
+        min_size=min_size,
+        simplify_epsilon=simplify_epsilon,
+        collected_masks=collected_masks,
+    )
+    aligned_masks: Optional[List[np.ndarray]]
+    if collected_masks is None:
+        aligned_masks = None
+    else:
+        aligned_masks = collected_masks
+    return (detections, aligned_masks) if return_masks else detections
+
+
 def _ensure_qwen_ready():
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
     if QWEN_IMPORT_ERROR is not None or Qwen2_5_VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
@@ -2073,6 +2155,49 @@ class Sam3TextPrompt(BaseModel):
             except (TypeError, ValueError):
                 min_size_int = 0
             values["min_size"] = min_size_int
+        eps = values.get("simplify_epsilon")
+        if eps is not None:
+            try:
+                eps_val = float(eps)
+            except (TypeError, ValueError):
+                eps_val = None
+            values["simplify_epsilon"] = eps_val if eps_val is None or eps_val >= 0 else 0.0
+        return values
+
+
+class Sam3VisualPrompt(BaseModel):
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
+    bbox_left: float
+    bbox_top: float
+    bbox_width: float
+    bbox_height: float
+    threshold: float = 0.5
+    mask_threshold: float = 0.5
+    simplify_epsilon: Optional[float] = None
+    sam_variant: Optional[str] = None
+    image_name: Optional[str] = None
+    max_results: Optional[int] = None
+    min_size: Optional[int] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_visual_payload(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_payload_missing")
+        for key in ("bbox_left", "bbox_top", "bbox_width", "bbox_height"):
+            raw = values.get(key)
+            try:
+                values[key] = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"invalid_{key}")
+        if values["bbox_width"] <= 0 or values["bbox_height"] <= 0:
+            raise ValueError("invalid_bbox_dims")
+        min_size = values.get("min_size")
+        if min_size is not None:
+            try:
+                values["min_size"] = max(0, int(min_size))
+            except (TypeError, ValueError):
+                values["min_size"] = 0
         eps = values.get("simplify_epsilon")
         if eps is not None:
             try:
@@ -7854,6 +7979,52 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
             )
         )
     return Sam3TextPromptAutoResponse(detections=responses, warnings=warnings, image_token=token)
+
+
+@app.post("/sam3/visual_prompt", response_model=Sam3TextPromptResponse)
+def sam3_visual_prompt(payload: Sam3VisualPrompt):
+    variant = _default_variant(payload.sam_variant or "sam3")
+    if variant != "sam3":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_visual_requires_sam3")
+    pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
+    effective_limit = payload.max_results if payload.max_results is not None else 20
+    detections, masks_arr = _run_sam3_visual_inference(
+        pil_img,
+        (
+            float(payload.bbox_left),
+            float(payload.bbox_top),
+            float(payload.bbox_width),
+            float(payload.bbox_height),
+        ),
+        payload.threshold,
+        payload.mask_threshold,
+        effective_limit,
+        return_masks=True,
+        min_size=payload.min_size,
+        simplify_epsilon=payload.simplify_epsilon,
+    )
+    warnings: List[str] = []
+    if not detections:
+        warnings.append("no_results")
+    encoded_masks = None
+    if detections:
+        encoded_masks = []
+        for idx, det in enumerate(detections):
+            payload_mask = det.mask if isinstance(det, QwenDetection) else None
+            if payload_mask is None and masks_arr is not None and idx < len(masks_arr) and masks_arr[idx] is not None:
+                try:
+                    payload_mask = encode_binary_mask(masks_arr[idx])
+                except Exception:
+                    payload_mask = None
+            encoded_masks.append(payload_mask)
+        if all(m is None for m in encoded_masks):
+            encoded_masks = None
+    return Sam3TextPromptResponse(
+        detections=detections,
+        warnings=warnings,
+        image_token=token,
+        masks=encoded_masks,
+    )
 
 
 @app.post("/sam_point", response_model=YoloBboxOutput)

@@ -9215,6 +9215,33 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         let simplifyEps = parseFloat(sam3TextElements.epsilonInput?.value || "1.0");
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) simplifyEps = 1.0;
 
+        function yoloBoxToPixelRect(yoloBox) {
+            if (!currentImage || !Array.isArray(yoloBox) || yoloBox.length < 4) return null;
+            const [cx, cy, wNorm, hNorm] = yoloBox.map(Number);
+            const wPx = wNorm * currentImage.width;
+            const hPx = hNorm * currentImage.height;
+            return {
+                x: cx * currentImage.width - wPx / 2,
+                y: cy * currentImage.height - hPx / 2,
+                width: wPx,
+                height: hPx,
+            };
+        }
+
+        function rectIoU(a, b) {
+            const ax2 = a.x + a.width;
+            const ay2 = a.y + a.height;
+            const bx2 = b.x + b.width;
+            const by2 = b.y + b.height;
+            const ix = Math.max(0, Math.min(ax2, bx2) - Math.max(a.x, b.x));
+            const iy = Math.max(0, Math.min(ay2, by2) - Math.max(a.y, b.y));
+            const inter = ix * iy;
+            if (inter <= 0) return 0;
+            const union = a.width * a.height + b.width * b.height - inter;
+            if (union <= 0) return 0;
+            return inter / union;
+        }
+
         sam3SimilarityRequestActive = true;
         updateSam3TextButtons();
         setSam3TextStatus("Running SAM3 similarity prompt…", "info");
@@ -9234,7 +9261,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (currentImage && result?.image_token) {
                 rememberSamToken(currentImage.name, samVariant, result.image_token);
             }
-            const detections = Array.isArray(result?.detections) ? result.detections : [];
+            let detections = Array.isArray(result?.detections) ? result.detections.slice() : [];
+            if (detections.length) {
+                const exemplarRect = { x: left, y: top, width, height };
+                detections = detections.filter((det) => {
+                    if (!det || !det.bbox) return false;
+                    const rect = yoloBoxToPixelRect(det.bbox);
+                    if (!rect) return true;
+                    const iou = rectIoU(rect, exemplarRect);
+                    return iou < 0.98;
+                });
+            }
             const added = applySegAwareDetections(detections, targetClass, "SAM3 similarity");
             if (added) {
                 const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
@@ -12028,6 +12065,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 const fillColor = withAlpha(strokeColor, 0.2);
                 const isCurrent = currentBbox && currentBbox.bbox === bbox;
                 const lineWidth = isCurrent ? Math.max(1.5, 1.5 * scale) : 1;
+                const pulseNow = performance.now();
+                const pulseAlpha = 0.35 + 0.25 * Math.sin(pulseNow / 200);
+                const highlightColor = `rgba(255, 213, 79, ${Math.min(0.9, 0.6 + pulseAlpha)})`;
+                const highlightDash = [6 * scale, 4 * scale];
 
                 context.font = context.font.replace(/\d+px/, `${Math.max(8, zoom(fontBaseSize))}px`);
                 context.fillStyle = strokeColor;
@@ -12063,6 +12104,24 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                                 context.stroke();
                             }
                         });
+                        context.save();
+                        context.strokeStyle = highlightColor;
+                        context.lineWidth = Math.max(2.5, 2.5 * scale);
+                        context.setLineDash(highlightDash);
+                        context.lineDashOffset = (pulseNow / 20) % (10 * scale);
+                        context.beginPath();
+                        bbox.points.forEach((pt, idx) => {
+                            const x = zoomX(pt.x);
+                            const y = zoomY(pt.y);
+                            if (idx === 0) {
+                                context.moveTo(x, y);
+                            } else {
+                                context.lineTo(x, y);
+                            }
+                        });
+                        context.closePath();
+                        context.stroke();
+                        context.restore();
                     }
                 } else {
                     context.fillRect(
@@ -12083,6 +12142,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                         if (handlePoint) {
                             drawCornerHandle(context, handlePoint.x, handlePoint.y, strokeColor);
                         }
+                    }
+                    if (isCurrent) {
+                        context.save();
+                        context.strokeStyle = highlightColor;
+                        context.lineWidth = Math.max(2.5, 2.5 * scale);
+                        context.setLineDash(highlightDash);
+                        context.lineDashOffset = (pulseNow / 20) % (10 * scale);
+                        context.strokeRect(
+                            zoomX(bbox.x),
+                            zoomY(bbox.y),
+                            zoom(bbox.width),
+                            zoom(bbox.height)
+                        );
+                        context.restore();
                     }
                     if (bbox.marked === true) {
                         setBboxCoordinates(bbox.x, bbox.y, bbox.width, bbox.height);

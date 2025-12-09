@@ -3926,6 +3926,7 @@ def _collect_agent_mining_detections(
     cached = _load_agent_mining_detections(cache_dir, cache_key)
     if cached is not None:
         return cached
+    start_ts = time.time()
     results: List[Dict[str, Any]] = []
     for img_id in image_ids:
         img_info = images.get(img_id)
@@ -3977,6 +3978,18 @@ def _collect_agent_mining_detections(
             det_dict["image_id"] = img_id
             results.append(det_dict)
     _save_agent_mining_detections(cache_dir, cache_key, results)
+    try:
+        elapsed = time.time() - start_ts
+        logger.info(
+            "Agent mining collected %d detections for prompt=%s visual=%s over %d images in %.2fs",
+            len(results),
+            prompt if prompt else "",
+            bool(visual_ref),
+            len(image_ids),
+            elapsed,
+        )
+    except Exception:
+        pass
     return results
 
 
@@ -6457,158 +6470,164 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             )
             clip_exemplar_warnings: List[str] = []
             exemplar_embeddings: Dict[str, np.ndarray] = {}
-        if payload.cluster_exemplars and exemplars:
-            exemplars = _cluster_agent_mining_exemplars(
-                exemplars,
-                max_items=payload.exemplar_per_class,
-                seed=payload.split_seed + cat_id,
-            )
-        if payload.use_clip_fp_guard and exemplars:
-            exemplar_embeddings, clip_exemplar_warnings = _clip_embed_regions(
-                exemplars,
-                images,
-                max_regions=max(16, payload.exemplar_per_class * 2),
-            )
-            job.logs.append(
-                {
-                    "ts": time.time(),
-                    "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
-                }
-            )
-        text_prompts = (payload.text_prompts_by_class or {}).get(cat_id)
-        if not text_prompts:
-            text_prompts = [cat_name]
-            if payload.auto_mine_prompts and payload.qwen_max_prompts > 0:
-                extra_prompts = _expand_prompts_with_qwen(cat_name, text_prompts, payload.qwen_max_prompts)
-                extra_prompts = _refine_prompts_with_qwen(extra_prompts)
-                merged = []
-                seen_prompts = set()
-                for entry in [*text_prompts, *extra_prompts]:
-                    key = entry.lower().strip()
-                    if key in seen_prompts:
-                        continue
-                    seen_prompts.add(key)
-                    merged.append(entry)
-                text_prompts = merged
+            if payload.cluster_exemplars and exemplars:
+                exemplars = _cluster_agent_mining_exemplars(
+                    exemplars,
+                    max_items=payload.exemplar_per_class,
+                    seed=payload.split_seed + cat_id,
+                )
+            if payload.use_clip_fp_guard and exemplars:
+                exemplar_embeddings, clip_exemplar_warnings = _clip_embed_regions(
+                    exemplars,
+                    images,
+                    max_regions=max(16, payload.exemplar_per_class * 2),
+                )
                 job.logs.append(
                     {
                         "ts": time.time(),
-                        "msg": f"Qwen added {len(extra_prompts)} prompt(s) for {cat_name}: {', '.join(extra_prompts[:5])}",
+                        "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
                     }
                 )
-        else:
-            text_prompts = _refine_prompts_with_qwen(text_prompts)
-        selected_cats.append(
-            {
-                "id": cat_id,
-                "name": cat_name,
-                "train_gt": train_gt,
-                "val_gt": val_gt,
-                "exemplars": exemplars,
-                "clip_warnings": clip_exemplar_warnings,
-            }
-        )
-        if job.cancel_event.is_set():
-            job.status = "cancelled"
-            job.message = "Cancelled"
-            job.updated_at = time.time()
-            return
-        # Evaluate text prompts and exemplar prompts on the validation split using cached detections.
-        job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} (eval prompts)"
-        gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
-        gt_index_val = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in val_id_set}
-        per_image_gt_val = {img_id: per_image_gt_all.get(img_id, 0) for img_id in val_ids}
-        all_gt_keys_val: set[str] = set()
-        for entries in gt_index_val.values():
-            for key, _ in entries:
-                all_gt_keys_val.add(key)
-        eval_candidates: List[Dict[str, Any]] = []
-        for prompt_text in text_prompts:
-            for thr in thresholds:
-                dets = _collect_agent_mining_detections(
-                    images=images,
-                    image_ids=val_ids,
-                    prompt=prompt_text,
-                    visual_ref=None,
-                    threshold=thr,
-                    mask_threshold=payload.mask_threshold,
-                    min_size=payload.min_size,
-                    simplify=payload.simplify_epsilon,
-                    max_results=payload.max_results,
-                    cache_dir=cache_dir,
-                )
-                fp_warnings: List[str] = []
-                if payload.use_clip_fp_guard and exemplar_embeddings:
-                    dets, fp_warnings = _clip_fp_filter_detections(
-                        dets,
-                        exemplar_embeddings=exemplar_embeddings,
-                        images=images,
-                        similarity_floor=payload.similarity_score,
+            text_prompts = (payload.text_prompts_by_class or {}).get(cat_id)
+            if not text_prompts:
+                text_prompts = [cat_name]
+                if payload.auto_mine_prompts and payload.qwen_max_prompts > 0:
+                    extra_prompts = _expand_prompts_with_qwen(cat_name, text_prompts, payload.qwen_max_prompts)
+                    extra_prompts = _refine_prompts_with_qwen(extra_prompts)
+                    merged = []
+                    seen_prompts = set()
+                    for entry in [*text_prompts, *extra_prompts]:
+                        key = entry.lower().strip()
+                        if key in seen_prompts:
+                            continue
+                        seen_prompts.add(key)
+                        merged.append(entry)
+                    text_prompts = merged
+                    job.logs.append(
+                        {
+                            "ts": time.time(),
+                            "msg": f"Qwen added {len(extra_prompts)} prompt(s) for {cat_name}: {', '.join(extra_prompts[:5])}",
+                        }
                     )
-                cache_map = _detections_to_eval_cache(dets, images)
-                metrics = _evaluate_prompt_candidate(
-                    prompt_text,
-                    thr,
-                    cat_id=cat_id,
-                    image_ids=val_ids,
-                    gt_index=gt_index_val,
-                    images=images,
-                    iou_threshold=0.5,
-                    max_dets=payload.max_results,
-                    image_cache={},
-                    cached_detections=cache_map,
-                )
-                metrics["type"] = "text"
-                metrics["detections"] = len(dets)
-                if fp_warnings:
-                    metrics["warnings"] = fp_warnings
-                eval_candidates.append(metrics)
-        for ex_idx, ex in enumerate(exemplars):
-            label = f"exemplar_{ex_idx}"
-            for thr in thresholds:
-                dets = _collect_agent_mining_detections(
-                    images=images,
-                    image_ids=val_ids,
-                    prompt=None,
-                    visual_ref=ex,
-                    threshold=thr,
-                    mask_threshold=payload.mask_threshold,
-                    min_size=payload.min_size,
-                    simplify=payload.simplify_epsilon,
-                    max_results=payload.max_results,
-                    cache_dir=cache_dir,
-                )
-                fp_warnings: List[str] = []
-                if payload.use_clip_fp_guard and exemplar_embeddings:
-                    dets, fp_warnings = _clip_fp_filter_detections(
-                        dets,
-                        exemplar_embeddings=exemplar_embeddings,
-                        images=images,
-                        similarity_floor=payload.similarity_score,
-                    )
-                cache_map = _detections_to_eval_cache(dets, images)
-                metrics = _evaluate_prompt_candidate(
-                    label,
-                    thr,
-                    cat_id=cat_id,
-                    image_ids=val_ids,
-                    gt_index=gt_index_val,
-                    images=images,
-                    iou_threshold=0.5,
-                    max_dets=payload.max_results,
-                    image_cache={},
-                    cached_detections=cache_map,
-                )
-                metrics["type"] = "visual"
-                metrics["exemplar"] = {
-                    "image_id": ex.get("image_id"),
-                    "bbox": ex.get("bbox"),
-                    "file_name": ex.get("file_name"),
+            else:
+                text_prompts = _refine_prompts_with_qwen(text_prompts)
+            job.logs.append(
+                {
+                    "ts": time.time(),
+                    "msg": f"Evaluating {len(text_prompts)} text prompt(s) x {len(thresholds)} thresholds and {len(exemplars)} exemplar(s) for {cat_name}",
                 }
-                metrics["detections"] = len(dets)
-                if fp_warnings:
-                    metrics["warnings"] = fp_warnings
-                eval_candidates.append(metrics)
+            )
+            selected_cats.append(
+                {
+                    "id": cat_id,
+                    "name": cat_name,
+                    "train_gt": train_gt,
+                    "val_gt": val_gt,
+                    "exemplars": exemplars,
+                    "clip_warnings": clip_exemplar_warnings,
+                }
+            )
+            if job.cancel_event.is_set():
+                job.status = "cancelled"
+                job.message = "Cancelled"
+                job.updated_at = time.time()
+                return
+            # Evaluate text prompts and exemplar prompts on the validation split using cached detections.
+            job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} (eval prompts)"
+            gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
+            gt_index_val = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in val_id_set}
+            per_image_gt_val = {img_id: per_image_gt_all.get(img_id, 0) for img_id in val_ids}
+            all_gt_keys_val: set[str] = set()
+            for entries in gt_index_val.values():
+                for key, _ in entries:
+                    all_gt_keys_val.add(key)
+            eval_candidates: List[Dict[str, Any]] = []
+            for prompt_text in text_prompts:
+                for thr in thresholds:
+                    dets = _collect_agent_mining_detections(
+                        images=images,
+                        image_ids=val_ids,
+                        prompt=prompt_text,
+                        visual_ref=None,
+                        threshold=thr,
+                        mask_threshold=payload.mask_threshold,
+                        min_size=payload.min_size,
+                        simplify=payload.simplify_epsilon,
+                        max_results=payload.max_results,
+                        cache_dir=cache_dir,
+                    )
+                    fp_warnings: List[str] = []
+                    if payload.use_clip_fp_guard and exemplar_embeddings:
+                        dets, fp_warnings = _clip_fp_filter_detections(
+                            dets,
+                            exemplar_embeddings=exemplar_embeddings,
+                            images=images,
+                            similarity_floor=payload.similarity_score,
+                        )
+                    cache_map = _detections_to_eval_cache(dets, images)
+                    metrics = _evaluate_prompt_candidate(
+                        prompt_text,
+                        thr,
+                        cat_id=cat_id,
+                        image_ids=val_ids,
+                        gt_index=gt_index_val,
+                        images=images,
+                        iou_threshold=0.5,
+                        max_dets=payload.max_results,
+                        image_cache={},
+                        cached_detections=cache_map,
+                    )
+                    metrics["type"] = "text"
+                    metrics["detections"] = len(dets)
+                    if fp_warnings:
+                        metrics["warnings"] = fp_warnings
+                    eval_candidates.append(metrics)
+            for ex_idx, ex in enumerate(exemplars):
+                label = f"exemplar_{ex_idx}"
+                for thr in thresholds:
+                    dets = _collect_agent_mining_detections(
+                        images=images,
+                        image_ids=val_ids,
+                        prompt=None,
+                        visual_ref=ex,
+                        threshold=thr,
+                        mask_threshold=payload.mask_threshold,
+                        min_size=payload.min_size,
+                        simplify=payload.simplify_epsilon,
+                        max_results=payload.max_results,
+                        cache_dir=cache_dir,
+                    )
+                    fp_warnings: List[str] = []
+                    if payload.use_clip_fp_guard and exemplar_embeddings:
+                        dets, fp_warnings = _clip_fp_filter_detections(
+                            dets,
+                            exemplar_embeddings=exemplar_embeddings,
+                            images=images,
+                            similarity_floor=payload.similarity_score,
+                        )
+                    cache_map = _detections_to_eval_cache(dets, images)
+                    metrics = _evaluate_prompt_candidate(
+                        label,
+                        thr,
+                        cat_id=cat_id,
+                        image_ids=val_ids,
+                        gt_index=gt_index_val,
+                        images=images,
+                        iou_threshold=0.5,
+                        max_dets=payload.max_results,
+                        image_cache={},
+                        cached_detections=cache_map,
+                    )
+                    metrics["type"] = "visual"
+                    metrics["exemplar"] = {
+                        "image_id": ex.get("image_id"),
+                        "bbox": ex.get("bbox"),
+                        "file_name": ex.get("file_name"),
+                    }
+                    metrics["detections"] = len(dets)
+                    if fp_warnings:
+                        metrics["warnings"] = fp_warnings
+                    eval_candidates.append(metrics)
             recipe: Optional[Dict[str, Any]] = None
             coverage_by_image: Optional[List[Dict[str, Any]]] = None
             if eval_candidates and all_gt_keys_val:

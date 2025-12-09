@@ -94,11 +94,6 @@
                                     Polygon draw: On (P)
                                 </button>
                             </div>
-                            <div class="training-field">
-                                <label for="polygonSimplifyEpsilon">Polygon detail</label>
-                                <input type="range" id="polygonSimplifyEpsilon" name="polygonSimplifyEpsilon" min="0" max="30" step="0.5" value="15" />
-                                <div class="training-help">Left = simpler polygons, right = more detail (more points).</div>
-                            </div>
                             <div class="training-help">Seg mode only: P toggles polygon drawing. When off, clicks select/move polygons without adding new ones.</div>
                             <label for="classes">Classes:</label>
                             <input type="file" id="classes" name="classes" accept="text/plain" class="file-input-hidden" />
@@ -106,29 +101,39 @@
                             <label for="classList"></label>
                             <select name="classList" id="classList" size="10" multiple></select>
                             <div id="bboxInformation"></div>
-                            <!-- Toggle for automatic class assignment -->
-                            <label for="autoMode">Auto Class:</label>
-                            <input type="checkbox" id="autoMode" name="autoMode" />
-                            <br />
-                            <!-- Add a small toggle for "SAM Mode" -->
-                            <label for="samMode">SAM Mode:</label>
-                            <input type="checkbox" id="samMode" name="samMode" />
-                            <br />
-                            <label for="samVariant">SAM Model:</label>
-                            <select id="samVariant" name="samVariant">
-                                <option value="sam1" selected>SAM 1</option>
-                                <option value="sam3">SAM 3</option>
-                            </select>
-                            <br />
-                            <label for="samPreload">Preload SAM:</label>
-                            <input type="checkbox" id="samPreload" name="samPreload" />
-                            <br />
-                            <label for="pointMode">Point Mode:</label>
-                            <input type="checkbox" id="pointMode" name="pointMode" />
-                            <br />
-                            <label for="multiPointMode">Multi-Point Mode:</label>
-                            <input type="checkbox" id="multiPointMode" name="multiPointMode" />
-                            <br />
+                            <hr />
+                            <div class="training-field">
+                                <label for="autoMode">Auto Class</label>
+                                <input type="checkbox" id="autoMode" name="autoMode" />
+                            </div>
+                            <div class="training-field">
+                                <label for="samMode">SAM Mode</label>
+                                <input type="checkbox" id="samMode" name="samMode" />
+                            </div>
+                            <div class="training-field">
+                                <label for="samVariant">SAM Model</label>
+                                <select id="samVariant" name="samVariant">
+                                    <option value="sam1" selected>SAM 1</option>
+                                    <option value="sam3">SAM 3</option>
+                                </select>
+                            </div>
+                            <div class="training-field">
+                                <label for="samPreload">Preload SAM</label>
+                                <input type="checkbox" id="samPreload" name="samPreload" />
+                            </div>
+                            <div class="training-field">
+                                <label for="pointMode">Point Mode</label>
+                                <input type="checkbox" id="pointMode" name="pointMode" />
+                            </div>
+                            <div class="training-field">
+                                <label for="multiPointMode">Multi-Point Mode</label>
+                                <input type="checkbox" id="multiPointMode" name="multiPointMode" />
+                            </div>
+                            <div class="training-field" id="polygonSimplifyField">
+                                <label for="polygonSimplifyEpsilon">Polygon detail</label>
+                                <input type="range" id="polygonSimplifyEpsilon" name="polygonSimplifyEpsilon" min="0" max="40" step="0.5" value="20" />
+                                <div class="training-help">Left = simpler polygons, right = more detail (more points).</div>
+                            </div>
                             <div id="samStatus" class="sam-status" role="status" aria-live="polite"></div>
                             <div id="samStatusProgress" class="sam-status-progress" aria-hidden="true">
                                 <div id="samStatusProgressFill"></div>

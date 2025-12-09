@@ -9376,7 +9376,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const rawSlider = polygonSimplifyInput ? parseFloat(polygonSimplifyInput.value) : null;
         const sliderValid = Number.isFinite(rawSlider);
         const sliderMin = 0;
-        const sliderMax = 30;
+        const sliderMax = 40;
         const clampedSlider = sliderValid ? Math.max(sliderMin, Math.min(sliderMax, rawSlider)) : null;
         // Invert: slider left (low) => higher detail (lower epsilon), slider right (high) => more simplification.
         const sliderEps = clampedSlider !== null ? sliderMax - clampedSlider : null;
@@ -10518,6 +10518,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 multiPointModeCheckbox.disabled = false;
             }
         }
+        refreshPolygonDetailVisibility();
         console.log("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
     }
 
@@ -10529,6 +10530,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         samVariantSelect = document.getElementById("samVariant");
         samPreloadCheckbox = document.getElementById("samPreload");
         polygonSimplifyInput = document.getElementById("polygonSimplifyEpsilon");
+        polygonSimplifyField = document.getElementById("polygonSimplifyField");
         imagesSelectButton = document.getElementById("imagesSelect");
         classesSelectButton = document.getElementById("classesSelect");
         bboxesSelectButton = document.getElementById("bboxesSelect");
@@ -10596,6 +10598,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 setSamStatus(msg, { variant: "info", duration: 1500 });
             });
         }
+        refreshPolygonDetailVisibility();
 
         if (samPreloadCheckbox) {
             samPreloadCheckbox.addEventListener("change", () => {
@@ -11570,6 +11573,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     let datasetType = "bbox"; // "bbox" or "seg"
     let datasetTypeBadge = null;
     let polygonSimplifyInput = null;
+    let polygonSimplifyField = null;
     let bboxCreationCounter = 0;
     let polygonDraft = null; // {points: [{x,y}], className}
     let polygonDrag = null; // {bbox, className, index, vertexIndex}
@@ -11608,6 +11612,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     };
 
+    function refreshPolygonDetailVisibility() {
+        if (!polygonSimplifyField) return;
+        const show = datasetType === "seg" && samMode;
+        polygonSimplifyField.style.display = show ? "" : "none";
+    }
+
     const setDatasetType = (nextType) => {
         const normalized = nextType === "seg" ? "seg" : "bbox";
         datasetType = normalized;
@@ -11631,6 +11641,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     ? "Polygon mode: click to add points, double-click to close, drag vertices to edit."
                     : "BBox mode";
         }
+        refreshPolygonDetailVisibility();
     };
 
     function applyDatasetModeConstraints() {

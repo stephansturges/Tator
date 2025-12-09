@@ -1181,6 +1181,8 @@ const sam3TrainState = {
         datasetsById: {},
         loadedRecipe: null,
         recipeClassOverride: null,
+        pollTimer: null,
+        pollInFlight: false,
     };
 
     let promptHelperInitialized = false;
@@ -11306,6 +11308,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         setAgentStatus("Starting agent mining…", "info");
         if (agentElements.runButton) agentElements.runButton.disabled = true;
         updateAgentProgress({ progress: 0 });
+        stopAgentPoll();
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/jobs`, {
                 method: "POST",
@@ -11317,6 +11320,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             agentState.lastJob = job;
             setAgentStatus(`Job ${job.job_id} started`, "success");
             updateAgentProgress(job);
+            scheduleAgentPoll();
         } catch (err) {
             console.error("Agent mining start failed", err);
             setAgentStatus(`Start failed: ${err.message || err}`, "error");
@@ -11325,32 +11329,51 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function refreshAgentLatest() {
-        setAgentStatus("Fetching latest result…", "info");
-        if (agentElements.refreshButton) agentElements.refreshButton.disabled = true;
+    function stopAgentPoll() {
+        if (agentState.pollTimer) {
+            clearTimeout(agentState.pollTimer);
+            agentState.pollTimer = null;
+        }
+        agentState.pollInFlight = false;
+    }
+
+    function scheduleAgentPoll() {
+        stopAgentPoll();
+        agentState.pollTimer = setTimeout(() => {
+            refreshAgentLatest({ silent: true }).catch((err) => console.error("Agent mining refresh failed", err));
+        }, 2000);
+    }
+
+    async function refreshAgentLatest(options = {}) {
+        const { silent = false } = options;
+        if (agentState.pollInFlight) return;
+        agentState.pollInFlight = true;
+        if (!silent) setAgentStatus("Fetching latest result…", "info");
+        if (!silent && agentElements.refreshButton) agentElements.refreshButton.disabled = true;
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/results/latest`);
             if (!resp.ok) throw new Error(await resp.text());
             const job = await resp.json();
             agentState.lastJob = job;
-            setAgentStatus(`Latest job: ${job.status}`, "success");
+            if (!silent) setAgentStatus(`Latest job: ${job.status}`, "success");
             updateAgentProgress(job);
             renderAgentResults(job.result);
             renderAgentLogs(job);
-            // Auto-refresh if still running
             if (job.status === "running") {
-                setTimeout(() => {
-                    refreshAgentLatest().catch((err) => console.error("Agent mining refresh failed", err));
-                }, 2000);
+                scheduleAgentPoll();
+            } else {
+                stopAgentPoll();
             }
         } catch (err) {
             console.error("Agent mining latest failed", err);
             setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
             setAgentStatus(`Fetch failed: ${err.message || err}`, "error");
+            stopAgentPoll();
         } finally {
-        if (agentElements.refreshButton) agentElements.refreshButton.disabled = false;
+            agentState.pollInFlight = false;
+            if (!silent && agentElements.refreshButton) agentElements.refreshButton.disabled = false;
+        }
     }
-}
 
     async function cancelAgentJob() {
         const jobId = agentState.lastJob?.job_id;
@@ -11367,6 +11390,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setAgentStatus(`Job ${jobId} cancelled`, "success");
             updateAgentProgress(job);
             renderAgentLogs(job);
+            stopAgentPoll();
         } catch (err) {
             console.error("Agent cancel failed", err);
             setAgentStatus(`Cancel failed: ${err.message || err}`, "error");
@@ -11594,6 +11618,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.progressFill = document.getElementById("agentProgressFill");
         if (agentElements.logs) agentElements.logs.innerHTML = "";
         if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
+        stopAgentPoll();
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
         }

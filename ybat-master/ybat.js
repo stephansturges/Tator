@@ -805,8 +805,12 @@
         maxResultsInput: null,
         runButton: null,
         autoButton: null,
+        similarityButton: null,
         status: null,
         classSelect: null,
+        minSizeInput: null,
+        maxPointsInput: null,
+        epsilonInput: null,
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -837,6 +841,7 @@
     let qwenAvailable = false;
     let qwenRequestActive = false;
     let sam3TextRequestActive = false;
+    let sam3SimilarityRequestActive = false;
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
     const qwenModelState = {
@@ -8482,6 +8487,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
+        sam3TextElements.similarityButton = document.getElementById("sam3SimilarityButton");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
         sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
         sam3RecipeElements.applyButton = document.getElementById("sam3RecipeApplyButton");
@@ -8495,6 +8501,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
+        }
+        if (sam3TextElements.similarityButton) {
+            sam3TextElements.similarityButton.addEventListener("click", handleSam3SimilarityPrompt);
         }
         if (sam3RecipeElements.fileInput) {
             sam3RecipeElements.fileInput.addEventListener("change", handleSam3RecipeFile);
@@ -8662,14 +8671,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     function updateSam3TextButtons() {
-        const busy = sam3TextRequestActive;
+        const busy = sam3TextRequestActive || sam3SimilarityRequestActive;
         setButtonDisabled(sam3TextElements.runButton, busy);
         setButtonDisabled(sam3TextElements.autoButton, busy);
+        setButtonDisabled(sam3TextElements.similarityButton, busy);
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.textContent = busy ? "Running…" : "Run SAM3";
         }
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.textContent = busy ? "Running…" : "Run SAM3 + Auto Class";
+        }
+        if (sam3TextElements.similarityButton) {
+            sam3TextElements.similarityButton.textContent = busy ? "Running…" : "SAM3 similarity prompt (use selected box)";
         }
         if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
             setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
@@ -9162,6 +9175,86 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
+    async function handleSam3SimilarityPrompt() {
+        if (sam3SimilarityRequestActive || sam3TextRequestActive) {
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSam3TextStatus("Load an image and select a bbox to use as the exemplar.", "warn");
+            return;
+        }
+        const targetClass = getSam3TargetClass();
+        if (!targetClass) {
+            setSam3TextStatus("Pick a class to assign detections to before running similarity.", "warn");
+            return;
+        }
+        const exemplar = currentBbox && currentBbox.bbox ? currentBbox.bbox : null;
+        if (!exemplar) {
+            setSam3TextStatus("Select or draw a bbox to use as the similarity prompt.", "warn");
+            return;
+        }
+        const width = Math.abs(exemplar.width);
+        const height = Math.abs(exemplar.height);
+        if (width < minBBoxWidth || height < minBBoxHeight) {
+            setSam3TextStatus("Exemplar bbox is too small to use for similarity.", "warn");
+            return;
+        }
+        const left = Math.min(exemplar.x, exemplar.x + exemplar.width);
+        const top = Math.min(exemplar.y, exemplar.y + exemplar.height);
+        let threshold = parseFloat(sam3TextElements.thresholdInput?.value || "0.5");
+        if (Number.isNaN(threshold)) threshold = 0.5;
+        threshold = Math.min(Math.max(threshold, 0), 1);
+        let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
+        if (Number.isNaN(maskThreshold)) maskThreshold = 0.5;
+        maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
+        let minSize = parseInt(sam3TextElements.minSizeInput?.value || "0", 10);
+        if (Number.isNaN(minSize) || minSize < 0) minSize = 0;
+        let maxResults = parseInt(sam3TextElements.maxResultsInput?.value || "20", 10);
+        if (Number.isNaN(maxResults)) maxResults = 20;
+        maxResults = Math.min(Math.max(maxResults, 1), 100);
+        let simplifyEps = parseFloat(sam3TextElements.epsilonInput?.value || "1.0");
+        if (Number.isNaN(simplifyEps) || simplifyEps < 0) simplifyEps = 1.0;
+
+        sam3SimilarityRequestActive = true;
+        updateSam3TextButtons();
+        setSam3TextStatus("Running SAM3 similarity prompt…", "info");
+        setSamStatus("Running SAM3 similarity prompt…", { variant: "info", duration: 0 });
+        try {
+            const result = await invokeSam3VisualPrompt({
+                bbox_left: left,
+                bbox_top: top,
+                bbox_width: width,
+                bbox_height: height,
+                threshold,
+                mask_threshold: maskThreshold,
+                min_size: minSize,
+                simplify_epsilon: simplifyEps,
+                max_results: maxResults,
+            });
+            if (currentImage && result?.image_token) {
+                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            }
+            const detections = Array.isArray(result?.detections) ? result.detections : [];
+            const added = applySegAwareDetections(detections, targetClass, "SAM3 similarity");
+            if (added) {
+                const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+                setSam3TextStatus(`Similarity added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
+            } else {
+                const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
+                    ? "SAM3 found no similar objects."
+                    : "SAM3 returned no usable detections.";
+                setSam3TextStatus(warning, "warn");
+            }
+        } catch (error) {
+            const detail = error?.message || error;
+            setSam3TextStatus(`SAM3 similarity error: ${detail}`, "error");
+            console.error("SAM3 similarity prompt failed", error);
+        } finally {
+            sam3SimilarityRequestActive = false;
+            updateSam3TextButtons();
+        }
+    }
+
     async function invokeQwenInfer(requestFields) {
         if (!currentImage) {
             throw new Error("No active image");
@@ -9222,6 +9315,42 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
             payload.sam_variant = variantForRequest;
             resp = await fetch(`${API_ROOT}${auto ? "/sam3/text_prompt_auto" : "/sam3/text_prompt"}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...requestFields, ...payload }),
+            });
+        }
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    async function invokeSam3VisualPrompt(requestFields) {
+        if (!currentImage) {
+            throw new Error("No active image");
+        }
+        const imageNameForRequest = currentImage.name;
+        const variantForRequest = "sam3";
+        const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
+        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        if (imageNameForRequest && !payload.image_name) {
+            payload.image_name = imageNameForRequest;
+        }
+        payload.sam_variant = variantForRequest;
+        let resp = await fetch(`${API_ROOT}/sam3/visual_prompt`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...requestFields, ...payload }),
+        });
+        if (resp.status === 428) {
+            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            if (imageNameForRequest && !payload.image_name) {
+                payload.image_name = imageNameForRequest;
+            }
+            payload.sam_variant = variantForRequest;
+            resp = await fetch(`${API_ROOT}/sam3/visual_prompt`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ...requestFields, ...payload }),

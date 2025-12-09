@@ -1738,6 +1738,18 @@ def _run_sam3_visual_inference(
             masks_arr = np.asarray(mask_logits) > threshold_val
         except Exception:
             masks_arr = None
+    # Normalize mask shape to (N, H, W) where possible
+    if masks_arr is not None:
+        try:
+            masks_arr = np.asarray(masks_arr)
+            if masks_arr.ndim == 2:
+                masks_arr = masks_arr[None, ...]
+            elif masks_arr.ndim == 4 and masks_arr.shape[1] == 1:
+                masks_arr = masks_arr[:, 0, ...]
+            elif masks_arr.ndim == 4 and masks_arr.shape[-1] == 1:
+                masks_arr = masks_arr[..., 0]
+        except Exception:
+            masks_arr = None
     collected_masks: Optional[List[np.ndarray]] = [] if return_masks else None
     detections = _sam3_text_detections(
         pil_img,

@@ -11329,19 +11329,25 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         setAgentStatus("Fetching latest result…", "info");
         if (agentElements.refreshButton) agentElements.refreshButton.disabled = true;
         try {
-        const resp = await fetch(`${API_ROOT}/agent_mining/results/latest`);
-        if (!resp.ok) throw new Error(await resp.text());
-        const job = await resp.json();
-        agentState.lastJob = job;
-        setAgentStatus(`Latest job: ${job.status}`, "success");
-        updateAgentProgress(job);
-        renderAgentResults(job.result);
-        renderAgentLogs(job);
-    } catch (err) {
-        console.error("Agent mining latest failed", err);
-        setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
-        setAgentStatus(`Fetch failed: ${err.message || err}`, "error");
-    } finally {
+            const resp = await fetch(`${API_ROOT}/agent_mining/results/latest`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const job = await resp.json();
+            agentState.lastJob = job;
+            setAgentStatus(`Latest job: ${job.status}`, "success");
+            updateAgentProgress(job);
+            renderAgentResults(job.result);
+            renderAgentLogs(job);
+            // Auto-refresh if still running
+            if (job.status === "running") {
+                setTimeout(() => {
+                    refreshAgentLatest().catch((err) => console.error("Agent mining refresh failed", err));
+                }, 2000);
+            }
+        } catch (err) {
+            console.error("Agent mining latest failed", err);
+            setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
+            setAgentStatus(`Fetch failed: ${err.message || err}`, "error");
+        } finally {
         if (agentElements.refreshButton) agentElements.refreshButton.disabled = false;
     }
 }
@@ -11586,6 +11592,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.recipeDetails = document.getElementById("agentRecipeDetails");
         agentElements.logs = document.getElementById("agentLogs");
         agentElements.progressFill = document.getElementById("agentProgressFill");
+        if (agentElements.logs) agentElements.logs.innerHTML = "";
+        if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
         }

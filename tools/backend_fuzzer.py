@@ -226,6 +226,30 @@ def run_tests(
                 ),
             )
         )
+        # Visual similarity prompt using a random bbox
+        tests.append(
+            (
+                "sam3/visual_prompt",
+                lambda: _http_post_json(
+                    f"{base_url}/sam3/visual_prompt",
+                    {
+                        "bbox_left": 8,
+                        "bbox_top": 8,
+                        "bbox_width": 32,
+                        "bbox_height": 32,
+                        "threshold": 0.4,
+                        "mask_threshold": 0.5,
+                        "max_results": 5,
+                        "min_size": 0,
+                        "simplify_epsilon": 0.5,
+                        "image_base64": img_b64,
+                        "sam_variant": "sam3",
+                        "image_name": image_name,
+                    },
+                    timeout=request_timeout,
+                ),
+            )
+        )
         if sam3_dataset_id:
             tests.append(
                 (

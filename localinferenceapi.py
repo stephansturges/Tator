@@ -5375,6 +5375,7 @@ class AgentMiningRequest(BaseModel):
     reuse_split: bool = True
     text_prompts_by_class: Optional[Dict[int, List[str]]] = None
     auto_mine_prompts: bool = True
+    qwen_max_prompts: int = Field(0, ge=0, le=20)
     exemplar_per_class: int = Field(10, ge=0, le=500)
     cluster_exemplars: bool = False
     thresholds: List[float] = Field(default_factory=lambda: [0.2, 0.3, 0.4])
@@ -5438,6 +5439,49 @@ def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
         return []
+
+
+def _sanitize_prompts(prompts: List[str]) -> List[str]:
+    cleaned: List[str] = []
+    seen = set()
+    for p in prompts:
+        if not isinstance(p, str):
+            continue
+        val = p.strip()
+        if not val:
+            continue
+        words = val.split()
+        if not (1 <= len(words) <= 4):
+            continue
+        if any(len(w) <= 1 for w in words):
+            continue
+        key = val.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(val)
+    return cleaned
+
+
+def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
+    prompts = _sanitize_prompts(prompts)
+    if not prompts or Qwen2_5_VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
+        return prompts
+    try:
+        prompt_text = (
+            "You are validating candidate noun phrases for open-vocabulary detection. "
+            "Given a list, return only the entries that are valid object-like noun phrases (1-4 words, concrete items). "
+            "Respond as a comma-separated list, no numbering, no extra text.\n"
+            f"Candidates: {', '.join(prompts)}"
+        )
+        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+        if not text:
+            return prompts
+        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]
+        cleaned = _sanitize_prompts(parts)
+        return cleaned or prompts
+    except Exception:
+        return prompts
 
 
 def _normalize_recipe_thresholds(thresholds: Optional[List[float]], fallback: float, limit: int = 20) -> List[float]:
@@ -6413,39 +6457,62 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             )
             clip_exemplar_warnings: List[str] = []
             exemplar_embeddings: Dict[str, np.ndarray] = {}
-            if payload.cluster_exemplars and exemplars:
-                exemplars = _cluster_agent_mining_exemplars(
-                    exemplars,
-                    max_items=payload.exemplar_per_class,
-                    seed=payload.split_seed + cat_id,
-                )
-            if payload.use_clip_fp_guard and exemplars:
-                exemplar_embeddings, clip_exemplar_warnings = _clip_embed_regions(
-                    exemplars,
-                    images,
-                    max_regions=max(16, payload.exemplar_per_class * 2),
-                )
+        if payload.cluster_exemplars and exemplars:
+            exemplars = _cluster_agent_mining_exemplars(
+                exemplars,
+                max_items=payload.exemplar_per_class,
+                seed=payload.split_seed + cat_id,
+            )
+        if payload.use_clip_fp_guard and exemplars:
+            exemplar_embeddings, clip_exemplar_warnings = _clip_embed_regions(
+                exemplars,
+                images,
+                max_regions=max(16, payload.exemplar_per_class * 2),
+            )
+            job.logs.append(
+                {
+                    "ts": time.time(),
+                    "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
+                }
+            )
+        text_prompts = (payload.text_prompts_by_class or {}).get(cat_id)
+        if not text_prompts:
+            text_prompts = [cat_name]
+            if payload.auto_mine_prompts and payload.qwen_max_prompts > 0:
+                extra_prompts = _expand_prompts_with_qwen(cat_name, text_prompts, payload.qwen_max_prompts)
+                extra_prompts = _refine_prompts_with_qwen(extra_prompts)
+                merged = []
+                seen_prompts = set()
+                for entry in [*text_prompts, *extra_prompts]:
+                    key = entry.lower().strip()
+                    if key in seen_prompts:
+                        continue
+                    seen_prompts.add(key)
+                    merged.append(entry)
+                text_prompts = merged
                 job.logs.append(
                     {
                         "ts": time.time(),
-                        "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
+                        "msg": f"Qwen added {len(extra_prompts)} prompt(s) for {cat_name}: {', '.join(extra_prompts[:5])}",
                     }
                 )
-            selected_cats.append(
-                {
-                    "id": cat_id,
-                    "name": cat_name,
-                    "train_gt": train_gt,
-                    "val_gt": val_gt,
-                    "exemplars": exemplars,
-                    "clip_warnings": clip_exemplar_warnings,
-                }
-            )
-            if job.cancel_event.is_set():
-                job.status = "cancelled"
-                job.message = "Cancelled"
-                job.updated_at = time.time()
-                return
+        else:
+            text_prompts = _refine_prompts_with_qwen(text_prompts)
+        selected_cats.append(
+            {
+                "id": cat_id,
+                "name": cat_name,
+                "train_gt": train_gt,
+                "val_gt": val_gt,
+                "exemplars": exemplars,
+                "clip_warnings": clip_exemplar_warnings,
+            }
+        )
+        if job.cancel_event.is_set():
+            job.status = "cancelled"
+            job.message = "Cancelled"
+            job.updated_at = time.time()
+            return
             # Evaluate text prompts and exemplar prompts on the validation split using cached detections.
             job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} (eval prompts)"
             gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
@@ -6456,9 +6523,6 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 for key, _ in entries:
                     all_gt_keys_val.add(key)
             eval_candidates: List[Dict[str, Any]] = []
-            text_prompts = (payload.text_prompts_by_class or {}).get(cat_id)
-            if not text_prompts:
-                text_prompts = [cat_name]
             for prompt_text in text_prompts:
                 for thr in thresholds:
                     dets = _collect_agent_mining_detections(

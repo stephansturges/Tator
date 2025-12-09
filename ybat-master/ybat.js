@@ -11625,6 +11625,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.progressFill = document.getElementById("agentProgressFill");
         if (agentElements.logs) agentElements.logs.innerHTML = "";
         if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
+        if (agentElements.clusterExemplars) agentElements.clusterExemplars.checked = true;
+        if (agentElements.clipGuard) agentElements.clipGuard.checked = true;
         stopAgentPoll();
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());

@@ -11296,6 +11296,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             use_clip_fp_guard: !!(agentElements.clipGuard && agentElements.clipGuard.checked),
             similarity_score: Number.isFinite(similarityFloor) ? Math.max(0, Math.min(1, similarityFloor)) : 0.25,
             classes: classes.length ? classes : null,
+            auto_mine_prompts: (agentElements.qwenMaxPrompts && readNumberInput(agentElements.qwenMaxPrompts, { integer: true }) > 0) || false,
+            qwen_max_prompts: Number.isFinite(readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
+                ? Math.max(0, readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
+                : 0,
             test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
             test_train_limit: readNumberInput(agentElements.trainLimit, { integer: true }) ?? 10,
             test_val_limit: readNumberInput(agentElements.valLimit, { integer: true }) ?? 10,
@@ -11599,6 +11603,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.clipGuard = document.getElementById("agentClipGuard");
         agentElements.similarityScore = document.getElementById("agentSimilarityScore");
         agentElements.classesInput = document.getElementById("agentClasses");
+        agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
         agentElements.testMode = document.getElementById("agentTestMode");
         agentElements.trainLimit = document.getElementById("agentTrainLimit");
         agentElements.valLimit = document.getElementById("agentValLimit");

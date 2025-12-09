@@ -1166,6 +1166,7 @@ const sam3TrainState = {
         recipeImport: null,
         recipeFile: null,
         recipeDetails: null,
+        logs: null,
     };
 
     const promptRecipeState = {
@@ -11082,6 +11083,21 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.results.appendChild(frag);
     }
 
+    function renderAgentLogs(job) {
+        if (!agentElements.logs) return;
+        agentElements.logs.innerHTML = "";
+        if (!job || !Array.isArray(job.logs)) return;
+        const frag = document.createDocumentFragment();
+        job.logs.slice(-200).forEach((entry) => {
+            const div = document.createElement("div");
+            div.className = "training-log-line";
+            const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
+            div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
+            frag.appendChild(div);
+        });
+        agentElements.logs.appendChild(frag);
+    }
+
     function getAgentSelectedDatasetMeta() {
         const datasetId = agentElements.datasetSelect?.value;
         if (!datasetId) return null;
@@ -11309,6 +11325,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             agentState.lastJob = job;
             setAgentStatus(`Latest job: ${job.status}`, "success");
             renderAgentResults(job.result);
+            renderAgentLogs(job);
         } catch (err) {
             console.error("Agent mining latest failed", err);
             setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
@@ -11384,6 +11401,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             agentState.recipeClassOverride = null;
             renderAgentResults(agentState.lastJob.result);
             renderAgentRecipeDetails(data);
+            renderAgentLogs(null);
             setAgentStatus(`Loaded recipe ${data.label || data.id}`, "success");
         } catch (err) {
             console.error("Load recipe failed", err);
@@ -11533,6 +11551,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.recipeImport = document.getElementById("agentRecipeImport");
         agentElements.recipeFile = document.getElementById("agentRecipeFile");
         agentElements.recipeDetails = document.getElementById("agentRecipeDetails");
+        agentElements.logs = document.getElementById("agentLogs");
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
         }

@@ -1167,6 +1167,7 @@ const sam3TrainState = {
         recipeFile: null,
         recipeDetails: null,
         logs: null,
+        progressFill: null,
     };
 
     const promptRecipeState = {
@@ -11098,6 +11099,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.logs.appendChild(frag);
     }
 
+    function updateAgentProgress(job) {
+        if (!agentElements.progressFill) return;
+        const pct = Number.isFinite(job?.progress) ? Math.max(0, Math.min(1, job.progress)) * 100 : 0;
+        agentElements.progressFill.style.width = `${pct}%`;
+    }
+
     function getAgentSelectedDatasetMeta() {
         const datasetId = agentElements.datasetSelect?.value;
         if (!datasetId) return null;
@@ -11297,6 +11304,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!payload) return;
         setAgentStatus("Starting agent mining…", "info");
         if (agentElements.runButton) agentElements.runButton.disabled = true;
+        updateAgentProgress({ progress: 0 });
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/jobs`, {
                 method: "POST",
@@ -11307,6 +11315,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const job = await resp.json();
             agentState.lastJob = job;
             setAgentStatus(`Job ${job.job_id} started`, "success");
+            updateAgentProgress(job);
         } catch (err) {
             console.error("Agent mining start failed", err);
             setAgentStatus(`Start failed: ${err.message || err}`, "error");
@@ -11324,6 +11333,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const job = await resp.json();
             agentState.lastJob = job;
             setAgentStatus(`Latest job: ${job.status}`, "success");
+            updateAgentProgress(job);
             renderAgentResults(job.result);
             renderAgentLogs(job);
         } catch (err) {
@@ -11552,6 +11562,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.recipeFile = document.getElementById("agentRecipeFile");
         agentElements.recipeDetails = document.getElementById("agentRecipeDetails");
         agentElements.logs = document.getElementById("agentLogs");
+        agentElements.progressFill = document.getElementById("agentProgressFill");
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
         }

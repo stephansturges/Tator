@@ -11646,13 +11646,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     function applyDatasetModeConstraints() {
         const isSeg = datasetType === "seg";
-        if (autoModeCheckbox) {
-            autoModeCheckbox.disabled = isSeg;
-            if (isSeg) {
-                autoModeCheckbox.checked = false;
-                updateAutoModeState(false);
-            }
-        }
+        // Keep auto class available in both modes; segmentation users may still want predicted classes for bboxes.
         if (samModeCheckbox) {
             samModeCheckbox.disabled = false; // still allow SAM text prompts in seg mode
         }

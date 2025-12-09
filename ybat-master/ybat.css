@@ -1057,6 +1057,12 @@ hr {
     gap: 6px;
 }
 
+.training-field--inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
 .training-field-double {
     display: grid;
     grid-template-columns: repeat(2, minmax(140px, 1fr));

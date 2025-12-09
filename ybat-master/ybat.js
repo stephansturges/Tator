@@ -806,6 +806,7 @@
         runButton: null,
         autoButton: null,
         similarityButton: null,
+        similarityRow: null,
         status: null,
         classSelect: null,
         minSizeInput: null,
@@ -8488,6 +8489,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
         sam3TextElements.similarityButton = document.getElementById("sam3SimilarityButton");
+        sam3TextElements.similarityRow = document.getElementById("sam3SimilarityRow");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
         sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
         sam3RecipeElements.applyButton = document.getElementById("sam3RecipeApplyButton");
@@ -8670,7 +8672,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
+    function refreshSam3SimilarityVisibility() {
+        const row = sam3TextElements.similarityRow;
+        const btn = sam3TextElements.similarityButton;
+        const show = samVariant === "sam3" && samMode;
+        if (row) {
+            row.style.display = show ? "" : "none";
+        }
+        if (btn) {
+            btn.style.display = show ? "" : "none";
+        }
+    }
+
     function updateSam3TextButtons() {
+        refreshSam3SimilarityVisibility();
         const busy = sam3TextRequestActive || sam3SimilarityRequestActive;
         setButtonDisabled(sam3TextElements.runButton, busy);
         setButtonDisabled(sam3TextElements.autoButton, busy);
@@ -10685,6 +10700,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
         }
         refreshPolygonDetailVisibility();
+        refreshSam3SimilarityVisibility();
         console.log("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
     }
 
@@ -10787,6 +10803,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     scheduleSamPreload({ force: true, immediate: true });
                 }
                 updateSam3TextButtons();
+                refreshSam3SimilarityVisibility();
             });
         }
 

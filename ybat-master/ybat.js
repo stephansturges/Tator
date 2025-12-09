@@ -1155,6 +1155,7 @@ const sam3TrainState = {
         valLimit: null,
         runButton: null,
         refreshButton: null,
+        cancelButton: null,
         status: null,
         results: null,
         recipeSelect: null,
@@ -11328,20 +11329,41 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         setAgentStatus("Fetching latest result…", "info");
         if (agentElements.refreshButton) agentElements.refreshButton.disabled = true;
         try {
-            const resp = await fetch(`${API_ROOT}/agent_mining/results/latest`);
+        const resp = await fetch(`${API_ROOT}/agent_mining/results/latest`);
+        if (!resp.ok) throw new Error(await resp.text());
+        const job = await resp.json();
+        agentState.lastJob = job;
+        setAgentStatus(`Latest job: ${job.status}`, "success");
+        updateAgentProgress(job);
+        renderAgentResults(job.result);
+        renderAgentLogs(job);
+    } catch (err) {
+        console.error("Agent mining latest failed", err);
+        setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
+        setAgentStatus(`Fetch failed: ${err.message || err}`, "error");
+    } finally {
+        if (agentElements.refreshButton) agentElements.refreshButton.disabled = false;
+    }
+}
+
+    async function cancelAgentJob() {
+        const jobId = agentState.lastJob?.job_id;
+        if (!jobId) {
+            setAgentStatus("No running job to cancel.", "warn");
+            return;
+        }
+        setAgentStatus("Cancelling job…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/jobs/${jobId}/cancel`, { method: "POST" });
             if (!resp.ok) throw new Error(await resp.text());
             const job = await resp.json();
             agentState.lastJob = job;
-            setAgentStatus(`Latest job: ${job.status}`, "success");
+            setAgentStatus(`Job ${jobId} cancelled`, "success");
             updateAgentProgress(job);
-            renderAgentResults(job.result);
             renderAgentLogs(job);
         } catch (err) {
-            console.error("Agent mining latest failed", err);
-            setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
-            setAgentStatus(`Fetch failed: ${err.message || err}`, "error");
-        } finally {
-            if (agentElements.refreshButton) agentElements.refreshButton.disabled = false;
+            console.error("Agent cancel failed", err);
+            setAgentStatus(`Cancel failed: ${err.message || err}`, "error");
         }
     }
 
@@ -11550,6 +11572,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.valLimit = document.getElementById("agentValLimit");
         agentElements.runButton = document.getElementById("agentRunBtn");
         agentElements.refreshButton = document.getElementById("agentRefreshBtn");
+        agentElements.cancelButton = document.getElementById("agentCancelBtn");
         agentElements.status = document.getElementById("agentStatus");
         agentElements.results = document.getElementById("agentResults");
         agentElements.recipeSelect = document.getElementById("agentRecipeSelect");
@@ -11580,6 +11603,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (agentElements.refreshButton) {
             agentElements.refreshButton.addEventListener("click", () => refreshAgentLatest().catch((err) => console.error("Agent mining refresh failed", err)));
+        }
+        if (agentElements.cancelButton) {
+            agentElements.cancelButton.addEventListener("click", () => cancelAgentJob().catch((err) => console.error("Agent mining cancel failed", err)));
         }
         if (agentElements.recipeRefresh) {
             agentElements.recipeRefresh.addEventListener("click", () => fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err)));

@@ -1731,6 +1731,16 @@ def _run_sam3_visual_inference(
         threshold_val = float(mask_threshold)
     except Exception:
         threshold_val = 0.5
+    # Normalize mask logits into a numpy array before thresholding.
+    if isinstance(mask_logits, (list, tuple)):
+        try:
+            if any(isinstance(m, torch.Tensor) for m in mask_logits):
+                stacked = [m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m) for m in mask_logits]
+                mask_logits = np.stack(stacked)
+            else:
+                mask_logits = np.asarray(mask_logits)
+        except Exception:
+            pass
     if isinstance(mask_logits, torch.Tensor):
         try:
             masks_arr = (mask_logits > threshold_val).cpu().numpy()

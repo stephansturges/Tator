@@ -203,6 +203,7 @@
     const TAB_TRAINING = "training";
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
+    const TAB_AGENT_MINING = "agent-mining";
     const TAB_PROMPT_HELPER = "prompt-helper";
     const TAB_DATASETS = "datasets";
     const TAB_SAM3_PROMPT_MODELS = "sam3-prompt-models";
@@ -753,6 +754,8 @@
         trainingButton: null,
         qwenTrainButton: null,
         sam3TrainButton: null,
+        agentMiningButton: null,
+        promptHelperButton: null,
         sam3PromptModelsButton: null,
         datasetsButton: null,
         activeButton: null,
@@ -763,6 +766,8 @@
         trainingPanel: null,
         qwenTrainPanel: null,
         sam3TrainPanel: null,
+        agentMiningPanel: null,
+        promptHelperPanel: null,
         sam3PromptModelsPanel: null,
         datasetsPanel: null,
         activePanel: null,
@@ -7116,6 +7121,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
+        tabElements.agentMiningButton = document.getElementById("tabAgentMiningButton");
         tabElements.promptHelperButton = document.getElementById("tabPromptHelperButton");
         tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
         tabElements.datasetsButton = document.getElementById("tabDatasetsButton");
@@ -7127,6 +7133,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
+        tabElements.agentMiningPanel = document.getElementById("tabAgentMining");
         tabElements.promptHelperPanel = document.getElementById("tabPromptHelper");
         tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
         tabElements.datasetsPanel = document.getElementById("tabDatasets");
@@ -7145,6 +7152,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_TRAIN));
+        }
+        if (tabElements.agentMiningButton) {
+            tabElements.agentMiningButton.addEventListener("click", () => setActiveTab(TAB_AGENT_MINING));
         }
         if (tabElements.promptHelperButton) {
             tabElements.promptHelperButton.addEventListener("click", () => setActiveTab(TAB_PROMPT_HELPER));
@@ -7185,6 +7195,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
         }
+        if (tabElements.agentMiningButton) {
+            tabElements.agentMiningButton.classList.toggle("active", tabName === TAB_AGENT_MINING);
+        }
         if (tabElements.promptHelperButton) {
             tabElements.promptHelperButton.classList.toggle("active", tabName === TAB_PROMPT_HELPER);
         }
@@ -7217,6 +7230,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainPanel) {
             tabElements.sam3TrainPanel.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
+        }
+        if (tabElements.agentMiningPanel) {
+            tabElements.agentMiningPanel.classList.toggle("active", tabName === TAB_AGENT_MINING);
         }
         if (tabElements.promptHelperPanel) {
             tabElements.promptHelperPanel.classList.toggle("active", tabName === TAB_PROMPT_HELPER);
@@ -7256,6 +7272,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabName === TAB_SAM3_TRAIN && previous !== TAB_SAM3_TRAIN) {
             initSam3TrainUi().catch((err) => console.error("SAM3 UI init failed", err));
+        }
+        if (tabName === TAB_AGENT_MINING && previous !== TAB_AGENT_MINING) {
+            initAgentMiningUi();
         }
         if (tabName === TAB_PROMPT_HELPER && previous !== TAB_PROMPT_HELPER) {
             initPromptHelperUi().catch((err) => console.error("Prompt helper init failed", err));

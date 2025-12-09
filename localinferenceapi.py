@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 import numpy as np
 import yaml
-from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence
+from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping
 from collections import deque
 import torch, clip, joblib
 from io import BytesIO

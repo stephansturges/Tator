@@ -11365,7 +11365,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             updateAgentProgress(job);
             renderAgentResults(job.result);
             renderAgentLogs(job);
-            if (job.status === "running") {
+            const keepPolling = !["completed", "failed", "cancelled"].includes(job.status || "");
+            if (keepPolling) {
                 scheduleAgentPoll();
             } else {
                 stopAgentPoll();

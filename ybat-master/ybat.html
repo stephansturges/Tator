@@ -878,11 +878,11 @@
                             </div>
                             <div class="training-field training-field--inline">
                                 <label for="agentClusterExemplars">Cluster exemplars</label>
-                                <input type="checkbox" id="agentClusterExemplars" />
+                                <input type="checkbox" id="agentClusterExemplars" title="Group exemplar boxes to keep a diverse subset before prompting SAM3." />
                             </div>
                             <div class="training-field training-field--inline">
                                 <label for="agentClipGuard">Use CLIP FP guard</label>
-                                <input type="checkbox" id="agentClipGuard" />
+                                <input type="checkbox" id="agentClipGuard" title="Filter SAM3 detections by CLIP similarity to exemplars (higher precision, possible recall loss if too strict)." />
                             </div>
                             <div>
                                 <label for="agentSimilarityScore">Similarity floor</label>

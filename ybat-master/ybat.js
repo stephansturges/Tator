@@ -807,6 +807,7 @@
         autoButton: null,
         similarityButton: null,
         similarityRow: null,
+        similarityThresholdInput: null,
         status: null,
         classSelect: null,
         minSizeInput: null,
@@ -8490,6 +8491,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
         sam3TextElements.similarityButton = document.getElementById("sam3SimilarityButton");
         sam3TextElements.similarityRow = document.getElementById("sam3SimilarityRow");
+        sam3TextElements.similarityThresholdInput = document.getElementById("sam3SimilarityThreshold");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
         sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
         sam3RecipeElements.applyButton = document.getElementById("sam3RecipeApplyButton");
@@ -8681,6 +8683,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (btn) {
             btn.style.display = show ? "" : "none";
+        }
+        if (sam3TextElements.similarityThresholdInput) {
+            sam3TextElements.similarityThresholdInput.disabled = !show;
         }
     }
 
@@ -9216,7 +9221,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         const left = Math.min(exemplar.x, exemplar.x + exemplar.width);
         const top = Math.min(exemplar.y, exemplar.y + exemplar.height);
-        let threshold = parseFloat(sam3TextElements.thresholdInput?.value || "0.5");
+        let threshold = parseFloat(sam3TextElements.similarityThresholdInput?.value ?? sam3TextElements.thresholdInput?.value ?? "0.5");
         if (Number.isNaN(threshold)) threshold = 0.5;
         threshold = Math.min(Math.max(threshold, 0), 1);
         let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
@@ -9257,6 +9262,29 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return inter / union;
         }
 
+        function existingAnnotationRects() {
+            const rects = [];
+            const currentBboxes = bboxes[currentImage.name];
+            if (!currentBboxes) return rects;
+            for (let className in currentBboxes) {
+                currentBboxes[className].forEach((bbox) => {
+                    if (!bbox) return;
+                    if (Array.isArray(bbox.points) && bbox.points.length >= 3) {
+                        const xs = bbox.points.map((p) => p.x);
+                        const ys = bbox.points.map((p) => p.y);
+                        const minX = Math.min(...xs);
+                        const maxX = Math.max(...xs);
+                        const minY = Math.min(...ys);
+                        const maxY = Math.max(...ys);
+                        rects.push({ x: minX, y: minY, width: maxX - minX, height: maxY - minY });
+                    } else {
+                        rects.push({ x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height });
+                    }
+                });
+            }
+            return rects;
+        }
+
         sam3SimilarityRequestActive = true;
         updateSam3TextButtons();
         setSam3TextStatus("Running SAM3 similarity prompt…", "info");
@@ -9279,12 +9307,37 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             let detections = Array.isArray(result?.detections) ? result.detections.slice() : [];
             if (detections.length) {
                 const exemplarRect = { x: left, y: top, width, height };
+                const exemplarCx = exemplarRect.x + exemplarRect.width / 2;
+                const exemplarCy = exemplarRect.y + exemplarRect.height / 2;
+                const exemplarMaxDim = Math.max(exemplarRect.width, exemplarRect.height);
+                const existingRects = existingAnnotationRects();
                 detections = detections.filter((det) => {
                     if (!det || !det.bbox) return false;
                     const rect = yoloBoxToPixelRect(det.bbox);
                     if (!rect) return true;
+                    const rectCx = rect.x + rect.width / 2;
+                    const rectCy = rect.y + rect.height / 2;
+                    const dist = Math.hypot(rectCx - exemplarCx, rectCy - exemplarCy);
                     const iou = rectIoU(rect, exemplarRect);
-                    return iou < 0.98;
+                    const nearCenter = dist <= exemplarMaxDim * 0.1;
+                    const highOverlap = iou >= 0.85;
+                    if (nearCenter || highOverlap) {
+                        return false;
+                    }
+                    for (const existing of existingRects) {
+                        const overlap = rectIoU(rect, existing);
+                        if (overlap >= 0.75) {
+                            return false;
+                        }
+                        const exCx = existing.x + existing.width / 2;
+                        const exCy = existing.y + existing.height / 2;
+                        const exMax = Math.max(existing.width, existing.height);
+                        const distEx = Math.hypot(rectCx - exCx, rectCy - exCy);
+                        if (distEx <= exMax * 0.1) {
+                            return false;
+                        }
+                    }
+                    return true;
                 });
             }
             const added = applySegAwareDetections(detections, targetClass, "SAM3 similarity");

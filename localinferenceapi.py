@@ -1484,7 +1484,16 @@ def _sam3_text_detections(
         else:
             masks_arr = np.asarray(masks)
     detections: List[QwenDetection] = []
-    numeric_limit = limit if limit and limit > 0 else None
+    if limit is None:
+        numeric_limit: Optional[int] = None
+    else:
+        try:
+            numeric_limit = int(limit)
+        except (TypeError, ValueError):
+            numeric_limit = None
+        else:
+            if numeric_limit <= 0:
+                numeric_limit = None
     for idx, box in enumerate(boxes_iter):
         coords = np.asarray(box, dtype=np.float32).tolist()
         if len(coords) < 4:
@@ -1530,7 +1539,7 @@ def _sam3_text_detections(
                 simplify_epsilon=simplify_epsilon,
             )
         )
-        if numeric_limit and len(detections) >= numeric_limit:
+        if numeric_limit is not None and len(detections) >= numeric_limit:
             break
     if detections or masks_arr is None:
         return detections
@@ -1570,7 +1579,7 @@ def _sam3_text_detections(
         )
         if collected_masks is not None:
             collected_masks.append(mask)
-        if numeric_limit and len(detections) >= numeric_limit:
+        if numeric_limit is not None and len(detections) >= numeric_limit:
             break
     return detections
 
@@ -1618,7 +1627,9 @@ def _run_sam3_text_inference(
                 find_target=None,
                 geometric_prompt=state.get("geometric_prompt", processor.model._get_dummy_prompt()),
             )
-            boxes_xyxy = raw.get("pred_boxes_xyxy") or raw.get("pred_boxes")
+            boxes_xyxy = raw.get("pred_boxes_xyxy")
+            if boxes_xyxy is None:
+                boxes_xyxy = raw.get("pred_boxes")
             scores = None
             logits = raw.get("pred_logits")
             if logits is not None:
@@ -1638,7 +1649,7 @@ def _run_sam3_text_inference(
             logger.warning("SAM3 box-only text prompt fallback failed: %s", exc)
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_grounding_failed:{exc}") from exc
     try:
-        if output and hasattr(output, "pred_masks"):
+        if output is not None and hasattr(output, "pred_masks"):
             masks = output.pred_masks
             if masks is not None:
                 try:
@@ -1732,51 +1743,62 @@ def _run_sam3_visual_inference(
     except Exception:
         threshold_val = 0.5
     # Normalize mask logits into a numpy array before thresholding.
-    if isinstance(mask_logits, (list, tuple)):
-        try:
+    try:
+        if isinstance(mask_logits, (list, tuple)):
             if any(isinstance(m, torch.Tensor) for m in mask_logits):
                 stacked = [m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m) for m in mask_logits]
                 mask_logits = np.stack(stacked)
             else:
                 mask_logits = np.asarray(mask_logits)
-        except Exception:
-            pass
-    if isinstance(mask_logits, torch.Tensor):
-        try:
-            masks_arr = (mask_logits > threshold_val).cpu().numpy()
-        except Exception:
+        if isinstance(mask_logits, torch.Tensor):
             try:
-                masks_arr = mask_logits.cpu().numpy()
+                masks_arr = (mask_logits > threshold_val).cpu().numpy()
             except Exception:
-                masks_arr = None
-    elif mask_logits is not None:
-        try:
+                masks_arr = mask_logits.cpu().numpy()
+        elif mask_logits is not None:
             masks_arr = np.asarray(mask_logits) > threshold_val
-        except Exception:
-            masks_arr = None
-    # Normalize mask shape to (N, H, W) where possible
-    if masks_arr is not None:
-        try:
+        # Normalize mask shape to (N, H, W) where possible
+        if masks_arr is not None:
             masks_arr = np.asarray(masks_arr)
             if masks_arr.dtype == object:
-                try:
-                    flattened = [np.asarray(m) for m in masks_arr]
-                    masks_arr = np.stack(flattened)
-                except Exception:
-                    masks_arr = None
-            if masks_arr is not None:
-                if masks_arr.ndim == 2:
-                    masks_arr = masks_arr[None, ...]
-                elif masks_arr.ndim == 4 and masks_arr.shape[1] == 1:
-                    masks_arr = masks_arr[:, 0, ...]
-                elif masks_arr.ndim == 4 and masks_arr.shape[-1] == 1:
-                    masks_arr = masks_arr[..., 0]
+                flattened = [np.asarray(m) for m in masks_arr]
+                masks_arr = np.stack(flattened)
+            if masks_arr.ndim == 2:
+                masks_arr = masks_arr[None, ...]
+            elif masks_arr.ndim == 4 and masks_arr.shape[1] == 1:
+                masks_arr = masks_arr[:, 0, ...]
+            elif masks_arr.ndim == 4 and masks_arr.shape[-1] == 1:
+                masks_arr = masks_arr[..., 0]
+    except Exception:
+        masks_arr = None
+    def _to_numpy_safe(val: Any) -> Optional[np.ndarray]:
+        if val is None:
+            return None
+        if isinstance(val, torch.Tensor):
+            try:
+                return val.detach().cpu().numpy()
+            except Exception:
+                return None
+        try:
+            return np.asarray(val)
         except Exception:
-            masks_arr = None
+            return None
+
+    payload_for_detection: Dict[str, Any] = {}
+    if isinstance(output, Mapping):
+        boxes_val = _to_numpy_safe(output.get("boxes"))
+        scores_val = _to_numpy_safe(output.get("scores"))
+        masks_val = _to_numpy_safe(output.get("masks"))
+        if boxes_val is not None:
+            payload_for_detection["boxes"] = boxes_val
+        if scores_val is not None:
+            payload_for_detection["scores"] = scores_val
+        if masks_val is not None:
+            payload_for_detection["masks"] = masks_val
     collected_masks: Optional[List[np.ndarray]] = [] if return_masks else None
     detections = _sam3_text_detections(
         pil_img,
-        output if isinstance(output, Mapping) else {},
+        payload_for_detection,
         "visual",
         normalized_limit,
         min_score=float(threshold),

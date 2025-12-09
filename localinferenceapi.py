@@ -344,6 +344,27 @@ def _resume_clip_backbone() -> None:
         finally:
             _clip_reload_needed = False
 
+
+def _ensure_clip_backbone_for_mining() -> Tuple[Optional[Any], Optional[Any]]:
+    """Ensure a CLIP backbone is available for exemplar embedding/fp guard (raw CLIP, no classifier required)."""
+    global clip_model, clip_preprocess, clip_model_name, clip_initialized
+    if clip is None:
+        return None, None
+    with clip_lock:
+        if clip_model is None or clip_preprocess is None:
+            clip_name = clip_model_name or DEFAULT_CLIP_MODEL
+            try:
+                clip_model, clip_preprocess = clip.load(clip_name, device=device)
+                clip_model_name = clip_name
+                clip_initialized = bool(clip_model is not None)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Agent mining could not load CLIP backbone: %s", exc)
+                clip_model = None
+                clip_preprocess = None
+                clip_initialized = False
+                return None, None
+    return clip_model, clip_preprocess
+
 # 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_h")
 CHECKPOINT_PATH = os.environ.get("SAM_CHECKPOINT_PATH", "./sam_vit_h_4b8939.pth")
@@ -2625,6 +2646,21 @@ class PromptHelperJob:
     updated_at: float = field(default_factory=time.time)
 
 
+@dataclass
+class AgentMiningJob:
+    job_id: str
+    status: str = "queued"
+    message: str = "Queued"
+    progress: float = 0.0
+    request: Dict[str, Any] = field(default_factory=dict)
+    result: Optional[Dict[str, Any]] = None
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -2633,6 +2669,8 @@ SEGMENTATION_BUILD_JOBS: Dict[str, SegmentationBuildJob] = {}
 SEGMENTATION_BUILD_JOBS_LOCK = threading.Lock()
 PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
 PROMPT_HELPER_JOBS_LOCK = threading.Lock()
+AGENT_MINING_JOBS: Dict[str, AgentMiningJob] = {}
+AGENT_MINING_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
@@ -2643,6 +2681,18 @@ CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
 DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+AGENT_MINING_ROOT = UPLOAD_ROOT / "agent_mining"
+AGENT_MINING_ROOT.mkdir(parents=True, exist_ok=True)
+AGENT_MINING_JOB_ROOT = AGENT_MINING_ROOT / "jobs"
+AGENT_MINING_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+AGENT_MINING_CACHE_ROOT = AGENT_MINING_ROOT / "cache"
+AGENT_MINING_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+AGENT_MINING_META_ROOT = AGENT_MINING_ROOT / "meta"
+AGENT_MINING_META_ROOT.mkdir(parents=True, exist_ok=True)
+AGENT_MINING_DET_CACHE_ROOT = AGENT_MINING_ROOT / "detections"
+AGENT_MINING_DET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+AGENT_MINING_RECIPES_ROOT = AGENT_MINING_ROOT / "recipes"
+AGENT_MINING_RECIPES_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_DATASET_JOBS: Dict[str, ClipDatasetUploadJob] = {}
 CLIP_DATASET_JOBS_LOCK = threading.Lock()
 QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}
@@ -3286,6 +3336,867 @@ def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = Non
         rel = path.relative_to(root)
         entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
     return _stable_hash(entries)
+
+
+def _agent_mining_meta_dir(dataset_id: str) -> Path:
+    cleaned = (dataset_id or "").strip().replace("\\", "/").strip("/")
+    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
+    meta_dir = (AGENT_MINING_META_ROOT / safe).resolve()
+    if not str(meta_dir).startswith(str(AGENT_MINING_META_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_dataset_invalid")
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    return meta_dir
+
+
+def _agent_mining_cache_dir(dataset_id: str) -> Path:
+    cleaned = (dataset_id or "").strip().replace("\\", "/").strip("/")
+    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
+    cache_dir = (AGENT_MINING_DET_CACHE_ROOT / safe).resolve()
+    if not str(cache_dir).startswith(str(AGENT_MINING_DET_CACHE_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_dataset_invalid")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _normalize_agent_recipe_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for step in steps:
+        prompt = step.get("prompt")
+        threshold = step.get("threshold")
+        if prompt is None or threshold is None:
+            continue
+        try:
+            thr_val = float(threshold)
+        except Exception:
+            continue
+        entry = {
+            "prompt": str(prompt),
+            "threshold": thr_val,
+            "type": step.get("type"),
+            "exemplar": step.get("exemplar"),
+        }
+        normalized.append(entry)
+    return normalized
+
+
+def _compute_labelmap_hash(categories: List[Dict[str, Any]]) -> Tuple[str, List[str]]:
+    names: List[Tuple[int, str]] = []
+    for idx, cat in enumerate(categories):
+        try:
+            cid = int(cat.get("id", idx))
+        except Exception:
+            cid = idx
+        names.append((cid, str(cat.get("name", f"class_{cid}"))))
+    names.sort(key=lambda c: c[0])
+    labels = [name for _, name in names]
+    try:
+        digest = hashlib.sha256("|".join(labels).encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        digest = "unknown"
+    return digest, labels
+
+
+def _compute_dataset_signature(dataset_id: str, dataset_root: Path, images: Dict[int, Dict[str, Any]], categories: List[Dict[str, Any]]) -> str:
+    """
+    Create a location-agnostic signature for portability:
+    - dataset_id
+    - counts of images/categories
+    - hashes of category names (sorted)
+    - hashes of image file names (sorted)
+    """
+    try:
+        cat_names = [str(c.get("name", f"class_{idx}")) for idx, c in enumerate(categories)]
+        cat_hash = hashlib.sha256("|".join(sorted(cat_names)).encode("utf-8")).hexdigest()[:12]
+        file_names = [Path(info.get("file_name") or "").name for info in images.values() if info.get("file_name")]
+        file_hash = hashlib.sha256("|".join(sorted(file_names)).encode("utf-8")).hexdigest()[:12]
+        payload = f"{dataset_id}|{len(images)}|{len(categories)}|{cat_hash}|{file_hash}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return "unknown"
+
+
+def _save_exemplar_crop(
+    *,
+    exemplar: Dict[str, Any],
+    images: Dict[int, Dict[str, Any]],
+    crop_dir: Path,
+    step_idx: int,
+) -> Optional[Dict[str, Any]]:
+    """Persist a single exemplar crop to disk and return enriched metadata."""
+    img_id = exemplar.get("image_id")
+    if img_id is None:
+        return None
+    info = images.get(int(img_id))
+    if not info:
+        return None
+    bbox = exemplar.get("bbox")
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        x, y, w, h = map(float, bbox[:4])
+    except Exception:
+        return None
+    try:
+        img_path = info.get("path")
+        if not img_path:
+            return None
+        with Image.open(img_path) as pil_img:
+            pil_img = pil_img.convert("RGB")
+            width, height = pil_img.width, pil_img.height
+            x0 = max(0, x)
+            y0 = max(0, y)
+            x1 = min(width, x + w)
+            y1 = min(height, y + h)
+            crop = pil_img.crop((x0, y0, x1, y1))
+            crop_dir.mkdir(parents=True, exist_ok=True)
+            crop_name = f"step_{step_idx:02d}_exemplar.png"
+            crop_path = crop_dir / crop_name
+            crop.save(crop_path, format="PNG")
+    except Exception:
+        return None
+    bbox_norm = None
+    try:
+        bbox_norm = [x / width, y / height, w / width, h / height]
+    except Exception:
+        bbox_norm = None
+    enriched = {
+        **exemplar,
+        "bbox": [x, y, w, h],
+        "bbox_xyxy": [x0, y0, x1, y1],
+        "bbox_norm": bbox_norm,
+        "image_size": [width, height],
+        "crop_path": str(Path("crops") / crop_path.name),
+        "crop_size": [crop.width, crop.height],
+    }
+    return enriched
+
+
+def _persist_agent_recipe(
+    dataset_id: str,
+    class_id: Optional[int],
+    class_name: Optional[str],
+    label: str,
+    recipe: Dict[str, Any],
+    *,
+    crop_overrides: Optional[Dict[str, bytes]] = None,
+    meta_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not recipe or not recipe.get("steps"):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_empty")
+    cleaned_label = label.strip() or "agent_recipe"
+    recipe_id = f"ar_{uuid.uuid4().hex[:8]}"
+    images: Dict[int, Dict[str, Any]] = {}
+    categories: List[Dict[str, Any]] = []
+    dataset_signature: Optional[str] = None
+    labelmap_hash: Optional[str] = None
+    labelmap_entries: Optional[List[str]] = None
+    dataset_root: Optional[Path] = None
+    try:
+        dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+        coco, _, images = _load_coco_index(dataset_root)
+        categories = coco.get("categories") or []
+        dataset_signature = _compute_dataset_signature(dataset_id, dataset_root, images, categories)
+        labelmap_hash, labelmap_entries = _compute_labelmap_hash(categories)
+        if class_id is not None:
+            try:
+                cid = int(class_id)
+            except Exception:
+                cid = None
+            if cid is not None:
+                found = any(int(cat.get("id", idx)) == cid for idx, cat in enumerate(categories))
+                if not found and not crop_overrides:
+                    raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_class_missing")
+    except HTTPException as http_exc:
+        if not crop_overrides and not meta_overrides:
+            raise
+    except Exception:
+        # Allow portability when importing with embedded crops; we'll fall back to meta overrides.
+        pass
+    if not dataset_signature and meta_overrides:
+        dataset_signature = meta_overrides.get("dataset_signature")
+    if not labelmap_hash and meta_overrides:
+        labelmap_hash = meta_overrides.get("labelmap_hash")
+        labelmap_entries = meta_overrides.get("labelmap")
+    steps_raw = _normalize_agent_recipe_steps(recipe.get("steps") or [])
+    recipe_dir = AGENT_MINING_RECIPES_ROOT / recipe_id
+    crops_dir = recipe_dir / "crops"
+    portable_steps: List[Dict[str, Any]] = []
+    for idx, step in enumerate(steps_raw, start=1):
+        entry = dict(step)
+        ex = step.get("exemplar")
+        if ex:
+            enriched = None
+            # Prefer provided crops if present (e.g., imported package), else derive from dataset.
+            crop_key = None
+            if isinstance(ex, dict):
+                crop_key = ex.get("crop_path")
+                if crop_overrides and crop_key in crop_overrides:
+                    crop_path = crops_dir / Path(crop_key).name
+                    try:
+                        crops_dir.mkdir(parents=True, exist_ok=True)
+                        with crop_path.open("wb") as fp:
+                            fp.write(crop_overrides[crop_key])
+                        enriched = {
+                            **ex,
+                            "crop_path": str(Path("crops") / crop_path.name),
+                        }
+                    except Exception:
+                        enriched = dict(ex)
+            if enriched is None and images and isinstance(ex, dict):
+                enriched = _save_exemplar_crop(exemplar=ex, images=images, crop_dir=crops_dir, step_idx=idx)
+            if enriched is None and isinstance(ex, dict):
+                enriched = dict(ex)
+            entry["exemplar"] = enriched
+        portable_steps.append(entry)
+    params = recipe.get("params") or {
+        "mask_threshold": recipe.get("mask_threshold"),
+        "min_size": recipe.get("min_size"),
+        "simplify_epsilon": recipe.get("simplify_epsilon"),
+        "max_results": recipe.get("max_results"),
+        "similarity_score": recipe.get("similarity_score"),
+        "use_clip_fp_guard": recipe.get("use_clip_fp_guard"),
+    }
+    thresholds = sorted({float(s.get("threshold", 0.0)) for s in portable_steps if s.get("threshold") is not None})
+    if thresholds:
+        params["thresholds"] = thresholds
+    payload = {
+        "id": recipe_id,
+        "dataset_id": dataset_id,
+        "dataset_signature": dataset_signature,
+        "labelmap_hash": labelmap_hash,
+        "labelmap": labelmap_entries,
+        "class_id": class_id,
+        "class_name": class_name,
+        "label": cleaned_label,
+        "created_at": time.time(),
+        "params": params,
+        "recipe": {
+            "steps": portable_steps,
+            "summary": recipe.get("summary"),
+        },
+    }
+    path = (AGENT_MINING_ROOT / "recipes" / f"{recipe_id}.json").resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not str(path).startswith(str(AGENT_MINING_RECIPES_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    try:
+        with path.open("w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False, indent=2)
+        # Persist a portable zip alongside the JSON for download.
+        zip_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve()
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("recipe.json", json.dumps(payload, ensure_ascii=False, indent=2))
+            if crops_dir.exists():
+                for crop_file in crops_dir.glob("*.png"):
+                    try:
+                        zf.write(crop_file, arcname=f"crops/{crop_file.name}")
+                    except Exception:
+                        continue
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_save_failed:{exc}") from exc
+    payload["_path"] = str(path)
+    payload["_zip"] = str((AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve())
+    return payload
+
+
+def _load_agent_recipe(recipe_id: str) -> Dict[str, Any]:
+    path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.json").resolve()
+    if not str(path).startswith(str(AGENT_MINING_RECIPES_ROOT.resolve())) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        data["_path"] = str(path)
+        zip_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve()
+        if zip_path.exists():
+            data["_zip"] = str(zip_path)
+        # Inline exemplar previews if present on disk.
+        recipe_block = data.get("recipe") or {}
+        steps = recipe_block.get("steps") or []
+        crop_dir = AGENT_MINING_RECIPES_ROOT / recipe_id / "crops"
+        for step in steps:
+            ex = step.get("exemplar")
+            if not isinstance(ex, dict):
+                continue
+            crop_path = ex.get("crop_path")
+            if crop_path and isinstance(crop_path, str):
+                abs_path = Path(crop_path)
+                if not abs_path.is_absolute():
+                    abs_path = crop_dir / Path(crop_path).name
+                if abs_path.exists():
+                    try:
+                        with abs_path.open("rb") as cfp:
+                            b64 = base64.b64encode(cfp.read()).decode("ascii")
+                        ex["crop_base64"] = f"data:image/png;base64,{b64}"
+                        ex["crop_path"] = str(abs_path)
+                    except Exception:
+                        pass
+        return data
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_load_failed:{exc}") from exc
+
+
+def _list_agent_recipes(dataset_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    recipes: List[Dict[str, Any]] = []
+    for path in AGENT_MINING_RECIPES_ROOT.glob("*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if dataset_id and data.get("dataset_id") != dataset_id:
+                continue
+            data["_path"] = str(path)
+            zip_path = (AGENT_MINING_RECIPES_ROOT / f"{data.get('id','')}.zip").resolve()
+            if zip_path.exists():
+                data["_zip"] = str(zip_path)
+            recipes.append(data)
+        except Exception:
+            continue
+    recipes.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+    return recipes
+
+
+def _ensure_recipe_zip(recipe: Dict[str, Any]) -> Path:
+    recipe_id = recipe.get("id")
+    if not recipe_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_missing_id")
+    zip_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve()
+    if zip_path.exists():
+        return zip_path
+    recipe_dir = AGENT_MINING_RECIPES_ROOT / recipe_id
+    crops_dir = recipe_dir / "crops"
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("recipe.json", json.dumps(recipe, ensure_ascii=False, indent=2))
+            if crops_dir.exists():
+                for crop_file in crops_dir.glob("*.png"):
+                    try:
+                        zf.write(crop_file, arcname=f"crops/{crop_file.name}")
+                    except Exception:
+                        continue
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_export_failed:{exc}") from exc
+    return zip_path
+
+
+def _apply_agent_recipe_to_image(
+    recipe: Dict[str, Any],
+    *,
+    image: Dict[str, Any],
+    dataset_id: str,
+    mask_threshold: float,
+    min_size: int,
+    simplify_epsilon: float,
+    max_results: int,
+) -> List[QwenDetection]:
+    """Apply text/visual recipe steps to a single image using SAM3 text/visual calls."""
+    recipe_body = recipe.get("recipe") if "steps" not in recipe and isinstance(recipe.get("recipe"), dict) else recipe
+    img_path = image.get("path")
+    if not img_path:
+        return []
+    try:
+        pil_img = Image.open(img_path).convert("RGB")
+    except Exception:
+        return []
+    detections: List[QwenDetection] = []
+    steps = _normalize_agent_recipe_steps(recipe_body.get("steps") or [])
+    for step in steps:
+        prompt = step.get("prompt") or ""
+        thr = float(step.get("threshold", 0.3))
+        ex = step.get("exemplar")
+        try:
+            if ex:
+                bbox = ex.get("bbox")
+                if not bbox or len(bbox) < 4:
+                    continue
+                preds = _run_sam3_visual_inference(
+                    pil_img,
+                    (
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                    ),
+                    thr,
+                    mask_threshold,
+                    max_results,
+                    min_size=min_size if min_size > 0 else None,
+                    simplify_epsilon=simplify_epsilon,
+                )
+            else:
+                preds = _run_sam3_text_inference(
+                    pil_img,
+                    prompt,
+                    thr,
+                    mask_threshold,
+                    max_results,
+                    min_size=min_size if min_size > 0 else None,
+                    simplify_epsilon=simplify_epsilon,
+                )
+        except Exception:
+            continue
+        detections.extend(preds)
+    return detections
+
+
+def _detections_to_eval_cache(
+    detections: Sequence[Dict[str, Any]],
+    images: Dict[int, Dict[str, Any]],
+) -> Dict[int, List[Tuple[float, float, float, float, Optional[float]]]]:
+    """Convert detection dicts into the format expected by _evaluate_prompt_candidate cached_detections."""
+    by_image: Dict[int, List[Tuple[float, float, float, float, Optional[float]]]] = {}
+    for det in detections:
+        try:
+            img_id = int(det.get("image_id"))
+        except Exception:
+            continue
+        bbox = det.get("bbox")
+        if not bbox or len(bbox) < 4:
+            continue
+        info = images.get(img_id)
+        if not info:
+            continue
+        width = info.get("width")
+        height = info.get("height")
+        if width is None or height is None:
+            path = info.get("path")
+            if path:
+                try:
+                    with Image.open(path) as pil_img:
+                        width = pil_img.width
+                        height = pil_img.height
+                        info["width"] = width
+                        info["height"] = height
+                except Exception:
+                    continue
+            else:
+                continue
+        try:
+            x1, y1, x2, y2 = _yolo_to_xyxy(int(width), int(height), bbox)
+        except Exception:
+            continue
+        score = det.get("score")
+        by_image.setdefault(img_id, []).append((x1, y1, x2, y2, score))
+    return by_image
+
+
+def _load_agent_mining_split(dataset_id: str) -> Optional[Dict[str, Any]]:
+    split_path = _agent_mining_meta_dir(dataset_id) / "split.json"
+    if not split_path.exists():
+        return None
+    try:
+        with split_path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+            data["_path"] = str(split_path)
+            return data
+    except Exception:
+        return None
+
+
+def _ensure_agent_mining_split(
+    dataset_id: str,
+    dataset_root: Path,
+    *,
+    val_percent: float,
+    seed: int,
+    reuse_split: bool,
+    test_mode: bool,
+    train_limit: Optional[int] = None,
+    val_limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    coco, _, images = _load_coco_index(dataset_root)
+    image_ids = [int(img.get("id", idx)) for idx, img in enumerate(coco.get("images") or []) if "id" in img or idx >= 0]
+    if not image_ids:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_images")
+    signature = _compute_dir_signature(dataset_root)
+    if reuse_split and not test_mode:
+        cached = _load_agent_mining_split(dataset_id)
+        if cached and cached.get("signature") == signature and abs(cached.get("val_percent", val_percent) - val_percent) < 1e-6:
+            return cached
+    rng = random.Random(seed)
+    rng.shuffle(image_ids)
+    total = len(image_ids)
+    val_count = int(total * val_percent)
+    if val_count <= 0:
+        val_count = 1 if total > 1 else 0
+    if val_count >= total:
+        val_count = max(1, total - 1)
+    val_ids = image_ids[:val_count]
+    train_ids = image_ids[val_count:]
+    if train_limit is not None and train_limit > 0:
+        train_ids = train_ids[:train_limit]
+    if val_limit is not None and val_limit > 0:
+        val_ids = val_ids[:val_limit]
+    if not train_ids and val_ids:
+        train_ids, val_ids = val_ids, []
+    split = {
+        "train": train_ids,
+        "val": val_ids,
+        "val_percent": val_percent,
+        "seed": seed,
+        "total_images": total,
+        "signature": signature,
+        "created_at": time.time(),
+        "test_mode": bool(test_mode),
+    }
+    if not test_mode:
+        split_path = _agent_mining_meta_dir(dataset_id) / "split.json"
+        try:
+            with split_path.open("w", encoding="utf-8") as fp:
+                json.dump(split, fp)
+        except Exception:
+            logger.exception("Failed to persist agent mining split to %s", split_path)
+    return split
+
+
+def _agent_mining_cache_key(
+    *,
+    prompt: Optional[str],
+    visual_ref: Optional[Dict[str, Any]],
+    threshold: float,
+    mask_threshold: float,
+    min_size: int,
+    simplify: float,
+    max_results: int,
+    similarity_score: Optional[float] = None,
+) -> str:
+    visual_key = ""
+    if visual_ref:
+        visual_key = f"{visual_ref.get('image_id','')}:{','.join(map(str, visual_ref.get('bbox') or []))}"
+    key_parts = [
+        prompt or "",
+        visual_key,
+        f"thr={threshold:.4f}",
+        f"mthr={mask_threshold:.4f}",
+        f"min={min_size}",
+        f"simplify={simplify:.4f}",
+        f"max={max_results}",
+    ]
+    if similarity_score is not None:
+        key_parts.append(f"sim={similarity_score:.4f}")
+    return _stable_hash(key_parts)
+
+
+def _load_agent_mining_detections(cache_dir: Path, key: str) -> Optional[List[Dict[str, Any]]]:
+    path = cache_dir / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            return json.load(fp)
+    except Exception:
+        return None
+
+
+def _save_agent_mining_detections(cache_dir: Path, key: str, detections: List[Dict[str, Any]]) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp = cache_dir / f"{key}.json.tmp"
+    path = cache_dir / f"{key}.json"
+    try:
+        with tmp.open("w", encoding="utf-8") as fp:
+            json.dump(detections, fp)
+        tmp.replace(path)
+    except Exception:
+        logger.exception("Failed to persist agent mining detections to %s", path)
+
+
+def _collect_agent_mining_detections(
+    *,
+    images: Dict[int, Dict[str, Any]],
+    image_ids: Sequence[int],
+    prompt: Optional[str],
+    visual_ref: Optional[Dict[str, Any]],
+    threshold: float,
+    mask_threshold: float,
+    min_size: int,
+    simplify: float,
+    max_results: int,
+    cache_dir: Path,
+) -> List[Dict[str, Any]]:
+    cache_key = _agent_mining_cache_key(
+        prompt=prompt,
+        visual_ref=visual_ref,
+        threshold=threshold,
+        mask_threshold=mask_threshold,
+        min_size=min_size,
+        simplify=simplify,
+        max_results=max_results,
+    )
+    cached = _load_agent_mining_detections(cache_dir, cache_key)
+    if cached is not None:
+        return cached
+    results: List[Dict[str, Any]] = []
+    for img_id in image_ids:
+        img_info = images.get(img_id)
+        if not img_info:
+            continue
+        img_path = img_info.get("path")
+        if not img_path:
+            continue
+        try:
+            pil_img = Image.open(img_path).convert("RGB")
+        except Exception:
+            logger.exception("Agent mining failed to open image %s", img_path)
+            continue
+        detections: List[QwenDetection]
+        try:
+            if visual_ref:
+                bbox = visual_ref.get("bbox") if isinstance(visual_ref, dict) else None
+                if not bbox or len(bbox) < 4:
+                    continue
+                detections = _run_sam3_visual_inference(
+                    pil_img,
+                    (
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                    ),
+                    threshold,
+                    mask_threshold,
+                    max_results,
+                    min_size=min_size if min_size > 0 else None,
+                    simplify_epsilon=simplify,
+                )
+            else:
+                detections = _run_sam3_text_inference(
+                    pil_img,
+                    prompt or "",
+                    threshold,
+                    mask_threshold,
+                    max_results,
+                    min_size=min_size if min_size > 0 else None,
+                    simplify_epsilon=simplify,
+                )
+        except Exception:
+            logger.exception("Agent mining prompt failed for image %s", img_id)
+            continue
+        for det in detections:
+            det_dict = det.dict()
+            det_dict["image_id"] = img_id
+            results.append(det_dict)
+    _save_agent_mining_detections(cache_dir, cache_key, results)
+    return results
+
+
+def _clip_embed_regions(
+    regions: List[Dict[str, Any]],
+    images: Dict[int, Dict[str, Any]],
+    *,
+    max_regions: int = 256,
+) -> Tuple[Dict[str, np.ndarray], List[str]]:
+    """
+    Embed cropped regions (image_id + YOLO bbox) with raw CLIP. Returns (id->embedding, warnings).
+    """
+    model, preprocess = _ensure_clip_backbone_for_mining()
+    warnings: List[str] = []
+    if model is None or preprocess is None:
+        warnings.append("clip_unavailable")
+        return {}, warnings
+    embeddings: Dict[str, np.ndarray] = {}
+    device_to_use = device if isinstance(device, str) or isinstance(device, torch.device) else "cpu"
+    def _encode_image(image: Image.Image) -> Optional[np.ndarray]:
+        try:
+            target_dtype = next(model.parameters()).dtype
+        except Exception:
+            target_dtype = torch.float32
+        try:
+            inp = preprocess(image).unsqueeze(0).to(device_to_use)
+            if inp.dtype != target_dtype:
+                inp = inp.to(dtype=target_dtype)
+            with torch.no_grad():
+                feats = model.encode_image(inp)
+            feats = feats.to(dtype=torch.float32, device="cpu")
+            feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)
+            return feats.squeeze(0).cpu().numpy()
+        except Exception as exc:
+            logger.debug("CLIP encode failed: %s", exc)
+            return None
+    for entry in regions[:max_regions]:
+        try:
+            img_id = int(entry.get("image_id"))
+        except Exception:
+            continue
+        bbox = entry.get("bbox")
+        if not bbox or len(bbox) < 4:
+            continue
+        info = images.get(img_id) or {}
+        path = info.get("path")
+        if not path:
+            continue
+        try:
+            pil_img = Image.open(path).convert("RGB")
+        except Exception:
+            continue
+        try:
+            x, y, w, h = bbox[:4]
+            x1 = x
+            y1 = y
+            if max(bbox) <= 1.5:  # interpret as normalized if values are tiny
+                img_w = pil_img.width
+                img_h = pil_img.height
+                x1 = x * img_w
+                y1 = y * img_h
+                w = w * img_w
+                h = h * img_h
+            crop = pil_img.crop((x1, y1, x1 + w, y1 + h))
+            emb = _encode_image(crop)
+            if emb is None:
+                continue
+            key = f"{img_id}:{x1:.2f},{y1:.2f},{w:.2f},{h:.2f}"
+            embeddings[key] = emb
+        except Exception as exc:
+            logger.debug("CLIP embed crop failed: %s", exc)
+            continue
+    if not embeddings:
+        warnings.append("clip_embedding_empty")
+    return embeddings, warnings
+
+
+def _clip_fp_filter_detections(
+    detections: List[Dict[str, Any]],
+    *,
+    exemplar_embeddings: Dict[str, np.ndarray],
+    images: Dict[int, Dict[str, Any]],
+    similarity_floor: float,
+    max_regions: int = 512,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Filter detections whose CLIP similarity to any exemplar is below the floor."""
+    warnings: List[str] = []
+    if not exemplar_embeddings:
+        return detections, warnings
+    model, preprocess = _ensure_clip_backbone_for_mining()
+    if model is None or preprocess is None:
+        warnings.append("clip_unavailable")
+        return detections, warnings
+    filtered: List[Dict[str, Any]] = []
+    exemplars_mat = np.stack(list(exemplar_embeddings.values()))
+    ex_norm = np.linalg.norm(exemplars_mat, axis=1, keepdims=True) + 1e-8
+    exemplars_mat = exemplars_mat / ex_norm
+    device_to_use = device if isinstance(device, str) or isinstance(device, torch.device) else "cpu"
+    def _encode_image(image: Image.Image) -> Optional[np.ndarray]:
+        try:
+            target_dtype = next(model.parameters()).dtype
+        except Exception:
+            target_dtype = torch.float32
+        try:
+            inp = preprocess(image).unsqueeze(0).to(device_to_use)
+            if inp.dtype != target_dtype:
+                inp = inp.to(dtype=target_dtype)
+            with torch.no_grad():
+                feats = model.encode_image(inp)
+            feats = feats.to(dtype=torch.float32, device="cpu")
+            feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)
+            return feats.squeeze(0).cpu().numpy()
+        except Exception as exc:
+            logger.debug("CLIP encode failed: %s", exc)
+            return None
+    for det in detections[:max_regions]:
+        bbox = det.get("bbox")
+        if not bbox or len(bbox) < 4:
+            continue
+        try:
+            img_id = int(det.get("image_id"))
+        except Exception:
+            continue
+        info = images.get(img_id) or {}
+        path = info.get("path")
+        if not path:
+            continue
+        try:
+            pil_img = Image.open(path).convert("RGB")
+        except Exception:
+            continue
+        try:
+            x, y, w, h = bbox[:4]
+            x1 = x
+            y1 = y
+            if max(bbox) <= 1.5:
+                img_w = pil_img.width
+                img_h = pil_img.height
+                x1 = x * img_w
+                y1 = y * img_h
+                w = w * img_w
+                h = h * img_h
+            crop = pil_img.crop((x1, y1, x1 + w, y1 + h))
+            emb = _encode_image(crop)
+            if emb is None:
+                continue
+            sims = (exemplars_mat @ emb.reshape(-1, 1)).squeeze()
+            max_sim = float(np.max(sims)) if sims.size else 0.0
+            if max_sim >= similarity_floor:
+                filtered.append(det)
+        except Exception as exc:
+            logger.debug("CLIP filter crop failed: %s", exc)
+            continue
+    if len(filtered) < len(detections):
+        warnings.append("clip_fp_filtered")
+    return filtered if filtered else detections, warnings
+
+
+def _sample_agent_mining_exemplars(
+    cat_id: int,
+    train_ids: Sequence[int],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    images: Dict[int, Dict[str, Any]],
+    *,
+    limit: int,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    rng = random.Random(seed + cat_id)
+    candidates: List[Tuple[int, List[float]]] = []
+    for img_id in train_ids:
+        anns = gt_by_image_cat.get(img_id, {}).get(cat_id)
+        if not anns:
+            continue
+        for bbox in anns:
+            candidates.append((img_id, list(map(float, bbox[:4]))))
+    if not candidates:
+        return []
+    rng.shuffle(candidates)
+    exemplars: List[Dict[str, Any]] = []
+    for img_id, bbox in candidates[:limit]:
+        try:
+            x, y, w, h = bbox
+            area = max(0.0, w * h)
+        except Exception:
+            x = y = w = h = 0.0
+            area = 0.0
+        img_info = images.get(img_id, {})
+        exemplars.append(
+            {
+                "image_id": img_id,
+                "file_name": img_info.get("file_name"),
+                "path": str(img_info.get("path") or ""),
+                "bbox": [x, y, w, h],
+                "area": area,
+            }
+        )
+    return exemplars
+
+
+def _cluster_agent_mining_exemplars(
+    exemplars: List[Dict[str, Any]],
+    *,
+    max_items: int,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    """Placeholder clustering: down-sample exemplars evenly when clustering is requested."""
+    if max_items <= 0 or len(exemplars) <= max_items:
+        return exemplars
+    rng = random.Random(seed)
+    exemplars = exemplars[:]
+    rng.shuffle(exemplars)
+    step = max(1, len(exemplars) // max_items)
+    clustered: List[Dict[str, Any]] = []
+    for idx in range(0, len(exemplars), step):
+        clustered.append(exemplars[idx])
+        if len(clustered) >= max_items:
+            break
+    return clustered
 
 
 def _persist_qwen_run_metadata(
@@ -4456,6 +5367,31 @@ class PromptRecipeExpandRequest(BaseModel):
     max_new: int = Field(10, ge=0, le=50)
 
 
+class AgentMiningRequest(BaseModel):
+    dataset_id: str
+    classes: Optional[List[int]] = None
+    val_percent: float = Field(0.3, ge=0.05, le=0.95)
+    split_seed: int = 42
+    reuse_split: bool = True
+    text_prompts_by_class: Optional[Dict[int, List[str]]] = None
+    auto_mine_prompts: bool = True
+    exemplar_per_class: int = Field(10, ge=0, le=500)
+    cluster_exemplars: bool = False
+    thresholds: List[float] = Field(default_factory=lambda: [0.2, 0.3, 0.4])
+    mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    similarity_score: float = Field(0.25, ge=0.0, le=1.0)
+    max_results: int = Field(100, ge=1, le=5000)
+    min_size: int = Field(0, ge=0, le=10_000)
+    simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
+    fp_budget: int = Field(1_000, ge=0)
+    coverage_target: float = Field(0.95, ge=0.0, le=1.0)
+    max_steps: int = Field(8, ge=1, le=100)
+    use_clip_fp_guard: bool = False
+    test_mode: bool = False
+    test_train_limit: int = Field(10, ge=1, le=10_000)
+    test_val_limit: int = Field(10, ge=1, le=10_000)
+
+
 def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new: int) -> List[str]:
     """Use Qwen to brainstorm additional prompt variants for a class."""
     cleaned_base = []
@@ -4921,6 +5857,21 @@ def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
     }
 
 
+def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "message": job.message,
+        "progress": job.progress,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "request": job.request,
+        "result": job.result,
+        "logs": job.logs,
+        "error": job.error,
+    }
+
+
 def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -5357,6 +6308,291 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         job.updated_at = time.time()
 
 
+def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> None:
+    with AGENT_MINING_JOBS_LOCK:
+        AGENT_MINING_JOBS[job.job_id] = job
+    job.status = "running"
+    job.message = "Preparing dataset split…"
+    job.request = payload.dict()
+    job.updated_at = time.time()
+    try:
+        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+        job.logs.append({"ts": time.time(), "msg": f"Dataset resolved at {dataset_root}"})
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+        split = _ensure_agent_mining_split(
+            payload.dataset_id,
+            dataset_root,
+            val_percent=payload.val_percent,
+            seed=payload.split_seed,
+            reuse_split=payload.reuse_split,
+            test_mode=payload.test_mode,
+            train_limit=payload.test_train_limit if payload.test_mode else None,
+            val_limit=payload.test_val_limit if payload.test_mode else None,
+        )
+        job.progress = 0.2
+        job.updated_at = time.time()
+        job.logs.append(
+            {
+                "ts": time.time(),
+                "msg": f"Prepared split with {len(split.get('train') or [])} train / {len(split.get('val') or [])} val images",
+            }
+        )
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+        if job.cancel_event.is_set():
+            job.status = "cancelled"
+            job.message = "Cancelled"
+            job.updated_at = time.time()
+            return
+
+        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        categories = coco.get("categories") or []
+        cat_filter: Optional[set[int]] = None
+        if payload.classes:
+            try:
+                cat_filter = {int(c) for c in payload.classes}
+            except Exception:
+                cat_filter = None
+        selected_cats: List[Dict[str, Any]] = []
+        train_ids = list(split.get("train") or [])
+        val_ids = list(split.get("val") or [])
+        train_id_set = set(train_ids)
+        val_id_set = set(val_ids)
+        job.logs.append({"ts": time.time(), "msg": f"Loaded COCO with {len(categories)} categories"})
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+        job.progress = 0.35
+        job.updated_at = time.time()
+
+        cache_dir = _agent_mining_cache_dir(payload.dataset_id)
+        thresholds = [t for t in (payload.thresholds or []) if isinstance(t, (int, float))]
+        if not thresholds:
+            thresholds = [0.3]
+        thresholds = [float(max(0.0, min(1.0, t))) for t in thresholds]
+
+        for idx, cat in enumerate(categories):
+            try:
+                cat_id = int(cat.get("id", idx))
+            except Exception:
+                continue
+            if cat_filter and cat_id not in cat_filter:
+                continue
+            cat_name = str(cat.get("name", f"class_{cat_id}"))
+            train_gt = 0
+            val_gt = 0
+            for img_id, cat_map in gt_by_image_cat.items():
+                bboxes = cat_map.get(cat_id)
+                if not bboxes:
+                    continue
+                count = len(bboxes)
+                if img_id in train_id_set:
+                    train_gt += count
+                elif img_id in val_id_set:
+                    val_gt += count
+            sample_cap = payload.exemplar_per_class
+            if payload.cluster_exemplars:
+                sample_cap = payload.exemplar_per_class * 3
+            exemplars = _sample_agent_mining_exemplars(
+                cat_id,
+                train_ids,
+                gt_by_image_cat,
+                images,
+                limit=sample_cap,
+                seed=payload.split_seed,
+            )
+            clip_exemplar_warnings: List[str] = []
+            exemplar_embeddings: Dict[str, np.ndarray] = {}
+            if payload.cluster_exemplars and exemplars:
+                exemplars = _cluster_agent_mining_exemplars(
+                    exemplars,
+                    max_items=payload.exemplar_per_class,
+                    seed=payload.split_seed + cat_id,
+                )
+            if payload.use_clip_fp_guard and exemplars:
+                exemplar_embeddings, clip_exemplar_warnings = _clip_embed_regions(
+                    exemplars,
+                    images,
+                    max_regions=max(16, payload.exemplar_per_class * 2),
+                )
+            selected_cats.append(
+                {
+                    "id": cat_id,
+                    "name": cat_name,
+                    "train_gt": train_gt,
+                    "val_gt": val_gt,
+                    "exemplars": exemplars,
+                    "clip_warnings": clip_exemplar_warnings,
+                }
+            )
+            if job.cancel_event.is_set():
+                job.status = "cancelled"
+                job.message = "Cancelled"
+                job.updated_at = time.time()
+                return
+            # Evaluate text prompts and exemplar prompts on the validation split using cached detections.
+            gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
+            gt_index_val = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in val_id_set}
+            per_image_gt_val = {img_id: per_image_gt_all.get(img_id, 0) for img_id in val_ids}
+            all_gt_keys_val: set[str] = set()
+            for entries in gt_index_val.values():
+                for key, _ in entries:
+                    all_gt_keys_val.add(key)
+            eval_candidates: List[Dict[str, Any]] = []
+            text_prompts = (payload.text_prompts_by_class or {}).get(cat_id)
+            if not text_prompts:
+                text_prompts = [cat_name]
+            for prompt_text in text_prompts:
+                for thr in thresholds:
+                    dets = _collect_agent_mining_detections(
+                        images=images,
+                        image_ids=val_ids,
+                        prompt=prompt_text,
+                        visual_ref=None,
+                        threshold=thr,
+                        mask_threshold=payload.mask_threshold,
+                        min_size=payload.min_size,
+                        simplify=payload.simplify_epsilon,
+                        max_results=payload.max_results,
+                        cache_dir=cache_dir,
+                    )
+                    fp_warnings: List[str] = []
+                    if payload.use_clip_fp_guard and exemplar_embeddings:
+                        dets, fp_warnings = _clip_fp_filter_detections(
+                            dets,
+                            exemplar_embeddings=exemplar_embeddings,
+                            images=images,
+                            similarity_floor=payload.similarity_score,
+                        )
+                    cache_map = _detections_to_eval_cache(dets, images)
+                    metrics = _evaluate_prompt_candidate(
+                        prompt_text,
+                        thr,
+                        cat_id=cat_id,
+                        image_ids=val_ids,
+                        gt_index=gt_index_val,
+                        images=images,
+                        iou_threshold=0.5,
+                        max_dets=payload.max_results,
+                        image_cache={},
+                        cached_detections=cache_map,
+                    )
+                    metrics["type"] = "text"
+                    metrics["detections"] = len(dets)
+                    if fp_warnings:
+                        metrics["warnings"] = fp_warnings
+                    eval_candidates.append(metrics)
+            for ex_idx, ex in enumerate(exemplars):
+                label = f"exemplar_{ex_idx}"
+                for thr in thresholds:
+                    dets = _collect_agent_mining_detections(
+                        images=images,
+                        image_ids=val_ids,
+                        prompt=None,
+                        visual_ref=ex,
+                        threshold=thr,
+                        mask_threshold=payload.mask_threshold,
+                        min_size=payload.min_size,
+                        simplify=payload.simplify_epsilon,
+                        max_results=payload.max_results,
+                        cache_dir=cache_dir,
+                    )
+                    fp_warnings: List[str] = []
+                    if payload.use_clip_fp_guard and exemplar_embeddings:
+                        dets, fp_warnings = _clip_fp_filter_detections(
+                            dets,
+                            exemplar_embeddings=exemplar_embeddings,
+                            images=images,
+                            similarity_floor=payload.similarity_score,
+                        )
+                    cache_map = _detections_to_eval_cache(dets, images)
+                    metrics = _evaluate_prompt_candidate(
+                        label,
+                        thr,
+                        cat_id=cat_id,
+                        image_ids=val_ids,
+                        gt_index=gt_index_val,
+                        images=images,
+                        iou_threshold=0.5,
+                        max_dets=payload.max_results,
+                        image_cache={},
+                        cached_detections=cache_map,
+                    )
+                    metrics["type"] = "visual"
+                    metrics["exemplar"] = {
+                        "image_id": ex.get("image_id"),
+                        "bbox": ex.get("bbox"),
+                        "file_name": ex.get("file_name"),
+                    }
+                    metrics["detections"] = len(dets)
+                    if fp_warnings:
+                        metrics["warnings"] = fp_warnings
+                    eval_candidates.append(metrics)
+            recipe: Optional[Dict[str, Any]] = None
+            coverage_by_image: Optional[List[Dict[str, Any]]] = None
+            if eval_candidates and all_gt_keys_val:
+                recipe, coverage_by_image = _build_prompt_recipe(
+                    eval_candidates,
+                    all_gt_keys_val,
+                    per_image_gt_val,
+                    images,
+                    val_ids,
+                    gt_index_val,
+                )
+                if recipe:
+                    # Attach source metadata to steps
+                    meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
+                    for cand in eval_candidates:
+                        try:
+                            key = (cand.get("prompt"), float(cand.get("threshold")))
+                        except Exception:
+                            continue
+                        meta_map[key] = {
+                            "type": cand.get("type"),
+                            "exemplar": cand.get("exemplar"),
+                            "warnings": cand.get("warnings"),
+                        }
+                    for step in recipe.get("steps", []):
+                        key = (step.get("prompt"), float(step.get("threshold", 0)))
+                        meta = meta_map.get(key)
+                        if meta:
+                            step.update({k: v for k, v in meta.items() if v is not None})
+            selected_cats[-1]["candidates"] = eval_candidates
+            selected_cats[-1]["recipe"] = recipe
+            selected_cats[-1]["coverage_by_image"] = coverage_by_image
+            job.progress = 0.35 + 0.6 * ((idx + 1) / max(1, len(categories)))
+            job.updated_at = time.time()
+
+        job.progress = max(job.progress, 0.9)
+        job.updated_at = time.time()
+        job.logs.append({"ts": time.time(), "msg": f"Prepared {len(selected_cats)} classes with exemplar seeds"})
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+        if job.cancel_event.is_set():
+            job.status = "cancelled"
+            job.message = "Cancelled"
+            job.updated_at = time.time()
+            return
+        job.result = {
+            "dataset_id": payload.dataset_id,
+            "split": split,
+            "config": payload.dict(),
+            "status": "initialized",
+            "classes": selected_cats,
+            "note": "Agent mining runner initialized with splits, exemplars, and baseline candidate evals.",
+        }
+        job.status = "completed"
+        job.message = "Split and exemplars ready"
+        job.progress = 1.0
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Agent mining job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Failed"
+    finally:
+        job.updated_at = time.time()
+
+
 def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     job_id = f"ph_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
@@ -5364,6 +6600,30 @@ def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
         PROMPT_HELPER_JOBS[job.job_id] = job
     thread = threading.Thread(target=_run_prompt_helper_job, args=(job, payload), daemon=True)
     thread.start()
+    return job
+
+
+def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
+    job_id = f"am_{uuid.uuid4().hex[:8]}"
+    job = AgentMiningJob(job_id=job_id)
+    with AGENT_MINING_JOBS_LOCK:
+        AGENT_MINING_JOBS[job.job_id] = job
+    thread = threading.Thread(target=_run_agent_mining_job, args=(job, payload), daemon=True)
+    thread.start()
+    return job
+
+
+def _cancel_agent_mining_job(job_id: str) -> AgentMiningJob:
+    with AGENT_MINING_JOBS_LOCK:
+        job = AGENT_MINING_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_job_not_found")
+    if job.status in {"completed", "failed", "cancelled"}:
+        return job
+    job.cancel_event.set()
+    job.status = "cancelled"
+    job.message = "Cancelled"
+    job.updated_at = time.time()
     return job
 
 
@@ -5385,6 +6645,218 @@ def _start_prompt_recipe_job(payload: PromptRecipeRequest) -> PromptHelperJob:
     thread = threading.Thread(target=_run_prompt_recipe_job, args=(job, payload), daemon=True)
     thread.start()
     return job
+
+
+@app.post("/agent_mining/jobs")
+def start_agent_mining_job(payload: AgentMiningRequest):
+    job = _start_agent_mining_job(payload)
+    return _serialize_agent_mining_job(job)
+
+
+@app.get("/agent_mining/jobs")
+def list_agent_mining_jobs():
+    with AGENT_MINING_JOBS_LOCK:
+        jobs = list(AGENT_MINING_JOBS.values())
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return [_serialize_agent_mining_job(j) for j in jobs]
+
+
+@app.get("/agent_mining/jobs/{job_id}")
+def get_agent_mining_job(job_id: str):
+    with AGENT_MINING_JOBS_LOCK:
+        job = AGENT_MINING_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_job_not_found")
+    return _serialize_agent_mining_job(job)
+
+
+@app.post("/agent_mining/jobs/{job_id}/cancel")
+def cancel_agent_mining_job(job_id: str):
+    job = _cancel_agent_mining_job(job_id)
+    return _serialize_agent_mining_job(job)
+
+
+@app.get("/agent_mining/results/latest")
+def get_latest_agent_mining_result():
+    with AGENT_MINING_JOBS_LOCK:
+        jobs = [j for j in AGENT_MINING_JOBS.values() if j.status == "completed" and j.result]
+    if not jobs:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_result_not_found")
+    jobs.sort(key=lambda j: j.updated_at, reverse=True)
+    return _serialize_agent_mining_job(jobs[0])
+
+
+class AgentApplyRequest(BaseModel):
+    dataset_id: str
+    image_id: int
+    recipe: Dict[str, Any]
+    mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    min_size: int = Field(0, ge=0, le=10_000)
+    simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
+    max_results: int = Field(100, ge=1, le=5000)
+
+
+@app.post("/agent_mining/apply", response_model=Sam3TextPromptResponse)
+def agent_mining_apply(payload: AgentApplyRequest):
+    dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+    coco, _, images = _load_coco_index(dataset_root)
+    categories = coco.get("categories") or []
+    labelmap_hash, _ = _compute_labelmap_hash(categories)
+    warnings: List[str] = []
+    recipe_meta = payload.recipe or {}
+    recipe_labelmap_hash = recipe_meta.get("labelmap_hash")
+    if recipe_labelmap_hash and recipe_labelmap_hash != labelmap_hash:
+        warnings.append("labelmap_mismatch")
+    recipe_signature = recipe_meta.get("dataset_signature")
+    dataset_signature = _compute_dataset_signature(payload.dataset_id, dataset_root, images, categories)
+    if recipe_signature and recipe_signature != dataset_signature:
+        warnings.append("dataset_mismatch")
+    target_class_id = recipe_meta.get("class_id")
+    target_class_name = recipe_meta.get("class_name")
+    class_id_int: Optional[int] = None
+    if target_class_id is not None:
+        try:
+            class_id_int = int(target_class_id)
+        except Exception:
+            class_id_int = None
+    name_match_id: Optional[int] = None
+    if target_class_name:
+        target_lower = str(target_class_name).lower()
+        for idx, cat in enumerate(categories):
+            try:
+                cid = int(cat.get("id", idx))
+            except Exception:
+                cid = idx
+            if str(cat.get("name", "")).lower() == target_lower:
+                name_match_id = cid
+                break
+    # Prefer ID match; if missing but name matches, use name match and add warning.
+    if class_id_int is not None:
+        present = any(int(cat.get("id", idx)) == class_id_int for idx, cat in enumerate(categories))
+        if not present and name_match_id is not None:
+            warnings.append("class_id_remapped_by_name")
+            class_id_int = name_match_id
+        elif not present:
+            raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_class_missing")
+    elif name_match_id is not None:
+        class_id_int = name_match_id
+    else:
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_class_missing")
+    img = images.get(payload.image_id)
+    if not img:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_image_not_found")
+    dets = _apply_agent_recipe_to_image(
+        payload.recipe,
+        image=img,
+        dataset_id=payload.dataset_id,
+        mask_threshold=payload.mask_threshold,
+        min_size=payload.min_size,
+        simplify_epsilon=payload.simplify_epsilon,
+        max_results=payload.max_results,
+    )
+    return Sam3TextPromptResponse(detections=dets, warnings=warnings, image_token=None)
+
+
+class AgentRecipeExportRequest(BaseModel):
+    dataset_id: str
+    class_id: Optional[int] = None
+    class_name: Optional[str] = None
+    label: str = Field(..., min_length=1, max_length=128)
+    recipe: Dict[str, Any]
+
+
+@app.post("/agent_mining/recipes", response_model=Dict[str, Any])
+def agent_mining_save_recipe(payload: AgentRecipeExportRequest):
+    recipe = _persist_agent_recipe(
+        payload.dataset_id,
+        payload.class_id,
+        payload.class_name,
+        payload.label,
+        payload.recipe,
+    )
+    return recipe
+
+
+@app.get("/agent_mining/recipes", response_model=List[Dict[str, Any]])
+def agent_mining_list_recipes(dataset_id: Optional[str] = None):
+    return _list_agent_recipes(dataset_id)
+
+
+@app.get("/agent_mining/recipes/{recipe_id}", response_model=Dict[str, Any])
+def agent_mining_get_recipe(recipe_id: str):
+    return _load_agent_recipe(recipe_id)
+
+
+@app.get("/agent_mining/recipes/{recipe_id}/export")
+def agent_mining_export_recipe(recipe_id: str):
+    recipe = _load_agent_recipe(recipe_id)
+    zip_path = _ensure_recipe_zip(recipe)
+    filename = f"{recipe_id}.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    try:
+        stream = zip_path.open("rb")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_export_failed:{exc}") from exc
+    return StreamingResponse(stream, media_type="application/zip", headers=headers)
+
+
+@app.post("/agent_mining/recipes/import", response_model=Dict[str, Any])
+async def agent_mining_import_recipe(file: UploadFile = File(...)):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_empty")
+    data: Dict[str, Any] = {}
+    crops: Dict[str, bytes] = {}
+    if zipfile.is_zipfile(io.BytesIO(content)):
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                json_name = None
+                for name in zf.namelist():
+                    if name.lower().endswith(".json"):
+                        json_name = name
+                        break
+                if not json_name:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
+                with zf.open(json_name) as jf:
+                    data = json.load(jf)
+                for name in zf.namelist():
+                    if not name.lower().startswith("crops/") or not name.lower().endswith(".png"):
+                        continue
+                    try:
+                        crops[name] = zf.read(name)
+                    except Exception:
+                        continue
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_failed:{exc}") from exc
+    else:
+        try:
+            data = json.loads(content)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_invalid:{exc}") from exc
+    dataset_id = data.get("dataset_id") or data.get("recipe", {}).get("dataset_id")
+    label = data.get("label") or data.get("recipe", {}).get("label") or "imported_recipe"
+    class_id = data.get("class_id")
+    class_name = data.get("class_name")
+    recipe_body = data.get("recipe") or {}
+    meta_overrides = {
+        "dataset_signature": data.get("dataset_signature"),
+        "labelmap_hash": data.get("labelmap_hash"),
+        "labelmap": data.get("labelmap"),
+    }
+    if not dataset_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_missing_dataset")
+    persisted = _persist_agent_recipe(
+        dataset_id,
+        class_id,
+        class_name,
+        label,
+        recipe_body,
+        crop_overrides=crops,
+        meta_overrides=meta_overrides,
+    )
+    return persisted
 
 
 @app.post("/sam3/prompt_helper/suggest")

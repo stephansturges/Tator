@@ -23,6 +23,12 @@
         );
     }
 
+    function setAgentStatus(text, tone = "info") {
+        if (!agentElements.status) return;
+        agentElements.status.textContent = text || "";
+        agentElements.status.className = `training-message ${tone}`;
+    }
+
     // 1) Define a palette of 100 colors spread around the hue wheel
     //    (First ~20 are roughly 0°, 18°, 36°, ..., 342°, then continuing).
     const colorPalette = [];
@@ -1124,11 +1130,49 @@ const sam3TrainState = {
         results: null,
         message: null,
     };
+    const agentElements = {
+        datasetSelect: null,
+        datasetRefresh: null,
+        datasetSummary: null,
+        valPercent: null,
+        thresholds: null,
+        maskThreshold: null,
+        maxResults: null,
+        minSize: null,
+        simplifyEps: null,
+        exemplars: null,
+        clusterExemplars: null,
+        clipGuard: null,
+        similarityScore: null,
+        classesInput: null,
+        testMode: null,
+        trainLimit: null,
+        valLimit: null,
+        runButton: null,
+        refreshButton: null,
+        status: null,
+        results: null,
+        recipeSelect: null,
+        recipeRefresh: null,
+        recipeLoad: null,
+        recipeDownload: null,
+        recipeApply: null,
+        recipeImageId: null,
+        recipeImport: null,
+        recipeFile: null,
+        recipeDetails: null,
+    };
 
     const promptRecipeState = {
         activeJobId: null,
         pollHandle: null,
         lastJob: null,
+    };
+    const agentState = {
+        lastJob: null,
+        datasetsById: {},
+        loadedRecipe: null,
+        recipeClassOverride: null,
     };
 
     let promptHelperInitialized = false;
@@ -3058,6 +3102,115 @@ function setPromptHelperMessage(text, tone = "info") {
         promptRecipeElements.message.className = `training-message ${tone}`;
     }
 
+    function setAgentResultsMessage(text, tone = "info") {
+        if (!agentElements.results) return;
+        const msg = document.createElement("div");
+        msg.className = `training-message ${tone}`;
+        msg.textContent = text;
+        agentElements.results.innerHTML = "";
+        agentElements.results.appendChild(msg);
+    }
+
+    function renderAgentResults(result) {
+        if (!agentElements.results) return;
+        agentElements.results.innerHTML = "";
+        if (!result || !Array.isArray(result.classes)) {
+            const empty = document.createElement("div");
+            empty.className = "training-message warn";
+            empty.textContent = "No agent mining results yet.";
+            agentElements.results.appendChild(empty);
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        result.classes.forEach((cls) => {
+            const card = document.createElement("div");
+            card.className = "training-card";
+            const body = document.createElement("div");
+            body.className = "training-card__body";
+            const recipe = cls.recipe || {};
+            const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+            const summary = recipe.summary || {};
+            const covPct = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0.0";
+            body.innerHTML = `
+                <div class="training-history-row">
+                    <div class="training-history-title">${escapeHtml(cls.name || cls.id)}</div>
+                    <span class="badge">${steps.length} step${steps.length === 1 ? "" : "s"}</span>
+                </div>
+                <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
+                <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%) • FPs: ${summary.fps || 0}</div>
+            `;
+            if (steps.length) {
+                const table = document.createElement("table");
+                table.className = "training-table";
+                table.innerHTML = `
+                    <thead>
+                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Gain</th><th>FPs</th><th>Cov%</th></tr>
+                    </thead>
+                `;
+                const tbody = document.createElement("tbody");
+                steps.forEach((step, idx) => {
+                    const covAfter = Number.isFinite(step.coverage_after) ? (step.coverage_after * 100).toFixed(1) : "";
+                    const row = document.createElement("tr");
+                    const label =
+                        step.type === "visual" && step.exemplar
+                            ? `Exemplar img ${step.exemplar.image_id} bbox ${Array.isArray(step.exemplar.bbox) ? step.exemplar.bbox.join(",") : ""}`
+                            : step.prompt || "";
+                    row.innerHTML = `
+                        <td>${idx + 1}</td>
+                        <td>${step.type || "text"}</td>
+                        <td>${escapeHtml(label)}</td>
+                        <td>${(step.threshold ?? "").toString()}</td>
+                        <td>${step.gain ?? ""}</td>
+                        <td>${step.fps ?? ""}</td>
+                        <td>${covAfter}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                table.appendChild(tbody);
+                body.appendChild(table);
+            } else {
+                const empty = document.createElement("div");
+                empty.className = "training-help";
+                empty.textContent = "No steps proposed for this class.";
+                body.appendChild(empty);
+            }
+            const foot = document.createElement("div");
+            foot.className = "training-actions";
+            const saveBtn = document.createElement("button");
+            saveBtn.type = "button";
+            saveBtn.className = "training-button secondary";
+            saveBtn.textContent = "Save recipe";
+            saveBtn.addEventListener("click", async () => {
+                if (!agentElements.datasetSelect) return;
+                const datasetId = agentElements.datasetSelect.value;
+                const label = prompt(`Recipe label for ${cls.name || cls.id}?`, `${cls.name || cls.id} recipe`);
+                if (!label) return;
+                try {
+                    const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            dataset_id: datasetId,
+                            class_id: cls.id,
+                            class_name: cls.name,
+                            label,
+                            recipe,
+                        }),
+                    });
+                    if (!resp.ok) throw new Error(await resp.text());
+                    setAgentStatus(`Saved recipe "${label}".`, "success");
+                } catch (err) {
+                    console.error("Save recipe failed", err);
+                    setAgentStatus(`Save failed: ${err.message || err}`, "error");
+                }
+            });
+            foot.appendChild(saveBtn);
+            body.appendChild(foot);
+            card.appendChild(body);
+            frag.appendChild(card);
+        });
+        agentElements.results.appendChild(frag);
+    }
     function readThresholdList(inputEl, fallback = 0.2) {
         if (!inputEl) return [fallback];
         const raw = inputEl.value || "";
@@ -3077,6 +3230,57 @@ function setPromptHelperMessage(text, tone = "info") {
             cleaned.push(v);
         });
         return cleaned;
+    }
+
+    function parseCsvNumbers(raw, { clampMin = null, clampMax = null } = {}) {
+        const parts = String(raw || "")
+            .split(/[,\\s]+/)
+            .map((p) => p.trim())
+            .filter(Boolean);
+        const vals = [];
+        parts.forEach((p) => {
+            const num = parseFloat(p);
+            if (!Number.isNaN(num)) {
+                let v = num;
+                if (clampMin !== null) v = Math.max(clampMin, v);
+                if (clampMax !== null) v = Math.min(clampMax, v);
+                vals.push(v);
+            }
+        });
+        return vals;
+    }
+
+    function setAgentStatus(text, tone = "info") {
+        if (!agentElements.status) return;
+        agentElements.status.textContent = text || "";
+        agentElements.status.className = `training-message ${tone}`;
+    }
+
+    function setAgentResultsMessage(text, tone = "info") {
+        if (!agentElements.results) return;
+        const msg = document.createElement("div");
+        msg.className = `training-message ${tone}`;
+        msg.textContent = text;
+        agentElements.results.innerHTML = "";
+        agentElements.results.appendChild(msg);
+    }
+
+    function parseCsvNumbers(raw, { clampMin = null, clampMax = null } = {}) {
+        const parts = String(raw || "")
+            .split(/[,\\s]+/)
+            .map((p) => p.trim())
+            .filter(Boolean);
+        const vals = [];
+        parts.forEach((p) => {
+            const num = parseFloat(p);
+            if (!Number.isNaN(num)) {
+                let v = num;
+                if (clampMin !== null) v = Math.max(clampMin, v);
+                if (clampMax !== null) v = Math.min(clampMax, v);
+                vals.push(v);
+            }
+        });
+        return vals;
     }
 
 function updatePromptHelperDatasetSummary(entry) {
@@ -3487,11 +3691,11 @@ function renderPromptSearchResults(job) {
     promptSearchElements.results.appendChild(frag);
 }
 
-function renderPromptRecipeResults(job) {
-    if (!promptRecipeElements.results || !promptRecipeElements.status) return;
-    promptRecipeElements.results.innerHTML = "";
-    if (promptRecipeElements.logs) promptRecipeElements.logs.innerHTML = "";
-    if (promptRecipeElements.applyButton) promptRecipeElements.applyButton.disabled = true;
+    function renderPromptRecipeResults(job) {
+        if (!promptRecipeElements.results || !promptRecipeElements.status) return;
+        promptRecipeElements.results.innerHTML = "";
+        if (promptRecipeElements.logs) promptRecipeElements.logs.innerHTML = "";
+        if (promptRecipeElements.applyButton) promptRecipeElements.applyButton.disabled = true;
     if (job.error) {
         const err = document.createElement("div");
         err.className = "training-message error";
@@ -3974,13 +4178,13 @@ async function expandPromptRecipePrompts() {
     }
 }
 
-async function applyLastPromptRecipeToPrompts() {
-    const job = promptRecipeState.lastJob;
-    const datasetId = promptHelperState.selectedId;
-    if (!job || !job.result) {
-        setPromptRecipeMessage("Run recipe mining first.", "warn");
-        return;
-    }
+    async function applyLastPromptRecipeToPrompts() {
+        const job = promptRecipeState.lastJob;
+        const datasetId = promptHelperState.selectedId;
+        if (!job || !job.result) {
+            setPromptRecipeMessage("Run recipe mining first.", "warn");
+            return;
+        }
     if (!datasetId) {
         setPromptRecipeMessage("Select a dataset first.", "warn");
         return;
@@ -10757,6 +10961,596 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         console.log("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
     }
 
+    function renderAgentResults(result) {
+        if (!agentElements.results) return;
+        agentElements.results.innerHTML = "";
+        if (!result || !Array.isArray(result.classes)) {
+            setAgentResultsMessage("No agent mining results yet.", "warn");
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        result.classes.forEach((cls) => {
+            const card = document.createElement("div");
+            card.className = "training-card";
+            const body = document.createElement("div");
+            body.className = "training-card__body";
+            const recipe = cls.recipe || {};
+            const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+            const summary = recipe.summary || {};
+            const covPct = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0.0";
+            body.innerHTML = `
+                <div class="training-history-row">
+                    <div class="training-history-title">${escapeHtml(cls.name || cls.id)}</div>
+                    <span class="badge">${steps.length} step${steps.length === 1 ? "" : "s"}</span>
+                </div>
+                <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
+                <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%) • FPs: ${summary.fps || 0}</div>
+            `;
+            if (steps.length) {
+                const table = document.createElement("table");
+                table.className = "training-table";
+                table.innerHTML = `
+                    <thead>
+                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Gain</th><th>FPs</th><th>Cov%</th></tr>
+                    </thead>
+                `;
+                const tbody = document.createElement("tbody");
+                steps.forEach((step, idx) => {
+                    const covAfter = Number.isFinite(step.coverage_after) ? (step.coverage_after * 100).toFixed(1) : "";
+                    const label =
+                        step.type === "visual" && step.exemplar
+                            ? `Exemplar img ${step.exemplar.image_id} bbox ${Array.isArray(step.exemplar.bbox) ? step.exemplar.bbox.join(",") : ""}`
+                            : step.prompt || "";
+                    const row = document.createElement("tr");
+                    row.innerHTML = `
+                        <td>${idx + 1}</td>
+                        <td>${step.type || "text"}</td>
+                        <td>${escapeHtml(label)}</td>
+                        <td>${(step.threshold ?? "").toString()}</td>
+                        <td>${step.gain ?? ""}</td>
+                        <td>${step.fps ?? ""}</td>
+                        <td>${covAfter}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                table.appendChild(tbody);
+                body.appendChild(table);
+            } else {
+                const empty = document.createElement("div");
+                empty.className = "training-help";
+                empty.textContent = "No steps proposed for this class.";
+                body.appendChild(empty);
+            }
+            const foot = document.createElement("div");
+            foot.className = "training-actions";
+            const saveBtn = document.createElement("button");
+            saveBtn.type = "button";
+            saveBtn.className = "training-button secondary";
+            saveBtn.textContent = "Save recipe";
+            saveBtn.addEventListener("click", async () => {
+                const datasetId = agentElements.datasetSelect?.value;
+                if (!datasetId) {
+                    setAgentStatus("Select a dataset before saving.", "warn");
+                    return;
+                }
+                const label = prompt(`Recipe label for ${cls.name || cls.id}?`, `${cls.name || cls.id} recipe`);
+                if (!label) return;
+                try {
+                    const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            dataset_id: datasetId,
+                            class_id: cls.id,
+                            class_name: cls.name,
+                            label,
+                            recipe,
+                        }),
+                    });
+                    if (!resp.ok) throw new Error(await resp.text());
+                    setAgentStatus(`Saved recipe "${label}".`, "success");
+                    fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
+                } catch (err) {
+                    console.error("Save recipe failed", err);
+                    setAgentStatus(`Save failed: ${err.message || err}`, "error");
+                }
+            });
+            foot.appendChild(saveBtn);
+            body.appendChild(foot);
+            card.appendChild(body);
+            frag.appendChild(card);
+        });
+        agentElements.results.appendChild(frag);
+    }
+
+    function getAgentSelectedDatasetMeta() {
+        const datasetId = agentElements.datasetSelect?.value;
+        if (!datasetId) return null;
+        return agentState.datasetsById[datasetId] || null;
+    }
+
+    function renderAgentRecipeDetails(recipeData) {
+        if (!agentElements.recipeDetails) return;
+        agentElements.recipeDetails.innerHTML = "";
+        agentElements.recipeDetails.style.display = recipeData ? "block" : "none";
+        if (!recipeData) return;
+        const dsMeta = getAgentSelectedDatasetMeta();
+        const dsClasses = Array.isArray(dsMeta?.classes) ? dsMeta.classes : [];
+        const recipeClasses = Array.isArray(recipeData.labelmap) ? recipeData.labelmap : [];
+        const mismatchWarnings = [];
+        if (dsMeta?.signature && recipeData.dataset_signature && dsMeta.signature !== recipeData.dataset_signature) {
+            mismatchWarnings.push("Dataset signature differs from the recipe origin.");
+        }
+        if (recipeClasses.length && dsClasses.length && JSON.stringify(recipeClasses) !== JSON.stringify(dsClasses)) {
+            mismatchWarnings.push("Label map differs; remap the class before applying.");
+        }
+        const wrapper = document.createElement("div");
+        wrapper.className = "training-card__body";
+        const title = document.createElement("div");
+        title.className = "training-history-title";
+        title.textContent = recipeData.label || recipeData.id || "recipe";
+        wrapper.appendChild(title);
+            const meta = document.createElement("div");
+            meta.className = "training-help";
+            meta.textContent = [
+                recipeData.class_name ? `Class: ${recipeData.class_name}` : null,
+                recipeData.dataset_id ? `Dataset: ${recipeData.dataset_id}` : null,
+                recipeData.dataset_signature ? `Signature: ${recipeData.dataset_signature}` : null,
+                recipeData.labelmap_hash ? `Labelmap hash: ${recipeData.labelmap_hash}` : null,
+            ]
+                .filter(Boolean)
+                .join(" • ");
+            wrapper.appendChild(meta);
+        if (mismatchWarnings.length) {
+            const warn = document.createElement("div");
+            warn.className = "training-message warn";
+            warn.textContent = mismatchWarnings.join(" ");
+            wrapper.appendChild(warn);
+        }
+        if (dsClasses.length) {
+            const mapRow = document.createElement("div");
+            mapRow.className = "training-field";
+            const lbl = document.createElement("label");
+            lbl.textContent = "Remap class";
+            mapRow.appendChild(lbl);
+            const select = document.createElement("select");
+            dsClasses.forEach((clsName, idx) => {
+                const opt = document.createElement("option");
+                opt.value = (idx + 1).toString();
+                opt.textContent = clsName;
+                if (recipeData.class_name && clsName.toLowerCase() === recipeData.class_name.toLowerCase()) {
+                    opt.selected = true;
+                }
+                select.appendChild(opt);
+            });
+            select.addEventListener("change", () => {
+                const val = parseInt(select.value, 10);
+                if (Number.isInteger(val)) {
+                    agentState.recipeClassOverride = { class_id: val, class_name: dsClasses[val - 1] };
+                }
+            });
+            mapRow.appendChild(select);
+            wrapper.appendChild(mapRow);
+        }
+        const steps = recipeData.recipe?.steps || [];
+        if (steps.length) {
+            const list = document.createElement("div");
+            list.className = "training-grid";
+            steps.forEach((step, idx) => {
+                const card = document.createElement("div");
+                card.className = "training-card";
+                const body = document.createElement("div");
+                body.className = "training-card__body";
+                const header = document.createElement("div");
+                header.className = "training-history-row";
+                header.innerHTML = `<div class="training-history-title">Step ${idx + 1}: ${escapeHtml(step.type || "text")}</div><span class="badge">thr ${step.threshold ?? ""}</span>`;
+                body.appendChild(header);
+                const label = document.createElement("div");
+                label.className = "training-help";
+                label.textContent = step.prompt || (step.exemplar ? "Exemplar" : "");
+                body.appendChild(label);
+                if (step.exemplar && step.exemplar.crop_base64) {
+                    const img = document.createElement("img");
+                    img.src = step.exemplar.crop_base64;
+                    img.alt = "Exemplar crop";
+                    img.style.maxWidth = "120px";
+                    img.style.display = "block";
+                    img.style.marginTop = "6px";
+                    body.appendChild(img);
+                }
+                card.appendChild(body);
+                list.appendChild(card);
+            });
+            wrapper.appendChild(list);
+        }
+        agentElements.recipeDetails.appendChild(wrapper);
+    }
+
+    async function loadAgentDatasets() {
+        if (!agentElements.datasetSelect || !agentElements.datasetSummary) return;
+        agentElements.datasetSelect.disabled = true;
+        agentElements.datasetSelect.innerHTML = "";
+        agentElements.datasetSummary.textContent = "Loading datasets…";
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/datasets`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const list = Array.isArray(data) ? data : [];
+            agentState.datasetsById = {};
+            agentElements.datasetSelect.innerHTML = "";
+            list.forEach((entry) => {
+                const opt = document.createElement("option");
+                opt.value = entry.id || entry.label || entry.path || "";
+                opt.textContent = entry.label || entry.id || opt.value;
+                agentElements.datasetSelect.appendChild(opt);
+                if (opt.value) {
+                    agentState.datasetsById[opt.value] = entry;
+                }
+            });
+            if (list.length) {
+                agentElements.datasetSelect.selectedIndex = 0;
+                const first = list[0];
+                const parts = [];
+                if (first.source) parts.push(first.source);
+                if (first.image_count) parts.push(`${first.image_count} images`);
+                agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
+            } else {
+                agentElements.datasetSummary.textContent = "No datasets found.";
+            }
+        } catch (err) {
+            console.error("Agent datasets load failed", err);
+            agentElements.datasetSummary.textContent = `Failed: ${err.message || err}`;
+        } finally {
+            agentElements.datasetSelect.disabled = false;
+        }
+    }
+
+    function updateAgentDatasetSummary() {
+        if (!agentElements.datasetSummary) return;
+        const meta = getAgentSelectedDatasetMeta();
+        if (!meta) {
+            agentElements.datasetSummary.textContent = "Pick a converted SAM3/Qwen dataset.";
+            return;
+        }
+        const parts = [];
+        if (meta.source) parts.push(meta.source);
+        if (meta.image_count) parts.push(`${meta.image_count} images`);
+        agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
+    }
+
+    function parseAgentPayload() {
+        const datasetId = agentElements.datasetSelect?.value;
+        if (!datasetId) {
+            setAgentStatus("Select a dataset.", "warn");
+            return null;
+        }
+        const valPct = readNumberInput(agentElements.valPercent, { integer: false });
+        const thresholds = parseCsvNumbers(agentElements.thresholds?.value, { clampMin: 0, clampMax: 1 });
+        const maskThreshold = readNumberInput(agentElements.maskThreshold, { integer: false });
+        const maxResults = readNumberInput(agentElements.maxResults, { integer: true });
+        const minSize = readNumberInput(agentElements.minSize, { integer: true });
+        const simplifyEps = readNumberInput(agentElements.simplifyEps, { integer: false });
+        const exemplars = readNumberInput(agentElements.exemplars, { integer: true });
+        const similarityFloor = readNumberInput(agentElements.similarityScore, { integer: false });
+        const classesRaw = agentElements.classesInput?.value || "";
+        const classes =
+            classesRaw
+                .split(/[,\\s]+/)
+                .map((p) => parseInt(p.trim(), 10))
+                .filter((v) => Number.isInteger(v)) || [];
+        return {
+            dataset_id: datasetId,
+            val_percent: Number.isFinite(valPct) ? Math.max(5, Math.min(95, valPct)) / 100 : 0.3,
+            thresholds: thresholds.length ? thresholds : [0.2],
+            mask_threshold: Number.isFinite(maskThreshold) ? Math.max(0, Math.min(1, maskThreshold)) : 0.5,
+            max_results: Number.isFinite(maxResults) ? Math.max(1, maxResults) : 100,
+            min_size: Number.isFinite(minSize) ? Math.max(0, minSize) : 0,
+            simplify_epsilon: Number.isFinite(simplifyEps) ? Math.max(0, simplifyEps) : 0,
+            exemplar_per_class: Number.isFinite(exemplars) ? Math.max(0, exemplars) : 4,
+            cluster_exemplars: !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
+            use_clip_fp_guard: !!(agentElements.clipGuard && agentElements.clipGuard.checked),
+            similarity_score: Number.isFinite(similarityFloor) ? Math.max(0, Math.min(1, similarityFloor)) : 0.25,
+            classes: classes.length ? classes : null,
+            test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
+            test_train_limit: readNumberInput(agentElements.trainLimit, { integer: true }) ?? 10,
+            test_val_limit: readNumberInput(agentElements.valLimit, { integer: true }) ?? 10,
+        };
+    }
+
+    async function startAgentMiningJob() {
+        const payload = parseAgentPayload();
+        if (!payload) return;
+        setAgentStatus("Starting agent mining…", "info");
+        if (agentElements.runButton) agentElements.runButton.disabled = true;
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/jobs`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const job = await resp.json();
+            agentState.lastJob = job;
+            setAgentStatus(`Job ${job.job_id} started`, "success");
+        } catch (err) {
+            console.error("Agent mining start failed", err);
+            setAgentStatus(`Start failed: ${err.message || err}`, "error");
+        } finally {
+            if (agentElements.runButton) agentElements.runButton.disabled = false;
+        }
+    }
+
+    async function refreshAgentLatest() {
+        setAgentStatus("Fetching latest result…", "info");
+        if (agentElements.refreshButton) agentElements.refreshButton.disabled = true;
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/results/latest`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const job = await resp.json();
+            agentState.lastJob = job;
+            setAgentStatus(`Latest job: ${job.status}`, "success");
+            renderAgentResults(job.result);
+        } catch (err) {
+            console.error("Agent mining latest failed", err);
+            setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
+            setAgentStatus(`Fetch failed: ${err.message || err}`, "error");
+        } finally {
+            if (agentElements.refreshButton) agentElements.refreshButton.disabled = false;
+        }
+    }
+
+    async function fetchAgentRecipes() {
+        const datasetId = agentElements.datasetSelect?.value;
+        if (!agentElements.recipeSelect) return;
+        agentElements.recipeSelect.innerHTML = "";
+        try {
+            const url = new URL(`${API_ROOT}/agent_mining/recipes`);
+            if (datasetId) url.searchParams.set("dataset_id", datasetId);
+            const resp = await fetch(url.toString());
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const list = Array.isArray(data) ? data : [];
+            list.forEach((rec) => {
+                const opt = document.createElement("option");
+                opt.value = rec.id || "";
+                const labelParts = [];
+                if (rec.label) labelParts.push(rec.label);
+                if (rec.class_name) labelParts.push(`(${rec.class_name})`);
+                opt.textContent = labelParts.join(" ") || rec.id;
+                agentElements.recipeSelect.appendChild(opt);
+            });
+            if (!list.length) {
+                const opt = document.createElement("option");
+                opt.value = "";
+                opt.textContent = "No saved recipes";
+                agentElements.recipeSelect.appendChild(opt);
+            }
+        } catch (err) {
+            console.error("Fetch recipes failed", err);
+            setAgentStatus(`Recipe list failed: ${err.message || err}`, "error");
+        }
+    }
+
+    async function loadSelectedAgentRecipe() {
+        const recipeId = agentElements.recipeSelect?.value;
+        if (!recipeId) {
+            setAgentStatus("Select a recipe to load.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${recipeId}`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const recipe = data.recipe || {};
+            agentState.lastJob = {
+                status: "completed",
+                message: `Loaded recipe ${data.label || data.id}`,
+                result: {
+                    classes: [
+                        {
+                            id: data.class_id,
+                            name: data.class_name,
+                            train_gt: null,
+                            val_gt: null,
+                            exemplars: [],
+                            clip_warnings: [],
+                            candidates: [],
+                            recipe,
+                            coverage_by_image: null,
+                        },
+                    ],
+                },
+            };
+            agentState.loadedRecipe = data;
+            agentState.recipeClassOverride = null;
+            renderAgentResults(agentState.lastJob.result);
+            renderAgentRecipeDetails(data);
+            setAgentStatus(`Loaded recipe ${data.label || data.id}`, "success");
+        } catch (err) {
+            console.error("Load recipe failed", err);
+            setAgentStatus(`Load failed: ${err.message || err}`, "error");
+        }
+    }
+
+    async function downloadSelectedAgentRecipe() {
+        const recipeId = agentElements.recipeSelect?.value;
+        if (!recipeId) {
+            setAgentStatus("Select a recipe to download.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${recipeId}/export`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${recipeId}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            setAgentStatus("Downloaded recipe package.", "success");
+        } catch (err) {
+            console.error("Recipe download failed", err);
+            setAgentStatus(`Download failed: ${err.message || err}`, "error");
+        }
+    }
+
+    async function importAgentRecipe() {
+        if (!agentElements.recipeFile || !agentElements.recipeFile.files?.length) {
+            setAgentStatus("Choose a recipe file (.zip or .json) to import.", "warn");
+            return;
+        }
+        const file = agentElements.recipeFile.files[0];
+        const formData = new FormData();
+        formData.append("file", file);
+        setAgentStatus("Importing recipe…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
+                method: "POST",
+                body: formData,
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            agentState.loadedRecipe = data;
+            agentState.recipeClassOverride = null;
+            renderAgentRecipeDetails(data);
+            setAgentStatus(`Imported recipe ${data.label || data.id}`, "success");
+            await fetchAgentRecipes();
+        } catch (err) {
+            console.error("Recipe import failed", err);
+            setAgentStatus(`Import failed: ${err.message || err}`, "error");
+        } finally {
+            agentElements.recipeFile.value = "";
+        }
+    }
+
+    async function applySelectedAgentRecipe() {
+        const recipeId = agentElements.recipeSelect?.value;
+        const datasetId = agentElements.datasetSelect?.value;
+        if (!datasetId) {
+            setAgentStatus("Select a dataset first.", "warn");
+            return;
+        }
+        if (!recipeId) {
+            setAgentStatus("Select a recipe to apply.", "warn");
+            return;
+        }
+        const imageId = readNumberInput(agentElements.recipeImageId, { integer: true });
+        if (!Number.isInteger(imageId) || imageId < 0) {
+            setAgentStatus("Enter a valid COCO image id to apply.", "warn");
+            return;
+        }
+        try {
+            let recipeData = agentState.loadedRecipe;
+            if (!recipeData || recipeData.id !== recipeId) {
+                const recipeResp = await fetch(`${API_ROOT}/agent_mining/recipes/${recipeId}`);
+                if (!recipeResp.ok) throw new Error(await recipeResp.text());
+                recipeData = await recipeResp.json();
+            }
+            if (agentState.recipeClassOverride) {
+                recipeData = {
+                    ...recipeData,
+                    class_id: agentState.recipeClassOverride.class_id,
+                    class_name: agentState.recipeClassOverride.class_name,
+                };
+            }
+            const payload = {
+                dataset_id: datasetId,
+                image_id: imageId,
+                recipe: recipeData,
+                mask_threshold: recipeData.params?.mask_threshold ?? 0.5,
+                min_size: recipeData.params?.min_size ?? 0,
+                simplify_epsilon: recipeData.params?.simplify_epsilon ?? 0.5,
+                max_results: recipeData.params?.max_results ?? 100,
+            };
+            const resp = await fetch(`${API_ROOT}/agent_mining/apply`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const detections = Array.isArray(data?.detections) ? data.detections : [];
+            const warnList = Array.isArray(data?.warnings) ? data.warnings : [];
+            const warnText = warnList.length ? ` • Warnings: ${warnList.join(", ")}` : "";
+            setAgentStatus(`Apply succeeded: ${detections.length} detections${warnText}`, warnList.length ? "warn" : "success");
+            // Optionally overlay on current view? Not wired to the annotator yet.
+        } catch (err) {
+            console.error("Agent recipe apply failed", err);
+            setAgentStatus(`Apply failed: ${err.message || err}`, "error");
+        }
+    }
+
+    function initAgentMiningUi() {
+        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
+        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
+        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
+        agentElements.valPercent = document.getElementById("agentValPercent");
+        agentElements.thresholds = document.getElementById("agentThresholds");
+        agentElements.maskThreshold = document.getElementById("agentMaskThreshold");
+        agentElements.maxResults = document.getElementById("agentMaxResults");
+        agentElements.minSize = document.getElementById("agentMinSize");
+        agentElements.simplifyEps = document.getElementById("agentSimplifyEps");
+        agentElements.exemplars = document.getElementById("agentExemplars");
+        agentElements.clusterExemplars = document.getElementById("agentClusterExemplars");
+        agentElements.clipGuard = document.getElementById("agentClipGuard");
+        agentElements.similarityScore = document.getElementById("agentSimilarityScore");
+        agentElements.classesInput = document.getElementById("agentClasses");
+        agentElements.testMode = document.getElementById("agentTestMode");
+        agentElements.trainLimit = document.getElementById("agentTrainLimit");
+        agentElements.valLimit = document.getElementById("agentValLimit");
+        agentElements.runButton = document.getElementById("agentRunBtn");
+        agentElements.refreshButton = document.getElementById("agentRefreshBtn");
+        agentElements.status = document.getElementById("agentStatus");
+        agentElements.results = document.getElementById("agentResults");
+        agentElements.recipeSelect = document.getElementById("agentRecipeSelect");
+        agentElements.recipeRefresh = document.getElementById("agentRecipeRefresh");
+        agentElements.recipeLoad = document.getElementById("agentRecipeLoad");
+        agentElements.recipeDownload = document.getElementById("agentRecipeDownload");
+        agentElements.recipeApply = document.getElementById("agentRecipeApply");
+        agentElements.recipeImageId = document.getElementById("agentRecipeImageId");
+        agentElements.recipeImport = document.getElementById("agentRecipeImport");
+        agentElements.recipeFile = document.getElementById("agentRecipeFile");
+        agentElements.recipeDetails = document.getElementById("agentRecipeDetails");
+        if (agentElements.datasetRefresh) {
+            agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
+        }
+        if (agentElements.datasetSelect) {
+            agentElements.datasetSelect.addEventListener("change", () => {
+                updateAgentDatasetSummary();
+                agentState.loadedRecipe = null;
+                agentState.recipeClassOverride = null;
+                renderAgentRecipeDetails(null);
+                fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
+            });
+        }
+        if (agentElements.runButton) {
+            agentElements.runButton.addEventListener("click", () => startAgentMiningJob().catch((err) => console.error("Agent mining start failed", err)));
+        }
+        if (agentElements.refreshButton) {
+            agentElements.refreshButton.addEventListener("click", () => refreshAgentLatest().catch((err) => console.error("Agent mining refresh failed", err)));
+        }
+        if (agentElements.recipeRefresh) {
+            agentElements.recipeRefresh.addEventListener("click", () => fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err)));
+        }
+        if (agentElements.recipeLoad) {
+            agentElements.recipeLoad.addEventListener("click", () => loadSelectedAgentRecipe().catch((err) => console.error("Agent recipe load failed", err)));
+        }
+        if (agentElements.recipeDownload) {
+            agentElements.recipeDownload.addEventListener("click", () => downloadSelectedAgentRecipe().catch((err) => console.error("Agent recipe download failed", err)));
+        }
+        if (agentElements.recipeApply) {
+            agentElements.recipeApply.addEventListener("click", () => applySelectedAgentRecipe().catch((err) => console.error("Agent recipe apply failed", err)));
+        }
+        if (agentElements.recipeImport && agentElements.recipeFile) {
+            agentElements.recipeImport.addEventListener("click", () => importAgentRecipe().catch((err) => console.error("Agent recipe import failed", err)));
+        }
+        loadAgentDatasets().catch((err) => console.error("Agent dataset load failed", err));
+        fetchAgentRecipes().catch((err) => console.error("Agent recipe init failed", err));
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
         autoModeCheckbox = document.getElementById("autoMode");
         samModeCheckbox = document.getElementById("samMode");
@@ -10784,6 +11578,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         initQwenPanel();
         initQwenTrainingTab();
         initQwenModelTab();
+        initAgentMiningUi();
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));

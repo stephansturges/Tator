@@ -64,6 +64,27 @@ def _http_post_json(url: str, payload: dict, timeout: float = 8.0) -> Tuple[int 
         return None, None, str(exc)
 
 
+def _poll_job(url: str, timeout: float = 30.0, interval: float = 1.0) -> Tuple[bool, dict | None, str]:
+    deadline = time.time() + timeout
+    last_err = "timeout"
+    while time.time() < deadline:
+        status, body, err = _http_get(url, timeout=interval + 1)
+        if status is None:
+            last_err = err or f"HTTP {status}"
+            time.sleep(interval)
+            continue
+        try:
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception:
+            data = {}
+        state = data.get("status")
+        if state in {"completed", "failed", "cancelled"}:
+            return state == "completed", data, ""
+        last_err = f"state={state}"
+        time.sleep(interval)
+    return False, None, last_err
+
+
 def wait_for_server(base_url: str, deadline: float = 30.0, proc: subprocess.Popen | None = None) -> Tuple[bool, str]:
     start = time.time()
     last_error = "no response yet"
@@ -85,6 +106,7 @@ def run_tests(
     include_sam3: bool,
     include_auto: bool,
     include_clip: bool,
+    include_agent_mining: bool,
     sam3_dataset_id: Optional[str],
     request_timeout: float = 8.0,
     max_sam3_tests: int = 20,
@@ -308,6 +330,40 @@ def run_tests(
                     ),
                 )
             )
+        if include_agent_mining and sam3_dataset_id:
+            def _start_agent_job():
+                return _http_post_json(
+                    f"{base_url}/agent_mining/jobs",
+                    {
+                        "dataset_id": sam3_dataset_id,
+                        "val_percent": 0.3,
+                        "test_mode": True,
+                        "test_train_limit": 2,
+                        "test_val_limit": 2,
+                        "thresholds": [0.2],
+                        "mask_threshold": 0.5,
+                        "max_results": 5,
+                        "min_size": 0,
+                        "simplify_epsilon": 0.5,
+                        "exemplar_per_class": 1,
+                        "cluster_exemplars": False,
+                        "use_clip_fp_guard": False,
+                    },
+                    timeout=request_timeout,
+                )
+
+            tests.append(
+                (
+                    "agent_mining/jobs (test_mode)",
+                    _start_agent_job,
+                )
+            )
+            tests.append(
+                (
+                    "agent_mining/jobs (list)",
+                    lambda: _http_get(f"{base_url}/agent_mining/jobs", timeout=request_timeout),
+                )
+            )
     if include_auto:
         tests.append(
             (
@@ -360,6 +416,55 @@ def run_tests(
             except Exception:
                 pass
         results.append((name, ok, detail))
+        # If we just started an agent_mining job, poll it briefly so downstream endpoints can be hit.
+        if include_agent_mining and name.startswith("agent_mining/jobs (test_mode)") and status is not None and status // 100 == 2:
+            try:
+                data = json.loads(body.decode("utf-8")) if body else {}
+            except Exception:
+                data = {}
+            job_id = data.get("job_id")
+            if job_id:
+                ok_poll, job_data, poll_err = _poll_job(f"{base_url}/agent_mining/jobs/{job_id}", timeout=20.0, interval=1.0)
+                results.append((f"agent_mining/jobs/{job_id} poll", ok_poll, poll_err or "completed"))
+                if ok_poll:
+                    st, body_latest, err_latest = _http_get(f"{base_url}/agent_mining/results/latest", timeout=request_timeout)
+                    ok_latest = st is not None and 200 <= st < 300
+                    detail_latest = f"HTTP {st}" if st is not None else (err_latest or "no response")
+                    latest_payload = None
+                    if body_latest:
+                        try:
+                            parsed_latest = json.loads(body_latest.decode("utf-8"))
+                            latest_payload = parsed_latest
+                            detail_latest = f"{detail_latest} ({parsed_latest.get('status','')})"
+                        except Exception:
+                            pass
+                    results.append(("agent_mining/results/latest", ok_latest, detail_latest))
+                    if ok_latest and latest_payload:
+                        try:
+                            job_res = latest_payload.get("result") or {}
+                            split = job_res.get("split") or {}
+                            val_ids = split.get("val") or []
+                            classes = job_res.get("classes") or []
+                            first_class = classes[0] if classes else None
+                            recipe = (first_class or {}).get("recipe") or {}
+                            if val_ids and recipe and recipe.get("steps"):
+                                apply_payload = {
+                                    "dataset_id": job_res.get("dataset_id"),
+                                    "image_id": val_ids[0],
+                                    "recipe": recipe,
+                                    "mask_threshold": 0.5,
+                                    "min_size": 0,
+                                    "simplify_epsilon": 0.5,
+                                    "max_results": 10,
+                                }
+                                st_app, body_app, err_app = _http_post_json(
+                                    f"{base_url}/agent_mining/apply", apply_payload, timeout=request_timeout
+                                )
+                                ok_app = st_app is not None and 200 <= st_app < 300
+                                detail_app = f"HTTP {st_app}" if st_app is not None else (err_app or "no response")
+                                results.append(("agent_mining/apply", ok_app, detail_app))
+                        except Exception as exc:
+                            results.append(("agent_mining/apply", False, f"exception:{exc}"))
     return results
 
 
@@ -373,6 +478,7 @@ def main() -> int:
     parser.add_argument("--include-sam3", action="store_true", help="Exercise SAM3 text endpoints (requires sam3 weights).")
     parser.add_argument("--include-auto", action="store_true", help="Exercise auto-class endpoints (sam_point_auto, sam_bbox_auto).")
     parser.add_argument("--include-clip", action="store_true", help="Exercise CLIP inference/activation endpoints.")
+    parser.add_argument("--include-agent-mining", action="store_true", help="Exercise agent_mining endpoints (requires dataset).")
     parser.add_argument("--wait-seconds", type=float, default=45.0, help="How long to wait for the server to become responsive.")
     parser.add_argument("--request-timeout", type=float, default=30.0, help="Timeout (seconds) for each individual request.")
     parser.add_argument("--max-sam3-tests", type=int, default=30, help="Cap on SAM3 text prompt combinations to try.")
@@ -405,6 +511,7 @@ def main() -> int:
             include_sam3=args.include_sam3,
             include_auto=args.include_auto,
             include_clip=args.include_clip,
+            include_agent_mining=args.include_agent_mining,
             sam3_dataset_id=args.sam3_dataset_id,
             request_timeout=args.request_timeout,
             max_sam3_tests=max(1, args.max_sam3_tests),

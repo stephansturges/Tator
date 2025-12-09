@@ -65,6 +65,7 @@
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
+            <button class="tab-button" data-tab="agent-mining" id="tabAgentMiningButton" type="button">Agent Mining</button>
             <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">Prompt Helper</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
             <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
@@ -827,6 +828,124 @@
                             </div>
                             <div class="training-help">Lists folders under <code>uploads/sam3_runs/</code>; delete logs/dumps/checkpoints you no longer need.</div>
                             <div id="sam3StorageList" class="storage-list"></div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabAgentMining" data-tab-panel="agent-mining">
+                <div class="training-wrapper">
+                    <section class="training-form-section">
+                        <h2>Agent Mining (SAM3 + exemplars)</h2>
+                        <p class="training-help">Run SAM3 text/visual sweeps with optional CLIP FP guard to propose per-class recipes. Test mode limits images for fast smoke tests.</p>
+                        <div class="training-field">
+                            <label>Dataset</label>
+                            <div class="sam3-dataset-row">
+                                <select id="agentDatasetSelect"></select>
+                                <button type="button" class="training-button" id="agentDatasetRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help" id="agentDatasetSummary">Pick a converted SAM3/Qwen dataset.</div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="agentValPercent">Val %</label>
+                                <input type="number" id="agentValPercent" min="5" max="95" value="30" title="Percent of images for validation split." />
+                            </div>
+                            <div>
+                                <label for="agentThresholds">Thresholds</label>
+                                <input type="text" id="agentThresholds" value="0.2,0.3,0.4" title="Comma-separated score thresholds to try." />
+                            </div>
+                            <div>
+                                <label for="agentMaskThreshold">Mask threshold</label>
+                                <input type="number" id="agentMaskThreshold" step="0.05" min="0" max="1" value="0.5" />
+                            </div>
+                            <div>
+                                <label for="agentMaxResults">Max dets/image</label>
+                                <input type="number" id="agentMaxResults" min="1" value="100" />
+                            </div>
+                            <div>
+                                <label for="agentMinSize">Min area (px²)</label>
+                                <input type="number" id="agentMinSize" min="0" value="0" />
+                            </div>
+                            <div>
+                                <label for="agentSimplifyEps">Simplify ε</label>
+                                <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" />
+                            </div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="agentExemplars">Exemplars/class</label>
+                                <input type="number" id="agentExemplars" min="0" value="4" />
+                            </div>
+                            <div class="training-field training-field--inline">
+                                <label for="agentClusterExemplars">Cluster exemplars</label>
+                                <input type="checkbox" id="agentClusterExemplars" />
+                            </div>
+                            <div class="training-field training-field--inline">
+                                <label for="agentClipGuard">Use CLIP FP guard</label>
+                                <input type="checkbox" id="agentClipGuard" />
+                            </div>
+                            <div>
+                                <label for="agentSimilarityScore">Similarity floor</label>
+                                <input type="number" id="agentSimilarityScore" step="0.05" min="0" max="1" value="0.25" />
+                            </div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="agentClasses">Class IDs (comma)</label>
+                                <input type="text" id="agentClasses" placeholder="blank = all" />
+                            </div>
+                            <div class="training-field training-field--inline">
+                                <label for="agentTestMode">Test mode</label>
+                                <input type="checkbox" id="agentTestMode" checked />
+                            </div>
+                            <div>
+                                <label for="agentTrainLimit">Test train imgs</label>
+                                <input type="number" id="agentTrainLimit" min="1" value="10" />
+                            </div>
+                            <div>
+                                <label for="agentValLimit">Test val imgs</label>
+                                <input type="number" id="agentValLimit" min="1" value="10" />
+                            </div>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="agentRunBtn">Run Agent Mining</button>
+                            <button type="button" class="training-button secondary" id="agentRefreshBtn">Refresh latest</button>
+                        </div>
+                        <div class="training-message" id="agentStatus" role="status">Idle</div>
+                    </section>
+                    <section class="training-status-section">
+                        <h3>Results</h3>
+                        <div class="training-help">Shows the latest completed Agent Mining job (test mode if selected). Recipes export as a portable zip (JSON + exemplar crops).</div>
+                        <div id="agentResults"></div>
+                        <div class="training-divider"></div>
+                        <h3>Saved Recipes</h3>
+                        <div class="training-field">
+                            <label>Recipes for this dataset</label>
+                            <div class="training-grid">
+                                <div>
+                                    <select id="agentRecipeSelect" style="min-width: 220px;"></select>
+                                </div>
+                                <div class="training-field">
+                                    <label for="agentRecipeImageId">Apply to image id</label>
+                                    <input type="number" id="agentRecipeImageId" min="0" placeholder="e.g. 123" />
+                                </div>
+                            </div>
+                            <div class="training-actions">
+                                <button type="button" class="training-button" id="agentRecipeRefresh">Refresh list</button>
+                                <button type="button" class="training-button secondary" id="agentRecipeLoad">Load recipe</button>
+                                <button type="button" class="training-button secondary" id="agentRecipeDownload">Download zip</button>
+                                <button type="button" class="training-button secondary" id="agentRecipeApply">Apply to image</button>
+                            </div>
+                            <div class="training-field">
+                                <label for="agentRecipeFile">Import recipe zip / JSON</label>
+                                <div class="training-grid">
+                                    <input type="file" id="agentRecipeFile" accept=".zip,.json" />
+                                    <button type="button" class="training-button secondary" id="agentRecipeImport">Import</button>
+                                </div>
+                                <div class="training-help">Packages include the recipe JSON plus exemplar crops so they are portable between machines.</div>
+                            </div>
+                            <div id="agentRecipeDetails" class="training-card" style="display: none;"></div>
+                            <div class="training-help">Pick a dataset, refresh, then load, download, import, or apply to a specific COCO image id.</div>
                         </div>
                     </section>
                 </div>

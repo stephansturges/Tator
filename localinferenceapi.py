@@ -3891,12 +3891,12 @@ def _load_agent_mining_detections(cache_dir: Path, key: str) -> Optional[List[Di
 
 def _save_agent_mining_detections(cache_dir: Path, key: str, detections: List[Dict[str, Any]]) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    tmp = cache_dir / f"{key}.json.tmp"
     path = cache_dir / f"{key}.json"
     try:
-        with tmp.open("w", encoding="utf-8") as fp:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=cache_dir, suffix=".tmp") as fp:
             json.dump(detections, fp)
-        tmp.replace(path)
+            tmp_name = fp.name
+        Path(tmp_name).replace(path)
     except Exception:
         logger.exception("Failed to persist agent mining detections to %s", path)
 

@@ -11335,7 +11335,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     function stopAgentPoll() {
         if (agentState.pollTimer) {
-            clearTimeout(agentState.pollTimer);
+            clearInterval(agentState.pollTimer);
             agentState.pollTimer = null;
         }
         agentState.pollInFlight = false;
@@ -11343,7 +11343,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     function scheduleAgentPoll() {
         stopAgentPoll();
-        agentState.pollTimer = setTimeout(() => {
+        agentState.pollTimer = setInterval(() => {
             refreshAgentLatest({ silent: true }).catch((err) => console.error("Agent mining refresh failed", err));
         }, 2000);
     }

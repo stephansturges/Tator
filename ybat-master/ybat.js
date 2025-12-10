@@ -3143,7 +3143,7 @@ function setPromptHelperMessage(text, tone = "info") {
             const covPct = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0.0";
             body.innerHTML = `
                 <div class="training-history-row">
-                    <div class="training-history-title">${escapeHtml(cls.name || cls.id)}</div>
+                    <div class="training-history-title" style="font-size: 20px; font-weight: 700;">${escapeHtml(cls.name || cls.id)}</div>
                     <span class="badge">${steps.length} step${steps.length === 1 ? "" : "s"}</span>
                 </div>
                 <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
@@ -3178,6 +3178,13 @@ function setPromptHelperMessage(text, tone = "info") {
                 });
                 table.appendChild(tbody);
                 body.appendChild(table);
+                const meta = cls.meta || {};
+                const recap = document.createElement("div");
+                recap.className = "training-help";
+                const promptsTried = meta.text_prompts ? `${meta.text_prompts} text prompt${meta.text_prompts === 1 ? "" : "s"}` : "text prompt(s)";
+                const exemplarsTried = meta.exemplars !== undefined ? `${meta.exemplars} exemplar${meta.exemplars === 1 ? "" : "s"}` : "exemplars";
+                recap.textContent = `Tested ${promptsTried} × ${meta.thresholds || 0} thresholds and ${exemplarsTried} (total candidates: ${meta.total_candidates || steps.length}); best coverage came from the steps above.`;
+                body.appendChild(recap);
             } else {
                 const empty = document.createElement("div");
                 empty.className = "training-help";

@@ -6661,6 +6661,37 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     meta = meta_map.get(key)
                     if meta:
                         step.update({k: v for k, v in meta.items() if v is not None})
+                # Build human-readable explanation
+                summary_block = recipe.get("summary") or {}
+                fp_total = summary_block.get("fps") or 0
+                best_steps = recipe.get("steps") or []
+                best_labels = []
+                for s in best_steps:
+                    if s.get("type") == "visual" and s.get("exemplar"):
+                        ex = s.get("exemplar") or {}
+                        best_labels.append(f"exemplar img {ex.get('image_id')} thr {s.get('threshold')}")
+                    else:
+                        best_labels.append(f"{s.get('prompt')} thr {s.get('threshold')}")
+                explanation = (
+                    f"Tested {text_prompt_count} text prompt(s) x {thresholds_count} thresholds and {len(exemplars)} exemplar(s) "
+                    f"({len(eval_candidates)} total candidates). "
+                )
+                if best_labels:
+                    explanation += f"Kept {len(best_steps)} step(s): {', '.join(best_labels)}."
+                else:
+                    explanation += "No steps kept."
+                if summary_block:
+                    covered = summary_block.get("covered")
+                    total_gt = summary_block.get("total_gt")
+                    cov_rate = summary_block.get("coverage_rate")
+                    cov_txt = ""
+                    if cov_rate is not None:
+                        try:
+                            cov_txt = f"{cov_rate * 100:.1f}%"
+                        except Exception:
+                            cov_txt = ""
+                    explanation += f" Coverage {covered}/{total_gt} ({cov_txt}), FPs {fp_total}."
+                recipe["explanation"] = explanation
             selected_cats[-1]["candidates"] = eval_candidates
             selected_cats[-1]["recipe"] = recipe
             selected_cats[-1]["coverage_by_image"] = coverage_by_image

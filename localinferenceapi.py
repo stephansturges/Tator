@@ -5817,49 +5817,63 @@ class AgentMiningRequest(BaseModel):
 
 def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new: int) -> List[str]:
     """Use Qwen to brainstorm additional prompt variants for a class."""
-    cleaned_base = []
-    for entry in base_prompts:
-        if not isinstance(entry, str):
-            continue
-        val = entry.strip()
-        if val:
-            cleaned_base.append(val)
+    cleaned_base = _sanitize_prompts(base_prompts)
     if max_new <= 0 or not cleaned_base:
         return []
     seen = {p.lower() for p in cleaned_base}
+    suggestions: List[str] = []
     try:
-        prompt_text = (
-            "You are generating candidate noun phrases for open-vocabulary object detection with SAM3. "
-            f"Target class: '{_humanize_class_name(class_name)}'. "
-            f"Known good prompts: {', '.join(cleaned_base)}. "
-            f"Produce up to {max_new} additional, concrete object names (1-4 words) that strictly describe the same class, "
-            "including common synonyms or specific sub-types. Avoid adjectives without nouns and avoid words that could mean unrelated things. "
-            "Return ONLY a comma-separated list of noun phrases. Do not number or explain."
-        )
-        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
-        suggestions: List[str] = []
-        for part in re.split(r"[\\n;,]+", text):
-            normalized = part.strip().strip('"').strip("'")
-            if not normalized:
-                continue
-            if any(ch in normalized for ch in "{}[]:\""):
-                continue
-            if len(normalized) > 48:
-                continue
-            words = normalized.split()
-            if not words or len(words) > 5:
-                continue
-            if any(len(w) < 2 for w in words):
-                continue
-            lowered = normalized.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            suggestions.append(normalized)
-        return suggestions[:max_new]
+        for _ in range(2):  # allow two brainstorming passes for diversity
+            if len(suggestions) >= max_new:
+                break
+            prompt_text = (
+                "You are generating candidate noun phrases for open-vocabulary object detection with SAM3. "
+                f"Target class: '{_humanize_class_name(class_name)}'. "
+                f"Known good prompts: {', '.join(cleaned_base)}. "
+                f"Produce up to {max_new} additional, concrete object names (1-4 words) that strictly describe the same class, "
+                "including common synonyms or specific sub-types. Avoid adjectives without nouns and avoid words that could mean unrelated things. "
+                "Return ONLY a comma-separated list of noun phrases. Do not number or explain."
+            )
+            text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+            for part in re.split(r"[\\n;,]+", text):
+                normalized = part.strip().strip('"').strip("'")
+                if not normalized:
+                    continue
+                if any(ch in normalized for ch in "{}[]:\""):
+                    continue
+                if len(normalized) > 48:
+                    continue
+                words = normalized.split()
+                if not words or len(words) > 5:
+                    continue
+                if any(len(w) < 2 for w in words):
+                    continue
+                lowered = normalized.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                suggestions.append(normalized)
+                if len(suggestions) >= max_new:
+                    break
     except Exception as exc:  # noqa: BLE001
         logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
-        return []
+        suggestions = []
+    # Self-verify with Qwen and sanitize.
+    combined = _sanitize_prompts([*cleaned_base, *suggestions])
+    refined = _refine_prompts_with_qwen(combined)
+    reviewed = _qwen_self_filter_prompts(class_name, refined)
+    reviewed = _sanitize_prompts(reviewed)
+    reviewed_lower = {p.lower() for p in cleaned_base}
+    final_new: List[str] = []
+    for p in reviewed:
+        low = p.lower()
+        if low in reviewed_lower:
+            continue
+        reviewed_lower.add(low)
+        final_new.append(p)
+        if len(final_new) >= max_new:
+            break
+    return final_new
 
 
 def _sanitize_prompts(prompts: List[str]) -> List[str]:
@@ -5894,6 +5908,30 @@ def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
             "Keep only entries that are concrete object-like noun phrases (1-4 words, nouns included). "
             "Reject fragments, verbs, partial words, or unrelated terms. "
             "Respond ONLY as a comma-separated list, no numbering, no explanations.\n"
+            f"Candidates: {', '.join(prompts)}"
+        )
+        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+        if not text:
+            return prompts
+        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]
+        cleaned = _sanitize_prompts(parts)
+        return cleaned or prompts
+    except Exception:
+        return prompts
+
+
+def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
+    """Ask Qwen to self-critique the candidate prompts against the target class and return only credible entries."""
+    prompts = _sanitize_prompts(prompts)
+    if not prompts or Qwen2_5_VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
+        return prompts
+    try:
+        prompt_text = (
+            "You are double-checking candidate noun phrases for object detection. "
+            f"Target class: '{_humanize_class_name(class_name)}'. "
+            "From the list, keep ONLY phrases that clearly describe that class (synonyms or sub-types). "
+            "Drop anything ambiguous, misspelled, or unrelated. "
+            "Return ONLY a comma-separated list, no explanations.\n"
             f"Candidates: {', '.join(prompts)}"
         )
         text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)

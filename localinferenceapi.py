@@ -79,6 +79,12 @@ except Exception as exc:  # noqa: BLE001
 else:
     QWEN_IMPORT_ERROR = None
 
+# Optional text-only LLM for prompt expansion (preferred over Qwen when available).
+GPT_OSS_MODEL_ID = os.environ.get("PROMPT_LLM_MODEL_ID", "openai/gpt-oss-20b")
+GPT_OSS_PIPELINE = None
+GPT_OSS_PIPELINE_ERROR: Optional[Exception] = None
+_GPT_OSS_PIPELINE_LOCK = threading.Lock()
+
 try:
     from sam3.model_builder import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor as Sam3ImageProcessor
@@ -2083,6 +2089,87 @@ def _generate_qwen_text(
         clean_up_tokenization_spaces=False,
     )[0]
     return decoded.strip()
+
+
+def _ensure_prompt_llm():
+    """Lazy-load the GPT-OSS text generation pipeline (preferred for prompt expansion)."""
+    global GPT_OSS_PIPELINE, GPT_OSS_PIPELINE_ERROR
+    if GPT_OSS_PIPELINE is not None:
+        return GPT_OSS_PIPELINE
+    if GPT_OSS_PIPELINE_ERROR is not None:
+        raise GPT_OSS_PIPELINE_ERROR
+    with _GPT_OSS_PIPELINE_LOCK:
+        if GPT_OSS_PIPELINE is not None:
+            return GPT_OSS_PIPELINE
+        if GPT_OSS_PIPELINE_ERROR is not None:
+            raise GPT_OSS_PIPELINE_ERROR
+        try:
+            from transformers import pipeline as hf_pipeline
+
+            GPT_OSS_PIPELINE = hf_pipeline(
+                "text-generation",
+                model=GPT_OSS_MODEL_ID,
+                torch_dtype="auto",
+                device_map="auto",
+            )
+            return GPT_OSS_PIPELINE
+        except Exception as exc:  # noqa: BLE001
+            GPT_OSS_PIPELINE_ERROR = exc
+            raise
+
+
+def _generate_prompt_text(prompt: str, *, max_new_tokens: int = 128) -> str:
+    """
+    Text-only helper for prompt brainstorming/critique.
+    Uses the GPT-OSS pipeline; returns empty string on failure.
+    """
+    # Build a minimal Harmony-style prompt to steer GPT-OSS toward clean, comma-separated outputs.
+    system_msg = (
+        "You are ChatGPT, a large language model trained by OpenAI.\n"
+        "Knowledge cutoff: 2024-06\n"
+        "Current date: 2025-12-10\n\n"
+        "Reasoning: high\n\n"
+        "# Valid channels: analysis, commentary, final. Channel must be included for every message."
+    )
+    developer_msg = (
+        "# Instructions\n"
+        "You generate short noun-phrase candidates for open-vocabulary detection. "
+        "Always respond on the final channel with ONLY a comma-separated list of candidates ending with STOP. "
+        "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no punctuation, no quotes, no numbering, no JSON. "
+        "If no valid candidates, return STOP."
+    )
+    user_msg = prompt
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "developer", "content": developer_msg},
+        {"role": "user", "content": user_msg},
+    ]
+    try:
+        pipe = _ensure_prompt_llm()
+        outputs = pipe(
+            messages,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.4,
+            top_p=0.9,
+        )
+        if outputs:
+            gen = outputs[0].get("generated_text")
+            text = ""
+            # Hugging Face pipeline may return a list of message dicts; pick the last assistant message content.
+            if isinstance(gen, list):
+                for item in reversed(gen):
+                    if isinstance(item, dict) and item.get("role") in {"assistant", "bot"}:
+                        text = item.get("content") or item.get("text") or ""
+                        if text:
+                            break
+            elif isinstance(gen, str):
+                text = gen
+            if text:
+                return str(text).strip()
+    except Exception:
+        pass
+    return ""
 
 
 def resolve_image_payload(
@@ -5407,7 +5494,7 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
     variants: List[str] = []
     if use_qwen and max_synonyms > 0:
         try:
-            text = _generate_qwen_text(
+            text = _generate_prompt_text(
                 (
                     f"Generate up to {max_synonyms} alternative, common English labels for the object class "
                     f"'{human or cleaned}'. Each label must be 1-3 full words, each word at least 3 letters. "
@@ -5417,7 +5504,6 @@ def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_
                     "Return a single comma-separated list."
                 ),
                 max_new_tokens=96,
-                use_system_prompt=False,
             )
             raw_parts = re.split(r"[\\n;,]+", text)
             for part in raw_parts:
@@ -5871,31 +5957,11 @@ def _expand_prompts_with_qwen(
     cleaned_base = _sanitize_prompts(base_prompts)
     if max_new <= 0 or not cleaned_base:
         return []
+
     seen = {p.lower() for p in cleaned_base}
     suggestions: List[str] = []
     try:
-        # Two-agent dialogue: Brainstormer proposes, Critic filters, loop until STOP or cap.
         known_list_str = ", ".join(cleaned_base)
-        brainstorm_prompt = (
-            "You are Agent A, brainstorming diverse noun phrases for open-vocabulary object detection with SAM3. "
-            f"Target class: '{_humanize_class_name(class_name)}'. "
-            f"Known good prompts: {known_list_str}. "
-        )
-        if class_hint:
-            brainstorm_prompt += f"Class note: {class_hint}. "
-        brainstorm_prompt += (
-            f"Propose up to {max_new} NEW, concrete object names (1-4 words) that strictly describe this class, including common synonyms or sub-types. "
-            "Each item must be unique, not in the known list, visually recognizable, and free of punctuation or fragments. "
-            "Avoid verbs, standalone adjectives, or unrelated words. "
-            "Respond ONLY as a comma-separated list ending with the token STOP. Example: pickup truck, delivery van, hatchback, STOP"
-        )
-        critic_prompt_tpl = (
-            "You are Agent B, validating Agent A's suggestions for class '{class_name}'. "
-            f"Known prompts to exclude: {known_list_str}. "
-            "Review each candidate independently: if it is a clear synonym/sub-type of the class, keep it; otherwise drop it. "
-            "Remove duplicates and anything in the known list. "
-            "Return ONLY the kept items as a comma-separated list ending with STOP."
-        )
 
         def _log(msg: str) -> None:
             if log_fn:
@@ -5904,59 +5970,52 @@ def _expand_prompts_with_qwen(
                 except Exception:
                     pass
 
-        for round_idx in range(3):  # allow up to three dialogue rounds
+        for round_idx in range(3):  # allow a few brainstorming rounds
             if len(suggestions) >= max_new:
                 break
-            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=160, use_system_prompt=False)
-            if not brainstorm:
-                continue
-            # Skip obviously noisy outputs (long repeated punctuation or very short tokens).
-            if len(brainstorm) > 12 and (re.search(r"([!@#\\$%\\^&\\*_=\\-\\.])\\1{4,}", brainstorm) or len(set(brainstorm)) < 4):
-                _log(f"Qwen brainstorm (class={class_name}, round {round_idx + 1}) skipped due to noise")
+            remaining = max_new - len(suggestions)
+            prompt_text = (
+                "Generate diverse noun-phrase prompts for open-vocabulary object detection with SAM3.\n"
+                f"Target class: '{_humanize_class_name(class_name)}'.\n"
+                f"Known good prompts: {known_list_str}.\n"
+            )
+            if class_hint:
+                prompt_text += f"Class note: {class_hint}.\n"
+            prompt_text += (
+                f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).\n"
+                "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.\n"
+                "Return ONLY a comma-separated list ending with STOP. Example: pickup truck, delivery van, hatchback, STOP"
+            )
+            text = _generate_prompt_text(prompt_text, max_new_tokens=140)
+            if not text:
                 continue
             _log(
-                f"Qwen brainstorm (class={class_name}, round {round_idx + 1}): {str(brainstorm)[:200]}"
-                + ("…" if len(str(brainstorm)) > 200 else "")
+                f"Qwen brainstorm (class={class_name}, round {round_idx + 1}): {str(text)[:200]}"
+                + ("…" if len(str(text)) > 200 else "")
             )
-            critic_prompt = critic_prompt_tpl.format(class_name=_humanize_class_name(class_name))
-            critic_input = f"{critic_prompt}\nAgent A list: {brainstorm}"
-            critic_text = _generate_qwen_text(critic_input, max_new_tokens=160, use_system_prompt=False)
-            if critic_text:
-                _log(
-                    f"Qwen critic (class={class_name}, round {round_idx + 1}): {str(critic_text)[:200]}"
-                    + ("…" if len(str(critic_text)) > 200 else "")
-                )
-            text = critic_text or brainstorm
-            round_candidates: List[str] = []
-            for part in re.split(r"[\\n;,]+", text):
-                normalized = part.strip().strip('"').strip("'")
-                if not normalized or normalized.upper() == "STOP":
+            for part in re.split(r"[,\n;]+", text):
+                cand = part.strip().strip('"').strip("'")
+                if not cand:
                     continue
-                # Strict sanitation: allow letters/numbers/space/-/_ only and 1-4 words.
-                if re.search(r"[^\w\s\-]", normalized):
+                if cand.upper() == "STOP":
+                    break
+                cand = re.sub(r"\s+", " ", cand)
+                if re.search(r"[^A-Za-z\s\-]", cand):
                     continue
-                if len(normalized) > 48:
-                    continue
-                words = normalized.split()
-                if not words or len(words) > 5:
+                words = cand.split()
+                if not (1 <= len(words) <= 4):
                     continue
                 if any(len(w) < 2 for w in words):
                     continue
-                lowered = normalized.lower()
-                if lowered in seen:
+                key = cand.lower()
+                if key in seen:
                     continue
-                seen.add(lowered)
-                suggestions.append(normalized)
-                round_candidates.append(normalized)
+                seen.add(key)
+                suggestions.append(cand)
                 if len(suggestions) >= max_new:
                     break
-            if round_candidates:
-                preview = ", ".join(round_candidates[:8])
-                if len(round_candidates) > 8:
-                    preview += " (+more)"
-                _log(f"Qwen accepted (class={class_name}, round {round_idx + 1}): {preview}")
-            else:
-                _log(f"Qwen accepted (class={class_name}, round {round_idx + 1}): none")
+            if len(suggestions) >= max_new:
+                break
     except Exception as exc:  # noqa: BLE001
         logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
         suggestions = []
@@ -6017,13 +6076,13 @@ def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
             "You are validating candidate noun phrases for open-vocabulary object detection. "
             "Keep only entries that are concrete object-like noun phrases (1-4 words, nouns included). "
             "Reject fragments, verbs, partial words, or unrelated terms. "
-            "Respond ONLY as a comma-separated list, no numbering, no explanations.\n"
+            "Respond ONLY as a comma-separated list, no numbering, no explanations, ending with STOP.\n"
             f"Candidates: {', '.join(prompts)}"
         )
-        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+        text = _generate_prompt_text(prompt_text, max_new_tokens=160)
         if not text:
             return prompts
-        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]
+        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip() and t.strip().upper() != "STOP"]
         cleaned = _sanitize_prompts(parts)
         return cleaned or prompts
     except Exception:
@@ -6044,7 +6103,7 @@ def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
             "Return ONLY a comma-separated list, no explanations, ending with STOP.\n"
             f"Candidates: {', '.join(prompts)}"
         )
-        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+        text = _generate_prompt_text(prompt_text, max_new_tokens=160)
         if not text:
             return prompts
         parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip() and t.strip().upper() != "STOP"]

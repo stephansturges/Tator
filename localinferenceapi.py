@@ -5869,8 +5869,9 @@ def _expand_prompts_with_qwen(
         critic_prompt_tpl = (
             "You are Agent B, validating Agent A's suggestions for class '{class_name}'. "
             f"Known prompts to exclude: {known_list_str}. "
-            "Keep only entries that clearly describe that class (synonyms or sub-types), drop ambiguous/misspelled/unrelated items, and drop duplicates or anything in the known list. "
-            "Return ONLY a comma-separated list ending with STOP."
+            "Review each candidate independently: if it is a clear synonym/sub-type of the class, keep it; otherwise drop it. "
+            "Remove duplicates and anything in the known list. "
+            "Return ONLY the kept items as a comma-separated list ending with STOP."
         )
 
         def _log(msg: str) -> None:

@@ -11352,7 +11352,7 @@ return {
             use_clip_fp_guard: !!(agentElements.clipGuard && agentElements.clipGuard.checked),
             similarity_score: Number.isFinite(similarityFloor) ? Math.max(0, Math.min(1, similarityFloor)) : 0.25,
             classes: classes.length ? classes : null,
-            class_hints: Object.keys(classHints).length ? classHints : null,
+            class_hints: classHints && typeof classHints === "object" && Object.keys(classHints).length ? classHints : null,
             auto_mine_prompts: (agentElements.qwenMaxPrompts && readNumberInput(agentElements.qwenMaxPrompts, { integer: true }) > 0) || false,
             qwen_max_prompts: Number.isFinite(readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
                 ? Math.max(0, readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
@@ -11699,6 +11699,7 @@ return {
                 agentState.recipeClassOverride = null;
                 renderAgentRecipeDetails(null);
                 fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
+                prefillClassHints();
             });
         }
         if (agentElements.runButton) {
@@ -11727,6 +11728,23 @@ return {
         }
         loadAgentDatasets().catch((err) => console.error("Agent dataset load failed", err));
         fetchAgentRecipes().catch((err) => console.error("Agent recipe init failed", err));
+        prefillClassHints();
+    }
+
+    function prefillClassHints() {
+        if (!agentElements.classHints) return;
+        const meta = getAgentSelectedDatasetMeta();
+        const classes = Array.isArray(meta?.classes) ? meta.classes : [];
+        if (!classes.length) return;
+        const template = {};
+        classes.forEach((name, idx) => {
+            template[String(idx + 1)] = `${name} — add hint`;
+        });
+        try {
+            agentElements.classHints.value = JSON.stringify(template, null, 2);
+        } catch (err) {
+            console.warn("Failed to prefill class hints", err);
+        }
     }
 
     document.addEventListener("DOMContentLoaded", () => {

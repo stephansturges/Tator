@@ -5815,8 +5815,13 @@ class AgentMiningRequest(BaseModel):
     test_val_limit: int = Field(10, ge=1, le=10_000)
 
 
-def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new: int) -> List[str]:
-    """Use Qwen to brainstorm additional prompt variants for a class."""
+def _expand_prompts_with_qwen(
+    class_name: str,
+    base_prompts: List[str],
+    max_new: int,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List[str]:
+    """Use Qwen to brainstorm additional prompt variants for a class. Accepts optional logger callback."""
     cleaned_base = _sanitize_prompts(base_prompts)
     if max_new <= 0 or not cleaned_base:
         return []
@@ -5843,9 +5848,25 @@ def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new:
             brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False)
             if not brainstorm:
                 continue
+            if log_fn:
+                try:
+                    log_fn(
+                        f"Qwen brainstorm (class={class_name}, round {_ + 1}): {str(brainstorm)[:200]}"
+                        + ("…" if len(str(brainstorm)) > 200 else "")
+                    )
+                except Exception:
+                    pass
             critic_prompt = critic_prompt_tpl.format(class_name=_humanize_class_name(class_name))
             critic_input = f"{critic_prompt}\nAgent A list: {brainstorm}"
             critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False)
+            if log_fn and critic_text:
+                try:
+                    log_fn(
+                        f"Qwen critic (class={class_name}, round {_ + 1}): {str(critic_text)[:200]}"
+                        + ("…" if len(str(critic_text)) > 200 else "")
+                    )
+                except Exception:
+                    pass
             text = critic_text or brainstorm
             for part in re.split(r"[\\n;,]+", text):
                 normalized = part.strip().strip('"').strip("'")
@@ -6987,7 +7008,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             if not text_prompts:
                 text_prompts = [cat_name]
                 if payload.auto_mine_prompts and payload.qwen_max_prompts > 0:
-                    extra_prompts = _expand_prompts_with_qwen(cat_name, text_prompts, payload.qwen_max_prompts)
+                    def _log_qwen(msg: str) -> None:
+                        job.logs.append({"ts": time.time(), "msg": msg})
+                        if len(job.logs) > MAX_JOB_LOGS:
+                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                    extra_prompts = _expand_prompts_with_qwen(cat_name, text_prompts, payload.qwen_max_prompts, log_fn=_log_qwen)
                     extra_prompts = _refine_prompts_with_qwen(extra_prompts)
                     merged = []
                     seen_prompts = set()

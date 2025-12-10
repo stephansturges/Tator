@@ -6541,125 +6541,138 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             for entries in gt_index_val.values():
                 for key, _ in entries:
                     all_gt_keys_val.add(key)
-            eval_candidates: List[Dict[str, Any]] = []
-            for prompt_text in text_prompts:
-                for thr in thresholds:
-                    dets = _collect_agent_mining_detections(
-                        images=images,
-                        image_ids=val_ids,
-                        prompt=prompt_text,
-                        visual_ref=None,
-                        threshold=thr,
-                        mask_threshold=payload.mask_threshold,
-                        min_size=payload.min_size,
-                        simplify=payload.simplify_epsilon,
-                        max_results=payload.max_results,
-                        cache_dir=cache_dir,
-                    )
-                    fp_warnings: List[str] = []
-                    if payload.use_clip_fp_guard and exemplar_embeddings:
-                        dets, fp_warnings = _clip_fp_filter_detections(
-                            dets,
-                            exemplar_embeddings=exemplar_embeddings,
-                            images=images,
-                            similarity_floor=payload.similarity_score,
-                        )
-                    cache_map = _detections_to_eval_cache(dets, images)
-                    metrics = _evaluate_prompt_candidate(
-                        prompt_text,
-                        thr,
-                        cat_id=cat_id,
-                        image_ids=val_ids,
-                        gt_index=gt_index_val,
-                        images=images,
-                        iou_threshold=0.5,
-                        max_dets=payload.max_results,
-                        image_cache={},
-                        cached_detections=cache_map,
-                    )
-                    metrics["type"] = "text"
-                    metrics["detections"] = len(dets)
-                    if fp_warnings:
-                        metrics["warnings"] = fp_warnings
-                    eval_candidates.append(metrics)
-            for ex_idx, ex in enumerate(exemplars):
-                label = f"exemplar_{ex_idx}"
-                for thr in thresholds:
-                    dets = _collect_agent_mining_detections(
-                        images=images,
-                        image_ids=val_ids,
-                        prompt=None,
-                        visual_ref=ex,
-                        threshold=thr,
-                        mask_threshold=payload.mask_threshold,
-                        min_size=payload.min_size,
-                        simplify=payload.simplify_epsilon,
-                        max_results=payload.max_results,
-                        cache_dir=cache_dir,
-                    )
-                    fp_warnings: List[str] = []
-                    if payload.use_clip_fp_guard and exemplar_embeddings:
-                        dets, fp_warnings = _clip_fp_filter_detections(
-                            dets,
-                            exemplar_embeddings=exemplar_embeddings,
-                            images=images,
-                            similarity_floor=payload.similarity_score,
-                        )
-                    cache_map = _detections_to_eval_cache(dets, images)
-                    metrics = _evaluate_prompt_candidate(
-                        label,
-                        thr,
-                        cat_id=cat_id,
-                        image_ids=val_ids,
-                        gt_index=gt_index_val,
-                        images=images,
-                        iou_threshold=0.5,
-                        max_dets=payload.max_results,
-                        image_cache={},
-                        cached_detections=cache_map,
-                    )
-                    metrics["type"] = "visual"
-                    metrics["exemplar"] = {
-                        "image_id": ex.get("image_id"),
-                        "bbox": ex.get("bbox"),
-                        "file_name": ex.get("file_name"),
-                    }
-                    metrics["detections"] = len(dets)
-                    if fp_warnings:
-                        metrics["warnings"] = fp_warnings
-                    eval_candidates.append(metrics)
-            recipe: Optional[Dict[str, Any]] = None
-            coverage_by_image: Optional[List[Dict[str, Any]]] = None
-            if eval_candidates and all_gt_keys_val:
-                recipe, coverage_by_image = _build_prompt_recipe(
-                    eval_candidates,
-                    all_gt_keys_val,
-                    per_image_gt_val,
-                    images,
-                    val_ids,
-                    gt_index_val,
+        eval_candidates: List[Dict[str, Any]] = []
+        text_prompt_count = len(text_prompts or [])
+        thresholds_count = len(thresholds or [])
+        visual_candidate_count = 0
+        for prompt_text in text_prompts:
+            for thr in thresholds:
+                dets = _collect_agent_mining_detections(
+                    images=images,
+                    image_ids=val_ids,
+                    prompt=prompt_text,
+                    visual_ref=None,
+                    threshold=thr,
+                    mask_threshold=payload.mask_threshold,
+                    min_size=payload.min_size,
+                    simplify=payload.simplify_epsilon,
+                    max_results=payload.max_results,
+                    cache_dir=cache_dir,
                 )
-                if recipe:
-                    # Attach source metadata to steps
-                    meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
-                    for cand in eval_candidates:
-                        try:
-                            key = (cand.get("prompt"), float(cand.get("threshold")))
-                        except Exception:
-                            continue
-                        meta_map[key] = {
-                            "type": cand.get("type"),
-                            "exemplar": cand.get("exemplar"),
-                            "warnings": cand.get("warnings"),
-                        }
-                    for step in recipe.get("steps", []):
-                        key = (step.get("prompt"), float(step.get("threshold", 0)))
-                        meta = meta_map.get(key)
-                        if meta:
-                            step.update({k: v for k, v in meta.items() if v is not None})
+                fp_warnings: List[str] = []
+                if payload.use_clip_fp_guard and exemplar_embeddings:
+                    dets, fp_warnings = _clip_fp_filter_detections(
+                        dets,
+                        exemplar_embeddings=exemplar_embeddings,
+                        images=images,
+                        similarity_floor=payload.similarity_score,
+                    )
+                cache_map = _detections_to_eval_cache(dets, images)
+                metrics = _evaluate_prompt_candidate(
+                    prompt_text,
+                    thr,
+                    cat_id=cat_id,
+                    image_ids=val_ids,
+                    gt_index=gt_index_val,
+                    images=images,
+                    iou_threshold=0.5,
+                    max_dets=payload.max_results,
+                    image_cache={},
+                    cached_detections=cache_map,
+                )
+                metrics["type"] = "text"
+                metrics["detections"] = len(dets)
+                if fp_warnings:
+                    metrics["warnings"] = fp_warnings
+                eval_candidates.append(metrics)
+        for ex_idx, ex in enumerate(exemplars):
+            label = f"exemplar_{ex_idx}"
+            visual_candidate_count += thresholds_count
+            for thr in thresholds:
+                dets = _collect_agent_mining_detections(
+                    images=images,
+                    image_ids=val_ids,
+                    prompt=None,
+                    visual_ref=ex,
+                    threshold=thr,
+                    mask_threshold=payload.mask_threshold,
+                    min_size=payload.min_size,
+                    simplify=payload.simplify_epsilon,
+                    max_results=payload.max_results,
+                    cache_dir=cache_dir,
+                )
+                fp_warnings: List[str] = []
+                if payload.use_clip_fp_guard and exemplar_embeddings:
+                    dets, fp_warnings = _clip_fp_filter_detections(
+                        dets,
+                        exemplar_embeddings=exemplar_embeddings,
+                        images=images,
+                        similarity_floor=payload.similarity_score,
+                    )
+                cache_map = _detections_to_eval_cache(dets, images)
+                metrics = _evaluate_prompt_candidate(
+                    label,
+                    thr,
+                    cat_id=cat_id,
+                    image_ids=val_ids,
+                    gt_index=gt_index_val,
+                    images=images,
+                    iou_threshold=0.5,
+                    max_dets=payload.max_results,
+                    image_cache={},
+                    cached_detections=cache_map,
+                )
+                metrics["type"] = "visual"
+                metrics["exemplar"] = {
+                    "image_id": ex.get("image_id"),
+                    "bbox": ex.get("bbox"),
+                    "file_name": ex.get("file_name"),
+                }
+                metrics["detections"] = len(dets)
+                if fp_warnings:
+                    metrics["warnings"] = fp_warnings
+                eval_candidates.append(metrics)
+        recipe: Optional[Dict[str, Any]] = None
+        coverage_by_image: Optional[List[Dict[str, Any]]] = None
+        if eval_candidates and all_gt_keys_val:
+            recipe, coverage_by_image = _build_prompt_recipe(
+                eval_candidates,
+                all_gt_keys_val,
+                per_image_gt_val,
+                images,
+                val_ids,
+                gt_index_val,
+            )
+            if recipe:
+                # Attach source metadata to steps
+                meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
+                for cand in eval_candidates:
+                    try:
+                        key = (cand.get("prompt"), float(cand.get("threshold")))
+                    except Exception:
+                        continue
+                    meta_map[key] = {
+                        "type": cand.get("type"),
+                        "exemplar": cand.get("exemplar"),
+                        "warnings": cand.get("warnings"),
+                    }
+                for step in recipe.get("steps", []):
+                    key = (step.get("prompt"), float(step.get("threshold", 0)))
+                    meta = meta_map.get(key)
+                    if meta:
+                        step.update({k: v for k, v in meta.items() if v is not None})
             selected_cats[-1]["candidates"] = eval_candidates
             selected_cats[-1]["recipe"] = recipe
             selected_cats[-1]["coverage_by_image"] = coverage_by_image
+            selected_cats[-1]["meta"] = {
+                "text_prompts": text_prompt_count,
+                "thresholds": thresholds_count,
+                "exemplars": len(exemplars),
+                "visual_candidates": visual_candidate_count,
+                "total_candidates": len(eval_candidates),
+            }
+            if not recipe or not recipe.get("steps"):
+                selected_cats[-1]["no_recipe_reason"] = "no_candidate_gain"
             job.progress = 0.35 + 0.6 * ((idx + 1) / max(1, len(categories)))
             summary = (recipe or {}).get("summary") or {}
             covered = summary.get("covered")

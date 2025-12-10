@@ -5304,6 +5304,23 @@ def list_sam3_datasets():
     return _list_sam3_datasets()
 
 
+@app.get("/sam3/datasets/{dataset_id}/classes")
+def get_sam3_dataset_classes(dataset_id: str):
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    coco, _, _ = _load_coco_index(dataset_root)
+    categories = coco.get("categories") or []
+    classes: List[str] = []
+    class_ids: List[int] = []
+    for idx, cat in enumerate(categories):
+        try:
+            cid = int(cat.get("id", idx))
+        except Exception:
+            cid = idx
+        class_ids.append(cid)
+        classes.append(str(cat.get("name", f"class_{cid}")))
+    return {"dataset_id": dataset_id, "classes": classes, "class_ids": class_ids}
+
+
 @app.post("/sam3/datasets/{dataset_id}/convert")
 def sam3_convert_dataset(dataset_id: str):
     dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)

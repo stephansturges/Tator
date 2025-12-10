@@ -11733,22 +11733,30 @@ return {
 
     function prefillClassHints() {
         if (!agentElements.classHints) return;
-        const meta = getAgentSelectedDatasetMeta();
-        const classes = Array.isArray(meta?.classes) ? meta.classes : [];
-        const template = {};
-        if (classes.length) {
-            classes.forEach((name, idx) => {
-                // Use 1-based ids as fallback; if meta has numeric ids array, prefer it.
-                const cid = Array.isArray(meta?.class_ids) && meta.class_ids[idx] != null ? meta.class_ids[idx] : idx + 1;
-                template[String(cid)] = `${name} — add hint`;
+        const datasetId = agentElements.datasetSelect?.value;
+        if (!datasetId) return;
+        fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(datasetId)}/classes`)
+            .then((resp) => {
+                if (!resp.ok) throw new Error("Failed to load classes");
+                return resp.json();
+            })
+            .then((data) => {
+                const names = Array.isArray(data?.classes) ? data.classes : [];
+                const ids = Array.isArray(data?.class_ids) ? data.class_ids : [];
+                const template = {};
+                if (names.length) {
+                    names.forEach((name, idx) => {
+                        const cid = ids[idx] != null ? ids[idx] : idx + 1;
+                        template[String(cid)] = `${name} — add hint`;
+                    });
+                }
+                agentElements.classHints.value = JSON.stringify(template, null, 2);
+                agentElements.classHints.removeAttribute("readonly");
+            })
+            .catch((err) => {
+                console.warn("Failed to prefill class hints", err);
+                agentElements.classHints.value = "{}";
             });
-        }
-        try {
-            agentElements.classHints.value = JSON.stringify(template, null, 2);
-            agentElements.classHints.removeAttribute("readonly");
-        } catch (err) {
-            console.warn("Failed to prefill class hints", err);
-        }
     }
 
     document.addEventListener("DOMContentLoaded", () => {

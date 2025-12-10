@@ -5829,13 +5829,12 @@ def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new:
     seen = {p.lower() for p in cleaned_base}
     try:
         prompt_text = (
-            "You are helping to find robust text prompts for SAM3 text detection. "
-            f"The target class is '{_humanize_class_name(class_name)}'. "
-            f"Existing prompts: {', '.join(cleaned_base)}. "
-            f"Generate up to {max_new} additional, diverse prompts (1-4 words) that would still correctly describe this class, "
-            "including common synonyms, sub-types, or everyday phrases users might use. "
-            "Avoid false positives by staying specific to the class. "
-            "Return a simple comma-separated list, no numbering or JSON."
+            "You are generating candidate noun phrases for open-vocabulary object detection with SAM3. "
+            f"Target class: '{_humanize_class_name(class_name)}'. "
+            f"Known good prompts: {', '.join(cleaned_base)}. "
+            f"Produce up to {max_new} additional, concrete object names (1-4 words) that strictly describe the same class, "
+            "including common synonyms or specific sub-types. Avoid adjectives without nouns and avoid words that could mean unrelated things. "
+            "Return ONLY a comma-separated list of noun phrases. Do not number or explain."
         )
         text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
         suggestions: List[str] = []
@@ -5891,9 +5890,10 @@ def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
         return prompts
     try:
         prompt_text = (
-            "You are validating candidate noun phrases for open-vocabulary detection. "
-            "Given a list, return only the entries that are valid object-like noun phrases (1-4 words, concrete items). "
-            "Respond as a comma-separated list, no numbering, no extra text.\n"
+            "You are validating candidate noun phrases for open-vocabulary object detection. "
+            "Keep only entries that are concrete object-like noun phrases (1-4 words, nouns included). "
+            "Reject fragments, verbs, partial words, or unrelated terms. "
+            "Respond ONLY as a comma-separated list, no numbering, no explanations.\n"
             f"Candidates: {', '.join(prompts)}"
         )
         text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)

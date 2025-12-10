@@ -11326,20 +11326,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 .map((p) => parseInt(p.trim(), 10))
                 .filter((v) => Number.isInteger(v)) || [];
         const hintsRaw = agentElements.classHints?.value || "";
-        const classHints = {};
-        hintsRaw
-            .split(/\\n+/)
-            .map((l) => l.trim())
-            .filter(Boolean)
-            .forEach((line) => {
-                const [idPart, ...rest] = line.split(":");
-                const idVal = parseInt(idPart.trim(), 10);
-                if (!Number.isInteger(idVal)) return;
-                const note = rest.join(":").trim();
-                if (!note) return;
-                classHints[idVal] = note;
-            });
-        return {
+        let classHints = null;
+        if (hintsRaw.trim()) {
+            try {
+                const parsed = JSON.parse(hintsRaw);
+                if (parsed && typeof parsed === "object") {
+                    classHints = parsed;
+                }
+            } catch (err) {
+                console.warn("Invalid class hints JSON", err);
+            }
+        }
+return {
             dataset_id: datasetId,
             val_percent: Number.isFinite(valPct) ? Math.max(5, Math.min(95, valPct)) / 100 : 0.3,
             thresholds: thresholds.length ? thresholds : [0.2],

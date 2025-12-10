@@ -5989,10 +5989,7 @@ def _expand_prompts_with_qwen(
             text = _generate_prompt_text(prompt_text, max_new_tokens=140)
             if not text:
                 continue
-            _log(
-                f"Qwen brainstorm (class={class_name}, round {round_idx + 1}): {str(text)[:200]}"
-                + ("…" if len(str(text)) > 200 else "")
-            )
+            _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}): {text}")
             for part in re.split(r"[,\n;]+", text):
                 cand = part.strip().strip('"').strip("'")
                 if not cand:
@@ -6017,9 +6014,9 @@ def _expand_prompts_with_qwen(
             if len(suggestions) >= max_new:
                 break
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
+        logger.warning("Prompt recipe: GPT-OSS expansion failed for %s: %s", class_name, exc)
         suggestions = []
-    # Self-verify with Qwen and sanitize.
+    # Self-verify and sanitize.
     combined = _sanitize_prompts([*cleaned_base, *suggestions])
     refined = _refine_prompts_with_qwen(combined)
     reviewed = _qwen_self_filter_prompts(class_name, refined)
@@ -6038,7 +6035,7 @@ def _expand_prompts_with_qwen(
     if not final_new:
         if log_fn:
             try:
-                log_fn(f"Qwen prompts fell back to base for {class_name}")
+                log_fn(f"GPT-OSS prompts fell back to base for {class_name}")
             except Exception:
                 pass
         return cleaned_base
@@ -7117,10 +7114,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 prompts_for_cat = _refine_prompts_with_qwen(prompts_for_cat)
             prepared_prompts[cat_id] = prompts_for_cat
 
-        # Release Qwen to free memory before SAM3 loads.
+        # Release prompt LLM to free memory before SAM3 loads.
         try:
             _unload_qwen_runtime()
-            job.logs.append({"ts": time.time(), "msg": "Qwen unloaded to free memory before SAM3 init"})
+            job.logs.append({"ts": time.time(), "msg": "Prompt LLM unloaded to free memory before SAM3 init"})
             if len(job.logs) > MAX_JOB_LOGS:
                 job.logs[:] = job.logs[-MAX_JOB_LOGS:]
         except Exception:

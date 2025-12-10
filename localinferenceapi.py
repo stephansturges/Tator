@@ -5781,6 +5781,7 @@ class AgentMiningRequest(BaseModel):
     exemplar_per_class: int = Field(10, ge=0, le=500)
     cluster_exemplars: bool = False
     max_workers: int = Field(1, ge=1, le=16)
+    max_workers_per_device: int = Field(1, ge=1, le=8)
     thresholds: List[float] = Field(default_factory=lambda: [0.2, 0.3, 0.4])
     mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
     similarity_score: float = Field(0.25, ge=0.0, le=1.0)
@@ -6824,9 +6825,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if not thresholds:
             thresholds = [0.3]
         thresholds = [float(max(0.0, min(1.0, t))) for t in thresholds]
-        mining_devices = _resolve_sam3_mining_devices()
+        base_devices = _resolve_sam3_mining_devices()
+        expanded_devices: List[torch.device] = []
+        per_dev_cap = max(1, payload.max_workers_per_device or 1)
+        for dev in base_devices:
+            expanded_devices.extend([dev] * per_dev_cap)
         if payload.max_workers and payload.max_workers > 0:
-            mining_devices = mining_devices[: payload.max_workers]
+            mining_devices = expanded_devices[: payload.max_workers]
+        else:
+            mining_devices = expanded_devices
+        if not mining_devices:
+            raise RuntimeError("sam3_mining_no_devices")
         try:
             mining_pool = _Sam3MiningPool(mining_devices)
         except Exception as exc:  # noqa: BLE001
@@ -6846,6 +6855,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             log_msg += f" (capped at {payload.max_workers} max_workers)"
         elif used_requested != requested:
             log_msg += f" (requested {requested}, some devices invalid or unavailable)"
+        if payload.max_workers_per_device and payload.max_workers_per_device > 1:
+            log_msg += f"; up to {payload.max_workers_per_device} worker(s) per device"
         job.logs.append({"ts": time.time(), "msg": log_msg})
         if len(job.logs) > MAX_JOB_LOGS:
             job.logs[:] = job.logs[-MAX_JOB_LOGS:]

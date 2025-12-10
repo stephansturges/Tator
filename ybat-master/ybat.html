@@ -872,6 +872,14 @@
                                 <label for="agentSimplifyEps">Simplify ε</label>
                                 <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" />
                             </div>
+                            <div>
+                                <label for="agentMaxWorkers">Max workers</label>
+                                <input type="number" id="agentMaxWorkers" min="1" max="16" value="1" title="Total SAM3 worker processes for mining (capped per GPU)." />
+                            </div>
+                            <div>
+                                <label for="agentWorkersPerGpu">Workers per GPU</label>
+                                <input type="number" id="agentWorkersPerGpu" min="1" max="8" value="1" title="How many workers to launch per detected GPU (caps above apply)." />
+                            </div>
                         </div>
                         <div class="training-grid">
                             <div>

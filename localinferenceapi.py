@@ -4199,6 +4199,35 @@ class _Sam3MiningPool:
         results: Dict[str, List[Dict[str, Any]]] = {task.get("id"): [] for task in tasks if task.get("id")}
         max_workers = max(1, len(self.workers))
 
+        # Fast path: single worker, run sequentially to avoid thread overhead and potential native race conditions.
+        if max_workers == 1:
+            worker = self.workers[0]
+            for img_id, path in image_entries:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                try:
+                    with Image.open(path) as img:
+                        pil_img = img.convert("RGB")
+                except Exception:
+                    continue
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                partial = worker.process_image(
+                    img_id,
+                    pil_img,
+                    tasks,
+                    min_threshold=min_threshold,
+                    mask_threshold=mask_threshold,
+                    max_results=max_results,
+                    min_size=min_size,
+                    simplify=simplify,
+                )
+                for key, dets in partial.items():
+                    if key is None or not dets:
+                        continue
+                    results.setdefault(key, []).extend(dets)
+            return results
+
         def _run_task(worker: _Sam3MiningWorker, img_id: int, path: str) -> Dict[str, List[Dict[str, Any]]]:
             if cancel_event is not None and cancel_event.is_set():
                 return {}
@@ -5751,6 +5780,7 @@ class AgentMiningRequest(BaseModel):
     qwen_max_prompts: int = Field(0, ge=0, le=20)
     exemplar_per_class: int = Field(10, ge=0, le=500)
     cluster_exemplars: bool = False
+    max_workers: int = Field(1, ge=1, le=16)
     thresholds: List[float] = Field(default_factory=lambda: [0.2, 0.3, 0.4])
     mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
     similarity_score: float = Field(0.25, ge=0.0, le=1.0)
@@ -6795,6 +6825,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             thresholds = [0.3]
         thresholds = [float(max(0.0, min(1.0, t))) for t in thresholds]
         mining_devices = _resolve_sam3_mining_devices()
+        if payload.max_workers and payload.max_workers > 0:
+            mining_devices = mining_devices[: payload.max_workers]
         try:
             mining_pool = _Sam3MiningPool(mining_devices)
         except Exception as exc:  # noqa: BLE001
@@ -6810,7 +6842,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         used_requested = len(mining_pool.workers)
         requested = len(mining_devices)
         log_msg = f"Using {used_requested} SAM3 worker(s): {device_labels}"
-        if used_requested != requested:
+        if payload.max_workers and requested > payload.max_workers:
+            log_msg += f" (capped at {payload.max_workers} max_workers)"
+        elif used_requested != requested:
             log_msg += f" (requested {requested}, some devices invalid or unavailable)"
         job.logs.append({"ts": time.time(), "msg": log_msg})
         if len(job.logs) > MAX_JOB_LOGS:

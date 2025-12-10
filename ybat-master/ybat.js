@@ -1146,6 +1146,8 @@ const sam3TrainState = {
         maxResults: null,
         minSize: null,
         simplifyEps: null,
+        maxWorkers: null,
+        workersPerGpu: null,
         exemplars: null,
         clusterExemplars: null,
         clipGuard: null,
@@ -11312,6 +11314,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const maxResults = readNumberInput(agentElements.maxResults, { integer: true });
         const minSize = readNumberInput(agentElements.minSize, { integer: true });
         const simplifyEps = readNumberInput(agentElements.simplifyEps, { integer: false });
+        const maxWorkers = readNumberInput(agentElements.maxWorkers, { integer: true });
+        const workersPerGpu = readNumberInput(agentElements.workersPerGpu, { integer: true });
         const exemplars = readNumberInput(agentElements.exemplars, { integer: true });
         const similarityFloor = readNumberInput(agentElements.similarityScore, { integer: false });
         const classesRaw = agentElements.classesInput?.value || "";
@@ -11328,6 +11332,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             max_results: Number.isFinite(maxResults) ? Math.max(1, maxResults) : 100,
             min_size: Number.isFinite(minSize) ? Math.max(0, minSize) : 0,
             simplify_epsilon: Number.isFinite(simplifyEps) ? Math.max(0, simplifyEps) : 0,
+            max_workers: Number.isFinite(maxWorkers) ? Math.max(1, Math.min(16, maxWorkers)) : 1,
+            max_workers_per_device: Number.isFinite(workersPerGpu) ? Math.max(1, Math.min(8, workersPerGpu)) : 1,
             exemplar_per_class: Number.isFinite(exemplars) ? Math.max(0, exemplars) : 4,
             cluster_exemplars: !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
             use_clip_fp_guard: !!(agentElements.clipGuard && agentElements.clipGuard.checked),
@@ -11636,6 +11642,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.maxResults = document.getElementById("agentMaxResults");
         agentElements.minSize = document.getElementById("agentMinSize");
         agentElements.simplifyEps = document.getElementById("agentSimplifyEps");
+        agentElements.maxWorkers = document.getElementById("agentMaxWorkers");
+        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
         agentElements.exemplars = document.getElementById("agentExemplars");
         agentElements.clusterExemplars = document.getElementById("agentClusterExemplars");
         agentElements.clipGuard = document.getElementById("agentClipGuard");

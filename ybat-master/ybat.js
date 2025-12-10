@@ -15268,22 +15268,24 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return;
         }
         try {
-            const resp = await fetch(`${API_ROOT}/sam3/recipe_presets/${encodeURIComponent(presetId)}`);
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${encodeURIComponent(presetId)}`);
             if (!resp.ok) {
                 const detail = await resp.text();
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
             const data = await resp.json();
             const parsed = {
-                label: data.label || data.id,
-                class_name: data.class_name,
-                class_id: data.class_id,
-                steps: Array.isArray(data.steps)
-                    ? data.steps
-                          .map((s) => ({
-                              prompt: typeof s.prompt === "string" ? s.prompt.trim() : "",
-                              threshold: typeof s.threshold === "number" ? s.threshold : null,
-                          }))
+                label: data.label || data.id || (data.recipe && (data.recipe.label || data.recipe.id)) || "",
+                class_name: data.class_name || (data.recipe && data.recipe.class_name),
+                class_id: data.class_id ?? (data.recipe && data.recipe.class_id),
+                steps: Array.isArray(data.recipe?.steps)
+                    ? data.recipe.steps
+                    : Array.isArray(data.steps)
+                        ? data.steps
+                              .map((s) => ({
+                                  prompt: typeof s.prompt === "string" ? s.prompt.trim() : "",
+                                  threshold: typeof s.threshold === "number" ? s.threshold : null,
+                              }))
                           .filter((s) => s.prompt && s.threshold !== null)
                     : [],
             };

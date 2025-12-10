@@ -833,6 +833,7 @@
         presetNameInput: null,
         presetSaveButton: null,
         presetLoadButton: null,
+        presetRefreshButton: null,
     };
     const sam3RecipeState = {
         recipe: null,
@@ -8738,6 +8739,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3RecipeElements.presetNameInput = document.getElementById("sam3RecipePresetName");
         sam3RecipeElements.presetSaveButton = document.getElementById("sam3RecipePresetSave");
         sam3RecipeElements.presetLoadButton = document.getElementById("sam3RecipePresetLoad");
+        sam3RecipeElements.presetRefreshButton = document.getElementById("sam3RecipePresetRefresh");
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest({ auto: false }));
         }
@@ -8759,6 +8761,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (sam3RecipeElements.presetLoadButton) {
             sam3RecipeElements.presetLoadButton.addEventListener("click", loadSam3RecipePreset);
+        }
+        if (sam3RecipeElements.presetRefreshButton) {
+            sam3RecipeElements.presetRefreshButton.addEventListener("click", () => {
+                loadSam3RecipePresets().catch((err) => console.error("Refresh recipe presets failed", err));
+            });
         }
         updateSam3ClassOptions({ resetOverride: true });
         updateSam3TextButtons();
@@ -15203,19 +15210,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     async function loadSam3RecipePresets() {
         if (!sam3RecipeElements.presetSelect) return;
         try {
-            const resp = await fetch(`${API_ROOT}/sam3/recipe_presets`);
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             sam3RecipeElements.presetSelect.innerHTML = "";
             const placeholder = document.createElement("option");
             placeholder.value = "";
-            placeholder.textContent = "Select recipe preset…";
+            placeholder.textContent = "Select recipe…";
             sam3RecipeElements.presetSelect.appendChild(placeholder);
             (Array.isArray(data) ? data : []).forEach((p) => {
                 const opt = document.createElement("option");
-                opt.value = p.id;
+                opt.value = p.id || p._path || "";
                 const cls = p.class_name ? ` • ${p.class_name}` : "";
-                opt.textContent = `${p.label || p.id}${cls}`;
+                opt.textContent = `${p.label || p.id || opt.value}${cls}`;
                 sam3RecipeElements.presetSelect.appendChild(opt);
             });
         } catch (err) {

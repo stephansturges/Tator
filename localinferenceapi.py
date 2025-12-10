@@ -5857,7 +5857,7 @@ class AgentMiningRequest(BaseModel):
     test_mode: bool = False
     test_train_limit: int = Field(10, ge=1, le=10_000)
     test_val_limit: int = Field(10, ge=1, le=10_000)
-    class_hints: Optional[Dict[int, str]] = None
+    class_hints: Optional[Dict[str, str]] = None
 
 
 def _expand_prompts_with_qwen(
@@ -6982,7 +6982,33 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
         # Precompute prompts (including Qwen expansions) before loading SAM3.
         prepared_prompts: Dict[int, List[str]] = {}
-        class_hints = payload.class_hints or {}
+        raw_hints = payload.class_hints or {}
+        normalized_hints: Dict[int, str] = {}
+        # Build a map of class name -> id for hint resolution.
+        name_to_id: Dict[str, int] = {}
+        for idx, cat in enumerate(categories):
+            try:
+                cid = int(cat.get("id", idx))
+            except Exception:
+                cid = idx
+            name_to_id[str(cat.get("name", "")).strip().lower()] = cid
+        for key, note in raw_hints.items():
+            if not note or not isinstance(note, str):
+                continue
+            note_clean = note.strip()
+            if not note_clean:
+                continue
+            class_id_val: Optional[int] = None
+            try:
+                class_id_val = int(key)
+            except Exception:
+                class_id_val = None
+            if class_id_val is None:
+                name_key = str(key).strip().lower()
+                class_id_val = name_to_id.get(name_key)
+            if class_id_val is None:
+                continue
+            normalized_hints[class_id_val] = note_clean
         for idx, cat in enumerate(categories):
             try:
                 cat_id = int(cat.get("id", idx))
@@ -7004,7 +7030,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         prompts_for_cat,
                         payload.qwen_max_prompts,
                         log_fn=_log_qwen,
-                        class_hint=class_hints.get(cat_id),
+                        class_hint=normalized_hints.get(cat_id),
                     )
                     extra_prompts = _refine_prompts_with_qwen(extra_prompts)
                     merged = []

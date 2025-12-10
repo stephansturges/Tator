@@ -11744,12 +11744,10 @@ return {
             })
             .then((data) => {
                 const names = Array.isArray(data?.classes) ? data.classes : [];
-                const ids = Array.isArray(data?.class_ids) ? data.class_ids : [];
                 const template = {};
                 if (names.length) {
-                    names.forEach((name, idx) => {
-                        const cid = ids[idx] != null ? ids[idx] : idx + 1;
-                        template[String(cid)] = `${name} — add hint`;
+                    names.forEach((name) => {
+                        template[String(name)] = "add hint";
                     });
                 }
                 agentElements.classHints.value = JSON.stringify(template, null, 2);

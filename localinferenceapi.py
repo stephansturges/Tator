@@ -3638,6 +3638,30 @@ def _load_agent_recipe(recipe_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_load_failed:{exc}") from exc
 
 
+def _delete_agent_recipe(recipe_id: str) -> None:
+    json_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.json").resolve()
+    zip_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve()
+    recipe_dir = (AGENT_MINING_RECIPES_ROOT / recipe_id).resolve()
+    if not str(json_path).startswith(str(AGENT_MINING_RECIPES_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    removed_any = False
+    for path in (json_path, zip_path):
+        if path.exists():
+            try:
+                path.unlink()
+                removed_any = True
+            except Exception:
+                pass
+    if recipe_dir.exists() and recipe_dir.is_dir():
+        try:
+            shutil.rmtree(recipe_dir)
+            removed_any = True
+        except Exception:
+            pass
+    if not removed_any:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
+
+
 def _list_agent_recipes(dataset_id: Optional[str] = None) -> List[Dict[str, Any]]:
     recipes: List[Dict[str, Any]] = []
     for path in AGENT_MINING_RECIPES_ROOT.glob("*.json"):
@@ -7043,6 +7067,12 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
         meta_overrides=meta_overrides,
     )
     return persisted
+
+
+@app.delete("/agent_mining/recipes/{recipe_id}")
+def agent_mining_delete_recipe(recipe_id: str):
+    _delete_agent_recipe(recipe_id)
+    return {"id": recipe_id, "deleted": True}
 
 
 @app.post("/sam3/prompt_helper/suggest")

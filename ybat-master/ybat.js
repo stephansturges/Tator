@@ -1153,6 +1153,7 @@ const sam3TrainState = {
         clipGuard: null,
         similarityScore: null,
         classesInput: null,
+        classHints: null,
         testMode: null,
         trainLimit: null,
         valLimit: null,
@@ -11324,6 +11325,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 .split(/[,\\s]+/)
                 .map((p) => parseInt(p.trim(), 10))
                 .filter((v) => Number.isInteger(v)) || [];
+        const hintsRaw = agentElements.classHints?.value || "";
+        const classHints = {};
+        hintsRaw
+            .split(/\\n+/)
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .forEach((line) => {
+                const [idPart, ...rest] = line.split(":");
+                const idVal = parseInt(idPart.trim(), 10);
+                if (!Number.isInteger(idVal)) return;
+                const note = rest.join(":").trim();
+                if (!note) return;
+                classHints[idVal] = note;
+            });
         return {
             dataset_id: datasetId,
             val_percent: Number.isFinite(valPct) ? Math.max(5, Math.min(95, valPct)) / 100 : 0.3,
@@ -11339,6 +11354,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             use_clip_fp_guard: !!(agentElements.clipGuard && agentElements.clipGuard.checked),
             similarity_score: Number.isFinite(similarityFloor) ? Math.max(0, Math.min(1, similarityFloor)) : 0.25,
             classes: classes.length ? classes : null,
+            class_hints: Object.keys(classHints).length ? classHints : null,
             auto_mine_prompts: (agentElements.qwenMaxPrompts && readNumberInput(agentElements.qwenMaxPrompts, { integer: true }) > 0) || false,
             qwen_max_prompts: Number.isFinite(readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
                 ? Math.max(0, readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
@@ -11649,6 +11665,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.clipGuard = document.getElementById("agentClipGuard");
         agentElements.similarityScore = document.getElementById("agentSimilarityScore");
         agentElements.classesInput = document.getElementById("agentClasses");
+        agentElements.classHints = document.getElementById("agentClassHints");
         agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
         agentElements.testMode = document.getElementById("agentTestMode");
         agentElements.trainLimit = document.getElementById("agentTrainLimit");

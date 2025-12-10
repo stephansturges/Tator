@@ -5840,6 +5840,7 @@ class AgentMiningRequest(BaseModel):
     test_mode: bool = False
     test_train_limit: int = Field(10, ge=1, le=10_000)
     test_val_limit: int = Field(10, ge=1, le=10_000)
+    class_hints: Optional[Dict[int, str]] = None
 
 
 def _expand_prompts_with_qwen(
@@ -5847,6 +5848,7 @@ def _expand_prompts_with_qwen(
     base_prompts: List[str],
     max_new: int,
     log_fn: Optional[Callable[[str], None]] = None,
+    class_hint: Optional[str] = None,
 ) -> List[str]:
     """Use Qwen to brainstorm additional prompt variants for a class. Accepts optional logger callback."""
     cleaned_base = _sanitize_prompts(base_prompts)
@@ -5861,6 +5863,10 @@ def _expand_prompts_with_qwen(
             "You are Agent A, brainstorming diverse noun phrases for open-vocabulary object detection with SAM3. "
             f"Target class: '{_humanize_class_name(class_name)}'. "
             f"Known good prompts: {known_list_str}. "
+        )
+        if class_hint:
+            brainstorm_prompt += f"Class note: {class_hint}. "
+        brainstorm_prompt += (
             f"Propose up to {max_new} NEW, concrete object names (1-4 words) that strictly describe this class, including common synonyms or sub-types. "
             "Each item must be unique, not in the known list, visually recognizable, and free of punctuation or fragments. "
             "Avoid verbs, standalone adjectives, or unrelated words. "
@@ -6959,6 +6965,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
         # Precompute prompts (including Qwen expansions) before loading SAM3.
         prepared_prompts: Dict[int, List[str]] = {}
+        class_hints = payload.class_hints or {}
         for idx, cat in enumerate(categories):
             try:
                 cat_id = int(cat.get("id", idx))
@@ -6975,7 +6982,13 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         job.logs.append({"ts": time.time(), "msg": msg})
                         if len(job.logs) > MAX_JOB_LOGS:
                             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                    extra_prompts = _expand_prompts_with_qwen(cat_name, prompts_for_cat, payload.qwen_max_prompts, log_fn=_log_qwen)
+                    extra_prompts = _expand_prompts_with_qwen(
+                        cat_name,
+                        prompts_for_cat,
+                        payload.qwen_max_prompts,
+                        log_fn=_log_qwen,
+                        class_hint=class_hints.get(cat_id),
+                    )
                     extra_prompts = _refine_prompts_with_qwen(extra_prompts)
                     merged = []
                     seen_prompts = set()

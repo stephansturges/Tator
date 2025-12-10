@@ -31,6 +31,7 @@ from segment_anything import sam_model_registry, SamPredictor
 import threading
 import queue
 import itertools
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 
 # Ensure we import the bundled SAM3 package (sam3/sam3) rather than shadowing it
@@ -391,6 +392,34 @@ def _resolve_sam3_device() -> torch.device:
         return torch.device(SAM3_DEVICE_PREF)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_sam3_device:{SAM3_DEVICE_PREF}:{exc}") from exc
+
+
+def _resolve_sam3_mining_devices() -> List[torch.device]:
+    """
+    Resolve the list of devices to use for agent mining. If SAM3_DEVICE specifies an explicit device
+    (or comma-separated list), honor it; otherwise fan out across all available CUDA devices, falling
+    back to CPU when needed.
+    """
+    devices: List[torch.device] = []
+    if SAM3_DEVICE_PREF not in {"", "auto"}:
+        for part in SAM3_DEVICE_PREF.split(","):
+            name = part.strip()
+            if not name:
+                continue
+            try:
+                devices.append(torch.device(name))
+            except Exception:
+                logger.warning("Invalid SAM3 device in SAM3_DEVICE=%s", name)
+    if not devices and torch.cuda.is_available():
+        try:
+            for idx in range(torch.cuda.device_count()):
+                devices.append(torch.device(f"cuda:{idx}"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to enumerate CUDA devices for mining: %s", exc)
+            devices = []
+    if not devices:
+        devices = [torch.device("cpu")]
+    return devices
 
 
 def _reset_sam3_runtime() -> None:
@@ -1615,12 +1644,15 @@ def _run_sam3_text_inference(
     return_masks: bool = False,
     min_size: Optional[float] = None,
     simplify_epsilon: Optional[float] = None,
+    processor_override: Optional[Any] = None,
+    state: Optional[Any] = None,
 ) -> List[QwenDetection] | Tuple[List[QwenDetection], Optional[List[np.ndarray]]]:
     """
     Run SAM3 text inference. By default returns detections list; callers that need masks should
     inspect the second element when `return_masks=True`.
     """
-    _, processor, _ = _ensure_sam3_text_runtime()
+    _, default_processor, _ = _ensure_sam3_text_runtime()
+    processor = processor_override or default_processor
     try:
         processor.set_confidence_threshold(float(threshold))
     except Exception:
@@ -1634,19 +1666,19 @@ def _run_sam3_text_inference(
             normalized_limit = max(1, int(limit))
         except (TypeError, ValueError):
             normalized_limit = None
-    state = processor.set_image(pil_img)
+    img_state = state if state is not None else processor.set_image(pil_img)
     masks_arr: Optional[np.ndarray] = None
     try:
-        output = processor.set_text_prompt(state=state, prompt=text_prompt)
+        output = processor.set_text_prompt(state=img_state, prompt=text_prompt)
     except KeyError:
         # Box-only checkpoints (enable_segmentation=False) do not emit pred_masks.
         # Fall back to raw model output and extract boxes/scores manually.
         try:
             raw = processor.model.forward_grounding(
-                backbone_out=state.get("backbone_out", {}),
+                backbone_out=img_state.get("backbone_out", {}),
                 find_input=processor.find_stage,
                 find_target=None,
-                geometric_prompt=state.get("geometric_prompt", processor.model._get_dummy_prompt()),
+                geometric_prompt=img_state.get("geometric_prompt", processor.model._get_dummy_prompt()),
             )
             boxes_xyxy = raw.get("pred_boxes_xyxy")
             if boxes_xyxy is None:
@@ -1718,12 +1750,15 @@ def _run_sam3_visual_inference(
     return_masks: bool = False,
     min_size: Optional[float] = None,
     simplify_epsilon: Optional[float] = None,
+    processor_override: Optional[Any] = None,
+    state: Optional[Any] = None,
 ) -> List[QwenDetection] | Tuple[List[QwenDetection], Optional[List[np.ndarray]]]:
     """
     Run SAM3 with a single positive visual (box) prompt. By default returns detections list;
     callers that need masks should inspect the second element when `return_masks=True`.
     """
-    _, processor, _ = _ensure_sam3_text_runtime()
+    _, default_processor, _ = _ensure_sam3_text_runtime()
+    processor = processor_override or default_processor
     try:
         processor.set_confidence_threshold(float(threshold))
     except Exception:
@@ -1736,7 +1771,7 @@ def _run_sam3_visual_inference(
             normalized_limit = max(1, int(limit))
         except (TypeError, ValueError):
             normalized_limit = None
-    state = processor.set_image(pil_img)
+    img_state = state if state is not None else processor.set_image(pil_img)
     img_w, img_h = float(pil_img.width), float(pil_img.height)
     x, y, w, h = bbox_xywh
     cx = (x + w / 2.0) / img_w
@@ -1744,7 +1779,7 @@ def _run_sam3_visual_inference(
     w_norm = w / img_w
     h_norm = h / img_h
     try:
-        output = processor.add_geometric_prompt([cx, cy, w_norm, h_norm], True, state=state)
+        output = processor.add_geometric_prompt([cx, cy, w_norm, h_norm], True, state=img_state)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_prompt_failed:{exc}") from exc
     masks_arr: Optional[np.ndarray] = None
@@ -1754,11 +1789,11 @@ def _run_sam3_visual_inference(
             mask_logits = output.get("masks_logits")
         elif "masks" in output and output.get("masks") is not None:
             mask_logits = output.get("masks")
-    if mask_logits is None and isinstance(state, Mapping):
-        if "masks_logits" in state and state.get("masks_logits") is not None:
-            mask_logits = state.get("masks_logits")
-        elif "masks" in state and state.get("masks") is not None:
-            mask_logits = state.get("masks")
+    if mask_logits is None and isinstance(img_state, Mapping):
+        if "masks_logits" in img_state and img_state.get("masks_logits") is not None:
+            mask_logits = img_state.get("masks_logits")
+        elif "masks" in img_state and img_state.get("masks") is not None:
+            mask_logits = img_state.get("masks")
     try:
         threshold_val = float(mask_threshold)
     except Exception:
@@ -4015,6 +4050,307 @@ def _collect_agent_mining_detections(
     except Exception:
         pass
     return results
+
+
+def _build_sam3_text_processor_for_device(device: torch.device) -> Tuple[Any, Any]:
+    if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None or Sam3ImageProcessor is None:
+        raise RuntimeError(f"sam3_text_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}")
+    device_str = "cuda" if device.type == "cuda" else "cpu"
+    try:
+        model = build_sam3_image_model(
+            checkpoint_path=active_sam3_checkpoint,
+            device=device_str,
+            load_from_HF=active_sam3_checkpoint is None,
+            enable_segmentation=True,
+            bpe_path=str(SAM3_BPE_PATH),
+        )
+        if device:
+            model = model.to(device)
+        processor = Sam3ImageProcessor(model)
+        return model, processor
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"sam3_text_load_failed:{exc}") from exc
+
+
+class _Sam3MiningWorker:
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.model, self.processor = _build_sam3_text_processor_for_device(device)
+        self.lock = threading.Lock()
+
+    def close(self) -> None:
+        try:
+            del self.processor
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            del self.model
+        except Exception:  # noqa: BLE001
+            pass
+        if torch.cuda.is_available() and self.device.type == "cuda":
+            try:
+                torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def process_image(
+        self,
+        image_id: int,
+        pil_img: Image.Image,
+        tasks: Sequence[Dict[str, Any]],
+        *,
+        min_threshold: float,
+        mask_threshold: float,
+        max_results: int,
+        min_size: int,
+        simplify: float,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Run all requested tasks against a single preloaded image on this worker."""
+        if not tasks:
+            return {}
+        with self.lock:
+            try:
+                self.processor.set_confidence_threshold(float(min_threshold))
+            except Exception:
+                pass
+            state = self.processor.set_image(pil_img)
+            outputs: Dict[str, List[Dict[str, Any]]] = {}
+            for task in tasks:
+                task_id = task.get("id")
+                if not task_id:
+                    continue
+                dets: List[QwenDetection]
+                if task.get("type") == "text":
+                    dets = _run_sam3_text_inference(
+                        pil_img,
+                        task.get("prompt") or "",
+                        min_threshold,
+                        mask_threshold,
+                        max_results,
+                        min_size=min_size if min_size > 0 else None,
+                        simplify_epsilon=simplify,
+                        processor_override=self.processor,
+                        state=state,
+                    )
+                else:
+                    bbox = task.get("bbox")
+                    if not bbox or len(bbox) < 4:
+                        continue
+                    dets = _run_sam3_visual_inference(
+                        pil_img,
+                        (
+                            float(bbox[0]),
+                            float(bbox[1]),
+                            float(bbox[2]),
+                            float(bbox[3]),
+                        ),
+                        min_threshold,
+                        mask_threshold,
+                        max_results,
+                        min_size=min_size if min_size > 0 else None,
+                        simplify_epsilon=simplify,
+                        processor_override=self.processor,
+                        state=state,
+                    )
+                det_dicts: List[Dict[str, Any]] = []
+                for det in dets:
+                    try:
+                        det_data = det.dict()
+                    except Exception:
+                        continue
+                    det_data["image_id"] = image_id
+                    det_dicts.append(det_data)
+                outputs[task_id] = det_dicts
+            return outputs
+
+
+class _Sam3MiningPool:
+    def __init__(self, devices: Sequence[torch.device]):
+        self.workers: List[_Sam3MiningWorker] = []
+        for dev in devices:
+            try:
+                self.workers.append(_Sam3MiningWorker(dev))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to initialize SAM3 mining worker on %s: %s", dev, exc)
+        if not self.workers:
+            raise RuntimeError("sam3_mining_workers_unavailable")
+
+    def close(self) -> None:
+        for worker in self.workers:
+            try:
+                worker.close()
+            except Exception:
+                continue
+
+    def run(
+        self,
+        image_entries: Sequence[Tuple[int, str]],
+        tasks: Sequence[Dict[str, Any]],
+        *,
+        min_threshold: float,
+        mask_threshold: float,
+        max_results: int,
+        min_size: int,
+        simplify: float,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        if not tasks or not image_entries:
+            return {task.get("id"): [] for task in tasks if task.get("id")}
+        results: Dict[str, List[Dict[str, Any]]] = {task.get("id"): [] for task in tasks if task.get("id")}
+        max_workers = max(1, len(self.workers))
+
+        def _run_task(worker: _Sam3MiningWorker, img_id: int, path: str) -> Dict[str, List[Dict[str, Any]]]:
+            if cancel_event is not None and cancel_event.is_set():
+                return {}
+            if not path:
+                return {}
+            try:
+                with Image.open(path) as img:
+                    pil_img = img.convert("RGB")
+            except Exception:
+                return {}
+            if cancel_event is not None and cancel_event.is_set():
+                return {}
+            return worker.process_image(
+                img_id,
+                pil_img,
+                tasks,
+                min_threshold=min_threshold,
+                mask_threshold=mask_threshold,
+                max_results=max_results,
+                min_size=min_size,
+                simplify=simplify,
+            )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for idx, (img_id, path) in enumerate(image_entries):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                worker = self.workers[idx % max_workers]
+                futures.append(executor.submit(_run_task, worker, img_id, path))
+            for future in as_completed(futures):
+                try:
+                    partial = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Agent mining worker failed: %s", exc)
+                    continue
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                for key, dets in partial.items():
+                    if key is None:
+                        continue
+                    if dets:
+                        results.setdefault(key, []).extend(dets)
+        return results
+
+
+def _collect_agent_mining_detections_image_first(
+    *,
+    candidates: Sequence[Dict[str, Any]],
+    thresholds: Sequence[float],
+    images: Dict[int, Dict[str, Any]],
+    image_ids: Sequence[int],
+    mask_threshold: float,
+    min_size: int,
+    simplify: float,
+    max_results: int,
+    cache_dir: Path,
+    pool: _Sam3MiningPool,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[Dict[str, Dict[float, List[Dict[str, Any]]]], Dict[str, Any]]:
+    """
+    Collect detections for all candidates over all images in an image-first manner. We run the
+    lowest threshold once per image and reuse scores to materialize higher-threshold variants.
+    """
+    thresholds_list = [float(t) for t in thresholds] if thresholds else [0.3]
+    thresholds_list = [t for t in thresholds_list if 0.0 <= t <= 1.0]
+    if not thresholds_list:
+        thresholds_list = [0.3]
+    min_threshold = min(thresholds_list)
+    results: Dict[str, Dict[float, List[Dict[str, Any]]]] = {}
+    missing: List[Dict[str, Any]] = []
+    cached_pairs = 0
+    executed_pairs = 0
+    executed_pairs_with_dets = 0
+    # First try to satisfy from cache.
+    for cand in candidates:
+        cand_id = cand.get("id")
+        if not cand_id:
+            continue
+        results[cand_id] = {}
+        all_cached = True
+        for thr in thresholds_list:
+            cached = _load_agent_mining_detections(
+                cache_dir,
+                _agent_mining_cache_key(
+                    prompt=cand.get("prompt"),
+                    visual_ref=cand.get("visual_ref"),
+                    threshold=thr,
+                    mask_threshold=mask_threshold,
+                    min_size=min_size,
+                    simplify=simplify,
+                    max_results=max_results,
+                ),
+            )
+            if cached is not None:
+                results[cand_id][thr] = cached
+                cached_pairs += 1
+            else:
+                all_cached = False
+        if not all_cached:
+            missing.append(cand)
+    if missing and (cancel_event is None or not cancel_event.is_set()):
+        image_entries: List[Tuple[int, str]] = []
+        for img_id in image_ids:
+            info = images.get(img_id) or {}
+            path = info.get("path")
+            if path:
+                image_entries.append((img_id, path))
+        pooled = pool.run(
+            image_entries,
+            missing,
+            min_threshold=min_threshold,
+            mask_threshold=mask_threshold,
+            max_results=max_results,
+            min_size=min_size,
+            simplify=simplify,
+            cancel_event=cancel_event,
+        )
+        for cand in missing:
+            cand_id = cand.get("id")
+            if not cand_id:
+                continue
+            base_dets = pooled.get(cand_id, [])
+            for thr in thresholds_list:
+                filtered = [
+                    det
+                    for det in base_dets
+                    if ((det.get("score") is None and thr <= min_threshold) or (det.get("score") or 0.0) >= thr)
+                ]
+                cache_key = _agent_mining_cache_key(
+                    prompt=cand.get("prompt"),
+                    visual_ref=cand.get("visual_ref"),
+                    threshold=thr,
+                    mask_threshold=mask_threshold,
+                    min_size=min_size,
+                    simplify=simplify,
+                    max_results=max_results,
+                )
+                _save_agent_mining_detections(cache_dir, cache_key, filtered)
+                results.setdefault(cand_id, {})[thr] = filtered
+                executed_pairs += 1
+                if filtered:
+                    executed_pairs_with_dets += 1
+    stats = {
+        "images": len(image_ids),
+        "candidates": len(candidates),
+        "thresholds": len(thresholds_list),
+        "cached_pairs": cached_pairs,
+        "executed_pairs": executed_pairs,
+        "executed_pairs_with_dets": executed_pairs_with_dets,
+    }
+    return results, stats
 
 
 def _clip_embed_regions(
@@ -6396,6 +6732,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
     job.message = "Preparing dataset split…"
     job.request = payload.dict()
     job.updated_at = time.time()
+    mining_pool: Optional[_Sam3MiningPool] = None
     try:
         dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
         job.logs.append({"ts": time.time(), "msg": f"Dataset resolved at {dataset_root}"})
@@ -6457,6 +6794,27 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if not thresholds:
             thresholds = [0.3]
         thresholds = [float(max(0.0, min(1.0, t))) for t in thresholds]
+        mining_devices = _resolve_sam3_mining_devices()
+        try:
+            mining_pool = _Sam3MiningPool(mining_devices)
+        except Exception as exc:  # noqa: BLE001
+            job.status = "failed"
+            job.error = str(exc)
+            job.message = "SAM3 mining init failed"
+            job.updated_at = time.time()
+            return
+        try:
+            device_labels = ", ".join(str(w.device) for w in mining_pool.workers)
+        except Exception:
+            device_labels = str(mining_devices)
+        used_requested = len(mining_pool.workers)
+        requested = len(mining_devices)
+        log_msg = f"Using {used_requested} SAM3 worker(s): {device_labels}"
+        if used_requested != requested:
+            log_msg += f" (requested {requested}, some devices invalid or unavailable)"
+        job.logs.append({"ts": time.time(), "msg": log_msg})
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
 
         for idx, cat in enumerate(categories):
             try:
@@ -6565,97 +6923,117 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             for entries in gt_index_val.values():
                 for key, _ in entries:
                     all_gt_keys_val.add(key)
-        eval_candidates: List[Dict[str, Any]] = []
-        text_prompt_count = len(text_prompts or [])
-        thresholds_count = len(thresholds or [])
-        visual_candidate_count = 0
-        for prompt_text in text_prompts:
-            for thr in thresholds:
-                dets = _collect_agent_mining_detections(
-                    images=images,
-                    image_ids=val_ids,
-                    prompt=prompt_text,
-                    visual_ref=None,
-                    threshold=thr,
-                    mask_threshold=payload.mask_threshold,
-                    min_size=payload.min_size,
-                    simplify=payload.simplify_epsilon,
-                    max_results=payload.max_results,
-                    cache_dir=cache_dir,
+            candidate_tasks: List[Dict[str, Any]] = []
+            for prompt_text in text_prompts:
+                candidate_tasks.append({"id": f"text::{prompt_text}", "type": "text", "prompt": prompt_text})
+            for ex_idx, ex in enumerate(exemplars):
+                candidate_tasks.append(
+                    {
+                        "id": f"visual::{ex_idx}",
+                        "type": "visual",
+                        "bbox": ex.get("bbox"),
+                        "visual_ref": ex,
+                    }
                 )
-                fp_warnings: List[str] = []
-                if payload.use_clip_fp_guard and exemplar_embeddings:
-                    dets, fp_warnings = _clip_fp_filter_detections(
-                        dets,
-                        exemplar_embeddings=exemplar_embeddings,
+            det_cache, det_stats = _collect_agent_mining_detections_image_first(
+                candidates=candidate_tasks,
+                thresholds=thresholds,
+                images=images,
+                image_ids=val_ids,
+                mask_threshold=payload.mask_threshold,
+                min_size=payload.min_size,
+                simplify=payload.simplify_epsilon,
+                max_results=payload.max_results,
+                cache_dir=cache_dir,
+                pool=mining_pool,
+                cancel_event=job.cancel_event,
+            )
+            try:
+                job.logs.append(
+                    {
+                        "ts": time.time(),
+                        "msg": (
+                            f"SAM3 mining ran image-first on {det_stats.get('images')} val images for "
+                            f"{det_stats.get('candidates')} candidates x {det_stats.get('thresholds')} thresholds "
+                            f"(cached {det_stats.get('cached_pairs')} pairs, executed {det_stats.get('executed_pairs')} "
+                            f"with {det_stats.get('executed_pairs_with_dets')} yielding detections)"
+                        ),
+                    }
+                )
+                if len(job.logs) > MAX_JOB_LOGS:
+                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+            except Exception:
+                pass
+            eval_candidates: List[Dict[str, Any]] = []
+            text_prompt_count = len(text_prompts or [])
+            thresholds_count = len(thresholds or [])
+            visual_candidate_count = len(exemplars) * thresholds_count
+            for prompt_text in text_prompts:
+                task_id = f"text::{prompt_text}"
+                for thr in thresholds:
+                    dets = det_cache.get(task_id, {}).get(thr, [])
+                    fp_warnings: List[str] = []
+                    if payload.use_clip_fp_guard and exemplar_embeddings:
+                        dets, fp_warnings = _clip_fp_filter_detections(
+                            dets,
+                            exemplar_embeddings=exemplar_embeddings,
+                            images=images,
+                            similarity_floor=payload.similarity_score,
+                        )
+                    cache_map = _detections_to_eval_cache(dets, images)
+                    metrics = _evaluate_prompt_candidate(
+                        prompt_text,
+                        thr,
+                        cat_id=cat_id,
+                        image_ids=val_ids,
+                        gt_index=gt_index_val,
                         images=images,
-                        similarity_floor=payload.similarity_score,
+                        iou_threshold=0.5,
+                        max_dets=payload.max_results,
+                        image_cache={},
+                        cached_detections=cache_map,
                     )
-                cache_map = _detections_to_eval_cache(dets, images)
-                metrics = _evaluate_prompt_candidate(
-                    prompt_text,
-                    thr,
-                    cat_id=cat_id,
-                    image_ids=val_ids,
-                    gt_index=gt_index_val,
-                    images=images,
-                    iou_threshold=0.5,
-                    max_dets=payload.max_results,
-                    image_cache={},
-                    cached_detections=cache_map,
-                )
-                metrics["type"] = "text"
-                metrics["detections"] = len(dets)
-                if fp_warnings:
-                    metrics["warnings"] = fp_warnings
-                eval_candidates.append(metrics)
-        for ex_idx, ex in enumerate(exemplars):
-            label = f"exemplar_{ex_idx}"
-            visual_candidate_count += thresholds_count
-            for thr in thresholds:
-                dets = _collect_agent_mining_detections(
-                    images=images,
-                    image_ids=val_ids,
-                    prompt=None,
-                    visual_ref=ex,
-                    threshold=thr,
-                    mask_threshold=payload.mask_threshold,
-                    min_size=payload.min_size,
-                    simplify=payload.simplify_epsilon,
-                    max_results=payload.max_results,
-                    cache_dir=cache_dir,
-                )
-                fp_warnings: List[str] = []
-                if payload.use_clip_fp_guard and exemplar_embeddings:
-                    dets, fp_warnings = _clip_fp_filter_detections(
-                        dets,
-                        exemplar_embeddings=exemplar_embeddings,
+                    metrics["type"] = "text"
+                    metrics["detections"] = len(dets)
+                    if fp_warnings:
+                        metrics["warnings"] = fp_warnings
+                    eval_candidates.append(metrics)
+            for ex_idx, ex in enumerate(exemplars):
+                label = f"exemplar_{ex_idx}"
+                task_id = f"visual::{ex_idx}"
+                for thr in thresholds:
+                    dets = det_cache.get(task_id, {}).get(thr, [])
+                    fp_warnings: List[str] = []
+                    if payload.use_clip_fp_guard and exemplar_embeddings:
+                        dets, fp_warnings = _clip_fp_filter_detections(
+                            dets,
+                            exemplar_embeddings=exemplar_embeddings,
+                            images=images,
+                            similarity_floor=payload.similarity_score,
+                        )
+                    cache_map = _detections_to_eval_cache(dets, images)
+                    metrics = _evaluate_prompt_candidate(
+                        label,
+                        thr,
+                        cat_id=cat_id,
+                        image_ids=val_ids,
+                        gt_index=gt_index_val,
                         images=images,
-                        similarity_floor=payload.similarity_score,
+                        iou_threshold=0.5,
+                        max_dets=payload.max_results,
+                        image_cache={},
+                        cached_detections=cache_map,
                     )
-                cache_map = _detections_to_eval_cache(dets, images)
-                metrics = _evaluate_prompt_candidate(
-                    label,
-                    thr,
-                    cat_id=cat_id,
-                    image_ids=val_ids,
-                    gt_index=gt_index_val,
-                    images=images,
-                    iou_threshold=0.5,
-                    max_dets=payload.max_results,
-                    image_cache={},
-                    cached_detections=cache_map,
-                )
-                metrics["type"] = "visual"
-                metrics["exemplar"] = {
-                    "image_id": ex.get("image_id"),
-                    "bbox": ex.get("bbox"),
-                    "file_name": ex.get("file_name"),
-                }
-                metrics["detections"] = len(dets)
-                if fp_warnings:
-                    metrics["warnings"] = fp_warnings
-                eval_candidates.append(metrics)
+                    metrics["type"] = "visual"
+                    metrics["exemplar"] = {
+                        "image_id": ex.get("image_id"),
+                        "bbox": ex.get("bbox"),
+                        "file_name": ex.get("file_name"),
+                    }
+                    metrics["detections"] = len(dets)
+                    if fp_warnings:
+                        metrics["warnings"] = fp_warnings
+                    eval_candidates.append(metrics)
         recipe: Optional[Dict[str, Any]] = None
         coverage_by_image: Optional[List[Dict[str, Any]]] = None
         if eval_candidates and all_gt_keys_val:
@@ -6800,6 +7178,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.error = str(exc)
         job.message = "Failed"
     finally:
+        try:
+            if mining_pool is not None:
+                mining_pool.close()
+        except Exception:
+            pass
         job.updated_at = time.time()
 
 

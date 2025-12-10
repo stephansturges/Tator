@@ -11735,13 +11735,17 @@ return {
         if (!agentElements.classHints) return;
         const meta = getAgentSelectedDatasetMeta();
         const classes = Array.isArray(meta?.classes) ? meta.classes : [];
-        if (!classes.length) return;
         const template = {};
-        classes.forEach((name, idx) => {
-            template[String(idx + 1)] = `${name} — add hint`;
-        });
+        if (classes.length) {
+            classes.forEach((name, idx) => {
+                // Use 1-based ids as fallback; if meta has numeric ids array, prefer it.
+                const cid = Array.isArray(meta?.class_ids) && meta.class_ids[idx] != null ? meta.class_ids[idx] : idx + 1;
+                template[String(cid)] = `${name} — add hint`;
+            });
+        }
         try {
             agentElements.classHints.value = JSON.stringify(template, null, 2);
+            agentElements.classHints.removeAttribute("readonly");
         } catch (err) {
             console.warn("Failed to prefill class hints", err);
         }

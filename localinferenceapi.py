@@ -5823,21 +5823,33 @@ def _expand_prompts_with_qwen(class_name: str, base_prompts: List[str], max_new:
     seen = {p.lower() for p in cleaned_base}
     suggestions: List[str] = []
     try:
-        for _ in range(2):  # allow two brainstorming passes for diversity
+        # Two-agent dialogue: Brainstormer proposes, Critic filters, loop until STOP or cap.
+        brainstorm_prompt = (
+            "You are Agent A, brainstorming noun phrases for open-vocabulary object detection with SAM3. "
+            f"Target class: '{_humanize_class_name(class_name)}'. "
+            f"Known good prompts: {', '.join(cleaned_base)}. "
+            f"Propose up to {max_new} additional, concrete object names (1-4 words) that strictly describe this class, "
+            "including synonyms or sub-types. Avoid adjectives without nouns and avoid unrelated words. "
+            "Return ONLY a comma-separated list ending with the token STOP."
+        )
+        critic_prompt_tpl = (
+            "You are Agent B, validating Agent A's suggestions for class '{class_name}'. "
+            "Keep only entries that clearly describe the target class (synonyms or sub-types), drop ambiguous/misspelled/unrelated items. "
+            "Return ONLY a comma-separated list ending with STOP."
+        )
+        for _ in range(3):  # allow up to three dialogue rounds
             if len(suggestions) >= max_new:
                 break
-            prompt_text = (
-                "You are generating candidate noun phrases for open-vocabulary object detection with SAM3. "
-                f"Target class: '{_humanize_class_name(class_name)}'. "
-                f"Known good prompts: {', '.join(cleaned_base)}. "
-                f"Produce up to {max_new} additional, concrete object names (1-4 words) that strictly describe the same class, "
-                "including common synonyms or specific sub-types. Avoid adjectives without nouns and avoid words that could mean unrelated things. "
-                "Return ONLY a comma-separated list of noun phrases. Do not number or explain."
-            )
-            text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False)
+            if not brainstorm:
+                continue
+            critic_prompt = critic_prompt_tpl.format(class_name=_humanize_class_name(class_name))
+            critic_input = f"{critic_prompt}\nAgent A list: {brainstorm}"
+            critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False)
+            text = critic_text or brainstorm
             for part in re.split(r"[\\n;,]+", text):
                 normalized = part.strip().strip('"').strip("'")
-                if not normalized:
+                if not normalized or normalized.upper() == "STOP":
                     continue
                 if any(ch in normalized for ch in "{}[]:\""):
                     continue

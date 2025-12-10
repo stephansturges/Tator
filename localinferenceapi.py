@@ -5856,19 +5856,23 @@ def _expand_prompts_with_qwen(
     suggestions: List[str] = []
     try:
         # Two-agent dialogue: Brainstormer proposes, Critic filters, loop until STOP or cap.
+        known_list_str = ", ".join(cleaned_base)
         brainstorm_prompt = (
-            "You are Agent A, brainstorming noun phrases for open-vocabulary object detection with SAM3. "
+            "You are Agent A, brainstorming diverse noun phrases for open-vocabulary object detection with SAM3. "
             f"Target class: '{_humanize_class_name(class_name)}'. "
-            f"Known good prompts: {', '.join(cleaned_base)}. "
-            f"Propose up to {max_new} additional, concrete object names (1-4 words) that strictly describe this class, "
-            "including synonyms or sub-types. Avoid adjectives without nouns and avoid unrelated words. "
-            "Return ONLY a comma-separated list ending with the token STOP."
+            f"Known good prompts: {known_list_str}. "
+            f"Propose up to {max_new} NEW, concrete object names (1-4 words) that strictly describe this class, including common synonyms or sub-types. "
+            "Each item must be unique, not in the known list, visually recognizable, and free of punctuation or fragments. "
+            "Avoid verbs, standalone adjectives, or unrelated words. "
+            "Respond ONLY as a comma-separated list ending with the token STOP. Example: pickup truck, delivery van, hatchback, STOP"
         )
         critic_prompt_tpl = (
             "You are Agent B, validating Agent A's suggestions for class '{class_name}'. "
-            "Keep only entries that clearly describe the target class (synonyms or sub-types), drop ambiguous/misspelled/unrelated items. "
+            f"Known prompts to exclude: {known_list_str}. "
+            "Keep only entries that clearly describe that class (synonyms or sub-types), drop ambiguous/misspelled/unrelated items, and drop duplicates or anything in the known list. "
             "Return ONLY a comma-separated list ending with STOP."
         )
+
         def _log(msg: str) -> None:
             if log_fn:
                 try:
@@ -5895,12 +5899,13 @@ def _expand_prompts_with_qwen(
                     + ("…" if len(str(critic_text)) > 200 else "")
                 )
             text = critic_text or brainstorm
+            round_candidates: List[str] = []
             for part in re.split(r"[\\n;,]+", text):
                 normalized = part.strip().strip('"').strip("'")
                 if not normalized or normalized.upper() == "STOP":
                     continue
                 # Strict sanitation: allow letters/numbers/space/-/_ only and 1-4 words.
-                if re.search(r"[^\\w\\s\\-]", normalized):
+                if re.search(r"[^\w\s\-]", normalized):
                     continue
                 if len(normalized) > 48:
                     continue
@@ -5914,8 +5919,16 @@ def _expand_prompts_with_qwen(
                     continue
                 seen.add(lowered)
                 suggestions.append(normalized)
+                round_candidates.append(normalized)
                 if len(suggestions) >= max_new:
                     break
+            if round_candidates:
+                preview = ", ".join(round_candidates[:8])
+                if len(round_candidates) > 8:
+                    preview += " (+more)"
+                _log(f"Qwen accepted (class={class_name}, round {round_idx + 1}): {preview}")
+            else:
+                _log(f"Qwen accepted (class={class_name}, round {round_idx + 1}): none")
     except Exception as exc:  # noqa: BLE001
         logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
         suggestions = []

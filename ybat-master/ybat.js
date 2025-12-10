@@ -8824,8 +8824,24 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return;
         }
         try {
-            const text = await file.text();
-            const recipe = parseRecipeJson(text);
+            let recipe = null;
+            if (file.name.toLowerCase().endsWith(".zip")) {
+                const formData = new FormData();
+                formData.append("file", file);
+                const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
+                    method: "POST",
+                    body: formData,
+                });
+                if (!resp.ok) throw new Error(await resp.text());
+                const data = await resp.json();
+                recipe = data.recipe || data;
+                recipe.label = data.label || data.id || recipe.label;
+                if (!recipe.class_name && data.class_name) recipe.class_name = data.class_name;
+                if (recipe.class_id === undefined && data.class_id !== undefined) recipe.class_id = data.class_id;
+            } else {
+                const text = await file.text();
+                recipe = parseRecipeJson(text);
+            }
             // Validate class exists in labelmap.
             const classNames = orderedClassNames();
             const targetName = recipe.class_name;
@@ -8852,7 +8868,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const msg =
                 (err && err.message && err.message.startsWith("class_missing"))
                     ? `Class not in label map: ${err.message.split(":")[1] || ""}`
-                    : "Invalid recipe JSON.";
+                    : "Invalid recipe file (use zip/json).";
             setSam3RecipeStatus(msg, "error");
             sam3RecipeState.recipe = null;
             if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;

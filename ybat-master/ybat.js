@@ -8740,6 +8740,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3RecipeElements.presetSaveButton = document.getElementById("sam3RecipePresetSave");
         sam3RecipeElements.presetLoadButton = document.getElementById("sam3RecipePresetLoad");
         sam3RecipeElements.presetRefreshButton = document.getElementById("sam3RecipePresetRefresh");
+        sam3RecipeElements.presetDeleteButton = document.getElementById("sam3RecipePresetDelete");
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest({ auto: false }));
         }
@@ -8766,6 +8767,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             sam3RecipeElements.presetRefreshButton.addEventListener("click", () => {
                 loadSam3RecipePresets().catch((err) => console.error("Refresh recipe presets failed", err));
             });
+        }
+        if (sam3RecipeElements.presetDeleteButton) {
+            sam3RecipeElements.presetDeleteButton.addEventListener("click", deleteSam3RecipePreset);
         }
         updateSam3ClassOptions({ resetOverride: true });
         updateSam3TextButtons();
@@ -15308,6 +15312,33 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSam3RecipeStatus(err.message || "Load failed.", "error");
             sam3RecipeState.recipe = null;
             if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
+        }
+    }
+
+    async function deleteSam3RecipePreset() {
+        const presetId = sam3RecipeElements.presetSelect?.value;
+        if (!presetId) {
+            setSam3RecipeStatus("Choose a recipe preset to delete.", "warn");
+            return;
+        }
+        const confirmed = window.confirm("Delete this recipe? This cannot be undone.");
+        if (!confirmed) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${encodeURIComponent(presetId)}`, {
+                method: "DELETE",
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            sam3RecipeState.recipe = null;
+            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
+            if (sam3RecipeElements.presetNameInput) sam3RecipeElements.presetNameInput.value = "";
+            await loadSam3RecipePresets();
+            setSam3RecipeStatus("Deleted recipe preset.", "success");
+        } catch (err) {
+            console.error("Delete recipe preset failed", err);
+            setSam3RecipeStatus(err.message || "Delete failed.", "error");
         }
     }
 

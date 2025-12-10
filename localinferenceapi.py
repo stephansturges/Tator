@@ -2025,7 +2025,13 @@ def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, in
     return output_text, input_width, input_height
 
 
-def _generate_qwen_text(prompt: str, *, max_new_tokens: int = 128, use_system_prompt: bool = True) -> str:
+def _generate_qwen_text(
+    prompt: str,
+    *,
+    max_new_tokens: int = 128,
+    use_system_prompt: bool = True,
+    prefer_cpu: bool = False,
+) -> str:
     """Text-only generation with Qwen for small helper tasks (no images)."""
     model, processor = _ensure_qwen_ready()
     messages: List[Dict[str, Any]] = []
@@ -2045,6 +2051,14 @@ def _generate_qwen_text(prompt: str, *, max_new_tokens: int = 128, use_system_pr
         return_tensors="pt",
     )
     device = qwen_device or _resolve_qwen_device()
+    if prefer_cpu and device != "cpu":
+        try:
+            model = model.to("cpu")
+            device = "cpu"
+            # update global device to reflect move
+            qwen_device = device
+        except Exception:
+            pass
     inputs = inputs.to(device)
     with torch.inference_mode():
         outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
@@ -5845,7 +5859,7 @@ def _expand_prompts_with_qwen(
         for _ in range(3):  # allow up to three dialogue rounds
             if len(suggestions) >= max_new:
                 break
-            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False)
+            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False, prefer_cpu=True)
             if not brainstorm:
                 continue
             if log_fn:
@@ -5858,7 +5872,7 @@ def _expand_prompts_with_qwen(
                     pass
             critic_prompt = critic_prompt_tpl.format(class_name=_humanize_class_name(class_name))
             critic_input = f"{critic_prompt}\nAgent A list: {brainstorm}"
-            critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False)
+            critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False, prefer_cpu=True)
             if log_fn and critic_text:
                 try:
                     log_fn(
@@ -5943,7 +5957,7 @@ def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
             "Respond ONLY as a comma-separated list, no numbering, no explanations.\n"
             f"Candidates: {', '.join(prompts)}"
         )
-        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False, prefer_cpu=True)
         if not text:
             return prompts
         parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]
@@ -5967,7 +5981,7 @@ def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
             "Return ONLY a comma-separated list, no explanations.\n"
             f"Candidates: {', '.join(prompts)}"
         )
-        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
+        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False, prefer_cpu=True)
         if not text:
             return prompts
         parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]

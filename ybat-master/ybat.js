@@ -3183,7 +3183,10 @@ function setPromptHelperMessage(text, tone = "info") {
                 recap.className = "training-help";
                 const promptsTried = meta.text_prompts ? `${meta.text_prompts} text prompt${meta.text_prompts === 1 ? "" : "s"}` : "text prompt(s)";
                 const exemplarsTried = meta.exemplars !== undefined ? `${meta.exemplars} exemplar${meta.exemplars === 1 ? "" : "s"}` : "exemplars";
-                recap.textContent = `Tested ${promptsTried} × ${meta.thresholds || 0} thresholds and ${exemplarsTried} (total candidates: ${meta.total_candidates || steps.length}); best coverage came from the steps above.`;
+                const explanation = (cls.recipe && cls.recipe.explanation) || "";
+                recap.textContent =
+                    explanation ||
+                    `Tested ${promptsTried} × ${meta.thresholds || 0} thresholds and ${exemplarsTried} (total candidates: ${meta.total_candidates || steps.length}); best coverage came from the steps above.`;
                 body.appendChild(recap);
             } else {
                 const empty = document.createElement("div");

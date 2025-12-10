@@ -11279,8 +11279,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 if (first.source) parts.push(first.source);
                 if (first.image_count) parts.push(`${first.image_count} images`);
                 agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
+                prefillClassHints();
             } else {
                 agentElements.datasetSummary.textContent = "No datasets found.";
+                if (agentElements.classHints) agentElements.classHints.value = "{}";
             }
         } catch (err) {
             console.error("Agent datasets load failed", err);

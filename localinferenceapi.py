@@ -2074,7 +2074,7 @@ def _generate_qwen_text(
     device = qwen_device or _resolve_qwen_device()
     inputs = inputs.to(device)
     with torch.inference_mode():
-        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, temperature=0.0, top_p=1.0)
     input_len = inputs["input_ids"].shape[1]
     generated_ids = outputs[:, input_len:]
     decoded = processor.batch_decode(

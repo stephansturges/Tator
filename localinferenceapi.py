@@ -7017,6 +7017,18 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         job.updated_at = time.time()
                     except Exception:
                         pass
+            # Log a start marker per class for image-first sweep.
+            job.logs.append(
+                {
+                    "ts": time.time(),
+                    "msg": (
+                        f"Starting image-first sweep for {cat_name}: {len(val_ids)} val images, "
+                        f"{len(candidate_tasks)} candidates x {len(thresholds)} thresholds"
+                    ),
+                }
+            )
+            if len(job.logs) > MAX_JOB_LOGS:
+                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
 
             det_cache, det_stats = _collect_agent_mining_detections_image_first(
                 candidates=candidate_tasks,

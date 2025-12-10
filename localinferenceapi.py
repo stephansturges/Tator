@@ -1949,6 +1949,28 @@ def _ensure_qwen_ready():
         return model, processor
 
 
+def _unload_qwen_runtime() -> None:
+    """Release Qwen model/processor to free device memory."""
+    global qwen_model, qwen_processor, qwen_device, loaded_qwen_model_id
+    try:
+        del qwen_model
+    except Exception:
+        pass
+    try:
+        del qwen_processor
+    except Exception:
+        pass
+    qwen_model = None
+    qwen_processor = None
+    loaded_qwen_model_id = None
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+    qwen_device = None
+
+
 def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, int]:
     """Execute a Qwen 2.5 VL inference following the reference blog recipe."""
     model, processor = _ensure_qwen_ready()
@@ -2030,7 +2052,6 @@ def _generate_qwen_text(
     *,
     max_new_tokens: int = 128,
     use_system_prompt: bool = True,
-    prefer_cpu: bool = False,
 ) -> str:
     """Text-only generation with Qwen for small helper tasks (no images)."""
     model, processor = _ensure_qwen_ready()
@@ -2051,14 +2072,6 @@ def _generate_qwen_text(
         return_tensors="pt",
     )
     device = qwen_device or _resolve_qwen_device()
-    if prefer_cpu and device != "cpu":
-        try:
-            model = model.to("cpu")
-            device = "cpu"
-            # update global device to reflect move
-            qwen_device = device
-        except Exception:
-            pass
     inputs = inputs.to(device)
     with torch.inference_mode():
         outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
@@ -5859,7 +5872,7 @@ def _expand_prompts_with_qwen(
         for _ in range(3):  # allow up to three dialogue rounds
             if len(suggestions) >= max_new:
                 break
-            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False, prefer_cpu=True)
+            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False)
             if not brainstorm:
                 continue
             if log_fn:
@@ -5872,7 +5885,7 @@ def _expand_prompts_with_qwen(
                     pass
             critic_prompt = critic_prompt_tpl.format(class_name=_humanize_class_name(class_name))
             critic_input = f"{critic_prompt}\nAgent A list: {brainstorm}"
-            critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False, prefer_cpu=True)
+            critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False)
             if log_fn and critic_text:
                 try:
                     log_fn(
@@ -5957,7 +5970,7 @@ def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
             "Respond ONLY as a comma-separated list, no numbering, no explanations.\n"
             f"Candidates: {', '.join(prompts)}"
         )
-        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False, prefer_cpu=True)
+        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
         if not text:
             return prompts
         parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]
@@ -5981,7 +5994,7 @@ def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
             "Return ONLY a comma-separated list, no explanations.\n"
             f"Candidates: {', '.join(prompts)}"
         )
-        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False, prefer_cpu=True)
+        text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
         if not text:
             return prompts
         parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]
@@ -6928,6 +6941,49 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if not thresholds:
             thresholds = [0.3]
         thresholds = [float(max(0.0, min(1.0, t))) for t in thresholds]
+
+        # Precompute prompts (including Qwen expansions) before loading SAM3.
+        prepared_prompts: Dict[int, List[str]] = {}
+        for idx, cat in enumerate(categories):
+            try:
+                cat_id = int(cat.get("id", idx))
+            except Exception:
+                continue
+            if cat_filter and cat_id not in cat_filter:
+                continue
+            cat_name = str(cat.get("name", f"class_{cat_id}"))
+            prompts_for_cat = (payload.text_prompts_by_class or {}).get(cat_id)
+            if not prompts_for_cat:
+                prompts_for_cat = [cat_name]
+                if payload.auto_mine_prompts and payload.qwen_max_prompts > 0:
+                    def _log_qwen(msg: str) -> None:
+                        job.logs.append({"ts": time.time(), "msg": msg})
+                        if len(job.logs) > MAX_JOB_LOGS:
+                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                    extra_prompts = _expand_prompts_with_qwen(cat_name, prompts_for_cat, payload.qwen_max_prompts, log_fn=_log_qwen)
+                    extra_prompts = _refine_prompts_with_qwen(extra_prompts)
+                    merged = []
+                    seen_prompts = set()
+                    for entry in [*prompts_for_cat, *extra_prompts]:
+                        key = entry.lower().strip()
+                        if key in seen_prompts:
+                            continue
+                        seen_prompts.add(key)
+                        merged.append(entry)
+                    prompts_for_cat = merged
+            else:
+                prompts_for_cat = _refine_prompts_with_qwen(prompts_for_cat)
+            prepared_prompts[cat_id] = prompts_for_cat
+
+        # Release Qwen to free memory before SAM3 loads.
+        try:
+            _unload_qwen_runtime()
+            job.logs.append({"ts": time.time(), "msg": "Qwen unloaded to free memory before SAM3 init"})
+            if len(job.logs) > MAX_JOB_LOGS:
+                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+        except Exception:
+            pass
+
         base_devices = _resolve_sam3_mining_devices()
         expanded_devices: List[torch.device] = []
         per_dev_cap = max(1, payload.max_workers_per_device or 1)

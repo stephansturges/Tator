@@ -5869,37 +5869,38 @@ def _expand_prompts_with_qwen(
             "Keep only entries that clearly describe the target class (synonyms or sub-types), drop ambiguous/misspelled/unrelated items. "
             "Return ONLY a comma-separated list ending with STOP."
         )
-        for _ in range(3):  # allow up to three dialogue rounds
+        def _log(msg: str) -> None:
+            if log_fn:
+                try:
+                    log_fn(msg)
+                except Exception:
+                    pass
+
+        for round_idx in range(3):  # allow up to three dialogue rounds
             if len(suggestions) >= max_new:
                 break
             brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False)
             if not brainstorm:
                 continue
-            if log_fn:
-                try:
-                    log_fn(
-                        f"Qwen brainstorm (class={class_name}, round {_ + 1}): {str(brainstorm)[:200]}"
-                        + ("…" if len(str(brainstorm)) > 200 else "")
-                    )
-                except Exception:
-                    pass
+            _log(
+                f"Qwen brainstorm (class={class_name}, round {round_idx + 1}): {str(brainstorm)[:200]}"
+                + ("…" if len(str(brainstorm)) > 200 else "")
+            )
             critic_prompt = critic_prompt_tpl.format(class_name=_humanize_class_name(class_name))
             critic_input = f"{critic_prompt}\nAgent A list: {brainstorm}"
             critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False)
-            if log_fn and critic_text:
-                try:
-                    log_fn(
-                        f"Qwen critic (class={class_name}, round {_ + 1}): {str(critic_text)[:200]}"
-                        + ("…" if len(str(critic_text)) > 200 else "")
-                    )
-                except Exception:
-                    pass
+            if critic_text:
+                _log(
+                    f"Qwen critic (class={class_name}, round {round_idx + 1}): {str(critic_text)[:200]}"
+                    + ("…" if len(str(critic_text)) > 200 else "")
+                )
             text = critic_text or brainstorm
             for part in re.split(r"[\\n;,]+", text):
                 normalized = part.strip().strip('"').strip("'")
                 if not normalized or normalized.upper() == "STOP":
                     continue
-                if any(ch in normalized for ch in "{}[]:\""):
+                # Strict sanitation: allow letters/numbers/space/-/_ only and 1-4 words.
+                if re.search(r"[^\\w\\s\\-]", normalized):
                     continue
                 if len(normalized) > 48:
                     continue
@@ -5991,13 +5992,13 @@ def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
             f"Target class: '{_humanize_class_name(class_name)}'. "
             "From the list, keep ONLY phrases that clearly describe that class (synonyms or sub-types). "
             "Drop anything ambiguous, misspelled, or unrelated. "
-            "Return ONLY a comma-separated list, no explanations.\n"
+            "Return ONLY a comma-separated list, no explanations, ending with STOP.\n"
             f"Candidates: {', '.join(prompts)}"
         )
         text = _generate_qwen_text(prompt_text, max_new_tokens=160, use_system_prompt=False)
         if not text:
             return prompts
-        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip()]
+        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip() and t.strip().upper() != "STOP"]
         cleaned = _sanitize_prompts(parts)
         return cleaned or prompts
     except Exception:

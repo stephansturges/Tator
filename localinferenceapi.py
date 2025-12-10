@@ -5907,8 +5907,12 @@ def _expand_prompts_with_qwen(
         for round_idx in range(3):  # allow up to three dialogue rounds
             if len(suggestions) >= max_new:
                 break
-            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=200, use_system_prompt=False)
+            brainstorm = _generate_qwen_text(brainstorm_prompt, max_new_tokens=160, use_system_prompt=False)
             if not brainstorm:
+                continue
+            # Skip obviously noisy outputs (long repeated punctuation or very short tokens).
+            if len(brainstorm) > 12 and (re.search(r"([!@#\\$%\\^&\\*_=\\-\\.])\\1{4,}", brainstorm) or len(set(brainstorm)) < 4):
+                _log(f"Qwen brainstorm (class={class_name}, round {round_idx + 1}) skipped due to noise")
                 continue
             _log(
                 f"Qwen brainstorm (class={class_name}, round {round_idx + 1}): {str(brainstorm)[:200]}"
@@ -5916,7 +5920,7 @@ def _expand_prompts_with_qwen(
             )
             critic_prompt = critic_prompt_tpl.format(class_name=_humanize_class_name(class_name))
             critic_input = f"{critic_prompt}\nAgent A list: {brainstorm}"
-            critic_text = _generate_qwen_text(critic_input, max_new_tokens=200, use_system_prompt=False)
+            critic_text = _generate_qwen_text(critic_input, max_new_tokens=160, use_system_prompt=False)
             if critic_text:
                 _log(
                     f"Qwen critic (class={class_name}, round {round_idx + 1}): {str(critic_text)[:200]}"
@@ -5971,6 +5975,14 @@ def _expand_prompts_with_qwen(
         final_new.append(p)
         if len(final_new) >= max_new:
             break
+    # Fallback: if nothing survived, return the cleaned base prompts only.
+    if not final_new:
+        if log_fn:
+            try:
+                log_fn(f"Qwen prompts fell back to base for {class_name}")
+            except Exception:
+                pass
+        return cleaned_base
     return final_new
 
 

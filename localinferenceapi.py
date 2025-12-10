@@ -7102,33 +7102,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
                     }
                 )
-            text_prompts = (payload.text_prompts_by_class or {}).get(cat_id)
-            if not text_prompts:
-                text_prompts = [cat_name]
-                if payload.auto_mine_prompts and payload.qwen_max_prompts > 0:
-                    def _log_qwen(msg: str) -> None:
-                        job.logs.append({"ts": time.time(), "msg": msg})
-                        if len(job.logs) > MAX_JOB_LOGS:
-                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                    extra_prompts = _expand_prompts_with_qwen(cat_name, text_prompts, payload.qwen_max_prompts, log_fn=_log_qwen)
-                    extra_prompts = _refine_prompts_with_qwen(extra_prompts)
-                    merged = []
-                    seen_prompts = set()
-                    for entry in [*text_prompts, *extra_prompts]:
-                        key = entry.lower().strip()
-                        if key in seen_prompts:
-                            continue
-                        seen_prompts.add(key)
-                        merged.append(entry)
-                    text_prompts = merged
-                    job.logs.append(
-                        {
-                            "ts": time.time(),
-                            "msg": f"Qwen added {len(extra_prompts)} prompt(s) for {cat_name}: {', '.join(extra_prompts[:5])}",
-                        }
-                    )
-            else:
-                text_prompts = _refine_prompts_with_qwen(text_prompts)
+            text_prompts = prepared_prompts.get(cat_id) or [cat_name]
             job.logs.append(
                 {
                     "ts": time.time(),

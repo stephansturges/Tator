@@ -7214,6 +7214,18 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     }
                 )
             text_prompts = prepared_prompts.get(cat_id) or [cat_name]
+            try:
+                preview_prompts = ", ".join(text_prompts) if text_prompts else "(none)"
+                job.logs.append(
+                    {
+                        "ts": time.time(),
+                        "msg": f"Prompt list for {cat_name}: {preview_prompts}",
+                    }
+                )
+                if len(job.logs) > MAX_JOB_LOGS:
+                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+            except Exception:
+                pass
             job.logs.append(
                 {
                     "ts": time.time(),

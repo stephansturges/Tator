@@ -15242,9 +15242,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 label: sam3RecipeElements.presetNameInput?.value || recipe.label || "",
                 class_name: recipe.class_name,
                 class_id: recipe.class_id,
-                steps: recipe.steps,
+                recipe: { steps: recipe.steps, summary: recipe.summary },
+                dataset_id: null,
             };
-            const resp = await fetch(`${API_ROOT}/sam3/recipe_presets`, {
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),

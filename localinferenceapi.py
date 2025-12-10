@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 import numpy as np
 import yaml
-from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping
+from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable
 from collections import deque
 import torch, clip, joblib
 from io import BytesIO
@@ -4193,6 +4193,7 @@ class _Sam3MiningPool:
         min_size: int,
         simplify: float,
         cancel_event: Optional[threading.Event] = None,
+        progress_callback: Optional[Callable[[int], None]] = None,
     ) -> Dict[str, List[Dict[str, Any]]]:
         if not tasks or not image_entries:
             return {task.get("id"): [] for task in tasks if task.get("id")}
@@ -4202,7 +4203,7 @@ class _Sam3MiningPool:
         # Fast path: single worker, run sequentially to avoid thread overhead and potential native race conditions.
         if max_workers == 1:
             worker = self.workers[0]
-            for img_id, path in image_entries:
+            for idx, (img_id, path) in enumerate(image_entries, start=1):
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 try:
@@ -4226,7 +4227,15 @@ class _Sam3MiningPool:
                     if key is None or not dets:
                         continue
                     results.setdefault(key, []).extend(dets)
+                if progress_callback:
+                    try:
+                        progress_callback(idx)
+                    except Exception:
+                        pass
             return results
+
+        processed = 0
+        proc_lock = threading.Lock()
 
         def _run_task(worker: _Sam3MiningWorker, img_id: int, path: str) -> Dict[str, List[Dict[str, Any]]]:
             if cancel_event is not None and cancel_event.is_set():
@@ -4271,6 +4280,13 @@ class _Sam3MiningPool:
                         continue
                     if dets:
                         results.setdefault(key, []).extend(dets)
+                if progress_callback:
+                    with proc_lock:
+                        processed += 1
+                        try:
+                            progress_callback(processed)
+                        except Exception:
+                            pass
         return results
 
 
@@ -4287,6 +4303,7 @@ def _collect_agent_mining_detections_image_first(
     cache_dir: Path,
     pool: _Sam3MiningPool,
     cancel_event: Optional[threading.Event] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> Tuple[Dict[str, Dict[float, List[Dict[str, Any]]]], Dict[str, Any]]:
     """
     Collect detections for all candidates over all images in an image-first manner. We run the
@@ -4345,6 +4362,7 @@ def _collect_agent_mining_detections_image_first(
             min_size=min_size,
             simplify=simplify,
             cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         for cand in missing:
             cand_id = cand.get("id")
@@ -6980,6 +6998,26 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         "visual_ref": ex,
                     }
                 )
+            val_total = len(val_ids)
+            progress_every = max(1, val_total // 10) if val_total else 1
+
+            def _mining_progress(done: int) -> None:
+                if job.cancel_event.is_set():
+                    return
+                if done == 1 or done == val_total or done % progress_every == 0:
+                    try:
+                        job.logs.append(
+                            {
+                                "ts": time.time(),
+                                "msg": f"Processed {done}/{val_total} val images for {cat_name}",
+                            }
+                        )
+                        if len(job.logs) > MAX_JOB_LOGS:
+                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                        job.updated_at = time.time()
+                    except Exception:
+                        pass
+
             det_cache, det_stats = _collect_agent_mining_detections_image_first(
                 candidates=candidate_tasks,
                 thresholds=thresholds,
@@ -6992,6 +7030,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 cache_dir=cache_dir,
                 pool=mining_pool,
                 cancel_event=job.cancel_event,
+                progress_callback=_mining_progress,
             )
             try:
                 job.logs.append(

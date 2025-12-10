@@ -1889,13 +1889,24 @@ def _ensure_qwen_ready():
             and loaded_qwen_model_id == active_qwen_model_id
         ):
             return qwen_model, qwen_processor
-        # For agent-mining helpers we keep Qwen on CPU to reduce GPU pressure.
-        device = "cpu"
-        use_auto_map = False
-        load_kwargs: Dict[str, Any] = {
-            "torch_dtype": torch.float32,
-            "low_cpu_mem_usage": True,
-        }
+        try:
+            device = _resolve_qwen_device()
+        except RuntimeError as exc:  # noqa: BLE001
+            qwen_last_error = str(exc)
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}") from exc
+        use_auto_map = QWEN_DEVICE_PREF == "auto" and device.startswith("cuda") and torch.cuda.is_available()
+        load_kwargs: Dict[str, Any]
+        if use_auto_map:
+            load_kwargs = {
+                "torch_dtype": "auto",
+                "device_map": "auto",
+            }
+        else:
+            dtype = torch.float16 if device.startswith(("cuda", "mps")) else torch.float32
+            load_kwargs = {
+                "torch_dtype": dtype,
+                "low_cpu_mem_usage": True,
+            }
         adapter_path = active_qwen_model_path
         metadata = active_qwen_metadata or {}
         base_model_id = metadata.get("model_id") or QWEN_MODEL_NAME
@@ -2042,7 +2053,7 @@ def _generate_qwen_text(
     max_new_tokens: int = 128,
     use_system_prompt: bool = True,
 ) -> str:
-    """Text-only generation with Qwen for small helper tasks (no images). Always runs on CPU to avoid GPU contention."""
+    """Text-only generation with Qwen for small helper tasks (no images)."""
     model, processor = _ensure_qwen_ready()
     messages: List[Dict[str, Any]] = []
     sys_prompt = (active_qwen_metadata or {}).get("system_prompt")
@@ -2060,14 +2071,10 @@ def _generate_qwen_text(
         padding=True,
         return_tensors="pt",
     )
-    # Force CPU for helper text calls to avoid competing with SAM3 on GPU.
-    inputs = inputs.to("cpu")
-    try:
-        model_cpu = model.to("cpu")
-    except Exception:
-        model_cpu = model
+    device = qwen_device or _resolve_qwen_device()
+    inputs = inputs.to(device)
     with torch.inference_mode():
-        outputs = model_cpu.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     input_len = inputs["input_ids"].shape[1]
     generated_ids = outputs[:, input_len:]
     decoded = processor.batch_decode(

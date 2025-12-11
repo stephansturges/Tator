@@ -2156,30 +2156,26 @@ def _build_harmony_prompt(system_text: str, developer_text: str, user_text: str)
     )
 
 
-def _extract_harmony_final(text: str) -> str:
+def _extract_harmony_final(text: str) -> Tuple[str, bool]:
     """
     Extract the final-channel assistant content from a Harmony-formatted completion.
-    Falls back to the last assistant message content if no explicit final channel is found.
+    Returns (content, valid) where valid indicates we found a properly marked final channel.
     """
     if not text:
-        return ""
-    # First try strict harmony markers.
+        return "", False
     pattern = re.compile(
         r"<\|start\|>assistant(?:<\|channel\|>(\w+))?<\|message\|>(.*?)(?:<\|return\|>|<\|end\|>|<\|call\|>)",
         re.DOTALL,
     )
     matches = pattern.findall(text)
     if not matches:
-        # Fallback: look for a plain "assistant final" marker and return what follows.
-        plain = re.search(r"assistant\s+final\s+(.*)", text, flags=re.IGNORECASE | re.DOTALL)
-        if plain:
-            return plain.group(1).strip()
-        return text.strip()
-    # Prefer the last final-channel message; otherwise the last assistant message.
-    final_msgs = [m for m in matches if m[0] == "final"]
-    chosen = final_msgs[-1] if final_msgs else matches[-1]
-    content = chosen[1]
-    return content.strip()
+        return text.strip(), False
+    # Prefer the last final-channel message.
+    finals = [m for m in matches if m[0] == "final"]
+    chosen = finals[-1] if finals else matches[-1]
+    content = chosen[1].strip()
+    valid = bool(finals)
+    return content, valid
 
 
 def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
@@ -2275,7 +2271,7 @@ def _generate_prompt_text(
             top_p=1.0,
             eos_token_id=stop_ids,
             pad_token_id=pad_id,
-            return_full_text=False,
+            return_full_text=True,
         )
         if outputs:
             gen = outputs[0].get("generated_text") or outputs[0].get("text") or ""
@@ -2286,8 +2282,13 @@ def _generate_prompt_text(
                 # Some pipelines return list of dicts; fallback to stringify.
                 text = str(gen)
             if text:
-                final = _extract_harmony_final(text).strip()
-                cleaned = final
+                # If reasoning is enabled, require a well-formed final channel.
+                final, final_ok = _extract_harmony_final(text)
+                if reasoning != "none":
+                    if not final_ok or not final:
+                        return ""
+                    return final.strip()
+                cleaned = final.strip()
                 reject = False
                 try:
                     toks = _HARMONY_ENCODING.encode(cleaned, allowed_special="all")
@@ -2304,7 +2305,7 @@ def _generate_prompt_text(
                         if any(t in _HARMONY_SPECIAL_IDS for t in toks):
                             cleaned = ""
                     except Exception:
-                        if any(tag in cleaned for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>")):
+                        if any(tag in cleaned for tag in ("<\|start\|>", "<\|message\|>", "<\|channel\|>", "<\|end\|>", "<\|return\|>", "<\|call\|>")):
                             cleaned = ""
                 if cleaned:
                     return cleaned

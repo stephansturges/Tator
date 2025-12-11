@@ -899,15 +899,15 @@
                                 </select>
                             </div>
                             <div class="training-field training-field--inline">
-                                <label for="agentClusterExemplars">Cluster exemplars</label>
-                                <input type="checkbox" id="agentClusterExemplars" title="Group exemplar boxes to keep a diverse subset before prompting SAM3." />
+                                <label for="agentClusterExemplars" title="Keep a more diverse exemplar set (discourages near-duplicate crops). Recommended on.">Diversify exemplars</label>
+                                <input type="checkbox" id="agentClusterExemplars" checked title="Keep a more diverse exemplar set (discourages near-duplicate crops). Recommended on." />
                             </div>
                             <div class="training-field training-field--inline">
-                                <label for="agentClipGuard">Use CLIP FP guard</label>
+                                <label for="agentClipGuard" title="Filters detections by CLIP similarity to the recipe’s positive exemplars (and penalizes negatives when enabled). Uses the exemplar crops baked into the recipe for this class; if none exist, the guard is a no-op. Helps trim false positives; may lower recall if too strict.">Use CLIP FP guard</label>
                                 <input
                                     type="checkbox"
                                     id="agentClipGuard"
-                                    title="Filters detections by CLIP similarity to positive exemplars (and penalizes negatives when enabled). Helps remove FPs even without the extra negative crops; can trim recall if set too strict."
+                                    title="Filters detections by CLIP similarity to the recipe’s positive exemplars (and penalizes negatives when enabled). Uses the exemplar crops baked into the recipe for this class; if none exist, the guard is a no-op. Helps trim false positives; may lower recall if too strict."
                                 />
                             </div>
                             <div>

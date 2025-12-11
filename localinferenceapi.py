@@ -6481,7 +6481,7 @@ class AgentMiningRequest(BaseModel):
     auto_mine_prompts: bool = True
     qwen_max_prompts: int = Field(0, ge=0, le=20)
     exemplar_per_class: int = Field(10, ge=0, le=500)
-    cluster_exemplars: bool = False
+    cluster_exemplars: bool = True
     exemplar_candidate_mode: Literal["percent", "count"] = "percent"
     exemplar_candidate_value: int = Field(25, ge=1, le=10_000)
     use_negative_exemplars: bool = False

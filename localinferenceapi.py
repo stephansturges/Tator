@@ -6129,8 +6129,6 @@ def _expand_prompts_with_prompt_llm(
 
         def _run_brainstorm_with_retries(remaining: int, round_idx: int) -> List[str]:
             """Try up to 3 times (initial + 2 critiques) to get a clean list."""
-            req_terms, forbid_terms = _parse_hint_constraints(class_hint or "")
-
             base_prompt = [
                 "Generate diverse noun-phrase prompts for open-vocabulary object detection with SAM3.",
                 f"Target class: '{_humanize_class_name(class_name)}'.",
@@ -6169,25 +6167,6 @@ def _expand_prompts_with_prompt_llm(
                 parsed = _parse_prompt_candidates(text, seen, remaining)
                 if parsed and len(parsed) > remaining:
                     parsed = parsed[:remaining]
-                # Enforce hint constraints post-parse.
-                if parsed and (req_terms or forbid_terms):
-                    filtered: List[str] = []
-                    dropped = 0
-                    for cand in parsed:
-                        low = cand.lower()
-                        if req_terms and not any(term in low for term in req_terms):
-                            dropped += 1
-                            continue
-                        if forbid_terms and any(term in low for term in forbid_terms):
-                            dropped += 1
-                            continue
-                        filtered.append(cand)
-                    parsed = filtered
-                    if dropped:
-                        _log(
-                            f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) "
-                            f"dropped {dropped} candidate(s) due to class hint"
-                        )
                 _log(
                     f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}"
                     f"{' with hint' if class_hint else ''}): "
@@ -6258,44 +6237,6 @@ def _sanitize_prompts(prompts: List[str]) -> List[str]:
         seen.add(key)
         cleaned.append(val)
     return cleaned
-
-
-def _parse_hint_constraints(hint: str) -> Tuple[List[str], List[str]]:
-    """Extract simple required/forbidden tokens from a hint string."""
-    if not hint:
-        return [], []
-    text = hint.lower()
-    required: List[str] = []
-    forbidden: List[str] = []
-    # Required: look for "must keep/include ..." or "keep the words ..."
-    for marker in ["must keep", "must include", "keep the words", "keep these words"]:
-        if marker in text:
-            tail = text.split(marker, 1)[1]
-            tokens = re.split(r"[,\s/]+", tail)
-            required.extend(t for t in tokens if t and len(t) > 2)
-    # Forbidden: look for "but not ..." or "not ..." segments.
-    for marker in ["but not", "not"]:
-        parts = text.split(marker)
-        if len(parts) < 2:
-            continue
-        tail = parts[1]
-        tokens = re.split(r"[,\s/]+", tail)
-        forbidden.extend(t for t in tokens if t and len(t) > 2)
-    # Normalize and uniq.
-    def _dedupe(items: List[str]) -> List[str]:
-        seen: set[str] = set()
-        out: List[str] = []
-        for t in items:
-            tok = t.strip()
-            if not tok:
-                continue
-            if tok in seen:
-                continue
-            seen.add(tok)
-            out.append(tok)
-        return out
-
-    return _dedupe(required), _dedupe(forbidden)
 
 
 def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:

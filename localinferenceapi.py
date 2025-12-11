@@ -2182,13 +2182,11 @@ def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
     """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
     if not raw:
         return []
-    # Reject obvious junk (leftover harmony markers).
-    if "<|start|>" in raw or "<|message|>" in raw or "<|channel|>" in raw:
-        return []
     parts = re.split(r"[,;\n]+", raw)
     parsed: List[str] = []
     for part in parts:
         cand = part.strip().strip('"').strip("'")
+        cand = re.sub(r"(?i)^assistant\s+final[:\s]+", "", cand)
         if not cand:
             continue
         if cand.upper() == "STOP":
@@ -2286,40 +2284,13 @@ def _generate_prompt_text(
                     return final.strip()
                 # Reasoning disabled: be lenient. If final channel not found, try to strip any headers
                 # and grab the last assistant chunk.
-                if not final_ok or not final:
-                    # Try to find a plain "assistant final" marker in raw text.
-                    m = re.findall(r"assistant\\s+final\\s+(.*)", text, re.DOTALL | re.IGNORECASE)
-                    if m:
-                        final = m[-1].strip()
-                    else:
-                        final = text.strip()
-                cleaned = final.strip()
-                reject = False
-                try:
-                    toks = _HARMONY_ENCODING.encode(cleaned, allowed_special="all")
-                    reject = any(t in _HARMONY_SPECIAL_IDS for t in toks)
-                except Exception:
-                    reject = any(tag in cleaned for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>"))
-                if reject or "you are chatgpt" in cleaned.lower():
-                    # Try stripping any leftover harmony markers or headers.
-                    stripped = re.sub(r"<\\|[^>]+?\\|>", " ", cleaned or text)
-                    stripped = re.sub(r"(?i)^(system|developer|user|assistant)\\s+final\\s+", " ", stripped)
-                    stripped = re.sub(r"\\s+", " ", stripped).strip()
-                    cleaned = stripped
-                    try:
-                        toks = _HARMONY_ENCODING.encode(cleaned, allowed_special="all")
-                        if any(t in _HARMONY_SPECIAL_IDS for t in toks):
-                            cleaned = ""
-                    except Exception:
-                        if any(tag in cleaned for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>")):
-                            cleaned = ""
-                if cleaned:
-                    return cleaned
-                # Last resort: strip markers from the raw text blob.
-                fallback = re.sub(r"<\\|[^>]+?\\|>", " ", text)
-                fallback = re.sub(r"\\s+", " ", fallback).strip()
-                if fallback:
-                    return fallback
+                candidate = final if final else text
+                # Strip any harmony markers or role prefixes.
+                candidate = re.sub(r"<\\|[^>]+?\\|>", " ", candidate)
+                candidate = re.sub(r"(?i)^(system|developer|user|assistant)\\s+final\\s+", " ", candidate)
+                candidate = re.sub(r"\\s+", " ", candidate).strip()
+                if candidate:
+                    return candidate
     except Exception:
         pass
     return ""
@@ -4024,6 +3995,7 @@ def _apply_agent_recipe_to_image(
     *,
     image: Dict[str, Any],
     dataset_id: str,
+    images: Dict[int, Dict[str, Any]],
     mask_threshold: float,
     min_size: int,
     simplify_epsilon: float,
@@ -4038,6 +4010,96 @@ def _apply_agent_recipe_to_image(
         pil_img = Image.open(img_path).convert("RGB")
     except Exception:
         return []
+    recipe_id = recipe.get("id")
+    params = recipe_body.get("params") or {}
+    use_clip_guard = bool(params.get("use_clip_fp_guard") or recipe_body.get("use_clip_fp_guard"))
+    use_negatives = bool(params.get("use_negative_exemplars") or recipe_body.get("use_negative_exemplars"))
+    neg_strength = float(params.get("negative_strength", recipe_body.get("negative_strength", 0.0) or 0.0))
+    similarity_floor = float(params.get("similarity_score", recipe_body.get("similarity_score", 0.25) or 0.25))
+
+    # Build embeddings for exemplars/negatives if present.
+    exemplar_entries: List[Dict[str, Any]] = []
+    for step in _normalize_agent_recipe_steps(recipe_body.get("steps") or []):
+        ex = step.get("exemplar")
+        if not ex:
+            continue
+        entry = dict(ex)
+        if recipe_id and entry.get("crop_path") and not entry.get("path"):
+            rel = Path(entry["crop_path"])
+            candidate = (AGENT_MINING_ROOT / "recipes" / recipe_id / rel).resolve()
+            if candidate.exists():
+                entry["path"] = str(candidate)
+        if "embed_id" not in entry and entry.get("bbox") and entry.get("image_id") is not None:
+            try:
+                x, y, w, h = entry["bbox"][:4]
+                entry["embed_id"] = f"{entry.get('image_id')}:{float(x):.2f},{float(y):.2f},{float(w):.2f},{float(h):.2f}"
+            except Exception:
+                pass
+        exemplar_entries.append(entry)
+    exemplar_embeddings: Dict[str, np.ndarray] = {}
+    exemplar_warnings: List[str] = []
+    if use_clip_guard and exemplar_entries:
+        exemplar_embeddings, exemplar_warnings = _clip_embed_regions(exemplar_entries, images, max_regions=len(exemplar_entries))
+
+    negatives_raw = recipe_body.get("negatives") or []
+    negative_entries: List[Dict[str, Any]] = []
+    if use_negatives and negatives_raw:
+        for neg in negatives_raw:
+            if not isinstance(neg, dict):
+                continue
+            entry = dict(neg)
+            if recipe_id and entry.get("crop_path") and not entry.get("path"):
+                rel = Path(entry["crop_path"])
+                candidate = (AGENT_MINING_ROOT / "recipes" / recipe_id / rel).resolve()
+                if candidate.exists():
+                    entry["path"] = str(candidate)
+            if "embed_id" not in entry and entry.get("bbox") and entry.get("image_id") is not None:
+                try:
+                    x, y, w, h = entry["bbox"][:4]
+                    entry["embed_id"] = f"neg:{entry.get('image_id')}:{float(x):.2f},{float(y):.2f},{float(w):.2f},{float(h):.2f}"
+                except Exception:
+                    pass
+            negative_entries.append(entry)
+    negative_embeddings: Dict[str, np.ndarray] = {}
+    if use_clip_guard and use_negatives and negative_entries:
+        negative_embeddings, _ = _clip_embed_regions(negative_entries, images, max_regions=len(negative_entries))
+
+    def _filter_with_clip(dets: List[QwenDetection]) -> List[QwenDetection]:
+        if not use_clip_guard or not exemplar_embeddings or not dets:
+            return dets
+        det_dicts: List[Dict[str, Any]] = []
+        img_id = image.get("id") or image.get("image_id")
+        for d in dets:
+            det_dicts.append(
+                {
+                    "bbox": d.bbox,
+                    "score": d.score,
+                    "mask": d.mask,
+                    "image_id": img_id,
+                }
+            )
+        filtered, _ = _clip_fp_filter_detections(
+            det_dicts,
+            exemplar_embeddings=exemplar_embeddings,
+            negative_embeddings=negative_embeddings if use_negatives else None,
+            negative_strength=neg_strength if use_negatives else 0.0,
+            images=images,
+            similarity_floor=similarity_floor,
+        )
+        result: List[QwenDetection] = []
+        for det in filtered:
+            result.append(
+                QwenDetection(
+                    bbox=det.get("bbox") or [],
+                    qwen_label=None,
+                    source="sam3_text",
+                    score=det.get("score"),
+                    mask=det.get("mask"),
+                    simplify_epsilon=simplify_epsilon,
+                )
+            )
+        return result
+
     detections: List[QwenDetection] = []
     steps = _normalize_agent_recipe_steps(recipe_body.get("steps") or [])
     for step in steps:
@@ -4075,7 +4137,8 @@ def _apply_agent_recipe_to_image(
                 )
         except Exception:
             continue
-        detections.extend(preds)
+        filtered = _filter_with_clip(preds)
+        detections.extend(filtered)
     return detections
 
 
@@ -4726,7 +4789,15 @@ def _clip_embed_regions(
         if not bbox or len(bbox) < 4:
             continue
         info = images.get(img_id) or {}
-        path = info.get("path")
+        path = entry.get("path") or info.get("path")
+        if not path:
+            crop_path = entry.get("crop_path")
+            if crop_path:
+                candidate = Path(crop_path)
+                if not candidate.is_absolute():
+                    candidate = (AGENT_MINING_ROOT / "recipes" / crop_path).resolve()
+                if candidate.exists():
+                    path = str(candidate)
         if not path:
             continue
         try:
@@ -8303,6 +8374,7 @@ def agent_mining_apply(payload: AgentApplyRequest):
         payload.recipe,
         image=img,
         dataset_id=payload.dataset_id,
+        images=images,
         mask_threshold=payload.mask_threshold,
         min_size=payload.min_size,
         simplify_epsilon=payload.simplify_epsilon,

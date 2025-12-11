@@ -7899,7 +7899,7 @@ def get_latest_agent_mining_result():
 
 @app.get("/agent_mining/cache_size")
 def agent_mining_cache_size():
-    cache_root = _agent_mining_root() / "detections"
+    cache_root = AGENT_MINING_DET_CACHE_ROOT
     total = 0
     try:
         for p in cache_root.rglob("*"):
@@ -7914,7 +7914,7 @@ def agent_mining_cache_size():
 
 @app.post("/agent_mining/cache/purge")
 def agent_mining_cache_purge():
-    cache_root = _agent_mining_root() / "detections"
+    cache_root = AGENT_MINING_DET_CACHE_ROOT
     if not cache_root.exists():
         return {"status": "ok", "deleted_bytes": 0}
     deleted = 0

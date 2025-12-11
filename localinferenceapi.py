@@ -6129,27 +6129,32 @@ def _expand_prompts_with_prompt_llm(
 
         def _run_brainstorm_with_retries(remaining: int, round_idx: int) -> List[str]:
             """Try up to 3 times (initial + 2 critiques) to get a clean list."""
-            base_prompt = (
-                "Generate diverse noun-phrase prompts for open-vocabulary object detection with SAM3.\n"
-                f"Target class: '{_humanize_class_name(class_name)}'.\n"
-                f"Known good prompts: {known_list_str}.\n"
-            )
+            base_prompt = [
+                "Generate diverse noun-phrase prompts for open-vocabulary object detection with SAM3.",
+                f"Target class: '{_humanize_class_name(class_name)}'.",
+                f"Known good prompts: {known_list_str}.",
+            ]
             if class_hint:
-                base_prompt += f"Class note: {class_hint}.\n"
-            base_prompt += (
-                f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).\n"
-                "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.\n"
-                "Return ONLY a comma-separated list. Example: pickup truck, delivery van, hatchback"
+                base_prompt.append(f"Class note: {class_hint}.")
+            base_prompt.extend(
+                [
+                    f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).",
+                    "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.",
+                    "Return ONLY a comma-separated list. Example: pickup truck, delivery van, hatchback",
+                ]
             )
             last_text = ""
             for attempt in range(3):
-                prompt_text = base_prompt
+                prompt_lines = list(base_prompt)
                 if attempt > 0:
-                    prompt_text = (
-                        f"The previous output was invalid: {last_text or '(empty)'}\n"
-                        f"Try again. Respond ONLY with up to {remaining} comma-separated noun phrases (1-3 words, letters/spaces/hyphens). "
-                        "No commentary."
+                    prompt_lines.extend(
+                        [
+                            f"Previous output was invalid: {last_text or '(empty)'}",
+                            f"Try again. Respond ONLY with up to {remaining} comma-separated noun phrases (1-3 words, letters/spaces/hyphens).",
+                            "No commentary.",
+                        ]
                     )
+                prompt_text = "\n".join(prompt_lines)
                 text = _generate_prompt_text(
                     prompt_text,
                     max_new_tokens=max_new_tokens,

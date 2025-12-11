@@ -223,6 +223,38 @@
         }
     }
 
+    async function refreshAgentCacheSize() {
+        if (!agentElements.cacheSize) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/cache_size`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const bytes = Number(data?.bytes) || 0;
+            const mb = bytes / (1024 * 1024);
+            const gb = mb / 1024;
+            const label = gb >= 1 ? `${gb.toFixed(1)} GB` : `${mb.toFixed(1)} MB`;
+            agentElements.cacheSize.textContent = `Cache: ${label}`;
+        } catch (err) {
+            console.warn("Cache size check failed", err);
+            agentElements.cacheSize.textContent = "Cache: n/a";
+        }
+    }
+
+    async function purgeAgentCache() {
+        if (!confirm("Purge agent mining detection cache? This frees disk space but will rerun detections next time.")) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/agent_mining/cache/purge`, { method: "POST" });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const freedMb = ((Number(data?.deleted_bytes) || 0) / (1024 * 1024)).toFixed(1);
+            setAgentStatus(`Cache purged (${freedMb} MB freed).`, "success");
+            refreshAgentCacheSize();
+        } catch (err) {
+            console.error("Agent cache purge failed", err);
+            setAgentStatus(`Cache purge failed: ${err.message || err}`, "error");
+        }
+    }
+
     function normalizeApiRoot(value) {
         if (!value) {
             return null;
@@ -11140,6 +11172,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             frag.appendChild(div);
         });
         agentElements.logs.appendChild(frag);
+        if (agentElements.purgeCacheBtn) {
+            const disabled = job && job.status === "running";
+            agentElements.purgeCacheBtn.disabled = disabled;
+            agentElements.purgeCacheBtn.title = disabled ? "Purge disabled while a job is running." : "Purge cached detections to free disk space.";
+        }
     }
 
     function updateAgentProgress(job) {
@@ -11435,6 +11472,7 @@ return {
             updateAgentProgress(job);
             renderAgentResults(job.result);
             renderAgentLogs(job);
+            refreshAgentCacheSize();
             const keepPolling = !["completed", "failed", "cancelled"].includes(job.status || "");
             if (keepPolling) {
                 scheduleAgentPoll();
@@ -11682,6 +11720,10 @@ return {
         agentElements.stackedFields = document.getElementById("agentStackedFields");
         agentElements.stackedMaxChains = document.getElementById("agentStackedMaxChains");
         agentElements.stackedIou = document.getElementById("agentStackedIou");
+        agentElements.promptReasoning = document.getElementById("agentPromptReasoning");
+        agentElements.promptMaxTokens = document.getElementById("agentPromptMaxTokens");
+        agentElements.cacheSize = document.getElementById("agentCacheSize");
+        agentElements.purgeCacheBtn = document.getElementById("agentPurgeCacheBtn");
         agentElements.testMode = document.getElementById("agentTestMode");
         agentElements.trainLimit = document.getElementById("agentTrainLimit");
         agentElements.valLimit = document.getElementById("agentValLimit");
@@ -11717,6 +11759,7 @@ return {
                 renderAgentRecipeDetails(null);
                 fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
                 prefillClassHints();
+                refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
             });
         }
         if (agentElements.stackedMining) {
@@ -11725,6 +11768,9 @@ return {
                     agentElements.stackedFields.style.display = agentElements.stackedMining.checked ? "grid" : "none";
                 }
             });
+        }
+        if (agentElements.purgeCacheBtn) {
+            agentElements.purgeCacheBtn.addEventListener("click", () => purgeAgentCache().catch((err) => console.error("Agent cache purge failed", err)));
         }
         if (agentElements.runButton) {
             agentElements.runButton.addEventListener("click", () => startAgentMiningJob().catch((err) => console.error("Agent mining start failed", err)));

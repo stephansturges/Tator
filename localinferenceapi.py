@@ -6135,7 +6135,7 @@ def _expand_prompts_with_prompt_llm(
                 f"Known good prompts: {known_list_str}.",
             ]
             if class_hint:
-                base_prompt.append(f"Class note: {class_hint}.")
+                base_prompt.append(f"Class note (must obey): {class_hint}.")
             base_prompt.extend(
                 [
                     f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).",
@@ -6168,7 +6168,8 @@ def _expand_prompts_with_prompt_llm(
                 if parsed and len(parsed) > remaining:
                     parsed = parsed[:remaining]
                 _log(
-                    f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}): "
+                    f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}"
+                    f"{' with hint' if class_hint else ''}): "
                     f"{', '.join(parsed) if parsed else text}"
                 )
                 if parsed:
@@ -7258,6 +7259,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             if cat_filter and cat_id not in cat_filter:
                 continue
             cat_name = str(cat.get("name", f"class_{cat_id}"))
+            hint_used = normalized_hints.get(cat_id)
             prompts_for_cat = (payload.text_prompts_by_class or {}).get(cat_id)
             if not prompts_for_cat:
                 prompts_for_cat = [cat_name]
@@ -7271,7 +7273,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         prompts_for_cat,
                         payload.qwen_max_prompts,
                         log_fn=_log_qwen,
-                        class_hint=normalized_hints.get(cat_id),
+                        class_hint=hint_used,
                         max_new_tokens=payload.prompt_max_new_tokens,
                         reasoning=payload.prompt_reasoning,
                     )
@@ -7290,6 +7292,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             else:
                 prompts_for_cat = _refine_prompts_with_qwen(prompts_for_cat)
             prepared_prompts[cat_id] = prompts_for_cat
+            if hint_used:
+                job.logs.append({"ts": time.time(), "msg": f"Class hint applied for {cat_name}: {hint_used}"})
+                if len(job.logs) > MAX_JOB_LOGS:
+                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
 
         try:
             _unload_qwen_runtime()

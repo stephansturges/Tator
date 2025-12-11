@@ -914,6 +914,22 @@
                                 <input type="number" id="agentQwenMaxPrompts" min="0" max="20" value="0" />
                             </div>
                             <div class="training-field training-field--inline">
+                                <label for="agentStackedMining">Stacked recipe mining</label>
+                                <input type="checkbox" id="agentStackedMining" title="Evaluate cross-class stacked recipes to suppress false positives using other classes." />
+                            </div>
+                            <div id="agentStackedFields" class="training-grid" style="display: none;">
+                                <div>
+                                    <label for="agentStackedMaxChains">Max stacked chains</label>
+                                    <input type="number" id="agentStackedMaxChains" min="1" max="10" value="3" />
+                                    <div class="training-help">Max steps from other classes to chain for FP suppression.</div>
+                                </div>
+                                <div>
+                                    <label for="agentStackedIou">Stacked IoU threshold</label>
+                                    <input type="number" id="agentStackedIou" step="0.05" min="0" max="1" value="0.5" />
+                                    <div class="training-help">IoU used to suppress overlapping detections across classes.</div>
+                                </div>
+                            </div>
+                            <div class="training-field training-field--inline">
                                 <label for="agentTestMode">Test mode</label>
                                 <input type="checkbox" id="agentTestMode" checked />
                             </div>

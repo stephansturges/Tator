@@ -11321,6 +11321,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const workersPerGpu = readNumberInput(agentElements.workersPerGpu, { integer: true });
         const exemplars = readNumberInput(agentElements.exemplars, { integer: true });
         const similarityFloor = readNumberInput(agentElements.similarityScore, { integer: false });
+        const stackedEnabled = !!(agentElements.stackedMining && agentElements.stackedMining.checked);
+        const stackedMaxChains = readNumberInput(agentElements.stackedMaxChains, { integer: true });
+        const stackedIou = readNumberInput(agentElements.stackedIou, { integer: false });
         const classesRaw = agentElements.classesInput?.value || "";
         const classes =
             classesRaw
@@ -11359,6 +11362,9 @@ return {
             qwen_max_prompts: Number.isFinite(readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
                 ? Math.max(0, readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
                 : 0,
+            stacked_mining: stackedEnabled,
+            stacked_max_chains: stackedEnabled && Number.isFinite(stackedMaxChains) ? Math.max(1, Math.min(10, stackedMaxChains)) : 3,
+            stacked_iou: stackedEnabled && Number.isFinite(stackedIou) ? Math.max(0, Math.min(1, stackedIou)) : 0.5,
             test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
             test_train_limit: readNumberInput(agentElements.trainLimit, { integer: true }) ?? 10,
             test_val_limit: readNumberInput(agentElements.valLimit, { integer: true }) ?? 10,
@@ -11667,6 +11673,10 @@ return {
         agentElements.classesInput = document.getElementById("agentClasses");
         agentElements.classHints = document.getElementById("agentClassHints");
         agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
+        agentElements.stackedMining = document.getElementById("agentStackedMining");
+        agentElements.stackedFields = document.getElementById("agentStackedFields");
+        agentElements.stackedMaxChains = document.getElementById("agentStackedMaxChains");
+        agentElements.stackedIou = document.getElementById("agentStackedIou");
         agentElements.testMode = document.getElementById("agentTestMode");
         agentElements.trainLimit = document.getElementById("agentTrainLimit");
         agentElements.valLimit = document.getElementById("agentValLimit");
@@ -11702,6 +11712,13 @@ return {
                 renderAgentRecipeDetails(null);
                 fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
                 prefillClassHints();
+            });
+        }
+        if (agentElements.stackedMining) {
+            agentElements.stackedMining.addEventListener("change", () => {
+                if (agentElements.stackedFields) {
+                    agentElements.stackedFields.style.display = agentElements.stackedMining.checked ? "grid" : "none";
+                }
             });
         }
         if (agentElements.runButton) {

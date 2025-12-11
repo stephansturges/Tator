@@ -7,7 +7,7 @@ import numpy as np
 import yaml
 from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable
 from collections import deque
-import torch, clip, joblib
+import torch, clip, joblib, tiktoken
 from io import BytesIO
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, Request
@@ -84,6 +84,16 @@ GPT_OSS_MODEL_ID = os.environ.get("PROMPT_LLM_MODEL_ID", "openai/gpt-oss-20b")
 GPT_OSS_PIPELINE = None
 GPT_OSS_PIPELINE_ERROR: Optional[Exception] = None
 _GPT_OSS_PIPELINE_LOCK = threading.Lock()
+
+# Harmony token helpers for GPT-OSS (o200k_harmony encoding).
+_HARMONY_ENCODING = tiktoken.get_encoding("o200k_harmony")
+_HARMONY_START = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|start|>", allowed_special="all")[0]])
+_HARMONY_END = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|end|>", allowed_special="all")[0]])
+_HARMONY_MESSAGE = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|message|>", allowed_special="all")[0]])
+_HARMONY_CHANNEL = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|channel|>", allowed_special="all")[0]])
+_HARMONY_RETURN_ID = _HARMONY_ENCODING.encode("<|return|>", allowed_special="all")[0]
+_HARMONY_CALL_ID = _HARMONY_ENCODING.encode("<|call|>", allowed_special="all")[0]
+_HARMONY_STOP_IDS = [_HARMONY_RETURN_ID, _HARMONY_CALL_ID]
 
 try:
     from sam3.model_builder import build_sam3_image_model
@@ -2118,16 +2128,46 @@ def _ensure_prompt_llm():
             raise
 
 
+def _build_harmony_prompt(system_text: str, developer_text: str, user_text: str) -> str:
+    """Render a minimal Harmony prompt (system, developer, user, then assistant start)."""
+    return (
+        f"{_HARMONY_START}system{_HARMONY_MESSAGE}{system_text}{_HARMONY_END}"
+        f"{_HARMONY_START}developer{_HARMONY_MESSAGE}{developer_text}{_HARMONY_END}"
+        f"{_HARMONY_START}user{_HARMONY_MESSAGE}{user_text}{_HARMONY_END}"
+        f"{_HARMONY_START}assistant"
+    )
+
+
+def _extract_harmony_final(text: str) -> str:
+    """
+    Extract the final-channel assistant content from a Harmony-formatted completion.
+    Falls back to the last assistant message content if no explicit final channel is found.
+    """
+    if not text:
+        return ""
+    pattern = re.compile(
+        r"<\|start\|>assistant(?:<\|channel\|>(\w+))?<\|message\|>(.*?)(?:<\|return\|>|<\|end\|>|<\|call\|>)",
+        re.DOTALL,
+    )
+    matches = pattern.findall(text)
+    if not matches:
+        return text.strip()
+    # Prefer the last final-channel message; otherwise the last assistant message.
+    final_msgs = [m for m in matches if m[0] == "final"]
+    chosen = final_msgs[-1] if final_msgs else matches[-1]
+    content = chosen[1]
+    return content.strip()
+
+
 def _generate_prompt_text(prompt: str, *, max_new_tokens: int = 128) -> str:
     """
     Text-only helper for prompt brainstorming/critique.
     Uses the GPT-OSS pipeline; returns empty string on failure.
     """
-    # Build a minimal Harmony-style prompt to steer GPT-OSS toward clean, comma-separated outputs.
     system_msg = (
         "You are ChatGPT, a large language model trained by OpenAI.\n"
         "Knowledge cutoff: 2024-06\n"
-        "Current date: 2025-12-10\n\n"
+        f"Current date: {time.strftime('%Y-%m-%d')}\n\n"
         "Reasoning: high\n\n"
         "# Valid channels: analysis, commentary, final. Channel must be included for every message."
     )
@@ -2135,38 +2175,48 @@ def _generate_prompt_text(prompt: str, *, max_new_tokens: int = 128) -> str:
         "# Instructions\n"
         "You generate short noun-phrase candidates for open-vocabulary detection. "
         "Always respond on the final channel with ONLY a comma-separated list of candidates ending with STOP. "
-        "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no punctuation, no quotes, no numbering, no JSON. "
+        "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no punctuation beyond commas, no quotes, no numbering, no JSON. "
         "If no valid candidates, return STOP."
     )
     user_msg = prompt
-    messages = [
-        {"role": "system", "content": system_msg},
-        {"role": "developer", "content": developer_msg},
-        {"role": "user", "content": user_msg},
-    ]
+    harmony_prompt = _build_harmony_prompt(system_msg, developer_msg, user_msg)
     try:
         pipe = _ensure_prompt_llm()
+        tokenizer = getattr(pipe, "tokenizer", None)
+        stop_ids = None
+        pad_id = None
+        if tokenizer is not None:
+            stop_ids = list({tok for tok in _HARMONY_STOP_IDS if tok is not None})
+            try:
+                if tokenizer.eos_token_id is not None:
+                    stop_ids.append(tokenizer.eos_token_id)
+            except Exception:
+                pass
+            if tokenizer.pad_token_id is not None:
+                pad_id = tokenizer.pad_token_id
+            elif tokenizer.eos_token_id is not None:
+                pad_id = tokenizer.eos_token_id
         outputs = pipe(
-            messages,
+            harmony_prompt,
             max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.4,
-            top_p=0.9,
+            do_sample=False,
+            temperature=0.0,
+            top_p=1.0,
+            eos_token_id=stop_ids,
+            pad_token_id=pad_id,
+            return_full_text=True,
         )
         if outputs:
-            gen = outputs[0].get("generated_text")
+            gen = outputs[0].get("generated_text") or outputs[0].get("text") or ""
             text = ""
-            # Hugging Face pipeline may return a list of message dicts; pick the last assistant message content.
-            if isinstance(gen, list):
-                for item in reversed(gen):
-                    if isinstance(item, dict) and item.get("role") in {"assistant", "bot"}:
-                        text = item.get("content") or item.get("text") or ""
-                        if text:
-                            break
-            elif isinstance(gen, str):
+            if isinstance(gen, str):
                 text = gen
+            elif isinstance(gen, list):
+                # Some pipelines return list of dicts; fallback to stringify.
+                text = str(gen)
             if text:
-                return str(text).strip()
+                final = _extract_harmony_final(text)
+                return final.strip()
     except Exception:
         pass
     return ""
@@ -5948,6 +5998,9 @@ class AgentMiningRequest(BaseModel):
     test_train_limit: int = Field(10, ge=1, le=10_000)
     test_val_limit: int = Field(10, ge=1, le=10_000)
     class_hints: Optional[Dict[str, str]] = None
+    stacked_mining: bool = False
+    stacked_max_chains: int = Field(3, ge=1, le=10)
+    stacked_iou: float = Field(0.5, ge=0.0, le=1.0)
 
 
 def _expand_prompts_with_prompt_llm(
@@ -7391,6 +7444,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         cached_detections=cache_map,
                     )
                     metrics["type"] = cand_type
+                    metrics["candidate_id"] = task_id
                     if cand_type == "visual":
                         metrics["exemplar"] = {
                             "image_id": cand.get("visual_ref", {}).get("image_id"),
@@ -7429,6 +7483,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         meta = meta_map.get(key)
                         if meta:
                             step.update({k: v for k, v in meta.items() if v is not None})
+                            if meta.get("candidate_id"):
+                                step["candidate_id"] = meta.get("candidate_id")
                     summary_block = recipe.get("summary") or {}
                     fp_total = summary_block.get("fps") or 0
                     best_steps = recipe.get("steps") or []
@@ -7509,6 +7565,144 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             job.message = "Cancelled"
             job.updated_at = time.time()
             return
+        # Optional stacked recipe cleanup: re-evaluate with cross-class suppression.
+        if payload.stacked_mining:
+            try:
+                suppressor_cache: Dict[int, Dict[str, Any]] = {}
+                # Pick top step (highest precision) per class as a suppressor.
+                for cls in selected_cats:
+                    steps = (cls.get("recipe") or {}).get("steps") or []
+                    if not steps:
+                        continue
+                    best = max(steps, key=lambda s: s.get("precision", 0.0))
+                    cand_id = best.get("candidate_id")
+                    thr = best.get("threshold")
+                    if not cand_id or thr is None:
+                        continue
+                    dets = det_cache.get(cand_id, {}).get(thr, [])
+                    suppressor_cache[cls.get("id")] = {"dets": dets, "class_name": cls.get("name")}
+                stacked_iou = float(max(0.0, min(1.0, payload.stacked_iou)))
+
+                def _filter_with_suppressors(base_dets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                    if not base_dets or not suppressor_cache:
+                        return base_dets
+                    filtered: List[Dict[str, Any]] = []
+                    for det in base_dets:
+                        bx1, by1, bx2, by2 = det.get("bbox", (None, None, None, None))
+                        if None in (bx1, by1, bx2, by2):
+                            continue
+                        suppressed = False
+                        for supp in suppressor_cache.values():
+                            for sd in supp.get("dets") or []:
+                                sx1, sy1, sx2, sy2 = sd.get("bbox", (None, None, None, None))
+                                if None in (sx1, sy1, sx2, sy2):
+                                    continue
+                                if _iou((bx1, by1, bx2, by2), (sx1, sy1, sx2, sy2)) >= stacked_iou:
+                                    suppressed = True
+                                    break
+                            if suppressed:
+                                break
+                        if not suppressed:
+                            filtered.append(det)
+                    return filtered
+
+                for cls in selected_cats:
+                    cat_id = cls.get("id")
+                    steps = (cls.get("recipe") or {}).get("steps") or []
+                    eval_candidates = cls.get("candidates") or []
+                    if not steps or not eval_candidates:
+                        continue
+                    text_prompts = [c.get("prompt") for c in eval_candidates if c.get("type") == "text"]
+                    exemplars = [c for c in eval_candidates if c.get("type") == "visual"]
+                    thresholds_count = len(thresholds or [])
+                    visual_candidate_count = len(exemplars) * thresholds_count
+                    gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
+                    gt_index_val = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in val_id_set}
+                    per_image_gt_val = {img_id: per_image_gt_all.get(img_id, 0) for img_id in val_ids}
+                    all_gt_keys_val: set[str] = set()
+                    for entries in gt_index_val.values():
+                        for key, _ in entries:
+                            all_gt_keys_val.add(key)
+                    filtered_eval: List[Dict[str, Any]] = []
+                    for cand in eval_candidates:
+                        task_id = cand.get("candidate_id") or cand.get("id")
+                        if not task_id:
+                            continue
+                        cand_type = cand.get("type")
+                        label = cand.get("prompt") if cand_type == "text" else f"exemplar_{task_id.split('::')[-1]}"
+                        for thr in thresholds:
+                            dets = det_cache.get(task_id, {}).get(thr, [])
+                            dets = _filter_with_suppressors(dets)
+                            cache_map = _detections_to_eval_cache(dets, images)
+                            metrics = _evaluate_prompt_candidate(
+                                label,
+                                thr,
+                                cat_id=cat_id,
+                                image_ids=val_ids,
+                                gt_index=gt_index_val,
+                                images=images,
+                                iou_threshold=0.5,
+                                max_dets=payload.max_results,
+                                image_cache={},
+                                cached_detections=cache_map,
+                            )
+                            metrics["type"] = cand_type
+                            metrics["candidate_id"] = task_id
+                            if cand_type == "visual":
+                                metrics["exemplar"] = {
+                                    "image_id": cand.get("visual_ref", {}).get("image_id"),
+                                    "bbox": cand.get("visual_ref", {}).get("bbox"),
+                                    "file_name": cand.get("visual_ref", {}).get("file_name"),
+                                }
+                            metrics["detections"] = len(dets)
+                            filtered_eval.append(metrics)
+                    stacked_recipe: Optional[Dict[str, Any]] = None
+                    stacked_cov: Optional[List[Dict[str, Any]]] = None
+                    if filtered_eval and all_gt_keys_val:
+                        stacked_recipe, stacked_cov = _build_prompt_recipe(
+                            filtered_eval,
+                            all_gt_keys_val,
+                            per_image_gt_val,
+                            images,
+                            val_ids,
+                            gt_index_val,
+                        )
+                        if stacked_recipe:
+                            meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
+                            for cand in filtered_eval:
+                                try:
+                                    key = (cand.get("prompt"), float(cand.get("threshold")))
+                                except Exception:
+                                    continue
+                                meta_map[key] = {
+                                    "type": cand.get("type"),
+                                    "exemplar": cand.get("exemplar"),
+                                    "warnings": cand.get("warnings"),
+                                    "candidate_id": cand.get("candidate_id"),
+                                }
+                            for step in stacked_recipe.get("steps", []):
+                                key = (step.get("prompt"), float(step.get("threshold", 0)))
+                                meta = meta_map.get(key)
+                                if meta:
+                                    step.update({k: v for k, v in meta.items() if v is not None})
+                    if stacked_recipe:
+                        cls["stacked_recipe"] = stacked_recipe
+                        cls["stacked_coverage_by_image"] = stacked_cov
+                        summary = stacked_recipe.get("summary") or {}
+                        fps = summary.get("fps")
+                        cov_rate = summary.get("coverage_rate")
+                        cov_pct = f"{cov_rate * 100:.1f}%" if cov_rate is not None else ""
+                        job.logs.append(
+                            {
+                                "ts": time.time(),
+                                "msg": f"Stacked cleanup for {cls.get('name')}: coverage {summary.get('covered')}/{summary.get('total_gt')} ({cov_pct}) fps={fps}",
+                            }
+                        )
+                        if len(job.logs) > MAX_JOB_LOGS:
+                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+            except Exception as exc:
+                logger.warning("Stacked recipe mining failed: %s", exc)
+
         job.result = {
             "dataset_id": payload.dataset_id,
             "split": split,

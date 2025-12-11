@@ -4025,7 +4025,7 @@ def _ensure_agent_mining_split(
 
 def _agent_mining_cache_key(
     *,
-    class_id: Optional[int],
+    class_id: Optional[int] = None,
     prompt: Optional[str],
     visual_ref: Optional[Dict[str, Any]],
     threshold: float,

@@ -138,7 +138,22 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
 5. **Run the API** — once authenticated, start the backend as usual. Selecting “SAM 3” in the UI enables both the point/bbox flows and the new text prompt panel.
 
 ### Segmentation Builder (bbox → polygons)
-The new **Segmentation Builder** tab scaffolds a conversion pipeline that clones an existing **bbox** dataset into a YOLO-seg (polygon) dataset using SAM1 or SAM3. The original dataset stays untouched; the copy is named `<source>_seg` by default and carries `type: seg` in its metadata so training can auto-enable mask losses later. Current build is a stub (jobs start and record planned metadata/layout) while the mask generator lands; COCO remains an internal bridge only.
+The **Segmentation Builder** tab clones an existing **bbox** dataset into a YOLO‑seg (polygon) dataset using SAM1 or SAM3. Originals stay untouched; output is named `<source>_seg` by default and tagged with `type: seg` so SAM3 training can auto-enable mask losses.
+
+Flow:
+- Pick any bbox dataset discovered under the unified **Datasets on disk** list (Qwen, SAM3, or registry roots).
+- Choose **SAM variant** (SAM1 for classic masks, SAM3 for text/visual parity with recipe mining).
+- Optional knobs (API payload, defaults shown): `mask_threshold=0.5`, `score_threshold=0.0`, `simplify_epsilon=30`, `min_size=0`, `max_results=1`.
+- Click **Start build**. A job is queued; progress and logs stream live in the panel. Jobs survive page reload; polling resumes automatically.
+- Each image is loaded once, all boxes are prompted in parallel across available GPUs (2 workers per device by default; override with env `SEG_BUILDER_WORKERS_PER_DEVICE`, `SEG_BUILDER_MAX_WORKERS`).
+- For each bbox: best SAM mask → polygon (convex hull + RDP simplification). If mask is below the score threshold or unusable, we fall back to the original box as a 4‑point polygon.
+- Output layout: `train/` and `val/` with `images/` (hard-linked or copied) and `labels/` in YOLO‑seg polygon format, plus `labelmap.txt` and `sam3_dataset.json`. COCO `_annotations.coco.json` is regenerated for both splits.
+- **Screenshots coming soon** (build list + logs).
+
+Error handling & requirements:
+- Requires at least one class in metadata or `labelmap.txt` (builder fails fast otherwise).
+- SciPy is optional; if missing, polygon fallback still works (bounding boxes).
+- Progress is reported as images processed; logs include per-split counts and conversion notes.
 
 #### Experimental: Training SAM3 (box-only)
 > **Unstable:** this path is still changing. Training currently requires a checkout of the upstream SAM3 repo inside this project; expect sharp edges.

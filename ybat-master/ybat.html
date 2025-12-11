@@ -1289,7 +1289,7 @@
                 <div class="training-card">
                     <div class="training-card__header">
                         <div class="training-card__title">Build segmentation datasets from bbox datasets</div>
-                        <div class="training-help">Creates YOLO polygon masks using SAM; currently scaffolded (no masks generated yet).</div>
+                        <div class="training-help">Creates YOLO polygon masks using SAM (bbox → polygon). Originals stay untouched.</div>
                     </div>
                     <div class="training-card__body">
                         <label for="segBuilderDatasetSelect">Source bbox dataset</label>
@@ -1304,10 +1304,11 @@
                         </select>
                         <div class="training-help">Polygons only (YOLO-seg). Output is kept separate; originals stay untouched.</div>
                         <div class="training-actions">
-                            <button type="button" id="segBuilderStartBtn" class="training-button">Plan build (stub)</button>
+                            <button type="button" id="segBuilderStartBtn" class="training-button">Start build</button>
                             <button type="button" id="segBuilderRefreshBtn" class="training-button training-button--ghost">Refresh datasets</button>
                         </div>
                         <div id="segBuilderMessage" class="training-message"></div>
+                        <div id="segBuilderLog" class="training-log"></div>
                     </div>
                     <div class="training-card__footer">
                         <div class="training-subsection__title">Segmentation build jobs</div>

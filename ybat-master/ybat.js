@@ -1240,6 +1240,7 @@ const sam3TrainState = {
         jobsRefresh: null,
         jobsContainer: null,
         message: null,
+        log: null,
     };
 
     const segBuilderState = {
@@ -1247,6 +1248,9 @@ const sam3TrainState = {
         selectedId: null,
         jobs: [],
         lastSeenJob: {},
+        activeJobId: null,
+        pollTimer: null,
+        pollInFlight: false,
     };
 
     const datasetManagerElements = {
@@ -5294,6 +5298,22 @@ function setSegBuilderMessage(text, tone = "info") {
     segBuilderElements.message.className = `training-message ${tone}`;
 }
 
+function renderSegBuilderLog(job) {
+    const logEl = segBuilderElements.log;
+    if (!logEl) return;
+    logEl.innerHTML = "";
+    const logs = job && Array.isArray(job.logs) ? job.logs.slice(-100) : [];
+    if (!logs.length) return;
+    logs.forEach((entry) => {
+        const row = document.createElement("div");
+        row.className = "training-log-line";
+        const ts = entry.timestamp ? formatTimestamp(entry.timestamp) : "";
+        row.textContent = ts ? `[${ts}] ${entry.message || ""}` : entry.message || "";
+        logEl.appendChild(row);
+    });
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
 function updateSegBuilderDatasetSummary(entry) {
     if (!segBuilderElements.datasetSummary) return;
     if (!entry) {
@@ -5386,12 +5406,50 @@ function renderSegBuilderJobs(list) {
     });
 }
 
+async function pollSegBuilderJob(jobId, { force = false } = {}) {
+    if (!jobId) return;
+    if (segBuilderState.pollInFlight && !force) return;
+    segBuilderState.pollInFlight = true;
+    try {
+        const resp = await fetch(`${API_ROOT}/segmentation/build/jobs/${jobId}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        segBuilderState.lastSeenJob[jobId] = data;
+        const pct = Number.isFinite(data.progress) ? Math.round(data.progress * 100) : null;
+        const tone = data.status === "failed" ? "error" : data.status === "completed" ? "success" : "info";
+        const message = pct !== null ? `${data.message || ""} (${pct}%)` : data.message || "";
+        setSegBuilderMessage(message, tone);
+        renderSegBuilderLog(data);
+        if (["completed", "failed", "cancelled"].includes(data.status)) {
+            segBuilderState.activeJobId = null;
+            if (segBuilderState.pollTimer) {
+                clearTimeout(segBuilderState.pollTimer);
+                segBuilderState.pollTimer = null;
+            }
+            refreshSegBuilderJobs();
+        } else {
+            segBuilderState.pollTimer = setTimeout(() => pollSegBuilderJob(jobId), 2000);
+        }
+    } catch (err) {
+        console.error("Failed to poll segmentation builder job", err);
+    } finally {
+        segBuilderState.pollInFlight = false;
+    }
+}
+
 async function refreshSegBuilderJobs() {
     try {
         const resp = await fetch(`${API_ROOT}/segmentation/build/jobs`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         renderSegBuilderJobs(data);
+        if (!segBuilderState.activeJobId) {
+            const running = data.find((job) => ["running", "queued", "blocked"].includes(job.status));
+            if (running) {
+                segBuilderState.activeJobId = running.job_id;
+                pollSegBuilderJob(running.job_id, { force: true });
+            }
+        }
     } catch (err) {
         console.error("Failed to refresh segmentation jobs", err);
         setSegBuilderMessage(`Failed to refresh jobs: ${err.message || err}`, "error");
@@ -5411,7 +5469,13 @@ async function startSegmentationBuild() {
     if (segBuilderElements.outputName && segBuilderElements.outputName.value.trim()) {
         payload.output_name = segBuilderElements.outputName.value.trim();
     }
-    setSegBuilderMessage("Queuing segmentation build (stub)…", "info");
+    setSegBuilderMessage("Queuing segmentation build…", "info");
+    renderSegBuilderLog(null);
+    if (segBuilderState.pollTimer) {
+        clearTimeout(segBuilderState.pollTimer);
+        segBuilderState.pollTimer = null;
+    }
+    segBuilderState.activeJobId = null;
     try {
         const resp = await fetch(`${API_ROOT}/segmentation/build/jobs`, {
             method: "POST",
@@ -5423,7 +5487,9 @@ async function startSegmentationBuild() {
             throw new Error(text || `HTTP ${resp.status}`);
         }
         const job = await resp.json();
-        setSegBuilderMessage("Job queued. Conversion is scaffolded only (no masks yet).", "success");
+        segBuilderState.activeJobId = job.job_id;
+        setSegBuilderMessage("Job queued.", "success");
+        pollSegBuilderJob(job.job_id, { force: true });
         await refreshSegBuilderJobs();
     } catch (err) {
         console.error("Segmentation build start failed", err);
@@ -5443,6 +5509,7 @@ async function initSegBuilderTab() {
     segBuilderElements.jobsRefresh = document.getElementById("segBuilderJobsRefresh");
     segBuilderElements.jobsContainer = document.getElementById("segBuilderJobs");
     segBuilderElements.message = document.getElementById("segBuilderMessage");
+    segBuilderElements.log = document.getElementById("segBuilderLog");
     if (segBuilderElements.datasetSelect) {
         segBuilderElements.datasetSelect.addEventListener("change", () => {
             segBuilderState.selectedId = segBuilderElements.datasetSelect.value || null;
@@ -5461,6 +5528,12 @@ async function initSegBuilderTab() {
     }
     await refreshSegBuilderDatasets();
     await refreshSegBuilderJobs();
+    // If a running job exists after the first refresh, start polling immediately.
+    const running = segBuilderState.jobs.find((job) => ["running", "queued", "blocked"].includes(job.status));
+    if (running) {
+        segBuilderState.activeJobId = running.job_id;
+        pollSegBuilderJob(running.job_id, { force: true });
+    }
 }
 
 async function initSam3TrainUi() {

@@ -2223,7 +2223,7 @@ def _generate_prompt_text(
     prompt: str,
     *,
     max_new_tokens: int = 128,
-    reasoning: Literal["low", "medium", "high"] = "high",
+    reasoning: Literal["none", "low", "medium", "high"] = "high",
 ) -> str:
     """
     Text-only helper for prompt brainstorming/critique.
@@ -6097,7 +6097,7 @@ class AgentMiningRequest(BaseModel):
     stacked_mining: bool = False
     stacked_max_chains: int = Field(3, ge=1, le=10)
     stacked_iou: float = Field(0.5, ge=0.0, le=1.0)
-    prompt_reasoning: Literal["low", "medium", "high"] = "high"
+    prompt_reasoning: Literal["none", "low", "medium", "high"] = "high"
     prompt_max_new_tokens: int = Field(160, ge=16, le=400)
 
 
@@ -6108,7 +6108,7 @@ def _expand_prompts_with_prompt_llm(
     log_fn: Optional[Callable[[str], None]] = None,
     class_hint: Optional[str] = None,
     max_new_tokens: int = 128,
-    reasoning: Literal["low", "medium", "high"] = "high",
+    reasoning: Literal["none", "low", "medium", "high"] = "high",
 ) -> List[str]:
     """Use Qwen to brainstorm additional prompt variants for a class. Accepts optional logger callback."""
     cleaned_base = _sanitize_prompts(base_prompts)

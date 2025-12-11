@@ -2147,12 +2147,12 @@ def _ensure_prompt_llm():
 
 
 def _build_harmony_prompt(system_text: str, developer_text: str, user_text: str) -> str:
-    """Render a minimal Harmony prompt (system, developer, user, then assistant start)."""
+    """Render a minimal Harmony prompt (system, developer, user, then assistant final-channel start)."""
     return (
         f"{_HARMONY_START}system{_HARMONY_MESSAGE}{system_text}{_HARMONY_END}"
         f"{_HARMONY_START}developer{_HARMONY_MESSAGE}{developer_text}{_HARMONY_END}"
         f"{_HARMONY_START}user{_HARMONY_MESSAGE}{user_text}{_HARMONY_END}"
-        f"{_HARMONY_START}assistant"
+        f"{_HARMONY_START}assistant{_HARMONY_CHANNEL}final{_HARMONY_MESSAGE}"
     )
 
 
@@ -2230,7 +2230,8 @@ def _generate_prompt_text(
     developer_msg = (
         "# Instructions\n"
         "You generate short noun-phrase candidates for open-vocabulary detection. "
-        "Always respond on the final channel with ONLY a comma-separated list of candidates ending with STOP. "
+        "Respond once, ONLY on the final channel, with a comma-separated list ending with STOP. "
+        "Do NOT emit analysis/commentary messages. "
         "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no punctuation beyond commas, no quotes, no numbering, no JSON. "
         "If no valid candidates, return STOP."
     )
@@ -2243,6 +2244,11 @@ def _generate_prompt_text(
         pad_id = None
         if tokenizer is not None:
             stop_ids = list({tok for tok in _HARMONY_STOP_IDS if tok is not None})
+            try:
+                end_id = _HARMONY_ENCODING.encode("<|end|>", allowed_special="all")[0]
+                stop_ids.append(end_id)
+            except Exception:
+                pass
             try:
                 if tokenizer.eos_token_id is not None:
                     stop_ids.append(tokenizer.eos_token_id)

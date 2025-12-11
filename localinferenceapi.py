@@ -2272,15 +2272,32 @@ def _generate_prompt_text(
                 text = str(gen)
             if text:
                 final = _extract_harmony_final(text).strip()
-                # Drop if the final still contains harmony markers (token-level).
+                cleaned = final
+                reject = False
                 try:
-                    toks = _HARMONY_ENCODING.encode(final, allowed_special="all")
-                    if any(t in _HARMONY_SPECIAL_IDS for t in toks):
-                        return ""
+                    toks = _HARMONY_ENCODING.encode(cleaned, allowed_special="all")
+                    reject = any(t in _HARMONY_SPECIAL_IDS for t in toks)
                 except Exception:
-                    if any(tag in final for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>")):
-                        return ""
-                return final
+                    reject = any(tag in cleaned for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>"))
+                if reject:
+                    # Try stripping any leftover harmony markers rather than returning empty.
+                    stripped = re.sub(r"<\|[^>]+?\|>", " ", cleaned or text)
+                    stripped = re.sub(r"\s+", " ", stripped).strip()
+                    cleaned = stripped
+                    try:
+                        toks = _HARMONY_ENCODING.encode(cleaned, allowed_special="all")
+                        if any(t in _HARMONY_SPECIAL_IDS for t in toks):
+                            cleaned = ""
+                    except Exception:
+                        if any(tag in cleaned for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>")):
+                            cleaned = ""
+                if cleaned:
+                    return cleaned
+                # Last resort: strip markers from the raw text blob.
+                fallback = re.sub(r"<\|[^>]+?\|>", " ", text)
+                fallback = re.sub(r"\s+", " ", fallback).strip()
+                if fallback:
+                    return fallback
     except Exception:
         pass
     return ""

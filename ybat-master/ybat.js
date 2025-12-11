@@ -3184,6 +3184,8 @@ function setPromptHelperMessage(text, tone = "info") {
             const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
             const summary = recipe.summary || {};
             const covPct = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0.0";
+            const negs = Array.isArray(recipe.negatives) ? recipe.negatives : [];
+            const negCount = negs.length;
             body.innerHTML = `
                 <div class="training-history-row">
                     <div class="training-history-title" style="font-size: 20px; font-weight: 700;">${escapeHtml(cls.name || cls.id)}</div>
@@ -3191,6 +3193,7 @@ function setPromptHelperMessage(text, tone = "info") {
                 </div>
                 <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
                 <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%) • FPs: ${summary.fps || 0}</div>
+                <div class="training-help">Negatives used: ${negCount}${recipe.use_negative_exemplars ? "" : " (disabled)"}</div>
             `;
             if (steps.length) {
                 const table = document.createElement("table");
@@ -3227,9 +3230,16 @@ function setPromptHelperMessage(text, tone = "info") {
                 const promptsTried = meta.text_prompts ? `${meta.text_prompts} text prompt${meta.text_prompts === 1 ? "" : "s"}` : "text prompt(s)";
                 const exemplarsTried = meta.exemplars !== undefined ? `${meta.exemplars} exemplar${meta.exemplars === 1 ? "" : "s"}` : "exemplars";
                 const explanation = (cls.recipe && cls.recipe.explanation) || "";
-                recap.textContent =
-                    explanation ||
-                    `Tested ${promptsTried} × ${meta.thresholds || 0} thresholds and ${exemplarsTried} (total candidates: ${meta.total_candidates || steps.length}); best coverage came from the steps above.`;
+                if (explanation) {
+                    recap.textContent = explanation;
+                } else {
+                    const covered = summary.covered ?? 0;
+                    const total = summary.total_gt ?? 0;
+                    const fps = summary.fps ?? 0;
+                    recap.textContent = `Tried ${promptsTried} at ${meta.thresholds || 0} thresholds plus ${exemplarsTried} (candidates: ${
+                        meta.total_candidates || steps.length
+                    }). Kept ${steps.length} step${steps.length === 1 ? "" : "s"} covering ${covered}/${total} GT (FPs: ${fps}).`;
+                }
                 body.appendChild(recap);
             } else {
                 const empty = document.createElement("div");
@@ -11373,9 +11383,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const negStrength = readNumberInput(agentElements.negStrength, { integer: false });
         const useFpNeg = !!(agentElements.useFpNeg && agentElements.useFpNeg.checked);
         const maxFpNeg = readNumberInput(agentElements.maxFpNeg, { integer: true });
-        const stackedEnabled = !!(agentElements.stackedMining && agentElements.stackedMining.checked);
-        const stackedMaxChains = readNumberInput(agentElements.stackedMaxChains, { integer: true });
-        const stackedIou = readNumberInput(agentElements.stackedIou, { integer: false });
         const promptReasoning =
             agentElements.promptReasoning && agentElements.promptReasoning.value ? agentElements.promptReasoning.value : "none";
         const promptMaxTokens = readNumberInput(agentElements.promptMaxTokens, { integer: true });
@@ -11424,9 +11431,6 @@ return {
             qwen_max_prompts: Number.isFinite(readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
                 ? Math.max(0, readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
                 : 0,
-            stacked_mining: stackedEnabled,
-            stacked_max_chains: stackedEnabled && Number.isFinite(stackedMaxChains) ? Math.max(1, Math.min(10, stackedMaxChains)) : 3,
-            stacked_iou: stackedEnabled && Number.isFinite(stackedIou) ? Math.max(0, Math.min(1, stackedIou)) : 0.5,
             prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
             prompt_max_new_tokens: Number.isFinite(promptMaxTokens) ? Math.max(16, Math.min(400, promptMaxTokens)) : 160,
             test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
@@ -11745,10 +11749,6 @@ return {
         agentElements.classesInput = document.getElementById("agentClasses");
         agentElements.classHints = document.getElementById("agentClassHints");
         agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
-        agentElements.stackedMining = document.getElementById("agentStackedMining");
-        agentElements.stackedFields = document.getElementById("agentStackedFields");
-        agentElements.stackedMaxChains = document.getElementById("agentStackedMaxChains");
-        agentElements.stackedIou = document.getElementById("agentStackedIou");
         agentElements.promptReasoning = document.getElementById("agentPromptReasoning");
         agentElements.promptMaxTokens = document.getElementById("agentPromptMaxTokens");
         agentElements.cacheSize = document.getElementById("agentCacheSize");
@@ -11789,13 +11789,6 @@ return {
                 fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
                 prefillClassHints();
                 refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
-            });
-        }
-        if (agentElements.stackedMining) {
-            agentElements.stackedMining.addEventListener("change", () => {
-                if (agentElements.stackedFields) {
-                    agentElements.stackedFields.style.display = agentElements.stackedMining.checked ? "grid" : "none";
-                }
             });
         }
         if (agentElements.purgeCacheBtn) {

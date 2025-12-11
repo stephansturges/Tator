@@ -27,6 +27,10 @@ from starlette.status import (
     HTTP_503_SERVICE_UNAVAILABLE,
 )
 from collections import OrderedDict
+try:
+    from scipy.spatial import ConvexHull
+except Exception:  # noqa: BLE001
+    ConvexHull = None
 from segment_anything import sam_model_registry, SamPredictor
 import threading
 import queue
@@ -470,6 +474,20 @@ def _reset_sam3_runtime() -> None:
             torch.cuda.empty_cache()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _resolve_sam1_devices() -> List[torch.device]:
+    devices: List[torch.device] = []
+    if torch.cuda.is_available():
+        try:
+            for idx in range(torch.cuda.device_count()):
+                devices.append(torch.device(f"cuda:{idx}"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to enumerate CUDA devices for SAM1: %s", exc)
+            devices = []
+    if not devices:
+        devices = [torch.device("cpu")]
+    return devices
 
 
 class _Sam1Backend:
@@ -2781,6 +2799,11 @@ class SegmentationBuildRequest(BaseModel):
     output_name: Optional[str] = Field(None, description="Optional output dataset name")
     sam_variant: Literal["sam1", "sam3"] = Field("sam3", description="Generator to use for masks")
     output_format: Literal["yolo-seg"] = Field("yolo-seg", description="Target mask encoding (polygons)")
+    mask_threshold: float = Field(0.5, ge=0.0, le=1.0, description="Mask probability threshold")
+    score_threshold: float = Field(0.0, ge=0.0, le=1.0, description="Box confidence threshold")
+    simplify_epsilon: float = Field(30.0, ge=0.0, description="Polygon simplification epsilon (px)")
+    min_size: float = Field(0.0, ge=0.0, description="Minimum mask area (px^2)")
+    max_results: int = Field(1, ge=1, description="Max detections per box prompt")
 
 
 @dataclass
@@ -4585,6 +4608,7 @@ class _Sam3MiningWorker:
         max_results: int,
         min_size: int,
         simplify: float,
+        return_masks: bool = False,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """Run all requested tasks against a single preloaded image on this worker."""
         if not tasks:
@@ -4601,48 +4625,164 @@ class _Sam3MiningWorker:
                 if not task_id:
                     continue
                 dets: List[QwenDetection]
+                det_masks: Optional[List[np.ndarray]] = None
                 if task.get("type") == "text":
-                    dets = _run_sam3_text_inference(
-                        pil_img,
-                        task.get("prompt") or "",
-                        min_threshold,
-                        mask_threshold,
-                        max_results,
-                        min_size=min_size if min_size > 0 else None,
-                        simplify_epsilon=simplify,
-                        processor_override=self.processor,
-                        state=state,
-                    )
+                    if return_masks:
+                        dets, det_masks = _run_sam3_text_inference(
+                            pil_img,
+                            task.get("prompt") or "",
+                            min_threshold,
+                            mask_threshold,
+                            max_results,
+                            min_size=min_size if min_size > 0 else None,
+                            simplify_epsilon=simplify,
+                            processor_override=self.processor,
+                            state=state,
+                            return_masks=True,
+                        )
+                    else:
+                        dets = _run_sam3_text_inference(
+                            pil_img,
+                            task.get("prompt") or "",
+                            min_threshold,
+                            mask_threshold,
+                            max_results,
+                            min_size=min_size if min_size > 0 else None,
+                            simplify_epsilon=simplify,
+                            processor_override=self.processor,
+                            state=state,
+                        )
                 else:
                     bbox = task.get("bbox")
                     if not bbox or len(bbox) < 4:
                         continue
-                    dets = _run_sam3_visual_inference(
-                        pil_img,
-                        (
-                            float(bbox[0]),
-                            float(bbox[1]),
-                            float(bbox[2]),
-                            float(bbox[3]),
-                        ),
-                        min_threshold,
-                        mask_threshold,
-                        max_results,
-                        min_size=min_size if min_size > 0 else None,
-                        simplify_epsilon=simplify,
-                        processor_override=self.processor,
-                        state=state,
-                    )
+                    if return_masks:
+                        dets, det_masks = _run_sam3_visual_inference(
+                            pil_img,
+                            (
+                                float(bbox[0]),
+                                float(bbox[1]),
+                                float(bbox[2]),
+                                float(bbox[3]),
+                            ),
+                            min_threshold,
+                            mask_threshold,
+                            max_results,
+                            min_size=min_size if min_size > 0 else None,
+                            simplify_epsilon=simplify,
+                            processor_override=self.processor,
+                            state=state,
+                            return_masks=True,
+                        )
+                    else:
+                        dets = _run_sam3_visual_inference(
+                            pil_img,
+                            (
+                                float(bbox[0]),
+                                float(bbox[1]),
+                                float(bbox[2]),
+                                float(bbox[3]),
+                            ),
+                            min_threshold,
+                            mask_threshold,
+                            max_results,
+                            min_size=min_size if min_size > 0 else None,
+                            simplify_epsilon=simplify,
+                            processor_override=self.processor,
+                            state=state,
+                        )
                 det_dicts: List[Dict[str, Any]] = []
-                for det in dets:
+                for det_idx, det in enumerate(dets):
                     try:
                         det_data = det.dict()
                     except Exception:
                         continue
                     det_data["image_id"] = image_id
+                    if return_masks and det_masks is not None:
+                        if 0 <= det_idx < len(det_masks):
+                            det_data["mask_array"] = det_masks[det_idx]
                     det_dicts.append(det_data)
                 outputs[task_id] = det_dicts
             return outputs
+
+
+class _Sam1SegWorker:
+    def __init__(self, device: torch.device):
+        model = sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH)
+        if device:
+            try:
+                model = model.to(device)
+            except Exception:
+                pass
+        self.device = device
+        self.predictor = SamPredictor(model)
+        self.lock = threading.Lock()
+
+    def close(self) -> None:
+        try:
+            del self.predictor
+        except Exception:
+            pass
+        if torch.cuda.is_available() and self.device and self.device.type == "cuda":
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    def process_image(
+        self,
+        image_id: int,
+        pil_img: Image.Image,
+        tasks: Sequence[Dict[str, Any]],
+        *,
+        simplify: float,
+        min_size: int = 0,
+        **_: Any,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        outputs: Dict[str, List[Dict[str, Any]]] = {}
+        if not tasks:
+            return outputs
+        np_img = np.array(pil_img.convert("RGB"))
+        with self.lock:
+            try:
+                self.predictor.set_image(np_img)
+            except Exception:
+                return outputs
+            for task in tasks:
+                task_id = task.get("id")
+                bbox = task.get("bbox")
+                class_idx = task.get("class_idx")
+                fallback = task.get("fallback_poly")
+                if not task_id or not bbox or len(bbox) < 4:
+                    continue
+                x, y, w, h = bbox
+                xyxy = np.array([x, y, x + w, y + h])
+                try:
+                    masks, scores, _ = self.predictor.predict(
+                        box=xyxy[None, :],
+                        multimask_output=True,
+                        return_logits=False,
+                    )
+                except Exception:
+                    continue
+                if masks is None or len(masks) == 0:
+                    continue
+                scores_arr = np.asarray(scores) if scores is not None else None
+                idx_best = int(np.argmax(scores_arr)) if scores_arr is not None and scores_arr.size else 0
+                mask_arr = masks[idx_best]
+                area = float(np.count_nonzero(mask_arr))
+                if min_size and area < float(min_size):
+                    continue
+                outputs[task_id] = [
+                    {
+                        "image_id": image_id,
+                        "mask_array": mask_arr,
+                        "score": float(scores_arr[idx_best]) if scores_arr is not None and scores_arr.size else None,
+                        "class_idx": class_idx,
+                        "fallback_poly": fallback,
+                    }
+                ]
+        return outputs
 
 
 class _Sam3MiningPool:
@@ -4675,6 +4815,7 @@ class _Sam3MiningPool:
         simplify: float,
         cancel_event: Optional[threading.Event] = None,
         progress_callback: Optional[Callable[[int], None]] = None,
+        return_masks: bool = False,
     ) -> Dict[str, List[Dict[str, Any]]]:
         if not tasks or not image_entries:
             return {task.get("id"): [] for task in tasks if task.get("id")}
@@ -4703,6 +4844,7 @@ class _Sam3MiningPool:
                     max_results=max_results,
                     min_size=min_size,
                     simplify=simplify,
+                    return_masks=return_masks,
                 )
                 for key, dets in partial.items():
                     if key is None or not dets:
@@ -4739,6 +4881,7 @@ class _Sam3MiningPool:
                 max_results=max_results,
                 min_size=min_size,
                 simplify=simplify,
+                return_masks=return_masks,
             )
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -9477,14 +9620,294 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
 
     def worker() -> None:
         try:
-            _seg_job_update(job, status="running", progress=0.05, message="Segmentation builder stub running")
-            job.result = {"planned_metadata": planned_meta, "planned_layout": planned_layout}
+            _seg_job_update(job, status="running", progress=0.02, message="Preparing segmentation build…", error=None)
+            source_meta = _resolve_sam3_dataset_meta(request.source_dataset_id)
+            classes = source_meta.get("classes") or []
+            if not classes:
+                # Try to load from labelmap.txt directly.
+                try:
+                    labelmap_file = _resolve_sam3_or_qwen_dataset(request.source_dataset_id) / "labelmap.txt"
+                    classes = _load_labelmap_file(labelmap_file)
+                except Exception:
+                    classes = []
+            if not classes:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_no_classes")
+            dataset_root = Path(source_meta.get("dataset_root") or _resolve_sam3_or_qwen_dataset(request.source_dataset_id))
+            labelmap_file = dataset_root / "labelmap.txt"
+            if not labelmap_file.exists() and classes:
+                # Backfill labelmap file if missing.
+                try:
+                    labelmap_file.write_text("\n".join(classes), encoding="utf-8")
+                except Exception:
+                    pass
+            output_root = Path(planned_layout["dataset_root"]).resolve()
+            train_out = output_root / "train"
+            val_out = output_root / "val"
+            (train_out / "images").mkdir(parents=True, exist_ok=True)
+            (train_out / "labels").mkdir(parents=True, exist_ok=True)
+            (val_out / "images").mkdir(parents=True, exist_ok=True)
+            (val_out / "labels").mkdir(parents=True, exist_ok=True)
+            # Copy/link labelmap.
+            if labelmap_file.exists():
+                shutil.copy2(labelmap_file, output_root / "labelmap.txt")
+            splits = []
+            image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+            def _find_image_for_label(labels_dir: Path, images_dir: Path, label_file: Path) -> Optional[Tuple[Path, Path]]:
+                stem = label_file.stem
+                for ext in image_exts:
+                    candidate = images_dir / f"{stem}{ext}"
+                    if candidate.exists():
+                        try:
+                            rel = candidate.relative_to(images_dir)
+                        except Exception:
+                            rel = Path(candidate.name)
+                        return candidate, rel
+                for candidate in images_dir.rglob(f"{stem}.*"):
+                    if candidate.suffix.lower() in image_exts:
+                        try:
+                            rel = candidate.relative_to(images_dir)
+                        except Exception:
+                            rel = Path(candidate.name)
+                        return candidate, rel
+                return None
+
+            image_uid = 1
+            for split in ("train", "val"):
+                images_dir = dataset_root / split / "images"
+                labels_dir = dataset_root / split / "labels"
+                if not images_dir.exists() or not labels_dir.exists():
+                    continue
+                entries = []
+                for label_file in sorted(labels_dir.rglob("*.txt")):
+                    match = _find_image_for_label(labels_dir, images_dir, label_file)
+                    if match is None:
+                        continue
+                    image_path, rel_path = match
+                    boxes = []
+                    try:
+                        with label_file.open("r", encoding="utf-8") as handle:
+                            lines = [ln.strip() for ln in handle if ln.strip()]
+                    except Exception:
+                        continue
+                    for ln in lines:
+                        parts = ln.split()
+                        if len(parts) < 5:
+                            continue
+                        try:
+                            cls_idx = int(float(parts[0]))
+                            cx = float(parts[1])
+                            cy = float(parts[2])
+                            w = float(parts[3])
+                            h = float(parts[4])
+                        except (TypeError, ValueError):
+                            continue
+                        if classes and (cls_idx < 0 or cls_idx >= len(classes)):
+                            continue
+                        boxes.append({"class_idx": cls_idx, "bbox": (cx, cy, w, h)})
+                    entries.append(
+                        {
+                            "label_file": label_file,
+                            "image_path": image_path,
+                            "rel_path": rel_path,
+                            "boxes": boxes,
+                            "split": split,
+                            "image_id": image_uid,
+                        }
+                    )
+                    image_uid += 1
+                splits.append((split, entries))
+            total_images = sum(len(e) for _, e in splits)
+            if total_images == 0:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_no_images")
+            _seg_job_log(job, f"Queued {total_images} images for conversion using {request.sam_variant.upper()}")
+            for split_name, entries in splits:
+                _seg_job_log(job, f"{split_name}: {len(entries)} images")
+            base_devices = _resolve_sam3_mining_devices() if request.sam_variant == "sam3" else _resolve_sam1_devices()
+            expanded_devices: List[torch.device] = []
+            per_dev = max(1, int(os.environ.get("SEG_BUILDER_WORKERS_PER_DEVICE", "1")))
+            max_total_env = os.environ.get("SEG_BUILDER_MAX_WORKERS")
+            max_total = None
+            try:
+                if max_total_env is not None:
+                    max_total = max(1, int(max_total_env))
+            except Exception:
+                max_total = None
+            for dev in base_devices:
+                for _ in range(per_dev):
+                    expanded_devices.append(dev)
+            if max_total is not None:
+                expanded_devices = expanded_devices[:max_total]
+            if not expanded_devices:
+                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="segmentation_builder_no_devices")
+            mining_pool = None
+            sam1_workers: List[_Sam1SegWorker] = []
+            try:
+                if request.sam_variant == "sam3":
+                    mining_pool = _Sam3MiningPool(expanded_devices)
+                else:
+                    for dev in expanded_devices:
+                        sam1_workers.append(_Sam1SegWorker(dev))
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+            processed = 0
+            simplify_eps = float(request.simplify_epsilon)
+            mask_threshold = float(request.mask_threshold)
+            min_threshold = float(request.score_threshold)
+            max_results = int(max(1, request.max_results))
+            min_area = float(request.min_size)
+            progress_lock = threading.Lock()
+
+            def _link_or_copy(src: Path, dst: Path) -> None:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    return
+                try:
+                    os.link(src, dst)
+                except Exception:
+                    shutil.copy2(src, dst)
+
+            def _process_entry(entry: Dict[str, Any], worker: Any) -> None:
+                nonlocal processed
+                if job.cancel_event.is_set():
+                    return
+                image_path: Path = entry["image_path"]
+                rel_path: Path = entry["rel_path"]
+                split: str = entry["split"]
+                boxes: List[Dict[str, Any]] = entry.get("boxes") or []
+                tasks: List[Dict[str, Any]] = []
+                try:
+                    with Image.open(image_path) as im:
+                        pil_img = im.convert("RGB")
+                        width, height = pil_img.size
+                        for idx, box in enumerate(boxes):
+                            cx, cy, bw, bh = box["bbox"]
+                            x1, y1, x2, y2 = _yolo_to_xyxy(width, height, (cx, cy, bw, bh))
+                            tasks.append(
+                                {
+                                    "id": f"{rel_path}:{idx}",
+                                    "type": "visual",
+                                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                                    "class_idx": box["class_idx"],
+                                    "fallback_poly": [(x1, y1), (x2, y1), (x2, y2), (x1, y2)],
+                                }
+                            )
+                        if not tasks:
+                            outputs = {}
+                        else:
+                            outputs = worker.process_image(
+                                image_id=entry.get("image_id", 0),
+                                pil_img=pil_img,
+                                tasks=tasks,
+                                min_threshold=min_threshold,
+                                mask_threshold=mask_threshold,
+                                max_results=max_results,
+                                min_size=min_area,
+                                simplify=simplify_eps,
+                                return_masks=True,
+                            ) or {}
+                            label_lines = []
+                            for task in tasks:
+                                task_id = task["id"]
+                                class_idx = task["class_idx"]
+                                fallback = task["fallback_poly"]
+                                dets = outputs.get(task_id) or []
+                                best = None
+                                if dets:
+                                    best = max(dets, key=lambda d: d.get("score") or 0.0)
+                                mask_arr = None
+                                best_score = best.get("score") if best else None
+                                if best:
+                                    mask_arr = best.get("mask_array")
+                                    if mask_arr is None and best.get("mask"):
+                                        mask_arr = decode_binary_mask(best.get("mask"))
+                                polygon = mask_to_polygon(mask_arr, simplify_eps) if mask_arr is not None else []
+                                if best_score is None or best_score < min_threshold:
+                                    polygon = []
+                                if len(polygon) < 3:
+                                    polygon = fallback
+                                coords: List[float] = []
+                                for x, y in polygon:
+                                    coords.extend(
+                                        [
+                                            max(0.0, min(1.0, x / width)),
+                                            max(0.0, min(1.0, y / height)),
+                                        ]
+                                    )
+                                if len(coords) >= 6:
+                                    label_lines.append(f"{class_idx} " + " ".join(f"{v:.6f}" for v in coords))
+                        dest_labels = (train_out if split == "train" else val_out) / "labels" / f"{rel_path.stem}.txt"
+                        dest_images = (train_out if split == "train" else val_out) / "images" / rel_path
+                        dest_labels.parent.mkdir(parents=True, exist_ok=True)
+                        dest_images.parent.mkdir(parents=True, exist_ok=True)
+                        _link_or_copy(image_path, dest_images)
+                        dest_labels.write_text("\n".join(label_lines), encoding="utf-8")
+                finally:
+                    with progress_lock:
+                        processed += 1
+                        progress_val = min(1.0, 0.05 + 0.9 * (processed / max(total_images, 1)))
+                    _seg_job_update(
+                        job,
+                        progress=progress_val,
+                        message=f"Processed {processed}/{total_images} images ({progress_val*100:.1f}%)",
+                        log_message=False,
+                    )
+
+            # Dispatch over workers
+            try:
+                workers_list = mining_pool.workers if mining_pool is not None else sam1_workers
+                if not workers_list:
+                    raise RuntimeError("segmentation_builder_no_workers")
+                with ThreadPoolExecutor(max_workers=max(1, len(workers_list))) as executor:
+                    futures = []
+                    task_idx = 0
+                    for _, entries in splits:
+                        for entry in entries:
+                            worker = workers_list[task_idx % len(workers_list)]
+                            futures.append(executor.submit(_process_entry, entry, worker))
+                            task_idx += 1
+                    for fut in as_completed(futures):
+                        if job.cancel_event.is_set():
+                            break
+                        try:
+                            fut.result()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Segmentation build worker failed: %s", exc)
+            finally:
+                try:
+                    if mining_pool is not None:
+                        mining_pool.close()
+                except Exception:
+                    pass
+                if sam1_workers:
+                    for worker in sam1_workers:
+                        try:
+                            worker.close()
+                        except Exception:
+                            pass
+            if job.cancel_event.is_set():
+                _seg_job_update(job, status="cancelled", message="Cancelled", progress=job.progress)
+                return
+            _seg_job_log(job, "Converting output to COCO…")
+            try:
+                coco_meta = _convert_yolo_dataset_to_coco(output_root)
+            except Exception as exc:  # noqa: BLE001
+                _seg_job_update(job, status="failed", message="COCO conversion failed", error=str(exc))
+                return
+            result_meta = _load_sam3_dataset_metadata(output_root) or coco_meta or planned_meta
             _seg_job_update(
                 job,
-                status="blocked",
-                progress=0.05,
-                message="Segmentation builder is scaffolded only; conversion not implemented yet",
-                error="segmentation_builder_not_implemented",
+                status="completed",
+                progress=1.0,
+                message="Segmentation build complete.",
+                result={
+                    "planned_metadata": planned_meta,
+                    "output_dataset_id": result_meta.get("id") if isinstance(result_meta, dict) else planned_meta.get("id"),
+                    "output_root": str(output_root),
+                    "classes": classes,
+                    "train_count": len(next((e for s, e in splits if s == "train"), [])),
+                    "val_count": len(next((e for s, e in splits if s == "val"), [])),
+                },
             )
         except HTTPException as exc:
             _seg_job_update(job, status="failed", message=str(exc.detail), error=str(exc.detail))
@@ -9943,6 +10366,78 @@ def encode_binary_mask(mask: np.ndarray) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return {"size": [int(height), int(width)], "counts": encoded}
+
+
+def decode_binary_mask(payload: Dict[str, Any]) -> Optional[np.ndarray]:
+    if not payload:
+        return None
+    counts = payload.get("counts")
+    size = payload.get("size") or []
+    if not counts or len(size) != 2:
+        return None
+    try:
+        packed = np.frombuffer(base64.b64decode(counts), dtype=np.uint8)
+        bits = np.unpackbits(packed)[: int(size[0]) * int(size[1])]
+        return bits.reshape(int(size[0]), int(size[1]))
+    except Exception:
+        return None
+
+
+def _rdp(points: np.ndarray, epsilon: float) -> np.ndarray:
+    """Ramer–Douglas–Peucker simplification for 2D points."""
+    if points.shape[0] < 3 or epsilon <= 0:
+        return points
+
+    def _perp_dist(pt, start, end):
+        if np.allclose(start, end):
+            return np.linalg.norm(pt - start)
+        return np.abs(np.cross(end - start, start - pt)) / np.linalg.norm(end - start)
+
+    start_pt = points[0]
+    end_pt = points[-1]
+    dmax = 0.0
+    idx = 0
+    for i in range(1, len(points) - 1):
+        d = _perp_dist(points[i], start_pt, end_pt)
+        if d > dmax:
+            idx = i
+            dmax = d
+    if dmax > epsilon:
+        rec1 = _rdp(points[: idx + 1], epsilon)
+        rec2 = _rdp(points[idx:], epsilon)
+        return np.concatenate((rec1[:-1], rec2), axis=0)
+    return np.array([start_pt, end_pt])
+
+
+def mask_to_polygon(mask: np.ndarray, simplify_epsilon: float) -> List[Tuple[float, float]]:
+    """Extract a coarse polygon outline from a binary mask."""
+    try:
+        mask_arr = np.asarray(mask).astype(bool)
+    except Exception:
+        return []
+    if mask_arr.ndim != 2 or not mask_arr.any():
+        return []
+    coords = np.argwhere(mask_arr)  # y, x
+    if coords.shape[0] < 3:
+        return []
+    points = np.stack([coords[:, 1], coords[:, 0]], axis=1)  # x, y
+    hull_pts = points
+    if ConvexHull is not None:
+        try:
+            hull = ConvexHull(points)
+            hull_pts = points[hull.vertices]
+        except Exception:
+            hull_pts = points
+    if simplify_epsilon and simplify_epsilon > 0:
+        hull_pts = _rdp(hull_pts, simplify_epsilon)
+    # Ensure at least 3 points.
+    if hull_pts.shape[0] < 3:
+        # Fallback to simple bounding box.
+        xs, ys = points[:, 0], points[:, 1]
+        x1, x2 = xs.min(), xs.max()
+        y1, y2 = ys.min(), ys.max()
+        hull_pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+    return [(float(x), float(y)) for x, y in hull_pts]
 
 def to_yolo(w: int, h: int, left: int, top: int, right: int, bottom: int) -> List[float]:
     w_abs = float(right - left)

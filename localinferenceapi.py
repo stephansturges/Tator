@@ -6165,7 +6165,12 @@ def _expand_prompts_with_prompt_llm(
                     _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) returned empty/invalid")
                     continue
                 parsed = _parse_prompt_candidates(text, seen, remaining)
-                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}): {text}")
+                if parsed and len(parsed) > remaining:
+                    parsed = parsed[:remaining]
+                _log(
+                    f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}): "
+                    f"{', '.join(parsed) if parsed else text}"
+                )
                 if parsed:
                     return parsed
                 _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) yielded no valid candidates")
@@ -7270,6 +7275,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         max_new_tokens=payload.prompt_max_new_tokens,
                         reasoning=payload.prompt_reasoning,
                     )
+                    if len(extra_prompts) > payload.qwen_max_prompts:
+                        extra_prompts = extra_prompts[: payload.qwen_max_prompts]
                     extra_prompts = _refine_prompts_with_qwen(extra_prompts)
                     merged = []
                     seen_prompts = set()

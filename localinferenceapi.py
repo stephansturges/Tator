@@ -7391,7 +7391,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             normalized_hints[class_id_val] = note_clean
         for idx, cat in enumerate(categories):
             try:
-            cat_id = int(cat.get("id", idx))
+                cat_id = int(cat.get("id", idx))
             except Exception:
                 continue
             if cat_filter and cat_id not in cat_filter:

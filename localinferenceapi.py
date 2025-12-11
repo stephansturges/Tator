@@ -2182,10 +2182,6 @@ def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
     """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
     if not raw:
         return []
-    # Reject if the raw text still contains obvious prompt headers.
-    lowered = raw.lower()
-    if "you are chatgpt" in lowered or "valid channels" in lowered:
-        return []
     # Reject obvious junk (leftover harmony markers).
     if "<|start|>" in raw or "<|message|>" in raw or "<|channel|>" in raw:
         return []
@@ -2271,7 +2267,7 @@ def _generate_prompt_text(
             top_p=1.0,
             eos_token_id=stop_ids,
             pad_token_id=pad_id,
-            return_full_text=True,
+            return_full_text=False,
         )
         if outputs:
             gen = outputs[0].get("generated_text") or outputs[0].get("text") or ""
@@ -2288,6 +2284,15 @@ def _generate_prompt_text(
                     if not final_ok or not final:
                         return ""
                     return final.strip()
+                # Reasoning disabled: be lenient. If final channel not found, try to strip any headers
+                # and grab the last assistant chunk.
+                if not final_ok or not final:
+                    # Try to find a plain "assistant final" marker in raw text.
+                    m = re.findall(r"assistant\\s+final\\s+(.*)", text, re.DOTALL | re.IGNORECASE)
+                    if m:
+                        final = m[-1].strip()
+                    else:
+                        final = text.strip()
                 cleaned = final.strip()
                 reject = False
                 try:
@@ -2295,23 +2300,24 @@ def _generate_prompt_text(
                     reject = any(t in _HARMONY_SPECIAL_IDS for t in toks)
                 except Exception:
                     reject = any(tag in cleaned for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>"))
-                if reject:
-                    # Try stripping any leftover harmony markers rather than returning empty.
-                    stripped = re.sub(r"<\|[^>]+?\|>", " ", cleaned or text)
-                    stripped = re.sub(r"\s+", " ", stripped).strip()
+                if reject or "you are chatgpt" in cleaned.lower():
+                    # Try stripping any leftover harmony markers or headers.
+                    stripped = re.sub(r"<\\|[^>]+?\\|>", " ", cleaned or text)
+                    stripped = re.sub(r"(?i)^(system|developer|user|assistant)\\s+final\\s+", " ", stripped)
+                    stripped = re.sub(r"\\s+", " ", stripped).strip()
                     cleaned = stripped
                     try:
                         toks = _HARMONY_ENCODING.encode(cleaned, allowed_special="all")
                         if any(t in _HARMONY_SPECIAL_IDS for t in toks):
                             cleaned = ""
                     except Exception:
-                        if any(tag in cleaned for tag in ("<\|start\|>", "<\|message\|>", "<\|channel\|>", "<\|end\|>", "<\|return\|>", "<\|call\|>")):
+                        if any(tag in cleaned for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>")):
                             cleaned = ""
                 if cleaned:
                     return cleaned
                 # Last resort: strip markers from the raw text blob.
-                fallback = re.sub(r"<\|[^>]+?\|>", " ", text)
-                fallback = re.sub(r"\s+", " ", fallback).strip()
+                fallback = re.sub(r"<\\|[^>]+?\\|>", " ", text)
+                fallback = re.sub(r"\\s+", " ", fallback).strip()
                 if fallback:
                     return fallback
     except Exception:
@@ -7670,13 +7676,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     if fp_negative_embeddings and fp_negatives:
                         sel_ids = {n.get("embed_id") for n in fp_negatives if n.get("embed_id")}
                         fp_negative_embeddings = {k: v for k, v in fp_negative_embeddings.items() if k in sel_ids}
+                    selected_fp_count = min(len(fp_negatives), len(fp_negative_embeddings)) if fp_negative_embeddings else len(fp_negatives)
                     try:
                         job.logs.append(
                             {
                                 "ts": time.time(),
                                 "msg": (
                                     f"FP negatives for {cat_name}: pool {len(fp_pool)} embedded {len(fp_negative_embeddings)} "
-                                    f"selected {len(fp_negatives)}"
+                                    f"selected {selected_fp_count}"
                                 ),
                             }
                         )

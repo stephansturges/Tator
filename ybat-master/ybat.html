@@ -936,15 +936,10 @@
                                 <input type="number" id="agentMaxFpNeg" min="0" max="64" value="8" />
                             </div>
                         </div>
-                        <div class="training-grid">
+                        <div class="two-col-grid">
                             <div>
                                 <label for="agentClasses">Class IDs (comma)</label>
                                 <input type="text" id="agentClasses" placeholder="blank = all" />
-                            </div>
-                            <div>
-                                <label for="agentClassHints">Class hints (JSON dict)</label>
-                                <textarea id="agentClassHints" rows="8" style="min-width: 420px;" placeholder='{"1": "cars and pickup trucks only", "2": "people on foot"}' title="Optional JSON dict of class_id -> hint. Example: {&quot;1&quot;: &quot;cars and pickup trucks only&quot;, &quot;2&quot;: &quot;people on foot&quot;}"></textarea>
-                                <div class="training-help">Provide per-class guidance for Qwen (JSON object). IDs should match the dataset labelmap.</div>
                             </div>
                             <div>
                                 <label for="agentQwenMaxPrompts">GPT-OSS extra prompts/class</label>
@@ -976,6 +971,11 @@
                                 <label for="agentValLimit">Test val imgs</label>
                                 <input type="number" id="agentValLimit" min="1" value="10" />
                             </div>
+                        </div>
+                        <div class="training-field">
+                            <label for="agentClassHints">Class hints (JSON dict)</label>
+                            <textarea id="agentClassHints" rows="8" style="min-width: 420px;" placeholder='{"1": "cars and pickup trucks only", "2": "people on foot"}' title="Optional JSON dict of class_id -> hint. Example: {&quot;1&quot;: &quot;cars and pickup trucks only&quot;, &quot;2&quot;: &quot;people on foot&quot;}"></textarea>
+                            <div class="training-help">Provide per-class guidance for Qwen (JSON object). IDs should match the dataset labelmap.</div>
                         </div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="agentRunBtn">Run SAM3 Recipe Mining</button>
@@ -1229,49 +1229,59 @@
                 </div>
             </div>
             <div class="tab-panel" id="tabDatasets" data-tab-panel="datasets">
-                <div class="training-card">
-                    <div class="training-card__header">
-                        <div class="training-card__title">Dataset Management</div>
-                        <div class="training-help">Upload YOLO/YOLO-seg datasets once and reuse them across CLIP, Qwen, and SAM3 training. Use the builder below to create segmentation variants.</div>
+                <div class="training-wrapper two-col">
+                    <div class="training-card">
+                        <div class="training-card__header">
+                            <div class="training-card__title">Dataset Management</div>
+                            <div class="training-help">Upload YOLO/YOLO-seg datasets once and reuse them across CLIP, Qwen, and SAM3 training.</div>
+                        </div>
+                        <div class="training-card__body dataset-manager">
+                            <div class="training-subsection">
+                                <div class="training-subsection__title">Upload current labeling session</div>
+                                <div class="training-help">Packages the images + bboxes you have loaded in the labeling tab and caches them as a bbox dataset.</div>
+                                <div class="training-actions">
+                                    <button type="button" id="datasetUploadCurrentBtn" class="training-button">Upload current dataset</button>
+                                    <div id="datasetUploadCurrentSummary" class="training-help"></div>
+                                </div>
+                            </div>
+                            <div class="training-subsection">
+                                <div class="training-subsection__title">Upload YOLO/YOLO-seg zip</div>
+                                <label for="datasetUploadFile">Zip file (root: labelmap.txt + images + labels)</label>
+                                <div class="training-help">
+                                    Expect exactly: labelmap.txt (class names, one per line) at the root, plus images/ and labels/ in YOLO format. If you already have train/val splits, include them; otherwise a single images/labels pair is fine.
+                                </div>
+                                <input type="file" id="datasetUploadFile" accept=".zip" />
+                                <div class="training-grid">
+                                    <div>
+                                        <label for="datasetUploadName">Dataset name (optional)</label>
+                                        <input type="text" id="datasetUploadName" placeholder="Defaults to zip name" />
+                                    </div>
+                                    <div>
+                                        <label for="datasetUploadType">Dataset type</label>
+                                        <select id="datasetUploadType">
+                                            <option value="">Auto-detect</option>
+                                            <option value="bbox">BBox (YOLO)</option>
+                                            <option value="seg">Polygon masks (YOLO-seg)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="training-actions">
+                                    <button type="button" id="datasetUploadBtn" class="training-button">Upload dataset</button>
+                                    <button type="button" id="datasetListRefresh" class="training-button training-button--ghost">Refresh list</button>
+                                </div>
+                                <div id="datasetUploadMessage" class="training-message"></div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="training-card__body dataset-manager">
-                        <div class="training-subsection">
-                            <div class="training-subsection__title">Upload current labeling session</div>
-                            <div class="training-help">Packages the images + bboxes you have loaded in the labeling tab and caches them as a bbox dataset.</div>
-                            <div class="training-actions">
-                                <button type="button" id="datasetUploadCurrentBtn" class="training-button">Upload current dataset</button>
-                                <div id="datasetUploadCurrentSummary" class="training-help"></div>
-                            </div>
+                    <div class="training-card">
+                        <div class="training-card__header">
+                            <div class="training-card__title">Datasets on disk</div>
+                            <div class="training-help">All cached datasets discovered on disk. Use the refresh button after adding or removing datasets manually.</div>
                         </div>
-                        <div class="training-subsection">
-                            <div class="training-subsection__title">Upload YOLO/YOLO-seg zip</div>
-                            <label for="datasetUploadFile">Zip file (root: labelmap.txt + images + labels)</label>
-                            <div class="training-help">
-                                Expect exactly: labelmap.txt (class names, one per line) at the root, plus images/ and labels/ in YOLO format. If you already have train/val splits, include them; otherwise a single images/labels pair is fine.
-                            </div>
-                            <input type="file" id="datasetUploadFile" accept=".zip" />
-                            <div class="training-grid">
-                                <div>
-                                    <label for="datasetUploadName">Dataset name (optional)</label>
-                                    <input type="text" id="datasetUploadName" placeholder="Defaults to zip name" />
-                                </div>
-                                <div>
-                                    <label for="datasetUploadType">Dataset type</label>
-                                    <select id="datasetUploadType">
-                                        <option value="">Auto-detect</option>
-                                        <option value="bbox">BBox (YOLO)</option>
-                                        <option value="seg">Polygon masks (YOLO-seg)</option>
-                                    </select>
-                                </div>
-                            </div>
+                        <div class="training-card__body">
                             <div class="training-actions">
-                                <button type="button" id="datasetUploadBtn" class="training-button">Upload dataset</button>
-                                <button type="button" id="datasetListRefresh" class="training-button training-button--ghost">Refresh list</button>
+                                <button type="button" id="datasetListRefreshTop" class="training-button">Refresh list</button>
                             </div>
-                            <div id="datasetUploadMessage" class="training-message"></div>
-                        </div>
-                        <div class="training-subsection">
-                            <div class="training-subsection__title">Datasets</div>
                             <div id="datasetList" class="training-history"></div>
                         </div>
                     </div>

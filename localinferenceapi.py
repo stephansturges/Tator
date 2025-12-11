@@ -6127,34 +6127,52 @@ def _expand_prompts_with_prompt_llm(
                 except Exception:
                     pass
 
-        for round_idx in range(3):  # allow a few brainstorming rounds
-            if len(suggestions) >= max_new:
-                break
-            remaining = max_new - len(suggestions)
-            prompt_text = (
+        def _run_brainstorm_with_retries(remaining: int, round_idx: int) -> List[str]:
+            """Try up to 3 times (initial + 2 critiques) to get a clean list."""
+            base_prompt = (
                 "Generate diverse noun-phrase prompts for open-vocabulary object detection with SAM3.\n"
                 f"Target class: '{_humanize_class_name(class_name)}'.\n"
                 f"Known good prompts: {known_list_str}.\n"
             )
             if class_hint:
-                prompt_text += f"Class note: {class_hint}.\n"
-            prompt_text += (
+                base_prompt += f"Class note: {class_hint}.\n"
+            base_prompt += (
                 f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).\n"
                 "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.\n"
                 "Return ONLY a comma-separated list ending with STOP. Example: pickup truck, delivery van, hatchback, STOP"
             )
-            text = _generate_prompt_text(
-                prompt_text,
-                max_new_tokens=max_new_tokens,
-                reasoning=reasoning,
-            )
-            if not text:
-                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}) returned empty/invalid")
-                continue
-            parsed = _parse_prompt_candidates(text, seen, max_new - len(suggestions))
-            _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}): {text}")
+            last_text = ""
+            for attempt in range(3):
+                prompt_text = base_prompt
+                if attempt > 0:
+                    prompt_text = (
+                        f"The previous output was invalid: {last_text or '(empty)'}\n"
+                        f"Try again. Respond ONLY with up to {remaining} comma-separated noun phrases (1-3 words, letters/spaces/hyphens), "
+                        "ending with STOP. No commentary."
+                    )
+                text = _generate_prompt_text(
+                    prompt_text,
+                    max_new_tokens=max_new_tokens,
+                    reasoning=reasoning,
+                )
+                last_text = text
+                if not text:
+                    _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) returned empty/invalid")
+                    continue
+                parsed = _parse_prompt_candidates(text, seen, remaining)
+                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}): {text}")
+                if parsed:
+                    return parsed
+                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) yielded no valid candidates")
+            _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}) failed after 3 attempts")
+            return []
+
+        for round_idx in range(3):  # allow a few brainstorming rounds
+            if len(suggestions) >= max_new:
+                break
+            remaining = max_new - len(suggestions)
+            parsed = _run_brainstorm_with_retries(remaining, round_idx)
             if not parsed:
-                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}) yielded no valid candidates")
                 continue
             suggestions.extend(parsed)
             if len(suggestions) >= max_new:

@@ -960,6 +960,7 @@
                             <button type="button" class="training-button danger" id="agentCancelBtn">Cancel job</button>
                         </div>
                         <div class="training-message" id="agentStatus" role="status">Idle</div>
+                        <div class="training-help" id="agentCacheSize">Cache: …</div>
                         <div class="training-progress" aria-hidden="true">
                             <div id="agentProgressFill" class="training-progress__fill"></div>
                         </div>
@@ -967,6 +968,9 @@
                     <section class="training-status-section">
                         <h3>Progress & Logs</h3>
                         <div class="training-help">Live status and logs for the latest Agent Mining job.</div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button danger" id="agentPurgeCacheBtn" title="Purge cached detections to free disk space.">Purge cache</button>
+                        </div>
                         <div class="training-logs" style="margin-bottom: 12px;">
                             <div id="agentLogs" class="training-log" style="max-height: 220px;"></div>
                         </div>

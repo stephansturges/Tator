@@ -7897,6 +7897,40 @@ def get_latest_agent_mining_result():
     return _serialize_agent_mining_job(jobs[0])
 
 
+@app.get("/agent_mining/cache_size")
+def agent_mining_cache_size():
+    cache_root = _agent_mining_root() / "detections"
+    total = 0
+    try:
+        for p in cache_root.rglob("*"):
+            try:
+                total += p.stat().st_size
+            except Exception:
+                continue
+    except Exception:
+        total = 0
+    return {"bytes": total}
+
+
+@app.post("/agent_mining/cache/purge")
+def agent_mining_cache_purge():
+    cache_root = _agent_mining_root() / "detections"
+    if not cache_root.exists():
+        return {"status": "ok", "deleted_bytes": 0}
+    deleted = 0
+    paths = sorted(cache_root.rglob("*"), key=lambda x: len(x.parts), reverse=True)
+    for p in paths:
+        try:
+            if p.is_file():
+                deleted += p.stat().st_size
+                p.unlink()
+            elif p.is_dir():
+                p.rmdir()
+        except Exception:
+            continue
+    return {"status": "ok", "deleted_bytes": deleted}
+
+
 class AgentApplyRequest(BaseModel):
     dataset_id: str
     image_id: int

@@ -2441,6 +2441,8 @@ class PredictorSettings(BaseModel):
     total_ram_mb: float
     available_ram_mb: float
     image_ram_mb: float
+    gpu_total_mb: Optional[float] = None
+    gpu_free_mb: Optional[float] = None
 
 
 class PredictorSettingsUpdate(BaseModel):
@@ -5770,9 +5772,16 @@ def _find_yolo_dataset_root(extracted_dir: Path) -> Optional[Path]:
         if child.is_dir():
             candidates.append(child)
     for candidate in candidates:
+        labelmap_path = candidate / "labelmap.txt"
         train_images = candidate / "train" / "images"
         train_labels = candidate / "train" / "labels"
-        if train_images.exists() and train_labels.exists():
+        val_images = candidate / "val" / "images"
+        val_labels = candidate / "val" / "labels"
+        root_images = candidate / "images"
+        root_labels = candidate / "labels"
+        if not labelmap_path.exists():
+            continue
+        if (train_images.exists() and train_labels.exists()) or (root_images.exists() and root_labels.exists()):
             return candidate
     return None
 
@@ -5833,11 +5842,30 @@ async def upload_dataset_zip(
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_invalid")
         if target_dir.exists():
             raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_exists")
+        # Ensure labelmap.txt exists and read classes.
+        labelmap_path = dataset_root / "labelmap.txt"
+        if not labelmap_path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_txt_missing")
+        try:
+            with labelmap_path.open("r", encoding="utf-8") as handle:
+                labelmap = [line.strip() for line in handle if line.strip()]
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"labelmap_txt_invalid:{exc}") from exc
+        # Normalize layout: accept either train/val splits or root-level images/labels (no split).
+        train_images = dataset_root / "train" / "images"
+        train_labels = dataset_root / "train" / "labels"
+        val_images = dataset_root / "val" / "images"
+        root_images = dataset_root / "images"
+        root_labels = dataset_root / "labels"
+        if root_images.exists() and root_labels.exists() and not train_images.exists():
+            # Move root images/labels into train split; val remains optional/missing.
+            (dataset_root / "train").mkdir(parents=True, exist_ok=True)
+            shutil.move(str(root_images), str(train_images.parent))
+            shutil.move(str(root_labels), str(train_labels.parent))
         shutil.move(str(dataset_root), str(target_dir))
         dataset_kind = (dataset_type or "").strip().lower() or _infer_yolo_dataset_type(target_dir / "train" / "labels", "bbox")
         if dataset_kind not in {"bbox", "seg"}:
             dataset_kind = "bbox"
-        labelmap = _discover_yolo_labelmap(target_dir)
         train_count = _count_images_in_dir(target_dir / "train" / "images")
         val_count = _count_images_in_dir(target_dir / "val" / "images") if split_val_images.exists() else 0
         image_count = train_count + val_count
@@ -5856,6 +5884,18 @@ async def upload_dataset_zip(
             "signature": signature,
         }
         _persist_sam3_dataset_metadata(target_dir, metadata)
+        # Build COCO JSONs immediately so Qwen/SAM3 consumers have them ready.
+        try:
+            coco_meta = _convert_yolo_dataset_to_coco(target_dir, existing_meta=metadata)
+            metadata.update(
+                {
+                    "coco_train_json": coco_meta.get("coco_train_json"),
+                    "coco_val_json": coco_meta.get("coco_val_json"),
+                }
+            )
+            _persist_sam3_dataset_metadata(target_dir, metadata)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[dataset-upload] failed COCO conversion for %s: %s", safe_name, exc)
         logger.info(
             "[dataset-upload] stored=%s type=%s train=%d val=%d classes=%d",
             safe_name,
@@ -5872,6 +5912,32 @@ async def upload_dataset_zip(
 @app.get("/datasets")
 def list_datasets():
     return _list_sam3_datasets()
+
+
+@app.delete("/datasets/{dataset_id}")
+def delete_dataset(dataset_id: str):
+    target_entry = None
+    for entry in _list_all_datasets(prefer_registry=True):
+        if dataset_id in (entry.get("id"), entry.get("signature")):
+            target_entry = entry
+            break
+    if not target_entry:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
+    target_path = Path(target_entry["dataset_root"]).resolve()
+    allowed_roots = {
+        DATASET_REGISTRY_ROOT.resolve(),
+        SAM3_DATASET_ROOT.resolve(),
+        QWEN_DATASET_ROOT.resolve(),
+    }
+    if not any(str(target_path).startswith(str(root)) for root in allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_invalid")
+    try:
+        shutil.rmtree(target_path, ignore_errors=False)
+    except FileNotFoundError:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    return {"status": "deleted", "dataset_id": dataset_id}
 
 
 @app.get("/sam3/datasets")
@@ -10932,6 +10998,16 @@ def _predictor_settings_payload() -> PredictorSettings:
     active = predictor_manager.active_slot_count()
     loaded = predictor_manager.loaded_slot_count()
     image_memory = predictor_manager.total_image_memory_bytes()
+    gpu_total_mb = None
+    gpu_free_mb = None
+    if torch.cuda.is_available():
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            gpu_total_mb = _bytes_to_mb(int(total_bytes))
+            gpu_free_mb = _bytes_to_mb(int(free_bytes))
+        except Exception:
+            gpu_total_mb = None
+            gpu_free_mb = None
     vm = psutil.virtual_memory()
     process = psutil.Process(os.getpid())
     process_mb = _bytes_to_mb(process.memory_info().rss)
@@ -10948,6 +11024,8 @@ def _predictor_settings_payload() -> PredictorSettings:
         total_ram_mb=total_mb,
         available_ram_mb=available_mb,
         image_ram_mb=image_mb,
+        gpu_total_mb=gpu_total_mb,
+        gpu_free_mb=gpu_free_mb,
     )
 
 

@@ -1259,6 +1259,7 @@ const sam3TrainState = {
         uploadCurrentSummary: null,
         refreshBtn: null,
         list: null,
+        deleteButtons: new Map(),
     };
 
     const datasetManagerState = {
@@ -1296,6 +1297,15 @@ const sam3TrainState = {
                     badge.textContent = (entry.type || "bbox").toUpperCase();
                     header.appendChild(title);
                     header.appendChild(badge);
+                    const actions = document.createElement("div");
+                    actions.className = "training-history-actions";
+                    const delBtn = document.createElement("button");
+                    delBtn.type = "button";
+                    delBtn.className = "button button-outline";
+                    delBtn.textContent = "Delete";
+                    delBtn.addEventListener("click", () => handleDatasetDelete(entry));
+                    actions.appendChild(delBtn);
+                    header.appendChild(actions);
                     const meta = document.createElement("div");
                     meta.className = "training-help";
                     const parts = [];
@@ -1313,6 +1323,25 @@ const sam3TrainState = {
             }
         }
         renderSegBuilderDatasets(datasetManagerState.datasets);
+    }
+
+    async function handleDatasetDelete(entry) {
+        if (!entry || !entry.id) return;
+        const ok = window.confirm(`Delete dataset "${entry.label || entry.id}"? This cannot be undone.`);
+        if (!ok) return;
+        setDatasetUploadMessage(`Deleting ${entry.label || entry.id}…`, "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(entry.id)}`, { method: "DELETE" });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            setDatasetUploadMessage(`Deleted ${entry.label || entry.id}.`, "success");
+            await refreshDatasetList();
+        } catch (err) {
+            console.error("Failed to delete dataset", err);
+            setDatasetUploadMessage(err.message || "Failed to delete dataset", "error");
+        }
     }
 
     async function refreshDatasetList() {
@@ -8449,6 +8478,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             totalRamMb: coerceNumber(data.total_ram_mb, 0),
             availableRamMb: coerceNumber(data.available_ram_mb, 0),
             imageRamMb: coerceNumber(data.image_ram_mb, 0),
+            gpuTotalMb: coerceNumber(data.gpu_total_mb, 0),
+            gpuFreeMb: coerceNumber(data.gpu_free_mb, 0),
         };
         samPredictorBudget = predictorSettings.maxPredictors;
         if (predictorElements.countInput) {
@@ -8473,8 +8504,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             predictorElements.imageRam.textContent = formatMb(predictorSettings.imageRamMb);
         }
         if (predictorElements.systemFreeRam) {
-            const free = predictorSettings.availableRamMb;
-            const total = predictorSettings.totalRamMb;
+            const useGpu = predictorSettings.gpuTotalMb > 0;
+            const free = useGpu ? predictorSettings.gpuFreeMb : predictorSettings.availableRamMb;
+            const total = useGpu ? predictorSettings.gpuTotalMb : predictorSettings.totalRamMb;
             predictorElements.systemFreeRam.textContent = total
                 ? `${formatMb(free)} / ${formatMb(total)}`
                 : formatMb(free);
@@ -8571,11 +8603,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         settingsElements.applyButton = document.getElementById("settingsApply");
         settingsElements.testButton = document.getElementById("settingsTest");
         settingsElements.status = document.getElementById("settingsStatus");
-        backendFuzzerElements.runButton = document.getElementById("runBackendFuzzer");
-        backendFuzzerElements.status = document.getElementById("backendFuzzerStatus");
-        backendFuzzerElements.log = document.getElementById("backendFuzzerLog");
-        backendFuzzerElements.includeQwen = document.getElementById("fuzzerIncludeQwen");
-        backendFuzzerElements.includeSam3 = document.getElementById("fuzzerIncludeSam3");
+    backendFuzzerElements.runButton = document.getElementById("runBackendFuzzer");
+    backendFuzzerElements.status = document.getElementById("backendFuzzerStatus");
+    backendFuzzerElements.log = document.getElementById("backendFuzzerLog");
+    backendFuzzerElements.includeQwen = document.getElementById("fuzzerIncludeQwen");
+    backendFuzzerElements.includeSam3 = document.getElementById("fuzzerIncludeSam3");
+    backendFuzzerElements.includeClip = document.getElementById("fuzzerIncludeClip");
         if (settingsElements.apiInput) {
             settingsElements.apiInput.value = API_ROOT;
         }
@@ -8610,6 +8643,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         backendFuzzerElements.log.textContent = "";
         const includeQwen = Boolean(backendFuzzerElements.includeQwen?.checked);
         const includeSam3 = Boolean(backendFuzzerElements.includeSam3?.checked);
+        const includeClip = Boolean(backendFuzzerElements.includeClip?.checked);
         const tests = [];
         const addLog = (line) => {
             backendFuzzerElements.log.textContent += `${line}\n`;
@@ -8633,6 +8667,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         addTest("Settings ping", async () => {
             await testApiRootCandidate(API_ROOT);
         });
+        if (includeClip) {
+            addTest("CLIP backbones list", async () => {
+                const resp = await fetch(`${API_ROOT}/clip/backbones`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+        }
         addTest("SAM point (sam1)", async () => {
             const payload = {
                 point_x: 32,

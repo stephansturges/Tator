@@ -5317,7 +5317,7 @@ function renderSegBuilderLog(job) {
 function updateSegBuilderDatasetSummary(entry) {
     if (!segBuilderElements.datasetSummary) return;
     if (!entry) {
-        segBuilderElements.datasetSummary.textContent = "Pick a bbox dataset to convert.";
+        segBuilderElements.datasetSummary.textContent = "Pick a dataset to convert (bbox required; others will fail at start).";
         return;
     }
     const pieces = [];
@@ -5341,17 +5341,16 @@ function renderSegBuilderDatasets(list) {
         const typeLabel = entry.type ? `[${entry.type}] ` : "";
         const cocoNote = entry.coco_ready ? "" : " (needs convert)";
         opt.textContent = `${typeLabel}${entry.label || entry.id}${cocoNote}`;
-        if ((entry.type || "bbox") !== "bbox") {
-            opt.disabled = true;
-        }
         if (entry.id === segBuilderState.selectedId) {
             opt.selected = true;
         }
         segBuilderElements.datasetSelect.appendChild(opt);
     });
-    const selected = segBuilderState.datasets.find((d) => d.id === segBuilderState.selectedId && (d.type || "bbox") === "bbox")
-        || segBuilderState.datasets.find((d) => (d.type || "bbox") === "bbox")
-        || null;
+    const selected =
+        segBuilderState.datasets.find((d) => d.id === segBuilderState.selectedId) ||
+        segBuilderState.datasets.find((d) => (d.type || "bbox") === "bbox") ||
+        segBuilderState.datasets[0] ||
+        null;
     segBuilderState.selectedId = selected ? selected.id : null;
     if (segBuilderElements.datasetSelect && segBuilderState.selectedId) {
         segBuilderElements.datasetSelect.value = segBuilderState.selectedId;

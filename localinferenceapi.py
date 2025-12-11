@@ -7514,9 +7514,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             "dataset_id": payload.dataset_id,
             "split": split,
             "config": payload.dict(),
-            "status": "initialized",
+            "status": "completed",
             "classes": selected_cats,
-            "note": "Agent mining runner initialized with splits, exemplars, and baseline candidate evals.",
+            "note": "Agent mining completed with splits, exemplars, and baseline candidate evals.",
         }
         try:
             coverages = []

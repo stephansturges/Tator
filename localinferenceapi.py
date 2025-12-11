@@ -84,6 +84,24 @@ GPT_OSS_MODEL_ID = os.environ.get("PROMPT_LLM_MODEL_ID", "openai/gpt-oss-20b")
 GPT_OSS_PIPELINE = None
 GPT_OSS_PIPELINE_ERROR: Optional[Exception] = None
 _GPT_OSS_PIPELINE_LOCK = threading.Lock()
+_HARMONY_ENCODING = tiktoken.get_encoding("o200k_harmony")
+_HARMONY_START = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|start|>", allowed_special="all")[0]])
+_HARMONY_END = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|end|>", allowed_special="all")[0]])
+_HARMONY_MESSAGE = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|message|>", allowed_special="all")[0]])
+_HARMONY_CHANNEL = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|channel|>", allowed_special="all")[0]])
+_HARMONY_RETURN_ID = _HARMONY_ENCODING.encode("<|return|>", allowed_special="all")[0]
+_HARMONY_CALL_ID = _HARMONY_ENCODING.encode("<|call|>", allowed_special="all")[0]
+_HARMONY_CONSTRAIN_ID = _HARMONY_ENCODING.encode("<|constrain|>", allowed_special="all")[0]
+_HARMONY_STOP_IDS = [_HARMONY_RETURN_ID, _HARMONY_CALL_ID]
+_HARMONY_SPECIAL_IDS = {
+    _HARMONY_ENCODING.encode("<|start|>", allowed_special="all")[0],
+    _HARMONY_ENCODING.encode("<|end|>", allowed_special="all")[0],
+    _HARMONY_ENCODING.encode("<|message|>", allowed_special="all")[0],
+    _HARMONY_ENCODING.encode("<|channel|>", allowed_special="all")[0],
+    _HARMONY_RETURN_ID,
+    _HARMONY_CALL_ID,
+    _HARMONY_CONSTRAIN_ID,
+}
 
 # Harmony token helpers for GPT-OSS (o200k_harmony encoding).
 _HARMONY_ENCODING = tiktoken.get_encoding("o200k_harmony")
@@ -2253,11 +2271,16 @@ def _generate_prompt_text(
                 # Some pipelines return list of dicts; fallback to stringify.
                 text = str(gen)
             if text:
-                final = _extract_harmony_final(text)
-                # Drop if the final still contains harmony markers.
-                if any(tag in final for tag in ("<|start|>", "<|message|>", "<|channel|>")):
-                    return ""
-                return final.strip()
+                final = _extract_harmony_final(text).strip()
+                # Drop if the final still contains harmony markers (token-level).
+                try:
+                    toks = _HARMONY_ENCODING.encode(final, allowed_special="all")
+                    if any(t in _HARMONY_SPECIAL_IDS for t in toks):
+                        return ""
+                except Exception:
+                    if any(tag in final for tag in ("<|start|>", "<|message|>", "<|channel|>", "<|end|>", "<|return|>", "<|call|>")):
+                        return ""
+                return final
     except Exception:
         pass
     return ""

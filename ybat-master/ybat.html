@@ -65,11 +65,11 @@
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
-            <button class="tab-button" data-tab="agent-mining" id="tabAgentMiningButton" type="button">Agent Mining</button>
-            <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">Prompt Helper</button>
+            <button class="tab-button" data-tab="agent-mining" id="tabAgentMiningButton" type="button">SAM3 Recipe Mining</button>
+            <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
             <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
-            <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Model</button>
+            <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Class Predictor Settings</button>
             <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
             <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">SAM Predictors</button>
             <button class="tab-button" data-tab="settings" id="tabSettingsButton" type="button">Backend Config</button>
@@ -267,9 +267,9 @@
                 </div>
             </div>
             <div class="tab-panel" id="tabTraining" data-tab-panel="training">
-                <div class="training-wrapper">
+                <div class="training-wrapper two-col">
                     <section class="training-form-section">
-                        <h2>Train CLIP Model</h2>
+                        <h2>CLIP Class Predictor Settings</h2>
                         <div class="training-field">
                             <label for="clipBackboneSelect">CLIP Backbone</label>
                             <select id="clipBackboneSelect"></select>
@@ -423,7 +423,7 @@
                 </div>
             </div>
             <div class="tab-panel" id="tabQwenTrain" data-tab-panel="qwen-train">
-                <div class="training-wrapper">
+                <div class="training-wrapper two-col">
                     <section class="training-form-section">
                         <h2>Fine-tune Qwen 2.5 VL</h2>
                         <p class="qwen-train-intro">
@@ -615,7 +615,7 @@
                 </div>
             </div>
             <div class="tab-panel" id="tabSam3Train" data-tab-panel="sam3-train">
-                <div class="training-wrapper">
+                <div class="training-wrapper two-col">
                     <section class="training-form-section">
                         <h2>Train SAM3 (text-promptable by default)</h2>
                         <p class="training-help">Pick a cached dataset (Qwen uploads or YOLO folders). By default we keep the SAM3 segmentation head so the resulting checkpoint works with text prompting; masks are only required if you opt in below.</p>
@@ -835,9 +835,9 @@
                 </div>
             </div>
             <div class="tab-panel" id="tabAgentMining" data-tab-panel="agent-mining">
-                <div class="training-wrapper">
+                <div class="training-wrapper two-col">
                     <section class="training-form-section">
-                        <h2>Agent Mining (SAM3 + exemplars)</h2>
+                        <h2>SAM3 Recipe Mining</h2>
                         <p class="training-help">Run SAM3 text/visual sweeps with optional CLIP FP guard to propose per-class recipes. Test mode limits images for fast smoke tests.</p>
                         <div class="training-field">
                             <label>Dataset</label>
@@ -958,6 +958,7 @@
                                     <option value="medium">medium</option>
                                     <option value="high">high</option>
                                 </select>
+                                <div class="training-help" style="color: #b91c1c;">Only “none” is stable right now.</div>
                             </div>
                             <div>
                                 <label for="agentPromptMaxTokens">GPT-OSS max tokens</label>
@@ -977,7 +978,7 @@
                             </div>
                         </div>
                         <div class="training-actions">
-                            <button type="button" class="training-button" id="agentRunBtn">Run Agent Mining</button>
+                            <button type="button" class="training-button" id="agentRunBtn">Run SAM3 Recipe Mining</button>
                             <button type="button" class="training-button secondary" id="agentRefreshBtn">Refresh latest</button>
                             <button type="button" class="training-button danger" id="agentCancelBtn">Cancel job</button>
                         </div>
@@ -989,7 +990,7 @@
                     </section>
                     <section class="training-status-section">
                         <h3>Progress & Logs</h3>
-                        <div class="training-help">Live status and logs for the latest Agent Mining job.</div>
+                        <div class="training-help">Live status and logs for the latest SAM3 Recipe Mining job.</div>
                         <div class="training-actions">
                             <button type="button" class="training-button danger" id="agentPurgeCacheBtn" title="Purge cached detections to free disk space.">Purge cache</button>
                         </div>
@@ -998,7 +999,7 @@
                         </div>
                         <div class="training-divider"></div>
                         <h3>Results</h3>
-                        <div class="training-help">Shows the latest completed Agent Mining job (test mode if selected). Recipes export as a portable zip (JSON + exemplar crops).</div>
+                        <div class="training-help">Shows the latest completed SAM3 Recipe Mining job (test mode if selected). Recipes export as a portable zip (JSON + exemplar crops).</div>
                         <div id="agentResults"></div>
                         <div class="training-divider"></div>
                         <h3>Saved Recipes</h3>
@@ -1036,7 +1037,7 @@
             <div class="tab-panel" id="tabPromptHelper" data-tab-panel="prompt-helper">
                 <div class="training-wrapper">
                     <section class="training-form-section">
-                        <h2>Prompt Helper (SAM3)</h2>
+                        <h2>SAM3 Vocabulary Explorer</h2>
                         <p class="training-help">Generate alternative text prompts for your dataset classes and score them with SAM3 on a sampled subset to find the best wording.</p>
                         <div class="training-field">
                             <label>Dataset</label>
@@ -1244,7 +1245,10 @@
                         </div>
                         <div class="training-subsection">
                             <div class="training-subsection__title">Upload YOLO/YOLO-seg zip</div>
-                            <label for="datasetUploadFile">Zip file (expects train/val &gt; images + labels)</label>
+                            <label for="datasetUploadFile">Zip file (root: labelmap.txt + images + labels)</label>
+                            <div class="training-help">
+                                Expect exactly: labelmap.txt (class names, one per line) at the root, plus images/ and labels/ in YOLO format. If you already have train/val splits, include them; otherwise a single images/labels pair is fine.
+                            </div>
                             <input type="file" id="datasetUploadFile" accept=".zip" />
                             <div class="training-grid">
                                 <div>
@@ -1305,9 +1309,9 @@
                 </div>
             </div>
             <div class="tab-panel" id="tabSam3PromptModels" data-tab-panel="sam3-prompt-models">
-                <div class="training-wrapper">
+                <div class="training-wrapper single-wide">
                     <section class="training-form-section">
-                        <h2>SAM3 Prompt Model Selection</h2>
+                        <h2>SAM3 Correction Model Selection</h2>
                         <p class="training-help">Pick a locally trained SAM3 checkpoint to use for bbox prompting in the labeling page.</p>
                         <div class="training-field">
                             <label for="sam3PromptModelSelect">Available models</label>
@@ -1425,7 +1429,7 @@
                             <strong id="predictorProcessRam">--</strong>
                         </div>
                         <div class="predictor-stat">
-                            <span>System free / total</span>
+                            <span>GPU free / total (fallback: system)</span>
                             <strong id="predictorSystemFreeRam">--</strong>
                         </div>
                     </div>
@@ -1447,8 +1451,9 @@
                     <h3>Backend Fuzzer</h3>
                     <p class="settings-help">Runs a quick smoke test with random data against key API endpoints (SAM/Qwen). Useful to sanity-check that the backend is alive and models are loaded. Tests may fail if weights are missing.</p>
                     <div class="training-grid">
-                        <label><input type="checkbox" id="fuzzerIncludeQwen" checked /> Include Qwen tests</label>
-                        <label><input type="checkbox" id="fuzzerIncludeSam3" /> Include SAM3 tests</label>
+                            <label><input type="checkbox" id="fuzzerIncludeQwen" checked /> Include Qwen tests</label>
+                            <label><input type="checkbox" id="fuzzerIncludeSam3" /> Include SAM3 tests</label>
+                            <label><input type="checkbox" id="fuzzerIncludeClip" /> Include CLIP tests</label>
                     </div>
                     <div class="settings-actions">
                         <button type="button" id="runBackendFuzzer" class="training-button">Run fuzzer</button>

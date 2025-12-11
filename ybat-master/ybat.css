@@ -1021,6 +1021,25 @@ hr {
     padding-right: 18px;
 }
 
+.training-wrapper.two-col .training-form-section,
+.training-wrapper.two-col .training-status-section {
+    flex: 1 1 50%;
+    max-width: 50%;
+}
+
+.training-wrapper.two-col .training-form-section {
+    max-height: calc(100vh - 140px);
+}
+
+.training-wrapper.single-wide {
+    max-width: 100%;
+}
+
+.training-wrapper.single-wide .training-form-section {
+    flex: 1 1 100%;
+    max-width: 100%;
+}
+
 .training-form-section::-webkit-scrollbar {
     width: 8px;
 }
@@ -1806,7 +1825,8 @@ hr {
     gap: 24px;
     padding: 24px 28px 40px;
     box-sizing: border-box;
-    max-width: 960px;
+    max-width: 100%;
+    width: 100%;
     margin: 0 auto;
 }
 

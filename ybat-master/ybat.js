@@ -11090,6 +11090,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const recipe = cls.recipe || {};
             const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
             const summary = recipe.summary || {};
+            const negatives = Array.isArray(recipe.negatives) ? recipe.negatives : [];
+            const params = recipe.params || {};
+            const guardBits = [];
+            if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
+                guardBits.push(`CLIP guard on (floor ${params.similarity_score ?? recipe.similarity_score ?? 0.25})`);
+            } else {
+                guardBits.push("CLIP guard off");
+            }
+            if (params.use_negative_exemplars || recipe.use_negative_exemplars) {
+                guardBits.push(`Negatives used: ${negatives.length || 0} (strength ${params.negative_strength ?? recipe.negative_strength ?? 0})`);
+            }
             const covPct = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0.0";
             body.innerHTML = `
                 <div class="training-history-row">
@@ -11098,36 +11109,69 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 </div>
                 <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
                 <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%) • FPs: ${summary.fps || 0}</div>
+                <div class="training-help">${guardBits.join(" • ")}</div>
             `;
             if (steps.length) {
+                const expl = recipe.explanation
+                    ? recipe.explanation
+                    : `Kept ${steps.length} step(s). Coverage ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%), FPs ${summary.fps || 0}.`;
+                const explDiv = document.createElement("div");
+                explDiv.className = "training-help";
+                explDiv.textContent = expl;
+                body.appendChild(explDiv);
+
                 const table = document.createElement("table");
                 table.className = "training-table";
                 table.innerHTML = `
                     <thead>
-                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Gain</th><th>FPs</th><th>Cov%</th></tr>
+                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Adds</th><th>Cov after %</th><th>FPs (step)</th><th>FPs (total)</th><th>Prec</th></tr>
                     </thead>
                 `;
                 const tbody = document.createElement("tbody");
                 steps.forEach((step, idx) => {
-                    const covAfter = Number.isFinite(step.coverage_after) ? (step.coverage_after * 100).toFixed(1) : "";
+                    const covVal =
+                        Number.isFinite(step.cum_coverage) && step.cum_coverage >= 0
+                            ? (step.cum_coverage * 100).toFixed(1)
+                            : Number.isFinite(step.coverage_after)
+                            ? (step.coverage_after * 100).toFixed(1)
+                            : "";
                     const label =
                         step.type === "visual" && step.exemplar
                             ? `Exemplar img ${step.exemplar.image_id} bbox ${Array.isArray(step.exemplar.bbox) ? step.exemplar.bbox.join(",") : ""}`
                             : step.prompt || "";
                     const row = document.createElement("tr");
+                    if (idx === 0) row.classList.add("metric-table__highlight");
                     row.innerHTML = `
                         <td>${idx + 1}</td>
                         <td>${step.type || "text"}</td>
                         <td>${escapeHtml(label)}</td>
                         <td>${(step.threshold ?? "").toString()}</td>
                         <td>${step.gain ?? ""}</td>
-                        <td>${step.fps ?? ""}</td>
-                        <td>${covAfter}</td>
+                        <td>${covVal}</td>
+                        <td>${step.fps ?? 0}</td>
+                        <td>${step.cum_fps ?? step.fps ?? 0}</td>
+                        <td>${formatMetric(step.precision, 3)}</td>
                     `;
                     tbody.appendChild(row);
                 });
                 table.appendChild(tbody);
                 body.appendChild(table);
+            }
+            // Show exemplars/negatives snapshot for transparency.
+            const exemplarList = Array.isArray(cls.exemplars) ? cls.exemplars : [];
+            if (exemplarList.length) {
+                const exDiv = document.createElement("div");
+                exDiv.className = "training-help";
+                const sample = exemplarList.slice(0, 6).map((ex) => `img ${ex.image_id} bbox ${Array.isArray(ex.bbox) ? ex.bbox.join(",") : ""}`);
+                exDiv.textContent = `Exemplars (${exemplarList.length}): ${sample.join(" • ")}`;
+                body.appendChild(exDiv);
+            }
+            if (negatives.length) {
+                const negDiv = document.createElement("div");
+                negDiv.className = "training-help";
+                const sampleNeg = negatives.slice(0, 6).map((ex) => `img ${ex.image_id} bbox ${Array.isArray(ex.bbox) ? ex.bbox.join(",") : ""}`);
+                negDiv.textContent = `Negatives (${negatives.length}): ${sampleNeg.join(" • ")}`;
+                body.appendChild(negDiv);
             } else {
                 const empty = document.createElement("div");
                 empty.className = "training-help";
@@ -11696,14 +11740,19 @@ return {
                     class_name: agentState.recipeClassOverride.class_name,
                 };
             }
+            const params = recipeData.params || {};
             const payload = {
                 dataset_id: datasetId,
                 image_id: imageId,
                 recipe: recipeData,
-                mask_threshold: recipeData.params?.mask_threshold ?? 0.5,
-                min_size: recipeData.params?.min_size ?? 0,
-                simplify_epsilon: recipeData.params?.simplify_epsilon ?? 0.5,
-                max_results: recipeData.params?.max_results ?? 100,
+                mask_threshold: params.mask_threshold ?? 0.5,
+                min_size: params.min_size ?? 0,
+                simplify_epsilon: params.simplify_epsilon ?? 0.5,
+                max_results: params.max_results ?? 100,
+                use_negative_exemplars: params.use_negative_exemplars ?? recipeData.use_negative_exemplars ?? false,
+                negative_strength: params.negative_strength ?? recipeData.negative_strength ?? 0,
+                use_clip_fp_guard: params.use_clip_fp_guard ?? recipeData.use_clip_fp_guard ?? false,
+                similarity_score: params.similarity_score ?? recipeData.similarity_score ?? 0.25,
             };
             const resp = await fetch(`${API_ROOT}/agent_mining/apply`, {
                 method: "POST",

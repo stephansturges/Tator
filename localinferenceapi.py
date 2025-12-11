@@ -2239,10 +2239,10 @@ def _generate_prompt_text(
     developer_msg = (
         "# Instructions\n"
         "You generate short noun-phrase candidates for open-vocabulary detection. "
-        "Respond once, ONLY on the final channel, with a comma-separated list ending with STOP. "
+        "Respond once, ONLY on the final channel, with a comma-separated list (no prose). "
         "Do NOT emit analysis/commentary messages. "
         "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no punctuation beyond commas, no quotes, no numbering, no JSON. "
-        "If no valid candidates, return STOP."
+        "If no valid candidates, return an empty list."
     )
     user_msg = prompt
     harmony_prompt = _build_harmony_prompt(system_msg, developer_msg, user_msg)
@@ -6139,7 +6139,7 @@ def _expand_prompts_with_prompt_llm(
             base_prompt += (
                 f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).\n"
                 "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.\n"
-                "Return ONLY a comma-separated list ending with STOP. Example: pickup truck, delivery van, hatchback, STOP"
+                "Return ONLY a comma-separated list. Example: pickup truck, delivery van, hatchback"
             )
             last_text = ""
             for attempt in range(3):
@@ -6147,8 +6147,8 @@ def _expand_prompts_with_prompt_llm(
                 if attempt > 0:
                     prompt_text = (
                         f"The previous output was invalid: {last_text or '(empty)'}\n"
-                        f"Try again. Respond ONLY with up to {remaining} comma-separated noun phrases (1-3 words, letters/spaces/hyphens), "
-                        "ending with STOP. No commentary."
+                        f"Try again. Respond ONLY with up to {remaining} comma-separated noun phrases (1-3 words, letters/spaces/hyphens). "
+                        "No commentary."
                     )
                 text = _generate_prompt_text(
                     prompt_text,

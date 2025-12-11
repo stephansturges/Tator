@@ -4025,6 +4025,7 @@ def _ensure_agent_mining_split(
 
 def _agent_mining_cache_key(
     *,
+    class_id: Optional[int],
     prompt: Optional[str],
     visual_ref: Optional[Dict[str, Any]],
     threshold: float,
@@ -4038,6 +4039,7 @@ def _agent_mining_cache_key(
     if visual_ref:
         visual_key = f"{visual_ref.get('image_id','')}:{','.join(map(str, visual_ref.get('bbox') or []))}"
     key_parts = [
+        f"class={class_id}" if class_id is not None else "class=?",
         prompt or "",
         visual_key,
         f"thr={threshold:.4f}",
@@ -4444,6 +4446,7 @@ def _collect_agent_mining_detections_image_first(
             cached = _load_agent_mining_detections(
                 cache_dir,
                 _agent_mining_cache_key(
+                    class_id=cand.get("class_id"),
                     prompt=cand.get("prompt"),
                     visual_ref=cand.get("visual_ref"),
                     threshold=thr,
@@ -4490,6 +4493,7 @@ def _collect_agent_mining_detections_image_first(
                     if ((det.get("score") is None and thr <= min_threshold) or (det.get("score") or 0.0) >= thr)
                 ]
                 cache_key = _agent_mining_cache_key(
+                    class_id=cand.get("class_id"),
                     prompt=cand.get("prompt"),
                     visual_ref=cand.get("visual_ref"),
                     threshold=thr,
@@ -7048,11 +7052,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             thresholds = [0.3]
         thresholds = [float(max(0.0, min(1.0, t))) for t in thresholds]
 
-        # Precompute prompts (including Qwen expansions) before loading SAM3.
+        # Precompute prompts (including GPT-OSS expansions) before loading SAM3.
         prepared_prompts: Dict[int, List[str]] = {}
         raw_hints = payload.class_hints or {}
         normalized_hints: Dict[int, str] = {}
-        # Build a map of class name -> id for hint resolution.
         name_to_id: Dict[str, int] = {}
         for idx, cat in enumerate(categories):
             try:
@@ -7114,7 +7117,6 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 prompts_for_cat = _refine_prompts_with_qwen(prompts_for_cat)
             prepared_prompts[cat_id] = prompts_for_cat
 
-        # Release prompt LLM to free memory before SAM3 loads.
         try:
             _unload_qwen_runtime()
             job.logs.append({"ts": time.time(), "msg": "Prompt LLM unloaded to free memory before SAM3 init"})
@@ -7159,6 +7161,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if len(job.logs) > MAX_JOB_LOGS:
             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
 
+        class_entries: List[Dict[str, Any]] = []
+        global_candidates: List[Dict[str, Any]] = []
         for idx, cat in enumerate(categories):
             try:
                 cat_id = int(cat.get("id", idx))
@@ -7232,6 +7236,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     "msg": f"Evaluating {len(text_prompts)} text prompt(s) x {len(thresholds)} thresholds and {len(exemplars)} exemplar(s) for {cat_name}",
                 }
             )
+            entry = {
+                "id": cat_id,
+                "name": cat_name,
+                "train_gt": train_gt,
+                "val_gt": val_gt,
+                "exemplars": exemplars,
+                "clip_warnings": clip_exemplar_warnings,
+                "exemplar_embeddings": exemplar_embeddings,
+                "text_prompts": text_prompts,
+            }
+            class_entries.append(entry)
             selected_cats.append(
                 {
                     "id": cat_id,
@@ -7242,13 +7257,101 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     "clip_warnings": clip_exemplar_warnings,
                 }
             )
+            class_candidates: List[Dict[str, Any]] = []
+            for prompt_text in text_prompts:
+                cid = f"class{cat_id}::text::{prompt_text}"
+                cand = {"id": cid, "type": "text", "prompt": prompt_text, "class_id": cat_id}
+                class_candidates.append(cand)
+                global_candidates.append(cand)
+            for ex_idx, ex in enumerate(exemplars):
+                cid = f"class{cat_id}::visual::{ex_idx}"
+                cand = {
+                    "id": cid,
+                    "type": "visual",
+                    "bbox": ex.get("bbox"),
+                    "visual_ref": ex,
+                    "class_id": cat_id,
+                }
+                class_candidates.append(cand)
+                global_candidates.append(cand)
+            entry["candidates"] = class_candidates
             if job.cancel_event.is_set():
                 job.status = "cancelled"
                 job.message = "Cancelled"
                 job.updated_at = time.time()
                 return
-            # Evaluate text prompts and exemplar prompts on the validation split using cached detections.
-            job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} (eval prompts)"
+
+        total_images = len(val_ids)
+        job.logs.append(
+            {
+                "ts": time.time(),
+                "msg": (
+                    f"Starting global image-first sweep: {total_images} val images, "
+                    f"{len(global_candidates)} candidates x {len(thresholds)} thresholds"
+                ),
+            }
+        )
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+
+        progress_every_global = max(1, total_images // 10) if total_images else 1
+
+        def _global_progress(done: int) -> None:
+            if job.cancel_event.is_set():
+                return
+            if done == 1 or done == total_images or done % progress_every_global == 0:
+                try:
+                    pct = (done / total_images) if total_images else 0.0
+                    job.progress = 0.35 + 0.4 * pct
+                    job.logs.append(
+                        {
+                            "ts": time.time(),
+                            "msg": f"Processed {done}/{total_images} val images (global) for all candidates",
+                        }
+                    )
+                    if len(job.logs) > MAX_JOB_LOGS:
+                        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                    job.updated_at = time.time()
+                except Exception:
+                    pass
+
+        det_cache, det_stats_global = _collect_agent_mining_detections_image_first(
+            candidates=global_candidates,
+            thresholds=thresholds,
+            images=images,
+            image_ids=val_ids,
+            mask_threshold=payload.mask_threshold,
+            min_size=payload.min_size,
+            simplify=payload.simplify_epsilon,
+            max_results=payload.max_results,
+            cache_dir=cache_dir,
+            pool=mining_pool,
+            cancel_event=job.cancel_event,
+            progress_callback=_global_progress,
+        )
+        job.logs.append(
+            {
+                "ts": time.time(),
+                "msg": (
+                    f"SAM3 global mining ran image-first on {det_stats_global.get('images')} val images for "
+                    f"{det_stats_global.get('candidates')} candidates x {det_stats_global.get('thresholds')} thresholds "
+                    f"(cached {det_stats_global.get('cached_pairs')} pairs, executed {det_stats_global.get('executed_pairs')} "
+                    f"with {det_stats_global.get('executed_pairs_with_dets')} yielding detections)"
+                ),
+            }
+        )
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+        job.progress = max(job.progress, 0.75)
+
+        for idx, entry in enumerate(class_entries):
+            cat_id = entry["id"]
+            cat_name = entry["name"]
+            exemplars = entry["exemplars"]
+            exemplar_embeddings = entry.get("exemplar_embeddings") or {}
+            text_prompts = entry["text_prompts"]
+            class_candidates = entry["candidates"]
+            job.message = f"Class {idx + 1}/{len(class_entries)}: {cat_name} (eval prompts)"
             gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
             gt_index_val = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in val_id_set}
             per_image_gt_val = {img_id: per_image_gt_all.get(img_id, 0) for img_id in val_ids}
@@ -7256,117 +7359,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             for entries in gt_index_val.values():
                 for key, _ in entries:
                     all_gt_keys_val.add(key)
-            candidate_tasks: List[Dict[str, Any]] = []
-            for prompt_text in text_prompts:
-                candidate_tasks.append({"id": f"text::{prompt_text}", "type": "text", "prompt": prompt_text})
-            for ex_idx, ex in enumerate(exemplars):
-                candidate_tasks.append(
-                    {
-                        "id": f"visual::{ex_idx}",
-                        "type": "visual",
-                        "bbox": ex.get("bbox"),
-                        "visual_ref": ex,
-                    }
-                )
-            val_total = len(val_ids)
-            progress_every = max(1, val_total // 10) if val_total else 1
-
-            def _mining_progress(done: int) -> None:
-                if job.cancel_event.is_set():
-                    return
-                if done == 1 or done == val_total or done % progress_every == 0:
-                    try:
-                        job.logs.append(
-                            {
-                                "ts": time.time(),
-                                "msg": f"Processed {done}/{val_total} val images for {cat_name}",
-                            }
-                        )
-                        if len(job.logs) > MAX_JOB_LOGS:
-                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                        job.updated_at = time.time()
-                    except Exception:
-                        pass
-            # Log a start marker per class for image-first sweep.
-            job.logs.append(
-                {
-                    "ts": time.time(),
-                    "msg": (
-                        f"Starting image-first sweep for {cat_name}: {len(val_ids)} val images, "
-                        f"{len(candidate_tasks)} candidates x {len(thresholds)} thresholds"
-                    ),
-                }
-            )
-            if len(job.logs) > MAX_JOB_LOGS:
-                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-
-            det_cache, det_stats = _collect_agent_mining_detections_image_first(
-                candidates=candidate_tasks,
-                thresholds=thresholds,
-                images=images,
-                image_ids=val_ids,
-                mask_threshold=payload.mask_threshold,
-                min_size=payload.min_size,
-                simplify=payload.simplify_epsilon,
-                max_results=payload.max_results,
-                cache_dir=cache_dir,
-                pool=mining_pool,
-                cancel_event=job.cancel_event,
-                progress_callback=_mining_progress,
-            )
-            try:
-                job.logs.append(
-                    {
-                        "ts": time.time(),
-                        "msg": (
-                            f"SAM3 mining ran image-first on {det_stats.get('images')} val images for "
-                            f"{det_stats.get('candidates')} candidates x {det_stats.get('thresholds')} thresholds "
-                            f"(cached {det_stats.get('cached_pairs')} pairs, executed {det_stats.get('executed_pairs')} "
-                            f"with {det_stats.get('executed_pairs_with_dets')} yielding detections)"
-                        ),
-                    }
-                )
-                if len(job.logs) > MAX_JOB_LOGS:
-                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-            except Exception:
-                pass
             eval_candidates: List[Dict[str, Any]] = []
             text_prompt_count = len(text_prompts or [])
             thresholds_count = len(thresholds or [])
             visual_candidate_count = len(exemplars) * thresholds_count
-            for prompt_text in text_prompts:
-                task_id = f"text::{prompt_text}"
-                for thr in thresholds:
-                    dets = det_cache.get(task_id, {}).get(thr, [])
-                    fp_warnings: List[str] = []
-                    if payload.use_clip_fp_guard and exemplar_embeddings:
-                        dets, fp_warnings = _clip_fp_filter_detections(
-                            dets,
-                            exemplar_embeddings=exemplar_embeddings,
-                            images=images,
-                            similarity_floor=payload.similarity_score,
-                        )
-                    cache_map = _detections_to_eval_cache(dets, images)
-                    metrics = _evaluate_prompt_candidate(
-                        prompt_text,
-                        thr,
-                        cat_id=cat_id,
-                        image_ids=val_ids,
-                        gt_index=gt_index_val,
-                        images=images,
-                        iou_threshold=0.5,
-                        max_dets=payload.max_results,
-                        image_cache={},
-                        cached_detections=cache_map,
-                    )
-                    metrics["type"] = "text"
-                    metrics["detections"] = len(dets)
-                    if fp_warnings:
-                        metrics["warnings"] = fp_warnings
-                    eval_candidates.append(metrics)
-            for ex_idx, ex in enumerate(exemplars):
-                label = f"exemplar_{ex_idx}"
-                task_id = f"visual::{ex_idx}"
+            for cand in class_candidates:
+                task_id = cand.get("id")
+                cand_type = cand.get("type")
+                label = cand.get("prompt") if cand_type == "text" else f"exemplar_{task_id.split('::')[-1]}"
                 for thr in thresholds:
                     dets = det_cache.get(task_id, {}).get(thr, [])
                     fp_warnings: List[str] = []
@@ -7390,80 +7390,79 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         image_cache={},
                         cached_detections=cache_map,
                     )
-                    metrics["type"] = "visual"
-                    metrics["exemplar"] = {
-                        "image_id": ex.get("image_id"),
-                        "bbox": ex.get("bbox"),
-                        "file_name": ex.get("file_name"),
-                    }
+                    metrics["type"] = cand_type
+                    if cand_type == "visual":
+                        metrics["exemplar"] = {
+                            "image_id": cand.get("visual_ref", {}).get("image_id"),
+                            "bbox": cand.get("visual_ref", {}).get("bbox"),
+                            "file_name": cand.get("visual_ref", {}).get("file_name"),
+                        }
                     metrics["detections"] = len(dets)
                     if fp_warnings:
                         metrics["warnings"] = fp_warnings
                     eval_candidates.append(metrics)
-        recipe: Optional[Dict[str, Any]] = None
-        coverage_by_image: Optional[List[Dict[str, Any]]] = None
-        if eval_candidates and all_gt_keys_val:
-            recipe, coverage_by_image = _build_prompt_recipe(
-                eval_candidates,
-                all_gt_keys_val,
-                per_image_gt_val,
-                images,
-                val_ids,
-                gt_index_val,
-            )
-            if recipe:
-                # Attach source metadata to steps
-                meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
-                for cand in eval_candidates:
-                    try:
-                        key = (cand.get("prompt"), float(cand.get("threshold")))
-                    except Exception:
-                        continue
-                    meta_map[key] = {
-                        "type": cand.get("type"),
-                        "exemplar": cand.get("exemplar"),
-                        "warnings": cand.get("warnings"),
-                    }
-                for step in recipe.get("steps", []):
-                    key = (step.get("prompt"), float(step.get("threshold", 0)))
-                    meta = meta_map.get(key)
-                    if meta:
-                        step.update({k: v for k, v in meta.items() if v is not None})
-                # Build human-readable explanation
-                summary_block = recipe.get("summary") or {}
-                fp_total = summary_block.get("fps") or 0
-                best_steps = recipe.get("steps") or []
-                best_labels = []
-                for s in best_steps:
-                    if s.get("type") == "visual" and s.get("exemplar"):
-                        ex = s.get("exemplar") or {}
-                        best_labels.append(f"exemplar img {ex.get('image_id')} thr {s.get('threshold')}")
-                    else:
-                        best_labels.append(f"{s.get('prompt')} thr {s.get('threshold')}")
-                explanation = (
-                    f"Tested {text_prompt_count} text prompt(s) x {thresholds_count} thresholds and {len(exemplars)} exemplar(s) "
-                    f"({len(eval_candidates)} total candidates). "
+            recipe: Optional[Dict[str, Any]] = None
+            coverage_by_image: Optional[List[Dict[str, Any]]] = None
+            if eval_candidates and all_gt_keys_val:
+                recipe, coverage_by_image = _build_prompt_recipe(
+                    eval_candidates,
+                    all_gt_keys_val,
+                    per_image_gt_val,
+                    images,
+                    val_ids,
+                    gt_index_val,
                 )
-                if best_labels:
-                    explanation += f"Kept {len(best_steps)} step(s): {', '.join(best_labels)}."
-                else:
-                    explanation += "No steps kept."
-                if summary_block:
-                    covered = summary_block.get("covered")
-                    total_gt = summary_block.get("total_gt")
-                    cov_rate = summary_block.get("coverage_rate")
-                    cov_txt = ""
-                    if cov_rate is not None:
+                if recipe:
+                    meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
+                    for cand in eval_candidates:
                         try:
-                            cov_txt = f"{cov_rate * 100:.1f}%"
+                            key = (cand.get("prompt"), float(cand.get("threshold")))
                         except Exception:
-                            cov_txt = ""
-                    explanation += f" Coverage {covered}/{total_gt} ({cov_txt}), FPs {fp_total}."
-                recipe["explanation"] = explanation
-            selected_cats[-1]["candidates"] = eval_candidates
-            selected_cats[-1]["recipe"] = recipe
-            selected_cats[-1]["coverage_by_image"] = coverage_by_image
-            selected_cats[-1]["meta"] = {
+                            continue
+                        meta_map[key] = {
+                            "type": cand.get("type"),
+                            "exemplar": cand.get("exemplar"),
+                            "warnings": cand.get("warnings"),
+                        }
+                    for step in recipe.get("steps", []):
+                        key = (step.get("prompt"), float(step.get("threshold", 0)))
+                        meta = meta_map.get(key)
+                        if meta:
+                            step.update({k: v for k, v in meta.items() if v is not None})
+                    summary_block = recipe.get("summary") or {}
+                    fp_total = summary_block.get("fps") or 0
+                    best_steps = recipe.get("steps") or []
+                    best_labels = []
+                    for s in best_steps:
+                        if s.get("type") == "visual" and s.get("exemplar"):
+                            ex = s.get("exemplar") or {}
+                            best_labels.append(f"exemplar img {ex.get('image_id')} thr {s.get('threshold')}")
+                        else:
+                            best_labels.append(f"{s.get('prompt')} thr {s.get('threshold')}")
+                    explanation = (
+                        f"Tested {text_prompt_count} text prompt(s) x {thresholds_count} thresholds and {len(exemplars)} exemplar(s) "
+                        f"({len(eval_candidates)} total candidates). "
+                    )
+                    if best_labels:
+                        explanation += f"Kept {len(best_steps)} step(s): {', '.join(best_labels)}."
+                    else:
+                        explanation += "No steps kept."
+                    if summary_block:
+                        covered = summary_block.get("covered")
+                        total_gt = summary_block.get("total_gt")
+                        cov_rate = summary_block.get("coverage_rate")
+                        cov_txt = ""
+                        if cov_rate is not None:
+                            try:
+                                cov_txt = f"{cov_rate * 100:.1f}%"
+                            except Exception:
+                                cov_txt = ""
+                        explanation += f" Coverage {covered}/{total_gt} ({cov_txt}), FPs {fp_total}."
+                    recipe["explanation"] = explanation
+            selected_cats[idx]["candidates"] = eval_candidates
+            selected_cats[idx]["recipe"] = recipe
+            selected_cats[idx]["coverage_by_image"] = coverage_by_image
+            selected_cats[idx]["meta"] = {
                 "text_prompts": text_prompt_count,
                 "thresholds": thresholds_count,
                 "exemplars": len(exemplars),
@@ -7471,8 +7470,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 "total_candidates": len(eval_candidates),
             }
             if not recipe or not recipe.get("steps"):
-                selected_cats[-1]["no_recipe_reason"] = "no_candidate_gain"
-            job.progress = 0.35 + 0.6 * ((idx + 1) / max(1, len(categories)))
+                selected_cats[idx]["no_recipe_reason"] = "no_candidate_gain"
+            job.progress = 0.75 + 0.2 * ((idx + 1) / max(1, len(class_entries)))
             summary = (recipe or {}).get("summary") or {}
             covered = summary.get("covered")
             total_gt = summary.get("total_gt")
@@ -7484,7 +7483,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     cov_pct_str = f"{coverage_rate * 100:.1f}%"
                 except Exception:
                     cov_pct_str = ""
-            job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} complete ({len(eval_candidates)} candidates)"
+            job.message = f"Class {idx + 1}/{len(class_entries)}: {cat_name} complete ({len(eval_candidates)} candidates)"
             job.logs.append(
                 {
                     "ts": time.time(),
@@ -7500,7 +7499,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 job.logs[:] = job.logs[-MAX_JOB_LOGS:]
             job.updated_at = time.time()
 
-        job.progress = max(job.progress, 0.9)
+        job.progress = max(job.progress, 0.95)
         job.updated_at = time.time()
         job.logs.append({"ts": time.time(), "msg": f"Prepared {len(selected_cats)} classes with exemplar seeds"})
         if len(job.logs) > MAX_JOB_LOGS:

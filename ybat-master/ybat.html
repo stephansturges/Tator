@@ -886,6 +886,18 @@
                                 <label for="agentExemplars">Exemplars/class</label>
                                 <input type="number" id="agentExemplars" min="0" value="4" />
                             </div>
+                            <div>
+                                <label for="agentExemplarPoolValue">Exemplar pool size</label>
+                                <input type="number" id="agentExemplarPoolValue" min="1" value="25" title="How many GT boxes to consider before picking exemplars." />
+                                <div class="training-help">Controls the candidate pool before CLIP diversity selection.</div>
+                            </div>
+                            <div>
+                                <label for="agentExemplarPoolMode">Pool mode</label>
+                                <select id="agentExemplarPoolMode" title="Pool as percent of GT boxes or fixed count.">
+                                    <option value="percent" selected>% of GT boxes</option>
+                                    <option value="count">Fixed count</option>
+                                </select>
+                            </div>
                             <div class="training-field training-field--inline">
                                 <label for="agentClusterExemplars">Cluster exemplars</label>
                                 <input type="checkbox" id="agentClusterExemplars" title="Group exemplar boxes to keep a diverse subset before prompting SAM3." />
@@ -897,6 +909,27 @@
                             <div>
                                 <label for="agentSimilarityScore">Similarity floor</label>
                                 <input type="number" id="agentSimilarityScore" step="0.05" min="0" max="1" value="0.25" />
+                            </div>
+                            <div class="training-field training-field--inline">
+                                <label for="agentUseNegExemplars">Use negative exemplars</label>
+                                <input type="checkbox" id="agentUseNegExemplars" title="Suppress detections that look like other classes (auto-select negatives from GT of other classes)." />
+                            </div>
+                            <div>
+                                <label for="agentMaxNegExemplars">Max negatives/class</label>
+                                <input type="number" id="agentMaxNegExemplars" min="0" max="64" value="8" />
+                            </div>
+                            <div>
+                                <label for="agentNegStrength">Negative strength (λ)</label>
+                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" title="How much a match to a negative exemplar suppresses detections. Higher = stronger suppression; 0 disables negatives." />
+                                <div class="training-help">Higher = stronger suppression; 0 disables negatives.</div>
+                            </div>
+                            <div class="training-field training-field--inline">
+                                <label for="agentUseFpNeg">Use FP negatives (this run)</label>
+                                <input type="checkbox" id="agentUseFpNeg" title="Harvest high-confidence false positives from this run as extra negatives (no extra SAM pass)." />
+                            </div>
+                            <div>
+                                <label for="agentMaxFpNeg">Max FP negatives/class</label>
+                                <input type="number" id="agentMaxFpNeg" min="0" max="64" value="8" />
                             </div>
                         </div>
                         <div class="training-grid">
@@ -932,10 +965,10 @@
                             <div>
                                 <label for="agentPromptReasoning">GPT-OSS reasoning</label>
                                 <select id="agentPromptReasoning" title="Harmony reasoning level for GPT-OSS prompt expansion.">
-                                    <option value="none">none (fastest)</option>
+                                    <option value="none" selected>none (fastest)</option>
                                     <option value="low">low</option>
                                     <option value="medium">medium</option>
-                                    <option value="high" selected>high</option>
+                                    <option value="high">high</option>
                                 </select>
                             </div>
                             <div>

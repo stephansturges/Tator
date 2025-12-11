@@ -1181,9 +1181,16 @@ const sam3TrainState = {
         maxWorkers: null,
         workersPerGpu: null,
         exemplars: null,
+        exemplarPoolMode: null,
+        exemplarPoolValue: null,
         clusterExemplars: null,
         clipGuard: null,
         similarityScore: null,
+        useNegExemplars: null,
+        maxNegExemplars: null,
+        negStrength: null,
+        useFpNeg: null,
+        maxFpNeg: null,
         classesInput: null,
         classHints: null,
         testMode: null,
@@ -11357,12 +11364,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const maxWorkers = readNumberInput(agentElements.maxWorkers, { integer: true });
         const workersPerGpu = readNumberInput(agentElements.workersPerGpu, { integer: true });
         const exemplars = readNumberInput(agentElements.exemplars, { integer: true });
+        const exemplarPoolMode =
+            agentElements.exemplarPoolMode && agentElements.exemplarPoolMode.value === "count" ? "count" : "percent";
+        const exemplarPoolValue = readNumberInput(agentElements.exemplarPoolValue, { integer: true });
         const similarityFloor = readNumberInput(agentElements.similarityScore, { integer: false });
+        const useNegExemplars = !!(agentElements.useNegExemplars && agentElements.useNegExemplars.checked);
+        const maxNegExemplars = readNumberInput(agentElements.maxNegExemplars, { integer: true });
+        const negStrength = readNumberInput(agentElements.negStrength, { integer: false });
+        const useFpNeg = !!(agentElements.useFpNeg && agentElements.useFpNeg.checked);
+        const maxFpNeg = readNumberInput(agentElements.maxFpNeg, { integer: true });
         const stackedEnabled = !!(agentElements.stackedMining && agentElements.stackedMining.checked);
         const stackedMaxChains = readNumberInput(agentElements.stackedMaxChains, { integer: true });
         const stackedIou = readNumberInput(agentElements.stackedIou, { integer: false });
         const promptReasoning =
-            agentElements.promptReasoning && agentElements.promptReasoning.value ? agentElements.promptReasoning.value : "high";
+            agentElements.promptReasoning && agentElements.promptReasoning.value ? agentElements.promptReasoning.value : "none";
         const promptMaxTokens = readNumberInput(agentElements.promptMaxTokens, { integer: true });
         const classesRaw = agentElements.classesInput?.value || "";
         const classes =
@@ -11393,8 +11408,15 @@ return {
             max_workers: Number.isFinite(maxWorkers) ? Math.max(1, Math.min(16, maxWorkers)) : 1,
             max_workers_per_device: Number.isFinite(workersPerGpu) ? Math.max(1, Math.min(8, workersPerGpu)) : 1,
             exemplar_per_class: Number.isFinite(exemplars) ? Math.max(0, exemplars) : 4,
+            exemplar_candidate_mode: exemplarPoolMode,
+            exemplar_candidate_value: Number.isFinite(exemplarPoolValue) ? Math.max(1, Math.min(10000, exemplarPoolValue)) : 25,
             cluster_exemplars: !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
             use_clip_fp_guard: !!(agentElements.clipGuard && agentElements.clipGuard.checked),
+            use_negative_exemplars: useNegExemplars,
+            max_negatives_per_class: Number.isFinite(maxNegExemplars) ? Math.max(0, Math.min(64, maxNegExemplars)) : 8,
+            negative_strength: Number.isFinite(negStrength) ? Math.max(0, Math.min(5, negStrength)) : 0.5,
+            use_fp_negatives: useFpNeg,
+            max_fp_negatives: Number.isFinite(maxFpNeg) ? Math.max(0, Math.min(64, maxFpNeg)) : 8,
             similarity_score: Number.isFinite(similarityFloor) ? Math.max(0, Math.min(1, similarityFloor)) : 0.25,
             classes: classes.length ? classes : null,
             class_hints: classHints && typeof classHints === "object" && Object.keys(classHints).length ? classHints : null,
@@ -11405,7 +11427,7 @@ return {
             stacked_mining: stackedEnabled,
             stacked_max_chains: stackedEnabled && Number.isFinite(stackedMaxChains) ? Math.max(1, Math.min(10, stackedMaxChains)) : 3,
             stacked_iou: stackedEnabled && Number.isFinite(stackedIou) ? Math.max(0, Math.min(1, stackedIou)) : 0.5,
-            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "high",
+            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
             prompt_max_new_tokens: Number.isFinite(promptMaxTokens) ? Math.max(16, Math.min(400, promptMaxTokens)) : 160,
             test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
             test_train_limit: readNumberInput(agentElements.trainLimit, { integer: true }) ?? 10,
@@ -11710,9 +11732,16 @@ return {
         agentElements.maxWorkers = document.getElementById("agentMaxWorkers");
         agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
         agentElements.exemplars = document.getElementById("agentExemplars");
+        agentElements.exemplarPoolMode = document.getElementById("agentExemplarPoolMode");
+        agentElements.exemplarPoolValue = document.getElementById("agentExemplarPoolValue");
         agentElements.clusterExemplars = document.getElementById("agentClusterExemplars");
         agentElements.clipGuard = document.getElementById("agentClipGuard");
         agentElements.similarityScore = document.getElementById("agentSimilarityScore");
+        agentElements.useNegExemplars = document.getElementById("agentUseNegExemplars");
+        agentElements.maxNegExemplars = document.getElementById("agentMaxNegExemplars");
+        agentElements.negStrength = document.getElementById("agentNegStrength");
+        agentElements.useFpNeg = document.getElementById("agentUseFpNeg");
+        agentElements.maxFpNeg = document.getElementById("agentMaxFpNeg");
         agentElements.classesInput = document.getElementById("agentClasses");
         agentElements.classHints = document.getElementById("agentClassHints");
         agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");

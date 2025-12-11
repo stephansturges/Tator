@@ -3817,6 +3817,7 @@ def _persist_agent_recipe(
     recipe_dir = AGENT_MINING_RECIPES_ROOT / recipe_id
     crops_dir = recipe_dir / "crops"
     portable_steps: List[Dict[str, Any]] = []
+    portable_negatives: List[Dict[str, Any]] = []
     for idx, step in enumerate(steps_raw, start=1):
         entry = dict(step)
         ex = step.get("exemplar")
@@ -3844,6 +3845,15 @@ def _persist_agent_recipe(
                 enriched = dict(ex)
             entry["exemplar"] = enriched
         portable_steps.append(entry)
+    negatives_raw = recipe.get("negatives") or []
+    for n_idx, neg in enumerate(negatives_raw, start=1):
+        enriched_neg = None
+        if images and isinstance(neg, dict):
+            enriched_neg = _save_exemplar_crop(exemplar=neg, images=images, crop_dir=crops_dir, step_idx=1000 + n_idx)
+        if enriched_neg is None and isinstance(neg, dict):
+            enriched_neg = dict(neg)
+        if enriched_neg:
+            portable_negatives.append(enriched_neg)
     params = recipe.get("params") or {
         "mask_threshold": recipe.get("mask_threshold"),
         "min_size": recipe.get("min_size"),
@@ -3851,6 +3861,8 @@ def _persist_agent_recipe(
         "max_results": recipe.get("max_results"),
         "similarity_score": recipe.get("similarity_score"),
         "use_clip_fp_guard": recipe.get("use_clip_fp_guard"),
+        "use_negative_exemplars": recipe.get("use_negative_exemplars"),
+        "negative_strength": recipe.get("negative_strength"),
     }
     thresholds = sorted({float(s.get("threshold", 0.0)) for s in portable_steps if s.get("threshold") is not None})
     if thresholds:
@@ -3868,6 +3880,7 @@ def _persist_agent_recipe(
         "params": params,
         "recipe": {
             "steps": portable_steps,
+            "negatives": portable_negatives,
             "summary": recipe.get("summary"),
         },
     }
@@ -4729,7 +4742,7 @@ def _clip_embed_regions(
             emb = _encode_image(crop)
             if emb is None:
                 continue
-            key = f"{img_id}:{x1:.2f},{y1:.2f},{w:.2f},{h:.2f}"
+            key = entry.get("embed_id") or f"{img_id}:{x1:.2f},{y1:.2f},{w:.2f},{h:.2f}"
             embeddings[key] = emb
         except Exception as exc:
             logger.debug("CLIP embed crop failed: %s", exc)
@@ -4743,6 +4756,8 @@ def _clip_fp_filter_detections(
     detections: List[Dict[str, Any]],
     *,
     exemplar_embeddings: Dict[str, np.ndarray],
+    negative_embeddings: Optional[Dict[str, np.ndarray]] = None,
+    negative_strength: float = 0.0,
     images: Dict[int, Dict[str, Any]],
     similarity_floor: float,
     max_regions: int = 512,
@@ -4759,6 +4774,12 @@ def _clip_fp_filter_detections(
     exemplars_mat = np.stack(list(exemplar_embeddings.values()))
     ex_norm = np.linalg.norm(exemplars_mat, axis=1, keepdims=True) + 1e-8
     exemplars_mat = exemplars_mat / ex_norm
+
+    neg_mat = None
+    if negative_embeddings:
+        neg_mat = np.stack(list(negative_embeddings.values()))
+        neg_norm = np.linalg.norm(neg_mat, axis=1, keepdims=True) + 1e-8
+        neg_mat = neg_mat / neg_norm
     device_to_use = device if isinstance(device, str) or isinstance(device, torch.device) else "cpu"
     def _encode_image(image: Image.Image) -> Optional[np.ndarray]:
         try:
@@ -4810,7 +4831,12 @@ def _clip_fp_filter_detections(
                 continue
             sims = (exemplars_mat @ emb.reshape(-1, 1)).squeeze()
             max_sim = float(np.max(sims)) if sims.size else 0.0
-            if max_sim >= similarity_floor:
+            max_neg_sim = 0.0
+            if neg_mat is not None:
+                neg_sims = (neg_mat @ emb.reshape(-1, 1)).squeeze()
+                max_neg_sim = float(np.max(neg_sims)) if neg_sims.size else 0.0
+            score = max_sim - max(0.0, negative_strength) * max_neg_sim
+            if max_sim >= similarity_floor and score >= 0:
                 filtered.append(det)
         except Exception as exc:
             logger.debug("CLIP filter crop failed: %s", exc)
@@ -4828,9 +4854,17 @@ def _sample_agent_mining_exemplars(
     *,
     limit: int,
     seed: int,
-) -> List[Dict[str, Any]]:
+    candidate_mode: Literal["percent", "count"] = "percent",
+    candidate_value: int = 25,
+    use_clip_selection: bool = True,
+    cluster: bool = False,
+) -> Tuple[List[Dict[str, Any]], Dict[str, np.ndarray], List[str], Dict[str, Any]]:
+    """
+    Sample exemplars for a class. Caps the candidate pool, optionally embeds with CLIP, and
+    selects a diverse set via k-center. Returns (exemplars, exemplar_embeddings, warnings, stats).
+    """
     if limit <= 0:
-        return []
+        return [], {}, [], {"candidates": 0, "embedded": 0, "selected": 0, "mode": candidate_mode, "value": candidate_value}
     rng = random.Random(seed + cat_id)
     candidates: List[Tuple[int, List[float]]] = []
     for img_id in train_ids:
@@ -4839,11 +4873,20 @@ def _sample_agent_mining_exemplars(
             continue
         for bbox in anns:
             candidates.append((img_id, list(map(float, bbox[:4]))))
+    total_candidates = len(candidates)
     if not candidates:
-        return []
+        return [], {}, ["no_candidates"], {"candidates": 0, "embedded": 0, "selected": 0, "mode": candidate_mode, "value": candidate_value}
+
+    if candidate_mode == "percent":
+        candidate_value = max(1, min(100, candidate_value))
+        pool_cap = max(1, int(math.ceil(total_candidates * (candidate_value / 100.0))))
+    else:
+        pool_cap = max(1, min(candidate_value, total_candidates))
+
     rng.shuffle(candidates)
-    exemplars: List[Dict[str, Any]] = []
-    for img_id, bbox in candidates[:limit]:
+    pool = candidates[:pool_cap]
+    pool_entries: List[Dict[str, Any]] = []
+    for img_id, bbox in pool:
         try:
             x, y, w, h = bbox
             area = max(0.0, w * h)
@@ -4851,16 +4894,75 @@ def _sample_agent_mining_exemplars(
             x = y = w = h = 0.0
             area = 0.0
         img_info = images.get(img_id, {})
-        exemplars.append(
+        embed_id = f"{img_id}:{x:.2f},{y:.2f},{w:.2f},{h:.2f}"
+        pool_entries.append(
             {
                 "image_id": img_id,
                 "file_name": img_info.get("file_name"),
                 "path": str(img_info.get("path") or ""),
                 "bbox": [x, y, w, h],
                 "area": area,
+                "embed_id": embed_id,
             }
         )
-    return exemplars
+
+    selection_target = limit * 3 if cluster else limit
+    warnings: List[str] = []
+    exemplar_embeddings: Dict[str, np.ndarray] = {}
+    selected: List[Dict[str, Any]] = []
+
+    def _select_k_center(regions: List[Dict[str, Any]], embeds: Dict[str, np.ndarray], k: int) -> List[Dict[str, Any]]:
+        if k <= 0 or not regions or not embeds:
+            return []
+        keyed = [(r, embeds.get(r.get("embed_id", ""))) for r in regions if r.get("embed_id") in embeds]
+        keyed = [(r, e) for r, e in keyed if e is not None]
+        if not keyed:
+            return []
+        vecs = np.stack([e for _, e in keyed])
+        areas = np.array([float(r.get("area", 0.0)) for r, _ in keyed])
+        start_idx = int(np.argmax(areas))
+        selected_indices = [start_idx]
+        dists = np.ones(len(keyed), dtype=np.float32)
+        dists *= np.inf
+        dists = np.minimum(dists, 1.0 - (vecs @ vecs[start_idx]))
+        while len(selected_indices) < min(k, len(keyed)):
+            next_idx = int(np.argmax(dists))
+            if not np.isfinite(dists[next_idx]):
+                break
+            selected_indices.append(next_idx)
+            dists = np.minimum(dists, 1.0 - (vecs @ vecs[next_idx]))
+        return [keyed[i][0] for i in selected_indices]
+
+    embedded_count = 0
+    if use_clip_selection and pool_entries:
+        exemplar_embeddings, clip_warn = _clip_embed_regions(pool_entries, images, max_regions=len(pool_entries))
+        warnings.extend(clip_warn)
+        embedded_count = len(exemplar_embeddings)
+        selected = _select_k_center(pool_entries, exemplar_embeddings, selection_target)
+
+    if not selected:
+        step = max(1, len(pool_entries) // selection_target) if selection_target > 0 else 1
+        selected = pool_entries[::step][:selection_target]
+        if not exemplar_embeddings and use_clip_selection:
+            warnings.append("clip_selection_fallback_random")
+
+    if cluster and len(selected) > limit:
+        selected = _cluster_agent_mining_exemplars(selected, max_items=limit, seed=seed + cat_id + 17)
+    if len(selected) > limit:
+        selected = selected[:limit]
+
+    if exemplar_embeddings:
+        selected_ids = {ex.get("embed_id") for ex in selected if ex.get("embed_id")}
+        exemplar_embeddings = {k: v for k, v in exemplar_embeddings.items() if k in selected_ids}
+    stats = {
+        "candidates": total_candidates,
+        "pool": len(pool_entries),
+        "embedded": embedded_count,
+        "selected": len(selected),
+        "mode": candidate_mode,
+        "value": candidate_value,
+    }
+    return selected, exemplar_embeddings, warnings, stats
 
 
 def _cluster_agent_mining_exemplars(
@@ -4882,6 +4984,30 @@ def _cluster_agent_mining_exemplars(
         if len(clustered) >= max_items:
             break
     return clustered
+
+
+def _k_center_select(regions: List[Dict[str, Any]], embeds: Dict[str, np.ndarray], k: int) -> List[Dict[str, Any]]:
+    """Greedy k-center over normalized embeddings keyed by region['embed_id']."""
+    if k <= 0 or not regions or not embeds:
+        return []
+    keyed = [(r, embeds.get(r.get("embed_id", ""))) for r in regions if r.get("embed_id") in embeds]
+    keyed = [(r, e) for r, e in keyed if e is not None]
+    if not keyed:
+        return []
+    vecs = np.stack([e for _, e in keyed])
+    areas = np.array([float(r.get("area", 0.0)) for r, _ in keyed])
+    start_idx = int(np.argmax(areas))
+    selected_indices = [start_idx]
+    dists = np.ones(len(keyed), dtype=np.float32)
+    dists *= np.inf
+    dists = np.minimum(dists, 1.0 - (vecs @ vecs[start_idx]))
+    while len(selected_indices) < min(k, len(keyed)):
+        next_idx = int(np.argmax(dists))
+        if not np.isfinite(dists[next_idx]):
+            break
+        selected_indices.append(next_idx)
+        dists = np.minimum(dists, 1.0 - (vecs @ vecs[next_idx]))
+    return [keyed[i][0] for i in selected_indices]
 
 
 def _persist_qwen_run_metadata(
@@ -6079,6 +6205,13 @@ class AgentMiningRequest(BaseModel):
     qwen_max_prompts: int = Field(0, ge=0, le=20)
     exemplar_per_class: int = Field(10, ge=0, le=500)
     cluster_exemplars: bool = False
+    exemplar_candidate_mode: Literal["percent", "count"] = "percent"
+    exemplar_candidate_value: int = Field(25, ge=1, le=10_000)
+    use_negative_exemplars: bool = False
+    max_negatives_per_class: int = Field(8, ge=0, le=64)
+    negative_strength: float = Field(0.5, ge=0.0, le=5.0)
+    use_fp_negatives: bool = False
+    max_fp_negatives: int = Field(8, ge=0, le=64)
     max_workers: int = Field(1, ge=1, le=16)
     max_workers_per_device: int = Field(1, ge=1, le=8)
     thresholds: List[float] = Field(default_factory=lambda: [0.2, 0.3, 0.4])
@@ -6098,7 +6231,7 @@ class AgentMiningRequest(BaseModel):
     stacked_mining: bool = False
     stacked_max_chains: int = Field(3, ge=1, le=10)
     stacked_iou: float = Field(0.5, ge=0.0, le=1.0)
-    prompt_reasoning: Literal["none", "low", "medium", "high"] = "high"
+    prompt_reasoning: Literal["none", "low", "medium", "high"] = "none"
     prompt_max_new_tokens: int = Field(160, ge=16, le=400)
 
 
@@ -6109,7 +6242,7 @@ def _expand_prompts_with_prompt_llm(
     log_fn: Optional[Callable[[str], None]] = None,
     class_hint: Optional[str] = None,
     max_new_tokens: int = 128,
-    reasoning: Literal["none", "low", "medium", "high"] = "high",
+    reasoning: Literal["none", "low", "medium", "high"] = "none",
 ) -> List[str]:
     """Use Qwen to brainstorm additional prompt variants for a class. Accepts optional logger callback."""
     cleaned_base = _sanitize_prompts(base_prompts)
@@ -7188,7 +7321,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.logs.append(
             {
                 "ts": time.time(),
-                "msg": f"Config: thresholds={payload.thresholds} mask_thr={payload.mask_threshold} min_size={payload.min_size} simplify={payload.simplify_epsilon} max_results={payload.max_results} clip_guard={payload.use_clip_fp_guard}",
+                "msg": (
+                    f"Config: thresholds={payload.thresholds} mask_thr={payload.mask_threshold} min_size={payload.min_size} "
+                    f"simplify={payload.simplify_epsilon} max_results={payload.max_results} clip_guard={payload.use_clip_fp_guard} "
+                    f"neg_exemplars={payload.use_negative_exemplars} neg_strength={payload.negative_strength}"
+                ),
             }
         )
         if len(job.logs) > MAX_JOB_LOGS:
@@ -7254,7 +7391,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             normalized_hints[class_id_val] = note_clean
         for idx, cat in enumerate(categories):
             try:
-                cat_id = int(cat.get("id", idx))
+            cat_id = int(cat.get("id", idx))
             except Exception:
                 continue
             if cat_filter and cat_id not in cat_filter:
@@ -7368,36 +7505,190 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 elif img_id in val_id_set:
                     val_gt += count
             sample_cap = payload.exemplar_per_class
-            if payload.cluster_exemplars:
-                sample_cap = payload.exemplar_per_class * 3
-            exemplars = _sample_agent_mining_exemplars(
+            exemplars, exemplar_embeddings, clip_exemplar_warnings, exemplar_stats = _sample_agent_mining_exemplars(
                 cat_id,
                 train_ids,
                 gt_by_image_cat,
                 images,
                 limit=sample_cap,
                 seed=payload.split_seed,
+                candidate_mode=payload.exemplar_candidate_mode,
+                candidate_value=payload.exemplar_candidate_value,
+                use_clip_selection=True,
+                cluster=payload.cluster_exemplars,
             )
-            clip_exemplar_warnings: List[str] = []
-            exemplar_embeddings: Dict[str, np.ndarray] = {}
-            if payload.cluster_exemplars and exemplars:
-                exemplars = _cluster_agent_mining_exemplars(
-                    exemplars,
-                    max_items=payload.exemplar_per_class,
-                    seed=payload.split_seed + cat_id,
-                )
-            if payload.use_clip_fp_guard and exemplars:
+            # If FP guard is enabled but embeddings were not produced (e.g., CLIP unavailable), try embedding selected exemplars.
+            if payload.use_clip_fp_guard and exemplars and not exemplar_embeddings:
                 exemplar_embeddings, clip_exemplar_warnings = _clip_embed_regions(
                     exemplars,
                     images,
                     max_regions=max(16, payload.exemplar_per_class * 2),
                 )
+            # Log exemplar selection stats.
+            try:
+                job.logs.append(
+                    {
+                        "ts": time.time(),
+                        "msg": (
+                            f"Exemplars for {cat_name}: {exemplar_stats.get('candidates', 0)} candidates "
+                            f"-> pool {exemplar_stats.get('pool', 0)} ({payload.exemplar_candidate_mode}="
+                            f"{payload.exemplar_candidate_value}), embedded {exemplar_stats.get('embedded', 0)}, "
+                            f"selected {len(exemplars)}"
+                        ),
+                    }
+                )
+                if len(job.logs) > MAX_JOB_LOGS:
+                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+            except Exception:
+                pass
                 job.logs.append(
                     {
                         "ts": time.time(),
                         "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
                     }
                 )
+            # Negative exemplars from other classes.
+            negatives: List[Dict[str, Any]] = []
+            negative_embeddings: Dict[str, np.ndarray] = {}
+            negative_stats: Dict[str, Any] = {"candidates": 0, "pool": 0, "embedded": 0, "selected": 0}
+            negative_warnings: List[str] = []
+            if payload.use_negative_exemplars and payload.max_negatives_per_class > 0:
+                neg_candidates: List[Dict[str, Any]] = []
+                for img_id in train_ids:
+                    cat_map = gt_by_image_cat.get(img_id, {})
+                    for other_cat, boxes in cat_map.items():
+                        if other_cat == cat_id:
+                            continue
+                        for bbox in boxes:
+                            try:
+                                x, y, w, h = map(float, bbox[:4])
+                                area = max(0.0, w * h)
+                            except Exception:
+                                x = y = w = h = 0.0
+                                area = 0.0
+                            img_info = images.get(img_id, {})
+                            embed_id = f"{img_id}:{x:.2f},{y:.2f},{w:.2f},{h:.2f}"
+                            neg_candidates.append(
+                                {
+                                    "image_id": img_id,
+                                    "file_name": img_info.get("file_name"),
+                                    "path": str(img_info.get("path") or ""),
+                                    "bbox": [x, y, w, h],
+                                    "area": area,
+                                    "embed_id": embed_id,
+                                }
+                            )
+                negative_stats["candidates"] = len(neg_candidates)
+                if neg_candidates:
+                    if payload.exemplar_candidate_mode == "percent":
+                        pct = max(1, min(100, payload.exemplar_candidate_value))
+                        pool_cap = max(1, int(math.ceil(len(neg_candidates) * (pct / 100.0))))
+                    else:
+                        pool_cap = max(1, min(payload.exemplar_candidate_value, len(neg_candidates)))
+                    rng = random.Random(payload.split_seed + cat_id + 999)
+                    rng.shuffle(neg_candidates)
+                    pool = neg_candidates[:pool_cap]
+                    negative_stats["pool"] = len(pool)
+                    negative_embeddings, negative_warnings = _clip_embed_regions(pool, images, max_regions=len(pool))
+                    negative_stats["embedded"] = len(negative_embeddings)
+                    negatives = _k_center_select(pool, negative_embeddings, payload.max_negatives_per_class)
+                    if negative_embeddings and negatives:
+                        sel_ids = {n.get("embed_id") for n in negatives if n.get("embed_id")}
+                        negative_embeddings = {k: v for k, v in negative_embeddings.items() if k in sel_ids}
+                    negative_stats["selected"] = len(negatives)
+                    if not negatives and not negative_embeddings:
+                        negative_warnings.append("negatives_empty")
+                else:
+                    negative_warnings.append("negatives_empty")
+            if payload.use_negative_exemplars:
+                try:
+                    job.logs.append(
+                        {
+                            "ts": time.time(),
+                            "msg": (
+                                f"Negatives for {cat_name}: {negative_stats.get('candidates', 0)} candidates "
+                                f"-> pool {negative_stats.get('pool', 0)}, embedded {negative_stats.get('embedded', 0)}, "
+                                f"selected {negative_stats.get('selected', 0)}"
+                            ),
+                        }
+                    )
+                    if len(job.logs) > MAX_JOB_LOGS:
+                        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                except Exception:
+                    pass
+            # Optional FP-derived negatives (same run) for this class
+            fp_negatives: List[Dict[str, Any]] = []
+            fp_negative_embeddings: Dict[str, np.ndarray] = {}
+            if payload.use_negative_exemplars and payload.use_fp_negatives and payload.max_fp_negatives > 0:
+                fp_candidates: List[Tuple[float, Dict[str, Any]]] = []
+                for cand in global_candidates:
+                    # only consider candidates of this class
+                    if cand.get("class_id") != cat_id:
+                        continue
+                    for thr in thresholds:
+                        dets = det_cache.get(cand.get("id", ""), {}).get(thr, []) or []
+                        for det in dets:
+                            # skip if already labeled as this class
+                            try:
+                                lbl = det.get("label")
+                                if lbl is not None and int(lbl) == int(cat_id):
+                                    continue
+                            except Exception:
+                                pass
+                            score = float(det.get("score", 0.0)) if det.get("score") is not None else 0.0
+                            fp_candidates.append((score, det))
+                fp_candidates.sort(key=lambda t: t[0], reverse=True)
+                fp_candidates = fp_candidates[: max(0, payload.max_fp_negatives * 3)]
+                fp_pool: List[Dict[str, Any]] = []
+                for _, det in fp_candidates:
+                    bbox = det.get("bbox")
+                    if not bbox or len(bbox) < 4:
+                        continue
+                    try:
+                        x, y, w, h = map(float, bbox[:4])
+                        area = max(0.0, w * h)
+                    except Exception:
+                        x = y = w = h = 0.0
+                        area = 0.0
+                    img_id = det.get("image_id")
+                    img_info = images.get(int(img_id)) if img_id is not None else {}
+                    embed_id = f"fp:{img_id}:{x:.2f},{y:.2f},{w:.2f},{h:.2f}"
+                    fp_pool.append(
+                        {
+                            "image_id": img_id,
+                            "file_name": img_info.get("file_name"),
+                            "path": str(img_info.get("path") or ""),
+                            "bbox": [x, y, w, h],
+                            "area": area,
+                            "embed_id": embed_id,
+                        }
+                    )
+                if fp_pool:
+                    fp_pool = fp_pool[: max(1, min(len(fp_pool), payload.max_fp_negatives * 3))]
+                    fp_negative_embeddings, fp_negative_warnings = _clip_embed_regions(fp_pool, images, max_regions=len(fp_pool))
+                    fp_negatives = _k_center_select(fp_pool, fp_negative_embeddings, payload.max_fp_negatives)
+                    if fp_negative_embeddings and fp_negatives:
+                        sel_ids = {n.get("embed_id") for n in fp_negatives if n.get("embed_id")}
+                        fp_negative_embeddings = {k: v for k, v in fp_negative_embeddings.items() if k in sel_ids}
+                    try:
+                        job.logs.append(
+                            {
+                                "ts": time.time(),
+                                "msg": (
+                                    f"FP negatives for {cat_name}: pool {len(fp_pool)} embedded {len(fp_negative_embeddings)} "
+                                    f"selected {len(fp_negatives)}"
+                                ),
+                            }
+                        )
+                        if len(job.logs) > MAX_JOB_LOGS:
+                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                    except Exception:
+                        pass
+            combined_neg_embeddings = {}
+            if payload.use_negative_exemplars:
+                combined_neg_embeddings.update(negative_embeddings)
+                combined_neg_embeddings.update(fp_negative_embeddings)
+            combined_negatives = negatives + fp_negatives if payload.use_negative_exemplars else []
             text_prompts = prepared_prompts.get(cat_id) or [cat_name]
             try:
                 preview_prompts = ", ".join(text_prompts) if text_prompts else "(none)"
@@ -7425,6 +7716,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 "exemplars": exemplars,
                 "clip_warnings": clip_exemplar_warnings,
                 "exemplar_embeddings": exemplar_embeddings,
+                "negatives": negatives,
+                "negative_embeddings": negative_embeddings,
+                "negative_warnings": negative_warnings,
                 "text_prompts": text_prompts,
             }
             class_entries.append(entry)
@@ -7530,6 +7824,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             cat_name = entry["name"]
             exemplars = entry["exemplars"]
             exemplar_embeddings = entry.get("exemplar_embeddings") or {}
+            negative_embeddings = entry.get("negative_embeddings") or {}
+            negatives = entry.get("negatives") or []
             text_prompts = entry["text_prompts"]
             class_candidates = entry["candidates"]
             job.message = f"Class {idx + 1}/{len(class_entries)}: {cat_name} (eval prompts)"
@@ -7540,6 +7836,78 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             for entries in gt_index_val.values():
                 for key, _ in entries:
                     all_gt_keys_val.add(key)
+            # Optional FP-derived negatives (single-run) for this class, before filtering
+            fp_negatives: List[Dict[str, Any]] = []
+            fp_negative_embeddings: Dict[str, np.ndarray] = {}
+            fp_negative_warnings: List[str] = []
+            if payload.use_negative_exemplars and payload.use_fp_negatives and payload.max_fp_negatives > 0:
+                fp_candidates: List[Tuple[float, Dict[str, Any]]] = []
+                for cand in class_candidates:
+                    for thr in thresholds:
+                        dets = det_cache.get(cand.get("id"), {}).get(thr, []) or []
+                        for det in dets:
+                            try:
+                                lbl = det.get("label")
+                                if lbl is not None and int(lbl) == int(cat_id):
+                                    continue
+                            except Exception:
+                                pass
+                            score = float(det.get("score", 0.0)) if det.get("score") is not None else 0.0
+                            fp_candidates.append((score, det))
+                fp_candidates.sort(key=lambda t: t[0], reverse=True)
+                fp_candidates = fp_candidates[: max(0, payload.max_fp_negatives * 3)]
+                fp_pool: List[Dict[str, Any]] = []
+                for _, det in fp_candidates:
+                    bbox = det.get("bbox")
+                    if not bbox or len(bbox) < 4:
+                        continue
+                    try:
+                        x, y, w, h = map(float, bbox[:4])
+                        area = max(0.0, w * h)
+                    except Exception:
+                        x = y = w = h = 0.0
+                        area = 0.0
+                    img_id = det.get("image_id")
+                    img_info = images.get(int(img_id)) if img_id is not None else {}
+                    embed_id = f"fp:{img_id}:{x:.2f},{y:.2f},{w:.2f},{h:.2f}"
+                    fp_pool.append(
+                        {
+                            "image_id": img_id,
+                            "file_name": img_info.get("file_name"),
+                            "path": str(img_info.get("path") or ""),
+                            "bbox": [x, y, w, h],
+                            "area": area,
+                            "embed_id": embed_id,
+                        }
+                    )
+                if fp_pool:
+                    fp_pool = fp_pool[: max(1, min(len(fp_pool), payload.max_fp_negatives * 3))]
+                    fp_negative_embeddings, fp_negative_warnings = _clip_embed_regions(fp_pool, images, max_regions=len(fp_pool))
+                    fp_negatives = _k_center_select(fp_pool, fp_negative_embeddings, payload.max_fp_negatives)
+                    if fp_negative_embeddings and fp_negatives:
+                        sel_ids = {n.get("embed_id") for n in fp_negatives if n.get("embed_id")}
+                        fp_negative_embeddings = {k: v for k, v in fp_negative_embeddings.items() if k in sel_ids}
+                    try:
+                        job.logs.append(
+                            {
+                                "ts": time.time(),
+                                "msg": (
+                                    f"FP negatives for {cat_name}: pool {len(fp_pool)} embedded {len(fp_negative_embeddings)} "
+                                    f"selected {len(fp_negatives)}"
+                                ),
+                            }
+                        )
+                        if len(job.logs) > MAX_JOB_LOGS:
+                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+                    except Exception:
+                        pass
+
+            combined_neg_embeddings = {}
+            if payload.use_negative_exemplars:
+                combined_neg_embeddings.update(negative_embeddings)
+                combined_neg_embeddings.update(fp_negative_embeddings)
+            combined_negatives = negatives + fp_negatives if payload.use_negative_exemplars else []
+
             eval_candidates: List[Dict[str, Any]] = []
             text_prompt_count = len(text_prompts or [])
             thresholds_count = len(thresholds or [])
@@ -7555,6 +7923,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         dets, fp_warnings = _clip_fp_filter_detections(
                             dets,
                             exemplar_embeddings=exemplar_embeddings,
+                            negative_embeddings=combined_neg_embeddings if payload.use_negative_exemplars else None,
+                            negative_strength=payload.negative_strength if payload.use_negative_exemplars else 0.0,
                             images=images,
                             similarity_floor=payload.similarity_score,
                         )
@@ -7583,6 +7953,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     if fp_warnings:
                         metrics["warnings"] = fp_warnings
                     eval_candidates.append(metrics)
+
             recipe: Optional[Dict[str, Any]] = None
             coverage_by_image: Optional[List[Dict[str, Any]]] = None
             if eval_candidates and all_gt_keys_val:
@@ -7595,6 +7966,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     gt_index_val,
                 )
                 if recipe:
+                    recipe["use_negative_exemplars"] = bool(payload.use_negative_exemplars)
+                    recipe["negative_strength"] = float(payload.negative_strength) if payload.use_negative_exemplars else 0.0
+                    recipe["negatives"] = combined_negatives if payload.use_negative_exemplars else []
                     meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
                     for cand in eval_candidates:
                         try:

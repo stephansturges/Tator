@@ -2159,6 +2159,39 @@ def _extract_harmony_final(text: str) -> str:
     return content.strip()
 
 
+def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
+    """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
+    if not raw:
+        return []
+    # Reject obvious junk (leftover harmony markers).
+    if "<|start|>" in raw or "<|message|>" in raw or "<|channel|>" in raw:
+        return []
+    parts = re.split(r"[,;\n]+", raw)
+    parsed: List[str] = []
+    for part in parts:
+        cand = part.strip().strip('"').strip("'")
+        if not cand:
+            continue
+        if cand.upper() == "STOP":
+            break
+        # Must be letters/spaces/hyphens only.
+        if re.search(r"[^A-Za-z\s\-]", cand):
+            continue
+        words = cand.split()
+        if not (1 <= len(words) <= 4):
+            continue
+        if any(len(w) < 2 for w in words):
+            continue
+        key = cand.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed.append(cand)
+        if limit and len(parsed) >= limit:
+            break
+    return parsed
+
+
 def _generate_prompt_text(
     prompt: str,
     *,
@@ -2221,6 +2254,9 @@ def _generate_prompt_text(
                 text = str(gen)
             if text:
                 final = _extract_harmony_final(text)
+                # Drop if the final still contains harmony markers.
+                if any(tag in final for tag in ("<|start|>", "<|message|>", "<|channel|>")):
+                    return ""
                 return final.strip()
     except Exception:
         pass
@@ -6055,32 +6091,17 @@ def _expand_prompts_with_prompt_llm(
             text = _generate_prompt_text(
                 prompt_text,
                 max_new_tokens=max_new_tokens,
-                reasoning="high",
+                reasoning=reasoning,
             )
             if not text:
+                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}) returned empty/invalid")
                 continue
+            parsed = _parse_prompt_candidates(text, seen, max_new - len(suggestions))
             _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}): {text}")
-            for part in re.split(r"[,\n;]+", text):
-                cand = part.strip().strip('"').strip("'")
-                if not cand:
-                    continue
-                if cand.upper() == "STOP":
-                    break
-                cand = re.sub(r"\s+", " ", cand)
-                if re.search(r"[^A-Za-z\s\-]", cand):
-                    continue
-                words = cand.split()
-                if not (1 <= len(words) <= 4):
-                    continue
-                if any(len(w) < 2 for w in words):
-                    continue
-                key = cand.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                suggestions.append(cand)
-                if len(suggestions) >= max_new:
-                    break
+            if not parsed:
+                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}) yielded no valid candidates")
+                continue
+            suggestions.extend(parsed)
             if len(suggestions) >= max_new:
                 break
     except Exception as exc:  # noqa: BLE001

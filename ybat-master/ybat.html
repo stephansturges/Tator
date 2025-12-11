@@ -929,6 +929,18 @@
                                     <div class="training-help">IoU used to suppress overlapping detections across classes.</div>
                                 </div>
                             </div>
+                            <div>
+                                <label for="agentPromptReasoning">GPT-OSS reasoning</label>
+                                <select id="agentPromptReasoning" title="Harmony reasoning level for GPT-OSS prompt expansion.">
+                                    <option value="low">low</option>
+                                    <option value="medium">medium</option>
+                                    <option value="high" selected>high</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="agentPromptMaxTokens">GPT-OSS max tokens</label>
+                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Max new tokens for GPT-OSS prompt expansion." />
+                            </div>
                             <div class="training-field training-field--inline">
                                 <label for="agentTestMode">Test mode</label>
                                 <input type="checkbox" id="agentTestMode" checked />

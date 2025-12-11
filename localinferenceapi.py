@@ -2159,7 +2159,12 @@ def _extract_harmony_final(text: str) -> str:
     return content.strip()
 
 
-def _generate_prompt_text(prompt: str, *, max_new_tokens: int = 128) -> str:
+def _generate_prompt_text(
+    prompt: str,
+    *,
+    max_new_tokens: int = 128,
+    reasoning: Literal["low", "medium", "high"] = "high",
+) -> str:
     """
     Text-only helper for prompt brainstorming/critique.
     Uses the GPT-OSS pipeline; returns empty string on failure.
@@ -2168,7 +2173,7 @@ def _generate_prompt_text(prompt: str, *, max_new_tokens: int = 128) -> str:
         "You are ChatGPT, a large language model trained by OpenAI.\n"
         "Knowledge cutoff: 2024-06\n"
         f"Current date: {time.strftime('%Y-%m-%d')}\n\n"
-        "Reasoning: high\n\n"
+        f"Reasoning: {reasoning}\n\n"
         "# Valid channels: analysis, commentary, final. Channel must be included for every message."
     )
     developer_msg = (
@@ -6001,6 +6006,8 @@ class AgentMiningRequest(BaseModel):
     stacked_mining: bool = False
     stacked_max_chains: int = Field(3, ge=1, le=10)
     stacked_iou: float = Field(0.5, ge=0.0, le=1.0)
+    prompt_reasoning: Literal["low", "medium", "high"] = "high"
+    prompt_max_new_tokens: int = Field(160, ge=16, le=400)
 
 
 def _expand_prompts_with_prompt_llm(
@@ -6009,6 +6016,8 @@ def _expand_prompts_with_prompt_llm(
     max_new: int,
     log_fn: Optional[Callable[[str], None]] = None,
     class_hint: Optional[str] = None,
+    max_new_tokens: int = 128,
+    reasoning: Literal["low", "medium", "high"] = "high",
 ) -> List[str]:
     """Use Qwen to brainstorm additional prompt variants for a class. Accepts optional logger callback."""
     cleaned_base = _sanitize_prompts(base_prompts)
@@ -6043,7 +6052,11 @@ def _expand_prompts_with_prompt_llm(
                 "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.\n"
                 "Return ONLY a comma-separated list ending with STOP. Example: pickup truck, delivery van, hatchback, STOP"
             )
-            text = _generate_prompt_text(prompt_text, max_new_tokens=140)
+            text = _generate_prompt_text(
+                prompt_text,
+                max_new_tokens=max_new_tokens,
+                reasoning="high",
+            )
             if not text:
                 continue
             _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}): {text}")
@@ -7155,6 +7168,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         payload.qwen_max_prompts,
                         log_fn=_log_qwen,
                         class_hint=normalized_hints.get(cat_id),
+                        max_new_tokens=payload.prompt_max_new_tokens,
+                        reasoning=payload.prompt_reasoning,
                     )
                     extra_prompts = _refine_prompts_with_qwen(extra_prompts)
                     merged = []
@@ -8032,7 +8047,13 @@ def prompt_helper_expand(payload: PromptRecipeExpandRequest):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="recipe_class_not_found")
     class_name = str(cat_entry.get("name", f"class_{payload.class_id}"))
     base_prompts = [p.strip() for p in payload.base_prompts if isinstance(p, str) and p.strip()]
-    new_prompts = _expand_prompts_with_prompt_llm(class_name, base_prompts, payload.max_new)
+    new_prompts = _expand_prompts_with_prompt_llm(
+        class_name,
+        base_prompts,
+        payload.max_new,
+        max_new_tokens=payload.max_new_tokens if hasattr(payload, "max_new_tokens") else 128,
+        reasoning="high",
+    )
     combined: List[str] = []
     seen = set()
     for prompt in [*base_prompts, *new_prompts]:

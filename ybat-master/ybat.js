@@ -1350,6 +1350,8 @@ const sam3TrainState = {
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             renderDatasetList(data);
+            // Keep the segmentation builder dropdown in sync.
+            renderSegBuilderDatasets(data);
         } catch (err) {
             console.error("Failed to refresh datasets", err);
             setDatasetUploadMessage(`Failed to load datasets: ${err.message || err}`, "error");
@@ -5339,7 +5341,7 @@ function renderSegBuilderDatasets(list) {
 
 async function refreshSegBuilderDatasets() {
     try {
-        const resp = await fetch(`${API_ROOT}/sam3/datasets`);
+        const resp = await fetch(`${API_ROOT}/datasets`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         renderSegBuilderDatasets(data);

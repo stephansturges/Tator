@@ -2163,12 +2163,17 @@ def _extract_harmony_final(text: str) -> str:
     """
     if not text:
         return ""
+    # First try strict harmony markers.
     pattern = re.compile(
         r"<\|start\|>assistant(?:<\|channel\|>(\w+))?<\|message\|>(.*?)(?:<\|return\|>|<\|end\|>|<\|call\|>)",
         re.DOTALL,
     )
     matches = pattern.findall(text)
     if not matches:
+        # Fallback: look for a plain "assistant final" marker and return what follows.
+        plain = re.search(r"assistant\s+final\s+(.*)", text, flags=re.IGNORECASE | re.DOTALL)
+        if plain:
+            return plain.group(1).strip()
         return text.strip()
     # Prefer the last final-channel message; otherwise the last assistant message.
     final_msgs = [m for m in matches if m[0] == "final"]
@@ -2180,6 +2185,10 @@ def _extract_harmony_final(text: str) -> str:
 def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
     """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
     if not raw:
+        return []
+    # Reject if the raw text still contains obvious prompt headers.
+    lowered = raw.lower()
+    if "you are chatgpt" in lowered or "valid channels" in lowered:
         return []
     # Reject obvious junk (leftover harmony markers).
     if "<|start|>" in raw or "<|message|>" in raw or "<|channel|>" in raw:
@@ -2266,7 +2275,7 @@ def _generate_prompt_text(
             top_p=1.0,
             eos_token_id=stop_ids,
             pad_token_id=pad_id,
-            return_full_text=True,
+            return_full_text=False,
         )
         if outputs:
             gen = outputs[0].get("generated_text") or outputs[0].get("text") or ""

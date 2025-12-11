@@ -2838,6 +2838,9 @@ SAM3_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_ROOT = SAM3_JOB_ROOT / "datasets"
 SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
+DATASET_REGISTRY_ROOT = Path(os.environ.get("DATASET_ROOT", "./uploads/datasets"))
+DATASET_REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
+DATASET_META_NAME = "dataset.json"
 PROMPT_HELPER_JOB_ROOT = Path(os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs"))
 PROMPT_HELPER_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SEG_BUILDER_ROOT = Path(os.environ.get("SEGMENTATION_ROOT", "./uploads/seg_runs"))
@@ -3321,6 +3324,117 @@ def _find_qwen_dataset_by_signature(signature: str) -> Optional[Path]:
     return None
 
 
+def _load_registry_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
+    return _load_json_metadata(dataset_dir / DATASET_META_NAME)
+
+
+def _persist_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
+    meta_path = dataset_dir / DATASET_META_NAME
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write dataset metadata for %s: %s", dataset_dir, exc)
+
+
+def _coerce_dataset_metadata(dataset_dir: Path, raw_meta: Optional[Dict[str, Any]], source: str) -> Dict[str, Any]:
+    meta = dict(raw_meta or {})
+    updated = False
+    if "id" not in meta:
+        meta["id"] = dataset_dir.name
+        updated = True
+    if "label" not in meta:
+        meta["label"] = meta["id"]
+        updated = True
+    dataset_type = meta.get("type") or meta.get("dataset_type") or "bbox"
+    meta["type"] = dataset_type
+    if "classes" not in meta:
+        meta["classes"] = []
+        updated = True
+    if "context" not in meta and meta.get("dataset_context"):
+        meta["context"] = meta.get("dataset_context") or ""
+        updated = True
+    if "created_at" not in meta:
+        meta["created_at"] = dataset_dir.stat().st_mtime
+        updated = True
+    if "source" not in meta:
+        meta["source"] = source
+        updated = True
+    signature = meta.get("signature")
+    if not signature:
+        signature = _compute_dir_signature(dataset_dir)
+        meta["signature"] = signature
+        updated = True
+    if source == "registry" and updated:
+        _persist_dataset_metadata(dataset_dir, meta)
+    return meta
+
+
+def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
+    """Collect datasets across registry, SAM3, and Qwen roots."""
+    entries: List[Dict[str, Any]] = []
+    seen: Dict[str, Tuple[int, str]] = {}
+    sources = [
+        ("registry", DATASET_REGISTRY_ROOT, _load_registry_dataset_metadata),
+        ("sam3", SAM3_DATASET_ROOT, _load_sam3_dataset_metadata),
+        ("qwen", QWEN_DATASET_ROOT, _load_qwen_dataset_metadata),
+    ]
+    for source, root, loader in sources:
+        if not root.exists():
+            continue
+        for path in root.iterdir():
+            if not path.is_dir():
+                continue
+            raw_meta = loader(path)
+            if not raw_meta and source == "registry":
+                raw_meta = _load_sam3_dataset_metadata(path) or _load_qwen_dataset_metadata(path)
+            if not raw_meta:
+                continue
+            meta = _coerce_dataset_metadata(path, raw_meta, source)
+            sam3_meta = _load_sam3_dataset_metadata(path) if source != "sam3" else meta
+            coco_train = None
+            coco_val = None
+            coco_ready = False
+            if sam3_meta:
+                coco_train = sam3_meta.get("coco_train_json")
+                coco_val = sam3_meta.get("coco_val_json")
+                coco_ready = bool(coco_train and coco_val)
+            signature = meta.get("signature") or ""
+            key = signature or meta["id"]
+            entry = {
+                "id": meta.get("id") or path.name,
+                "label": meta.get("label") or path.name,
+                "dataset_root": str(path),
+                "created_at": meta.get("created_at") or path.stat().st_mtime,
+                "image_count": meta.get("image_count"),
+                "train_count": meta.get("train_count"),
+                "val_count": meta.get("val_count"),
+                "classes": meta.get("classes", []),
+                "context": meta.get("context", "") or meta.get("dataset_context", ""),
+                "signature": signature,
+                "source": meta.get("source") or source,
+                "type": meta.get("type", "bbox"),
+                "coco_ready": coco_ready,
+                "coco_train_json": coco_train,
+                "coco_val_json": coco_val,
+            }
+            existing = seen.get(key)
+            if existing is not None:
+                existing_idx, existing_origin = existing
+                if prefer_registry:
+                    if existing_origin == "registry":
+                        continue
+                    if source == "registry":
+                        entries[existing_idx] = entry
+                        seen[key] = (existing_idx, source)
+                        continue
+                continue
+            seen[key] = (len(entries), source)
+            entries.append(entry)
+    entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return entries
+
+
 def _load_sam3_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     meta_path = dataset_dir / SAM3_DATASET_META_NAME
     data = _load_json_metadata(meta_path)
@@ -3573,7 +3687,7 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
     }
 
 
-def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
+def _resolve_dataset_legacy(dataset_id: str) -> Path:
     cleaned = (dataset_id or "").strip().replace("\\", "/")
     safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
     candidate_qwen = (QWEN_DATASET_ROOT / safe).resolve()
@@ -3582,7 +3696,24 @@ def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
     candidate_sam3 = (SAM3_DATASET_ROOT / safe).resolve()
     if str(candidate_sam3).startswith(str(SAM3_DATASET_ROOT.resolve())) and candidate_sam3.exists():
         return candidate_sam3
+    candidate_registry = (DATASET_REGISTRY_ROOT / safe).resolve()
+    if (
+        str(candidate_registry).startswith(str(DATASET_REGISTRY_ROOT.resolve()))
+        and candidate_registry.exists()
+    ):
+        return candidate_registry
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_dataset_not_found")
+
+
+def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
+    cleaned = (dataset_id or "").strip()
+    for entry in _list_all_datasets():
+        if cleaned in (entry.get("id"), entry.get("signature")):
+            path = Path(entry["dataset_root"]).resolve()
+            if path.exists():
+                return path
+    # Fallback to legacy per-root resolution
+    return _resolve_dataset_legacy(dataset_id)
 
 
 def _stable_hash(entries: Sequence[str]) -> str:
@@ -4076,6 +4207,9 @@ def _apply_agent_recipe_to_image(
                     "score": d.score,
                     "mask": d.mask,
                     "image_id": img_id,
+                    "qwen_label": d.qwen_label,
+                    "source": d.source,
+                    "simplify_epsilon": d.simplify_epsilon,
                 }
             )
         filtered, _ = _clip_fp_filter_detections(
@@ -4091,11 +4225,11 @@ def _apply_agent_recipe_to_image(
             result.append(
                 QwenDetection(
                     bbox=det.get("bbox") or [],
-                    qwen_label=None,
-                    source="sam3_text",
+                    qwen_label=det.get("qwen_label"),
+                    source=det.get("source") or "sam3_text",
                     score=det.get("score"),
                     mask=det.get("mask"),
-                    simplify_epsilon=simplify_epsilon,
+                    simplify_epsilon=det.get("simplify_epsilon", simplify_epsilon),
                 )
             )
         return result
@@ -5694,8 +5828,8 @@ async def upload_dataset_zip(
         split_val_labels = dataset_root / "val" / "labels"
         if not split_train_images.exists() or not split_train_labels.exists():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="train_split_missing")
-        target_dir = (SAM3_DATASET_ROOT / safe_name).resolve()
-        if not str(target_dir).startswith(str(SAM3_DATASET_ROOT.resolve())):
+        target_dir = (DATASET_REGISTRY_ROOT / safe_name).resolve()
+        if not str(target_dir).startswith(str(DATASET_REGISTRY_ROOT.resolve())):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_invalid")
         if target_dir.exists():
             raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_exists")
@@ -9194,54 +9328,7 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
 
 
 def _list_sam3_datasets() -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    for entry in _list_qwen_dataset_entries():
-        dataset_root = Path(entry["dataset_root"])
-        sam3_meta = _load_sam3_dataset_metadata(dataset_root)
-        coco_ready = False
-        coco_train = None
-        coco_val = None
-        if sam3_meta and sam3_meta.get("signature") == entry.get("signature"):
-            coco_train = sam3_meta.get("coco_train_json")
-            coco_val = sam3_meta.get("coco_val_json")
-            coco_ready = bool(coco_train and coco_val)
-        entries.append(
-            {
-                **entry,
-                "source": "qwen",
-                "type": entry.get("type", "bbox"),
-                "coco_ready": coco_ready,
-                "coco_train_json": coco_train,
-                "coco_val_json": coco_val,
-            }
-        )
-    for path in SAM3_DATASET_ROOT.iterdir():
-        if not path.is_dir():
-            continue
-        meta = _load_sam3_dataset_metadata(path)
-        if not meta:
-            continue
-        entries.append(
-            {
-                "id": meta.get("id") or path.name,
-                "label": meta.get("label") or path.name,
-                "dataset_root": str(path),
-                "created_at": meta.get("converted_at") or path.stat().st_mtime,
-                "image_count": meta.get("image_count"),
-                "train_count": meta.get("train_count"),
-                "val_count": meta.get("val_count"),
-                "classes": meta.get("classes", []),
-                "context": meta.get("context", ""),
-                "signature": meta.get("signature"),
-                "source": meta.get("source") or "sam3",
-                "type": meta.get("type", "bbox"),
-                "coco_ready": bool(meta.get("coco_train_json") and meta.get("coco_val_json")),
-                "coco_train_json": meta.get("coco_train_json"),
-                "coco_val_json": meta.get("coco_val_json"),
-            }
-        )
-    entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
-    return entries
+    return _list_all_datasets()
 
 
 def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:

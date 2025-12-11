@@ -1423,6 +1423,7 @@ const sam3TrainState = {
         datasetManagerElements.uploadCurrentBtn = document.getElementById("datasetUploadCurrentBtn");
         datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
         datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
+        datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
         datasetManagerElements.list = document.getElementById("datasetList");
         if (datasetManagerElements.uploadBtn) {
             datasetManagerElements.uploadBtn.addEventListener("click", () => uploadDatasetZip());
@@ -1432,6 +1433,9 @@ const sam3TrainState = {
         }
         if (datasetManagerElements.refreshBtn) {
             datasetManagerElements.refreshBtn.addEventListener("click", () => refreshDatasetList());
+        }
+        if (datasetManagerElements.refreshBtnTop) {
+            datasetManagerElements.refreshBtnTop.addEventListener("click", () => refreshDatasetList());
         }
         initSegBuilderUi();
         await refreshDatasetList();

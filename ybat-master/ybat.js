@@ -11324,6 +11324,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const stackedEnabled = !!(agentElements.stackedMining && agentElements.stackedMining.checked);
         const stackedMaxChains = readNumberInput(agentElements.stackedMaxChains, { integer: true });
         const stackedIou = readNumberInput(agentElements.stackedIou, { integer: false });
+        const promptReasoning =
+            agentElements.promptReasoning && agentElements.promptReasoning.value ? agentElements.promptReasoning.value : "high";
+        const promptMaxTokens = readNumberInput(agentElements.promptMaxTokens, { integer: true });
         const classesRaw = agentElements.classesInput?.value || "";
         const classes =
             classesRaw
@@ -11365,6 +11368,8 @@ return {
             stacked_mining: stackedEnabled,
             stacked_max_chains: stackedEnabled && Number.isFinite(stackedMaxChains) ? Math.max(1, Math.min(10, stackedMaxChains)) : 3,
             stacked_iou: stackedEnabled && Number.isFinite(stackedIou) ? Math.max(0, Math.min(1, stackedIou)) : 0.5,
+            prompt_reasoning: ["low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "high",
+            prompt_max_new_tokens: Number.isFinite(promptMaxTokens) ? Math.max(16, Math.min(400, promptMaxTokens)) : 160,
             test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
             test_train_limit: readNumberInput(agentElements.trainLimit, { integer: true }) ?? 10,
             test_val_limit: readNumberInput(agentElements.valLimit, { integer: true }) ?? 10,

@@ -5950,7 +5950,7 @@ class AgentMiningRequest(BaseModel):
     class_hints: Optional[Dict[str, str]] = None
 
 
-def _expand_prompts_with_qwen(
+def _expand_prompts_with_prompt_llm(
     class_name: str,
     base_prompts: List[str],
     max_new: int,
@@ -7096,7 +7096,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         job.logs.append({"ts": time.time(), "msg": msg})
                         if len(job.logs) > MAX_JOB_LOGS:
                             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                    extra_prompts = _expand_prompts_with_qwen(
+                    extra_prompts = _expand_prompts_with_prompt_llm(
                         cat_name,
                         prompts_for_cat,
                         payload.qwen_max_prompts,
@@ -7838,7 +7838,7 @@ def prompt_helper_expand(payload: PromptRecipeExpandRequest):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="recipe_class_not_found")
     class_name = str(cat_entry.get("name", f"class_{payload.class_id}"))
     base_prompts = [p.strip() for p in payload.base_prompts if isinstance(p, str) and p.strip()]
-    new_prompts = _expand_prompts_with_qwen(class_name, base_prompts, payload.max_new)
+    new_prompts = _expand_prompts_with_prompt_llm(class_name, base_prompts, payload.max_new)
     combined: List[str] = []
     seen = set()
     for prompt in [*base_prompts, *new_prompts]:

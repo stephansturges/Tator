@@ -328,10 +328,15 @@ def train_clip_from_yolo(
             logger.info("Embedding cache miss for signature %s", cache_signature)
 
     valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-    image_files = sorted(
-        f for f in os.listdir(images_path)
-        if os.path.splitext(f)[1].lower() in valid_exts
-    )
+    image_files: List[str] = []
+    for dirpath, _dirnames, filenames in os.walk(images_path):
+        for fname in filenames:
+            if os.path.splitext(fname)[1].lower() not in valid_exts:
+                continue
+            full_path = os.path.join(dirpath, fname)
+            rel_path = os.path.relpath(full_path, images_path)
+            image_files.append(rel_path)
+    image_files.sort()
     _check_cancel()
     if not image_files:
         raise TrainingError("No supported images found in the provided folder.")
@@ -394,16 +399,16 @@ def train_clip_from_yolo(
 
     total_valid = 0
     if not using_cached_embeddings:
-        for idx, img_fn in enumerate(image_files, start=1):
-            base = os.path.splitext(img_fn)[0]
+        for idx, img_rel in enumerate(image_files, start=1):
+            base = os.path.splitext(img_rel)[0]
             label_file = os.path.join(labels_path, base + ".txt")
             if not os.path.isfile(label_file):
                 continue
-            img_path = os.path.join(images_path, img_fn)
+            img_path = os.path.join(images_path, img_rel)
             try:
                 pil_img = Image.open(img_path).convert("RGB")
             except Exception as exc:
-                raise TrainingError(f"Failed to open image '{img_fn}': {exc}") from exc
+                raise TrainingError(f"Failed to open image '{img_rel}': {exc}") from exc
             w_img, h_img = pil_img.size
 
             try:

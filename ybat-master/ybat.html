@@ -290,6 +290,16 @@
                             </select>
                         </div>
                         <div class="training-field">
+                            <label for="trainDatasetSelect">Cached dataset (YOLO)</label>
+                            <div class="training-picker">
+                                <select id="trainDatasetSelect">
+                                    <option value="">Use local upload…</option>
+                                </select>
+                                <button type="button" class="training-button secondary" id="trainDatasetRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help" id="trainDatasetSummary">Choose a cached YOLO dataset or upload folders below.</div>
+                        </div>
+                        <div class="training-field">
                             <label for="trainImagesBtn">Images Folder</label>
                             <div class="training-picker">
                                 <button type="button" class="training-button" id="trainImagesBtn">Choose folder…</button>

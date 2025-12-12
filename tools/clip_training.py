@@ -399,10 +399,16 @@ def train_clip_from_yolo(
 
     total_valid = 0
     if not using_cached_embeddings:
+        label_exts = [".txt", ".TXT"]
         for idx, img_rel in enumerate(image_files, start=1):
             base = os.path.splitext(img_rel)[0]
-            label_file = os.path.join(labels_path, base + ".txt")
-            if not os.path.isfile(label_file):
+            label_file = None
+            for ext in label_exts:
+                candidate = os.path.join(labels_path, base + ext)
+                if os.path.isfile(candidate):
+                    label_file = candidate
+                    break
+            if label_file is None:
                 continue
             img_path = os.path.join(images_path, img_rel)
             try:

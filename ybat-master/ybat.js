@@ -1015,7 +1015,9 @@ const qwenTrainElements = {
         labelTotalCount: 0,
         nativeImagesPath: null,
         nativeLabelsPath: null,
+        nativeLabelmapPath: null,
     };
+    const clipDatasetState = { items: [] };
 
 const qwenTrainState = {
     activeJobId: null,
@@ -6907,12 +6909,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!usingUploads) {
             formData.append("images_path_native", trainingState.nativeImagesPath);
             formData.append("labels_path_native", trainingState.nativeLabelsPath);
+            if (trainingState.nativeLabelmapPath) {
+                formData.append("labelmap_path_native", trainingState.nativeLabelmapPath);
+            }
         }
-        if (trainingElements.labelmapInput && trainingElements.labelmapInput.files.length === 1) {
-            formData.append("labelmap", trainingElements.labelmapInput.files[0]);
-        } else if (loadedClassList.length) {
-            const blob = new Blob([loadedClassList.join("\n")], { type: "text/plain" });
-            formData.append("labelmap", blob, "ui_labelmap.txt");
+        if (usingUploads) {
+            if (trainingElements.labelmapInput && trainingElements.labelmapInput.files.length === 1) {
+                formData.append("labelmap", trainingElements.labelmapInput.files[0]);
+            } else if (loadedClassList.length) {
+                const blob = new Blob([loadedClassList.join("\n")], { type: "text/plain" });
+                formData.append("labelmap", blob, "ui_labelmap.txt");
+            }
         }
         if (trainingElements.clipBackboneSelect) {
             formData.append("clip_model_name", trainingElements.clipBackboneSelect.value);
@@ -7454,6 +7461,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingUiInitialized = true;
         trainingElements.clipBackboneSelect = document.getElementById("clipBackboneSelect");
         trainingElements.solverSelect = document.getElementById("trainSolver");
+        trainingElements.datasetSelect = document.getElementById("trainDatasetSelect");
+        trainingElements.datasetRefresh = document.getElementById("trainDatasetRefresh");
+        trainingElements.datasetSummary = document.getElementById("trainDatasetSummary");
         trainingElements.imagesInput = document.getElementById("trainImages");
         trainingElements.imagesBtn = document.getElementById("trainImagesBtn");
         trainingElements.imagesSummary = document.getElementById("trainImagesSummary");
@@ -7490,6 +7500,82 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.reuseEmbeddingsCheckbox = document.getElementById("trainReuseEmbeddings");
         trainingElements.hardMiningCheckbox = document.getElementById("trainHardMining");
 
+        const applyDatasetSelection = (datasetId) => {
+            const item = clipDatasetState.items.find((d) => d.id === datasetId);
+            if (!item) {
+                trainingState.nativeImagesPath = null;
+                trainingState.nativeLabelsPath = null;
+                trainingState.nativeLabelmapPath = null;
+                trainingState.imagesFolderName = null;
+                trainingState.labelsFolderName = null;
+                if (trainingElements.datasetSummary) {
+                    trainingElements.datasetSummary.textContent = "Choose a cached YOLO dataset or upload folders below.";
+                }
+                updateFileSummary(null, trainingElements.imagesSummary, { emptyText: "No folder selected" });
+                updateFileSummary(null, trainingElements.labelsSummary, { emptyText: "No folder selected" });
+                return;
+            }
+            const root = item.dataset_root;
+            trainingState.nativeImagesPath = `${root}/train/images`;
+            trainingState.nativeLabelsPath = `${root}/train/labels`;
+            trainingState.nativeLabelmapPath = `${root}/labelmap.txt`;
+            trainingState.imagesFolderName = item.label || item.id;
+            trainingState.labelsFolderName = item.label || item.id;
+            trainingState.imageEntries = [];
+            trainingState.labelEntries = [];
+            trainingState.imageTotalCount = 0;
+            trainingState.labelTotalCount = 0;
+            if (trainingElements.datasetSummary) {
+                trainingElements.datasetSummary.textContent = `Using dataset: ${item.label || item.id}`;
+            }
+            updateFileSummary(null, trainingElements.imagesSummary, { mode: "path", path: trainingState.nativeImagesPath, emptyText: "No folder selected" });
+            updateFileSummary(null, trainingElements.labelsSummary, { mode: "path", path: trainingState.nativeLabelsPath, emptyText: "No folder selected" });
+            if (trainingElements.labelmapSummary && trainingState.nativeLabelmapPath) {
+                trainingElements.labelmapSummary.textContent = trainingState.nativeLabelmapPath;
+                trainingElements.labelmapSummary.title = trainingState.nativeLabelmapPath;
+            }
+            if (trainingElements.imagesInput) trainingElements.imagesInput.value = "";
+            if (trainingElements.labelsInput) trainingElements.labelsInput.value = "";
+            if (trainingElements.labelmapInput) trainingElements.labelmapInput.value = "";
+            setTrainingMessage(`Using cached dataset ${item.label || item.id}`, "success");
+        };
+
+        const refreshClipDatasets = async (selectedId) => {
+            if (!trainingElements.datasetSelect) {
+                return;
+            }
+            try {
+                const resp = await fetch(`${API_ROOT}/datasets`);
+                if (!resp.ok) {
+                    throw new Error(`HTTP ${resp.status}`);
+                }
+                const data = await resp.json();
+                clipDatasetState.items = Array.isArray(data)
+                    ? data.filter((d) => (d.type || "bbox") === "bbox")
+                    : [];
+                trainingElements.datasetSelect.innerHTML = "";
+                const emptyOpt = document.createElement("option");
+                emptyOpt.value = "";
+                emptyOpt.textContent = "Use local upload…";
+                trainingElements.datasetSelect.appendChild(emptyOpt);
+                clipDatasetState.items.forEach((item) => {
+                    const opt = document.createElement("option");
+                    opt.value = item.id;
+                    opt.textContent = item.label || item.id;
+                    if (selectedId && selectedId === item.id) {
+                        opt.selected = true;
+                    }
+                    trainingElements.datasetSelect.appendChild(opt);
+                });
+                if (selectedId) {
+                    applyDatasetSelection(selectedId);
+                }
+            } catch (err) {
+                console.error("Failed to refresh datasets", err);
+                setTrainingMessage(`Unable to load cached datasets: ${err.message || err}`, "error");
+            }
+        };
+
         if (trainingElements.imagesBtn) {
             trainingElements.imagesBtn.addEventListener("click", () => chooseTrainingFolder("images"));
         }
@@ -7524,6 +7610,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 });
             });
         }
+        if (trainingElements.datasetRefresh) {
+            trainingElements.datasetRefresh.addEventListener("click", () => {
+                refreshClipDatasets(trainingElements.datasetSelect?.value || null);
+            });
+        }
+        if (trainingElements.datasetSelect) {
+            trainingElements.datasetSelect.addEventListener("change", (event) => {
+                applyDatasetSelection(event.target.value || "");
+            });
+        }
 
         updateFileSummary(trainingElements.imagesInput, trainingElements.imagesSummary, { emptyText: "No folder selected", mode: "folder", allowedExts: IMAGE_EXTENSIONS });
         updateFileSummary(trainingElements.labelsInput, trainingElements.labelsSummary, { emptyText: "No folder selected", mode: "folder", allowedExts: LABEL_EXTENSIONS });
@@ -7533,6 +7629,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
 
         populateClipBackbones();
+        refreshClipDatasets(null).catch((err) => console.warn("Dataset list init failed", err));
     }
 
     function initializeActiveModelUi() {

@@ -10737,14 +10737,6 @@ async def start_clip_training(
         temp_root = os.path.abspath(staged_temp_dir)
     job = ClipTrainingJob(job_id=job_id, temp_dir=temp_root, images_dir=images_dir, labels_dir=labels_dir, labelmap_path=labelmap_path)
     job_message = "Job queued (native paths)" if use_native_paths else "Job queued (upload staging)"
-    extras = [solver_name]
-    if reuse_embeddings_flag:
-        extras.append("cache")
-    if hard_example_flag:
-        extras.append(f"hard({hard_mis_weight_f:.1f}/{hard_low_conf_weight_f:.1f})")
-    job_message += f" [{', '.join(extras)}]"
-    _job_log(job, job_message)
-
     test_size_f = _coerce_float(test_size, 0.2, minimum=0.0, maximum=0.9)
     random_seed_i = _coerce_int(random_seed, 42)
     batch_size_i = _coerce_int(batch_size, 64, minimum=1)
@@ -10760,6 +10752,14 @@ async def start_clip_training(
     hard_low_conf_threshold_f = _coerce_float(hard_low_conf_threshold, 0.65, minimum=0.0, maximum=0.9999)
     hard_margin_threshold_f = _coerce_float(hard_margin_threshold, 0.15, minimum=0.0)
     convergence_tol_f = _coerce_float(convergence_tol, 1e-4, minimum=1e-8)
+
+    extras = [solver_name]
+    if reuse_embeddings_flag:
+        extras.append("cache")
+    if hard_example_flag:
+        extras.append(f"hard({hard_mis_weight_f:.1f}/{hard_low_conf_weight_f:.1f})")
+    job_message += f" [{', '.join(extras)}]"
+    _job_log(job, job_message)
 
     with TRAINING_JOBS_LOCK:
         TRAINING_JOBS[job_id] = job

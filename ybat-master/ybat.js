@@ -2237,7 +2237,22 @@ const sam3TrainState = {
     }
 
     async function chooseTrainingFolder(kind) {
+        const input = kind === "images" ? trainingElements.imagesInput : trainingElements.labelsInput;
         if (!HAS_DIRECTORY_PICKER) {
+            // Prefer the local file-input directory picker so users on remote backends
+            // can still select local folders, even on insecure origins.
+            if (input) {
+                try {
+                    if (typeof input.showPicker === "function") {
+                        await input.showPicker();
+                    } else {
+                        input.click();
+                    }
+                    return;
+                } catch (err) {
+                    console.warn("Local folder picker failed, falling back to server picker", err);
+                }
+            }
             handleNativeFolderFallback(kind);
             return;
         }

@@ -6983,6 +6983,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!Array.isArray(labelEntries) || !labelEntries.length) {
             throw new Error("No label files found for upload.");
         }
+
+        const normalizeRelPath = (value) => {
+            const raw = value || "";
+            // Drop the leading folder component (common when picking a folder) so
+            // images/labels align even if their top-level folder names differ.
+            const parts = raw.split(/[/\\\\]+/).filter(Boolean);
+            if (parts.length > 1) {
+                return parts.slice(1).join("/");
+            }
+            return raw;
+        };
+
         const initResp = await fetch(`${API_ROOT}/clip/dataset/init`, { method: "POST" });
         if (!initResp.ok) {
             const text = await initResp.text();
@@ -7000,7 +7012,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const uploadForm = new FormData();
             uploadForm.append("job_id", jobId);
             uploadForm.append("kind", kind);
-            const relPath = entry.relativePath || entry.file?.name || `${kind}_${completedItems}`;
+            const relPathRaw = entry.relativePath || entry.file?.name || `${kind}_${completedItems}`;
+            const relPath = normalizeRelPath(relPathRaw);
             uploadForm.append("relative_path", relPath);
             uploadForm.append("file", entry.file, entry.file?.name || relPath);
             const resp = await fetch(`${API_ROOT}/clip/dataset/chunk`, {

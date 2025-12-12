@@ -7551,7 +7551,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 }
                 const data = await resp.json();
                 clipDatasetState.items = Array.isArray(data)
-                    ? data.filter((d) => (d.type || "bbox") === "bbox")
+                    ? data.filter((d) => {
+                        const root = d.dataset_root;
+                        if (!root) return false;
+                        const typeOk = (d.type || "bbox") === "bbox";
+                        const fromQwen = (d.source || "").toLowerCase() === "qwen";
+                        if (!typeOk || fromQwen) return false;
+                        const trainImages = `${root}/train/images`;
+                        const trainLabels = `${root}/train/labels`;
+                        // We can’t stat on the client; rely on registry entries to only list YOLO datasets for CLIP.
+                        return Boolean(trainImages) && Boolean(trainLabels);
+                    })
                     : [];
                 trainingElements.datasetSelect.innerHTML = "";
                 const emptyOpt = document.createElement("option");

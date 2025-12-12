@@ -2118,38 +2118,25 @@ const sam3TrainState = {
     }
 
     async function handleNativeFolderFallback(kind) {
-        const previousPath = kind === "images" ? trainingState.nativeImagesPath : trainingState.nativeLabelsPath;
-        const params = new URLSearchParams();
-        if (previousPath) {
-            params.set('initial', previousPath);
-        }
-        const endpoint = `${API_ROOT}/fs/select_directory${params.toString() ? `?${params.toString()}` : ''}`;
-        try {
-            const resp = await fetch(endpoint);
-            if (!resp.ok) {
-                let detail;
-                try {
-                    detail = (await resp.json()).detail;
-                } catch (err) {
-                    detail = await resp.text();
-                }
-                if (detail === "tkinter_unavailable") {
-                    await promptForFolderPath(kind);
+        // Legacy callers may still reach here; prefer the local hidden file input first.
+        const input = kind === "images" ? trainingElements.imagesInput : trainingElements.labelsInput;
+        if (input) {
+            try {
+                if (typeof input.showPicker === "function") {
+                    await input.showPicker();
                     return;
                 }
-                throw new Error(detail || `HTTP ${resp.status}`);
-            }
-            const data = await resp.json();
-            const selected = data && data.path ? data.path : null;
-            if (!selected) {
-                setTrainingMessage("Directory selection cancelled.", null);
+                input.click();
                 return;
+            } catch (err) {
+                if (err && (err.name === "AbortError" || err.name === "NotAllowedError")) {
+                    setTrainingMessage("Directory selection cancelled.", null);
+                    return;
+                }
+                console.warn("Fallback directory picker failed", err);
             }
-            applyNativeFolderSelection(kind, selected);
-        } catch (error) {
-            console.warn('Native directory picker failed', error);
-            await promptForFolderPath(kind, error);
         }
+        await promptForFolderPath(kind);
     }
 
     async function promptForFolderPath(kind, reason) {

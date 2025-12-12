@@ -2238,44 +2238,57 @@ const sam3TrainState = {
 
     async function chooseTrainingFolder(kind) {
         const input = kind === "images" ? trainingElements.imagesInput : trainingElements.labelsInput;
-        if (!HAS_DIRECTORY_PICKER) {
-            // Prefer the local file-input directory picker so users on remote backends
-            // can still select local folders, even on insecure origins.
-            if (input) {
-                try {
-                    if (typeof input.showPicker === "function") {
-                        await input.showPicker();
-                    } else {
-                        input.click();
-                    }
-                    return;
-                } catch (err) {
-                    console.warn("Local folder picker failed, falling back to server picker", err);
-                }
+
+        const tryLocalFileInput = async () => {
+            if (!input) {
+                return false;
             }
-            handleNativeFolderFallback(kind);
+            try {
+                if (typeof input.showPicker === "function") {
+                    await input.showPicker();
+                } else {
+                    input.click();
+                }
+                return true;
+            } catch (err) {
+                console.warn("Local folder picker failed", err);
+                return false;
+            }
+        };
+
+        // Prefer the native browser directory picker when available in a secure context.
+        const allowed = kind === "images" ? IMAGE_EXTENSIONS : LABEL_EXTENSIONS;
+        if (typeof window !== "undefined" && typeof window.showDirectoryPicker === "function" && window.isSecureContext) {
+            try {
+                const handle = await window.showDirectoryPicker();
+                if (!handle) {
+                    return;
+                }
+                const { entries, totalCount } = await collectDirectoryEntries(handle, allowed);
+                if (!entries.length) {
+                    throw new Error("Selected folder does not contain supported files.");
+                }
+                summariseEntries(kind, entries, totalCount, handle.name);
+                setTrainingMessage(`Loaded ${entries.length} ${kind === "images" ? "image" : "label"} files from ${handle.name}.`, "success");
+                return;
+            } catch (error) {
+                if (error && (error.name === "AbortError" || error.name === "NotAllowedError")) {
+                    setTrainingMessage("Directory selection cancelled.", null);
+                    return;
+                }
+                console.warn("Native directory picker failed, falling back", error);
+                // fall through to local file input / server picker
+            }
+        }
+
+        // Fallback to the hidden file input with webkitdirectory support (works on insecure contexts).
+        const picked = await tryLocalFileInput();
+        if (picked) {
             return;
         }
-        const allowed = kind === "images" ? IMAGE_EXTENSIONS : LABEL_EXTENSIONS;
-        try {
-            const handle = await window.showDirectoryPicker();
-            if (!handle) {
-                return;
-            }
-            const { entries, totalCount } = await collectDirectoryEntries(handle, allowed);
-            if (!entries.length) {
-                throw new Error("Selected folder does not contain supported files.");
-            }
-            summariseEntries(kind, entries, totalCount, handle.name);
-            setTrainingMessage(`Loaded ${entries.length} ${kind === "images" ? "image" : "label"} files from ${handle.name}.`, "success");
-        } catch (error) {
-            if (error && (error.name === "AbortError" || error.name === "NotAllowedError")) {
-                setTrainingMessage("Directory selection cancelled.", null);
-                return;
-            }
-            console.error("Directory picker failed", error);
-            setTrainingMessage(error.message || String(error), "error");
-        }
+
+        // Last resort: server-side picker (opens on the backend host).
+        handleNativeFolderFallback(kind);
     }
 
     function handleImagesInputChange() {

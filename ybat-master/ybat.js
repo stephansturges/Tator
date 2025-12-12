@@ -2238,57 +2238,26 @@ const sam3TrainState = {
 
     async function chooseTrainingFolder(kind) {
         const input = kind === "images" ? trainingElements.imagesInput : trainingElements.labelsInput;
-
-        const tryLocalFileInput = async () => {
-            if (!input) {
-                return false;
-            }
-            try {
-                if (typeof input.showPicker === "function") {
-                    await input.showPicker();
-                } else {
-                    input.click();
-                }
-                return true;
-            } catch (err) {
-                console.warn("Local folder picker failed", err);
-                return false;
-            }
-        };
-
-        // Prefer the native browser directory picker when available in a secure context.
-        const allowed = kind === "images" ? IMAGE_EXTENSIONS : LABEL_EXTENSIONS;
-        if (typeof window !== "undefined" && typeof window.showDirectoryPicker === "function" && window.isSecureContext) {
-            try {
-                const handle = await window.showDirectoryPicker();
-                if (!handle) {
-                    return;
-                }
-                const { entries, totalCount } = await collectDirectoryEntries(handle, allowed);
-                if (!entries.length) {
-                    throw new Error("Selected folder does not contain supported files.");
-                }
-                summariseEntries(kind, entries, totalCount, handle.name);
-                setTrainingMessage(`Loaded ${entries.length} ${kind === "images" ? "image" : "label"} files from ${handle.name}.`, "success");
-                return;
-            } catch (error) {
-                if (error && (error.name === "AbortError" || error.name === "NotAllowedError")) {
-                    setTrainingMessage("Directory selection cancelled.", null);
-                    return;
-                }
-                console.warn("Native directory picker failed, falling back", error);
-                // fall through to local file input / server picker
-            }
-        }
-
-        // Fallback to the hidden file input with webkitdirectory support (works on insecure contexts).
-        const picked = await tryLocalFileInput();
-        if (picked) {
+        if (!input) {
+            setTrainingMessage("Folder picker unavailable in this browser.", "error");
             return;
         }
 
-        // Last resort: server-side picker (opens on the backend host).
-        handleNativeFolderFallback(kind);
+        // Prefer the hidden file input with webkitdirectory; works on remote backends and insecure origins.
+        try {
+            if (typeof input.showPicker === "function") {
+                await input.showPicker();
+            } else {
+                input.click();
+            }
+        } catch (err) {
+            if (err && (err.name === "AbortError" || err.name === "NotAllowedError")) {
+                setTrainingMessage("Directory selection cancelled.", null);
+                return;
+            }
+            console.warn("Folder picker failed", err);
+            setTrainingMessage("Folder picker blocked by the browser. Please allow file access.", "error");
+        }
     }
 
     function handleImagesInputChange() {
@@ -6633,55 +6602,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 
     async function chooseOutputDirectory() {
-        try {
-            const params = new URLSearchParams();
-            if (trainingState.outputDirPath) {
-                params.set('initial', trainingState.outputDirPath);
-            }
-            const resp = await fetch(`${API_ROOT}/fs/select_directory${params.toString() ? `?${params.toString()}` : ''}`);
-            if (!resp.ok) {
-                const textBody = await resp.text();
-                let detail = textBody;
-                try {
-                    detail = JSON.parse(textBody).detail;
-                } catch (err) {
-                    // ignore JSON parse errors
-                }
-                if (detail === "tkinter_unavailable") {
-                    const fallback = window.prompt('Enter output directory path', trainingState.outputDirPath || '.');
-                    if (fallback !== null) {
-                        trainingState.outputDirPath = fallback.trim() || '.';
-                        if (trainingElements.outputDirSummary) {
-                            trainingElements.outputDirSummary.textContent = trainingState.outputDirPath === '.' ? 'Server default (.)' : trainingState.outputDirPath;
-                        }
-                        setTrainingMessage('Using manual output directory entry.', 'success');
-                    }
-                    return;
-                }
-                throw new Error(detail || `HTTP ${resp.status}`);
-            }
-            const data = await resp.json();
-            const selected = data && Object.prototype.hasOwnProperty.call(data, 'path') ? data.path : null;
-            if (!selected) {
-                setTrainingMessage('Directory selection cancelled.', null);
-                return;
-            }
-            trainingState.outputDirPath = selected;
-            if (trainingElements.outputDirSummary) {
-                trainingElements.outputDirSummary.textContent = selected === '.' ? 'Server default (.)' : selected;
-            }
-            setTrainingMessage('Output directory updated.', 'success');
-        } catch (error) {
-            console.warn('Directory picker failed', error);
-            const fallback = window.prompt('Enter output directory path', trainingState.outputDirPath || '.');
-            if (fallback !== null) {
-                trainingState.outputDirPath = fallback.trim() || '.';
-                if (trainingElements.outputDirSummary) {
-                    trainingElements.outputDirSummary.textContent = trainingState.outputDirPath === '.' ? 'Server default (.)' : trainingState.outputDirPath;
-                }
-                setTrainingMessage('Using manual output directory entry.', 'success');
-            }
+        const fallback = window.prompt('Enter output directory path on the server', trainingState.outputDirPath || '.');
+        if (fallback === null) {
+            setTrainingMessage('Directory selection cancelled.', null);
+            return;
         }
+        const trimmed = fallback.trim() || '.';
+        trainingState.outputDirPath = trimmed;
+        if (trainingElements.outputDirSummary) {
+            trainingElements.outputDirSummary.textContent = trimmed === '.' ? 'Server default (.)' : trimmed;
+        }
+        setTrainingMessage('Output directory updated.', 'success');
     }
 
     async function refreshTrainingHistory() {

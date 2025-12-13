@@ -4990,6 +4990,28 @@ def _collect_agent_mining_detections_image_first(
             path = info.get("path")
             if path:
                 image_entries.append((img_id, path))
+        # Remove stale cache files for the keys we will regenerate to avoid duplicate appends across runs.
+        keys_to_reset: set[str] = set()
+        for cand in missing:
+            for thr in thresholds_list:
+                cache_key = _agent_mining_cache_key(
+                    class_id=cand.get("class_id"),
+                    prompt=cand.get("prompt"),
+                    visual_ref=cand.get("visual_ref"),
+                    threshold=thr,
+                    mask_threshold=mask_threshold,
+                    min_size=min_size,
+                    simplify=simplify,
+                    max_results=max_results,
+                )
+                keys_to_reset.add(cache_key)
+        for key in keys_to_reset:
+            path = cache_dir / f"{key}.json"
+            if path.exists():
+                try:
+                    path.unlink()
+                except Exception:
+                    logger.debug("Failed to remove stale cache file %s", path)
         # Stream in chunks to limit memory, flushing each chunk to cache.
         chunk_size = 8
         accumulator: Dict[str, List[Dict[str, Any]]] = {}

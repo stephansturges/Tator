@@ -4940,6 +4940,9 @@ def _collect_agent_mining_detections_image_first(
     min_threshold = min(thresholds_list)
     results: Dict[str, Dict[float, List[Dict[str, Any]]]] = {}
     missing: List[Dict[str, Any]] = []
+    # For streaming flush
+    executed_keys: set[str] = set()
+    executed_keys_with_dets: set[str] = set()
     cached_pairs = 0
     executed_pairs = 0
     executed_pairs_with_dets = 0
@@ -4978,28 +4981,70 @@ def _collect_agent_mining_detections_image_first(
             path = info.get("path")
             if path:
                 image_entries.append((img_id, path))
-        pooled = pool.run(
-            image_entries,
-            missing,
-            min_threshold=min_threshold,
-            mask_threshold=mask_threshold,
-            max_results=max_results,
-            min_size=min_size,
-            simplify=simplify,
-            cancel_event=cancel_event,
-            progress_callback=progress_callback,
-        )
+        # Stream in chunks to limit memory, flushing each chunk to cache.
+        chunk_size = 24
+        accumulator: Dict[str, List[Dict[str, Any]]] = {}
+
+        def flush_accumulator() -> None:
+            nonlocal accumulator
+            if not accumulator:
+                return
+            for key, items in accumulator.items():
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                existing = _load_agent_mining_detections(cache_dir, key) or []
+                existing.extend(items)
+                _save_agent_mining_detections(cache_dir, key, existing)
+            accumulator = {}
+
+        for start in range(0, len(image_entries), chunk_size):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            batch_entries = image_entries[start : start + chunk_size]
+            pooled = pool.run(
+                batch_entries,
+                missing,
+                min_threshold=min_threshold,
+                mask_threshold=mask_threshold,
+                max_results=max_results,
+                min_size=min_size,
+                simplify=simplify,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+            for cand in missing:
+                cand_id = cand.get("id")
+                if not cand_id:
+                    continue
+                base_dets = pooled.get(cand_id, [])
+                for thr in thresholds_list:
+                    filtered = [
+                        det
+                        for det in base_dets
+                        if ((det.get("score") is None and thr <= min_threshold) or (det.get("score") or 0.0) >= thr)
+                    ]
+                    cache_key = _agent_mining_cache_key(
+                        class_id=cand.get("class_id"),
+                        prompt=cand.get("prompt"),
+                        visual_ref=cand.get("visual_ref"),
+                        threshold=thr,
+                        mask_threshold=mask_threshold,
+                        min_size=min_size,
+                        simplify=simplify,
+                        max_results=max_results,
+                    )
+                    accumulator.setdefault(cache_key, []).extend(filtered)
+                    executed_keys.add(cache_key)
+                    if filtered:
+                        executed_keys_with_dets.add(cache_key)
+            flush_accumulator()
+        flush_accumulator()
+        # Reload from cache for all missing candidates.
         for cand in missing:
             cand_id = cand.get("id")
             if not cand_id:
                 continue
-            base_dets = pooled.get(cand_id, [])
             for thr in thresholds_list:
-                filtered = [
-                    det
-                    for det in base_dets
-                    if ((det.get("score") is None and thr <= min_threshold) or (det.get("score") or 0.0) >= thr)
-                ]
                 cache_key = _agent_mining_cache_key(
                     class_id=cand.get("class_id"),
                     prompt=cand.get("prompt"),
@@ -5010,11 +5055,10 @@ def _collect_agent_mining_detections_image_first(
                     simplify=simplify,
                     max_results=max_results,
                 )
-                _save_agent_mining_detections(cache_dir, cache_key, filtered)
-                results.setdefault(cand_id, {})[thr] = filtered
-                executed_pairs += 1
-                if filtered:
-                    executed_pairs_with_dets += 1
+                cached = _load_agent_mining_detections(cache_dir, cache_key) or []
+                results.setdefault(cand_id, {})[thr] = cached
+        executed_pairs += len(executed_keys)
+        executed_pairs_with_dets += len(executed_keys_with_dets)
     stats = {
         "images": len(image_ids),
         "candidates": len(candidates),

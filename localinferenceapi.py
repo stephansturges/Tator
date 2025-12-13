@@ -5013,7 +5013,9 @@ def _collect_agent_mining_detections_image_first(
                 except Exception:
                     logger.debug("Failed to remove stale cache file %s", path)
         # Stream in chunks to limit memory, flushing each chunk to cache.
-        chunk_size = 8
+        # Keep chunk_size small and also cap how many candidates are evaluated per chunk to limit RAM/VRAM.
+        chunk_size = 6
+        max_cands_per_chunk = 64
         accumulator: Dict[str, List[Dict[str, Any]]] = {}
         processed_total = 0
 
@@ -5033,6 +5035,8 @@ def _collect_agent_mining_detections_image_first(
             if cancel_event is not None and cancel_event.is_set():
                 break
             batch_entries = image_entries[start : start + chunk_size]
+            # Optionally slice candidates to keep per-chunk work bounded.
+            cand_chunks = [missing[i : i + max_cands_per_chunk] for i in range(0, len(missing), max_cands_per_chunk)]
             logger.info(
                 "[agent-mining] chunk %d/%d images %d-%d/%d (candidates=%d, thresholds=%d)",
                 (start // chunk_size) + 1,
@@ -5043,43 +5047,57 @@ def _collect_agent_mining_detections_image_first(
                 len(missing),
                 len(thresholds_list),
             )
-            pooled = pool.run(
-                batch_entries,
-                missing,
-                min_threshold=min_threshold,
-                mask_threshold=mask_threshold,
-                max_results=max_results,
-                min_size=min_size,
-                simplify=simplify,
-                cancel_event=cancel_event,
-                progress_callback=None,
-            )
-            for cand in missing:
-                cand_id = cand.get("id")
-                if not cand_id:
-                    continue
-                base_dets = pooled.get(cand_id, [])
-                for thr in thresholds_list:
-                    filtered = [
-                        det
-                        for det in base_dets
-                        if ((det.get("score") is None and thr <= min_threshold) or (det.get("score") or 0.0) >= thr)
-                    ]
-                    cache_key = _agent_mining_cache_key(
-                        class_id=cand.get("class_id"),
-                        prompt=cand.get("prompt"),
-                        visual_ref=cand.get("visual_ref"),
-                        threshold=thr,
-                        mask_threshold=mask_threshold,
-                        min_size=min_size,
-                        simplify=simplify,
-                        max_results=max_results,
-                    )
-                    accumulator.setdefault(cache_key, []).extend(filtered)
-                    executed_keys.add(cache_key)
-                    if filtered:
-                        executed_keys_with_dets.add(cache_key)
-            flush_accumulator()
+            for cand_slice in cand_chunks:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                pooled = pool.run(
+                    batch_entries,
+                    cand_slice,
+                    min_threshold=min_threshold,
+                    mask_threshold=mask_threshold,
+                    max_results=max_results,
+                    min_size=min_size,
+                    simplify=simplify,
+                    cancel_event=cancel_event,
+                    progress_callback=None,
+                )
+                for cand in cand_slice:
+                    cand_id = cand.get("id")
+                    if not cand_id:
+                        continue
+                    base_dets = pooled.get(cand_id, [])
+                    for thr in thresholds_list:
+                        filtered = [
+                            det
+                            for det in base_dets
+                            if ((det.get("score") is None and thr <= min_threshold) or (det.get("score") or 0.0) >= thr)
+                        ]
+                        cache_key = _agent_mining_cache_key(
+                            class_id=cand.get("class_id"),
+                            prompt=cand.get("prompt"),
+                            visual_ref=cand.get("visual_ref"),
+                            threshold=thr,
+                            mask_threshold=mask_threshold,
+                            min_size=min_size,
+                            simplify=simplify,
+                            max_results=max_results,
+                        )
+                        accumulator.setdefault(cache_key, []).extend(filtered)
+                        executed_keys.add(cache_key)
+                        if filtered:
+                            executed_keys_with_dets.add(cache_key)
+                flush_accumulator()
+                try:
+                    # Free pooled results explicitly to lower peak RAM.
+                    pooled.clear()
+                except Exception:
+                    pass
+                # Give the GPU a chance to release memory between slices.
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
             processed_total += len(batch_entries)
             if progress_callback:
                 try:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random
+import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
@@ -4450,11 +4450,36 @@ def _agent_mining_cache_key(
     return _stable_hash(key_parts)
 
 
+def _agent_mining_cache_paths(cache_dir: Path, key: str) -> Tuple[Path, Path]:
+    """Return (gz_path, legacy_json_path) for a cache key."""
+    return cache_dir / f"{key}.json.gz", cache_dir / f"{key}.json"
+
+
+def _slim_detections(detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep only the minimal fields needed downstream to cut disk usage."""
+    kept_fields = {"image_id", "bbox", "score", "label", "class_id", "class_idx"}
+    slimmed: List[Dict[str, Any]] = []
+    for det in detections or []:
+        try:
+            slim = {k: det.get(k) for k in kept_fields if k in det}
+            # ensure bbox is JSON-serializable list
+            if "bbox" in slim and isinstance(slim["bbox"], tuple):
+                slim["bbox"] = list(slim["bbox"])
+            slimmed.append(slim)
+        except Exception:
+            continue
+    return slimmed
+
+
 def _load_agent_mining_detections(cache_dir: Path, key: str) -> Optional[List[Dict[str, Any]]]:
-    path = cache_dir / f"{key}.json"
-    if not path.exists():
+    path_gz, path_json = _agent_mining_cache_paths(cache_dir, key)
+    path = path_gz if path_gz.exists() else path_json if path_json.exists() else None
+    if path is None:
         return None
     try:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8") as fp:
+                return json.load(fp)
         with path.open("r", encoding="utf-8") as fp:
             return json.load(fp)
     except Exception:
@@ -4463,14 +4488,22 @@ def _load_agent_mining_detections(cache_dir: Path, key: str) -> Optional[List[Di
 
 def _save_agent_mining_detections(cache_dir: Path, key: str, detections: List[Dict[str, Any]]) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{key}.json"
+    path_gz, path_json = _agent_mining_cache_paths(cache_dir, key)
+    # remove legacy uncompressed file if present
+    if path_json.exists():
+        try:
+            path_json.unlink()
+        except Exception:
+            logger.debug("Failed to remove legacy cache file %s", path_json)
+    slimmed = _slim_detections(detections)
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=cache_dir, suffix=".tmp") as fp:
-            json.dump(detections, fp)
+        with tempfile.NamedTemporaryFile("wb", delete=False, dir=cache_dir, suffix=".tmp") as fp:
+            with gzip.GzipFile(fileobj=fp, mode="w") as gz:
+                gz.write(json.dumps(slimmed).encode("utf-8"))
             tmp_name = fp.name
-        Path(tmp_name).replace(path)
+        Path(tmp_name).replace(path_gz)
     except Exception:
-        logger.exception("Failed to persist agent mining detections to %s", path)
+        logger.exception("Failed to persist agent mining detections to %s", path_gz)
 
 
 def _collect_agent_mining_detections(
@@ -5006,12 +5039,13 @@ def _collect_agent_mining_detections_image_first(
                 )
                 keys_to_reset.add(cache_key)
         for key in keys_to_reset:
-            path = cache_dir / f"{key}.json"
-            if path.exists():
-                try:
-                    path.unlink()
-                except Exception:
-                    logger.debug("Failed to remove stale cache file %s", path)
+            path_gz, path_json = _agent_mining_cache_paths(cache_dir, key)
+            for p in (path_gz, path_json):
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove stale cache file %s", p)
         # Stream in chunks to limit memory, flushing each chunk to cache.
         # Keep chunk_size small and also cap how many candidates are evaluated per chunk to limit RAM/VRAM.
         chunk_size = 6

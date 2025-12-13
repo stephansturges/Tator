@@ -4378,17 +4378,26 @@ def _ensure_agent_mining_split(
     rng = random.Random(seed)
     rng.shuffle(image_ids)
     total = len(image_ids)
-    val_count = int(total * val_percent)
-    if val_count <= 0:
-        val_count = 1 if total > 1 else 0
-    if val_count >= total:
-        val_count = max(1, total - 1)
-    val_ids = image_ids[:val_count]
-    train_ids = image_ids[val_count:]
-    if train_limit is not None and train_limit > 0:
-        train_ids = train_ids[:train_limit]
-    if val_limit is not None and val_limit > 0:
-        val_ids = val_ids[:val_limit]
+    if test_mode:
+        # In test mode, honor explicit limits (with sensible defaults) and ignore cached splits.
+        if val_limit is None or val_limit <= 0:
+            val_limit = 10
+        if train_limit is None or train_limit <= 0:
+            train_limit = 10
+        val_ids = image_ids[: min(val_limit, total)]
+        train_ids = image_ids[min(val_limit, total) : min(val_limit + train_limit, total)]
+    else:
+        val_count = int(total * val_percent)
+        if val_count <= 0:
+            val_count = 1 if total > 1 else 0
+        if val_count >= total:
+            val_count = max(1, total - 1)
+        val_ids = image_ids[:val_count]
+        train_ids = image_ids[val_count:]
+        if train_limit is not None and train_limit > 0:
+            train_ids = train_ids[:train_limit]
+        if val_limit is not None and val_limit > 0:
+            val_ids = val_ids[:val_limit]
     if not train_ids and val_ids:
         train_ids, val_ids = val_ids, []
     split = {
@@ -7805,6 +7814,13 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 "msg": f"Prepared split with {len(split.get('train') or [])} train / {len(split.get('val') or [])} val images",
             }
         )
+        if payload.test_mode:
+            job.logs.append(
+                {
+                    "ts": time.time(),
+                    "msg": f"Test mode enabled (train_limit={payload.test_train_limit}, val_limit={payload.test_val_limit})",
+                }
+            )
         job.logs.append(
             {
                 "ts": time.time(),

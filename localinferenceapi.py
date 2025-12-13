@@ -4984,6 +4984,7 @@ def _collect_agent_mining_detections_image_first(
         # Stream in chunks to limit memory, flushing each chunk to cache.
         chunk_size = 8
         accumulator: Dict[str, List[Dict[str, Any]]] = {}
+        processed_total = 0
 
         def flush_accumulator() -> None:
             nonlocal accumulator
@@ -5020,7 +5021,7 @@ def _collect_agent_mining_detections_image_first(
                 min_size=min_size,
                 simplify=simplify,
                 cancel_event=cancel_event,
-                progress_callback=progress_callback,
+                progress_callback=None,
             )
             for cand in missing:
                 cand_id = cand.get("id")
@@ -5048,6 +5049,12 @@ def _collect_agent_mining_detections_image_first(
                     if filtered:
                         executed_keys_with_dets.add(cache_key)
             flush_accumulator()
+            processed_total += len(batch_entries)
+            if progress_callback:
+                try:
+                    progress_callback(processed_total)
+                except Exception:
+                    pass
         flush_accumulator()
         # Reload from cache for all missing candidates.
         for cand in missing:

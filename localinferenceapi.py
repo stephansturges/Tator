@@ -5001,6 +5001,16 @@ def _collect_agent_mining_detections_image_first(
             if cancel_event is not None and cancel_event.is_set():
                 break
             batch_entries = image_entries[start : start + chunk_size]
+            logger.info(
+                "[agent-mining] chunk %d/%d images %d-%d/%d (candidates=%d, thresholds=%d)",
+                (start // chunk_size) + 1,
+                math.ceil(len(image_entries) / chunk_size),
+                start + 1,
+                min(start + len(batch_entries), len(image_entries)),
+                len(image_entries),
+                len(missing),
+                len(thresholds_list),
+            )
             pooled = pool.run(
                 batch_entries,
                 missing,
@@ -5067,6 +5077,15 @@ def _collect_agent_mining_detections_image_first(
         "executed_pairs": executed_pairs,
         "executed_pairs_with_dets": executed_pairs_with_dets,
     }
+    logger.info(
+        "[agent-mining] global sweep done: images=%d candidates=%d thresholds=%d cached=%d executed=%d det_pairs=%d",
+        len(image_ids),
+        len(candidates),
+        len(thresholds_list),
+        cached_pairs,
+        executed_pairs,
+        executed_pairs_with_dets,
+    )
     return results, stats
 
 

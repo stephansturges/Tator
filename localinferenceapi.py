@@ -4982,7 +4982,7 @@ def _collect_agent_mining_detections_image_first(
             if path:
                 image_entries.append((img_id, path))
         # Stream in chunks to limit memory, flushing each chunk to cache.
-        chunk_size = 24
+        chunk_size = 8
         accumulator: Dict[str, List[Dict[str, Any]]] = {}
 
         def flush_accumulator() -> None:

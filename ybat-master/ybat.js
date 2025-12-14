@@ -11661,6 +11661,9 @@ return {
                 : 0,
             prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
             prompt_max_new_tokens: Number.isFinite(promptMaxTokens) ? Math.max(16, Math.min(400, promptMaxTokens)) : 160,
+            split_seed: Number.isFinite(readNumberInput(agentElements.splitSeed, { integer: true }))
+                ? readNumberInput(agentElements.splitSeed, { integer: true })
+                : 42,
             test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
             test_train_limit: readNumberInput(agentElements.trainLimit, { integer: true }) ?? 10,
             test_val_limit: readNumberInput(agentElements.valLimit, { integer: true }) ?? 10,
@@ -11961,6 +11964,7 @@ return {
         agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
         agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
         agentElements.valPercent = document.getElementById("agentValPercent");
+        agentElements.splitSeed = document.getElementById("agentSplitSeed");
         agentElements.thresholds = document.getElementById("agentThresholds");
         agentElements.maskThreshold = document.getElementById("agentMaskThreshold");
         agentElements.maxResults = document.getElementById("agentMaxResults");

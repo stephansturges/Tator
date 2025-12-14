@@ -7902,6 +7902,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.logs.append({"ts": time.time(), "msg": f"Dataset resolved at {dataset_root}"})
         if len(job.logs) > MAX_JOB_LOGS:
             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+        # Log received test settings to diagnose splits.
+        job.logs.append(
+            {
+                "ts": time.time(),
+                "msg": (
+                    f"Request: test_mode={payload.test_mode} "
+                    f"train_limit={payload.test_train_limit} val_limit={payload.test_val_limit} "
+                    f"val_percent={payload.val_percent}"
+                ),
+            }
+        )
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
         split = _ensure_agent_mining_split(
             payload.dataset_id,
             dataset_root,

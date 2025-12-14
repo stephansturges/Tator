@@ -8195,7 +8195,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             train_limit=payload.test_train_limit if payload.test_mode else None,
             val_limit=payload.test_val_limit if payload.test_mode else None,
         )
-        job.progress = 0.2
+        job.progress = 0.05
         job.updated_at = time.time()
         job.logs.append(
             {
@@ -8254,7 +8254,6 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.logs.append({"ts": time.time(), "msg": f"Loaded COCO with {len(categories)} categories"})
         if len(job.logs) > MAX_JOB_LOGS:
             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        job.progress = 0.35
         job.updated_at = time.time()
 
         cache_dir = _agent_mining_cache_dir(payload.dataset_id)
@@ -8342,6 +8341,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             job.logs.append({"ts": time.time(), "msg": "Prompt LLM unloaded to free memory before SAM3 init"})
             if len(job.logs) > MAX_JOB_LOGS:
                 job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+            job.progress = max(job.progress, 0.1)
+            job.updated_at = time.time()
         except Exception:
             pass
 
@@ -8689,7 +8690,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if len(job.logs) > MAX_JOB_LOGS:
             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
 
-        progress_every_global = max(1, total_images // 10) if total_images else 1
+        progress_every_global = max(1, total_images // 20) if total_images else 1
 
         def _global_progress(done: int) -> None:
             if job.cancel_event.is_set():
@@ -8697,7 +8698,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             if done == 1 or done == total_images or done % progress_every_global == 0:
                 try:
                     pct = (done / total_images) if total_images else 0.0
-                    job.progress = 0.35 + 0.4 * pct
+                    job.progress = min(1.0, 0.1 + 0.6 * pct)
                     job.logs.append(
                         {
                             "ts": time.time(),
@@ -8737,7 +8738,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         )
         if len(job.logs) > MAX_JOB_LOGS:
             job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        job.progress = max(job.progress, 0.75)
+        job.progress = max(job.progress, 0.7)
 
         for idx, entry in enumerate(class_entries):
             cat_id = entry["id"]
@@ -8949,7 +8950,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             }
             if not recipe or not recipe.get("steps"):
                 selected_cats[idx]["no_recipe_reason"] = "no_candidate_gain"
-            job.progress = 0.75 + 0.2 * ((idx + 1) / max(1, len(class_entries)))
+            job.progress = 0.7 + 0.3 * ((idx + 1) / max(1, len(class_entries)))
             summary = (recipe or {}).get("summary") or {}
             covered = summary.get("covered")
             total_gt = summary.get("total_gt")
@@ -8977,7 +8978,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 job.logs[:] = job.logs[-MAX_JOB_LOGS:]
             job.updated_at = time.time()
 
-        job.progress = max(job.progress, 0.95)
+        job.progress = max(job.progress, 0.99)
         job.updated_at = time.time()
         job.logs.append({"ts": time.time(), "msg": f"Prepared {len(selected_cats)} classes with exemplar seeds"})
         if len(job.logs) > MAX_JOB_LOGS:

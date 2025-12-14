@@ -2730,6 +2730,11 @@ class QwenTrainRequest(BaseModel):
     seed: Optional[int] = None
     max_detections_per_sample: Optional[int] = None
     max_image_dim: Optional[int] = None
+    random_split: Optional[bool] = None
+    val_percent: Optional[float] = None
+    split_seed: Optional[int] = None
+    train_limit: Optional[int] = None
+    val_limit: Optional[int] = None
 
 
 class Sam3TrainRequest(BaseModel):
@@ -2768,6 +2773,9 @@ class Sam3TrainRequest(BaseModel):
     prompt_randomize: Optional[bool] = None
     val_score_thresh: Optional[float] = None
     val_max_dets: Optional[int] = None
+    random_split: Optional[bool] = None
+    val_percent: Optional[float] = None
+    split_seed: Optional[int] = None
 
 
 class Sam3ModelActivateRequest(BaseModel):
@@ -4374,8 +4382,15 @@ def _ensure_agent_mining_split(
     signature = _compute_dir_signature(dataset_root)
     if reuse_split and not test_mode:
         cached = _load_agent_mining_split(dataset_id)
-        if cached and cached.get("signature") == signature and abs(cached.get("val_percent", val_percent) - val_percent) < 1e-6:
-            return cached
+        cached_seed = cached.get("seed") if cached else None
+        if (
+            cached
+            and cached_seed is not None
+            and cached.get("signature") == signature
+            and abs(cached.get("val_percent", val_percent) - val_percent) < 1e-6
+            and int(cached_seed) == int(seed)
+        ):
+            return {**cached, "_cached": True}
     rng = random.Random(seed)
     rng.shuffle(image_ids)
     total = len(image_ids)
@@ -4426,7 +4441,7 @@ def _ensure_agent_mining_split(
                 json.dump(split, fp)
         except Exception:
             logger.exception("Failed to persist agent mining split to %s", split_path)
-    return split
+    return {**split, "_cached": False}
 
 
 def _agent_mining_cache_key(
@@ -5706,6 +5721,114 @@ def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _prepare_qwen_training_split(
+    dataset_root: Path,
+    job_id: str,
+    *,
+    random_split: bool,
+    val_percent: float,
+    split_seed: int,
+    train_limit: Optional[int] = None,
+    val_limit: Optional[int] = None,
+    log_messages: Optional[List[str]] = None,
+) -> Path:
+    if not random_split:
+        return dataset_root
+    meta = _load_qwen_dataset_metadata(dataset_root) or {}
+    entries: List[Dict[str, Any]] = []
+    for split in ("train", "val"):
+        jsonl_path = dataset_root / split / "annotations.jsonl"
+        if not jsonl_path.exists():
+            continue
+        try:
+            with jsonl_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        continue
+                    image_rel = payload.get("image")
+                    if not isinstance(image_rel, str) or not image_rel.strip():
+                        continue
+                    rel_path = Path(image_rel.strip())
+                    candidates = [
+                        dataset_root / split / rel_path,
+                        dataset_root / split / "images" / rel_path,
+                        dataset_root / "images" / rel_path,
+                        dataset_root / "train" / rel_path,
+                        dataset_root / "val" / rel_path,
+                        dataset_root / rel_path,
+                        dataset_root / "train" / "images" / rel_path,
+                        dataset_root / "val" / "images" / rel_path,
+                    ]
+                    src_path = next((p for p in candidates if p.exists()), None)
+                    if src_path is None:
+                        continue
+                    entries.append(
+                        {
+                            "raw": raw,
+                            "image_rel": rel_path,
+                            "src": src_path,
+                        }
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to read Qwen annotations from %s: %s", jsonl_path, exc)
+    if not entries:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_no_annotations")
+    rnd = random.Random(split_seed)
+    rnd.shuffle(entries)
+    total = len(entries)
+    vp = max(0.0, min(float(val_percent), 0.9))
+    val_count = int(total * vp)
+    if val_count <= 0 and total > 1:
+        val_count = 1
+    if val_limit is not None and val_limit > 0:
+        val_count = min(val_count if val_count > 0 else val_limit, val_limit, total - 1 if total > 1 else total)
+    val_entries = entries[:val_count]
+    train_entries = entries[val_count:]
+    if train_limit is not None and train_limit > 0:
+        train_entries = train_entries[:train_limit]
+    if not train_entries and val_entries:
+        train_entries, val_entries = val_entries, []
+    split_root = (QWEN_JOB_ROOT / "splits" / job_id).resolve()
+    if split_root.exists():
+        shutil.rmtree(split_root, ignore_errors=True)
+    (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)
+    (split_root / "val" / "images").mkdir(parents=True, exist_ok=True)
+    counts = {"train": 0, "val": 0}
+    for split_name, split_entries in (("train", train_entries), ("val", val_entries)):
+        ann_path = split_root / split_name / "annotations.jsonl"
+        with ann_path.open("w", encoding="utf-8") as handle:
+            for entry in split_entries:
+                dst = split_root / split_name / "images" / entry["image_rel"]
+                _link_or_copy_file(entry["src"], dst)
+                handle.write(entry["raw"] + "\n")
+                counts[split_name] += 1
+    new_meta = {
+        **meta,
+        "id": meta.get("id") or dataset_root.name,
+        "label": meta.get("label") or meta.get("id") or dataset_root.name,
+        "classes": meta.get("classes") or _load_qwen_labelmap(dataset_root),
+        "context": meta.get("context") or "",
+        "created_at": meta.get("created_at") or time.time(),
+        "train_count": counts["train"],
+        "val_count": counts["val"],
+        "image_count": counts["train"] + counts["val"],
+    }
+    _persist_qwen_dataset_metadata(split_root, new_meta)
+    split_summary = (
+        f"Qwen split: {counts['train']} train / {counts['val']} val "
+        f"(seed={split_seed}, val_percent={vp:.2f}, src={dataset_root}) -> {split_root}"
+    )
+    logger.info(split_summary)
+    if log_messages is not None:
+        log_messages.append(split_summary)
+    return split_root
+
+
 def _list_qwen_model_entries() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for path in QWEN_JOB_ROOT.iterdir():
@@ -5738,24 +5861,39 @@ def _get_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _build_qwen_config(payload: QwenTrainRequest, job_id: str) -> QwenTrainingConfig:
+def _build_qwen_config(payload: QwenTrainRequest, job_id: str, job_logs: Optional[List[str]] = None) -> QwenTrainingConfig:
     if QWEN_TRAINING_IMPORT_ERROR is not None or QwenTrainingConfig is None:
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"qwen_training_unavailable:{QWEN_TRAINING_IMPORT_ERROR}",
         )
-    dataset_root = os.path.abspath(payload.dataset_root)
-    if not os.path.isdir(dataset_root):
+    dataset_root = Path(os.path.abspath(payload.dataset_root))
+    if not dataset_root.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_not_found")
-    train_dir = os.path.join(dataset_root, "train")
-    val_dir = os.path.join(dataset_root, "val")
-    if not os.path.isdir(train_dir) or not os.path.isdir(val_dir):
+    val_percent = payload.val_percent if payload.val_percent is not None else 0.3
+    split_seed = int(payload.split_seed) if payload.split_seed is not None else 42
+    random_split = payload.random_split if payload.random_split is not None else True
+    train_limit = int(payload.train_limit) if payload.train_limit is not None and payload.train_limit > 0 else None
+    val_limit = int(payload.val_limit) if payload.val_limit is not None and payload.val_limit > 0 else None
+    dataset_root = _prepare_qwen_training_split(
+        dataset_root,
+        job_id,
+        random_split=random_split,
+        val_percent=val_percent,
+        split_seed=split_seed,
+        train_limit=train_limit,
+        val_limit=val_limit,
+        log_messages=job_logs,
+    )
+    train_dir = dataset_root / "train"
+    val_dir = dataset_root / "val"
+    if not train_dir.is_dir() or not val_dir.is_dir():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_missing_train_val")
     run_name = payload.run_name or f"qwen_run_{job_id}"
     result_path = (QWEN_JOB_ROOT / run_name).resolve()
     system_prompt = (payload.system_prompt or DEFAULT_SYSTEM_PROMPT).strip() or DEFAULT_SYSTEM_PROMPT
     cfg_kwargs: Dict[str, Any] = {
-        "dataset_root": dataset_root,
+        "dataset_root": str(dataset_root),
         "result_path": str(result_path),
         "model_id": payload.model_id or "Qwen/Qwen2.5-VL-3B-Instruct",
         "run_name": run_name,
@@ -5820,6 +5958,16 @@ def _normalise_relative_path(name: Optional[str]) -> Path:
         fallback = Path(candidate).name or f"file_{uuid.uuid4().hex}"
         parts = [fallback]
     return Path(*parts)
+
+
+def _link_or_copy_file(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except Exception:
+        shutil.copy2(src, dst)
 
 
 def _get_clip_dataset_job(job_id: str) -> ClipDatasetUploadJob:
@@ -6329,6 +6477,82 @@ def _find_coco_split(dataset_root: Path) -> Tuple[Path, Path]:
     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_annotations_missing")
 
 
+def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
+    ann_paths: List[Tuple[Path, Path]] = []
+    for split in ("train", "val"):
+        ann_file = dataset_root / split / "_annotations.coco.json"
+        if ann_file.exists():
+            images_dir = ann_file.parent / "images"
+            if not images_dir.exists():
+                images_dir = ann_file.parent
+            ann_paths.append((ann_file, images_dir))
+    if not ann_paths:
+        ann_path, images_dir = _find_coco_split(dataset_root)
+        ann_paths = [(ann_path, images_dir)]
+    images: Dict[int, Dict[str, Any]] = {}
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]] = {}
+    coco_merged: Dict[str, Any] = {"images": [], "annotations": [], "categories": []}
+    categories_map: Dict[int, Dict[str, Any]] = {}
+    for ann_path, images_dir in ann_paths:
+        try:
+            with ann_path.open("r", encoding="utf-8") as handle:
+                coco = json.load(handle)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+        for cat in coco.get("categories", []) or []:
+            try:
+                cid = int(cat.get("id"))
+            except Exception:
+                continue
+            categories_map.setdefault(cid, cat)
+        for img in coco.get("images", []) or []:
+            try:
+                img_id = int(img["id"])
+            except Exception:
+                continue
+            path = (images_dir / img["file_name"]).resolve()
+            images[img_id] = {**img, "path": path}
+        for ann in coco.get("annotations", []) or []:
+            try:
+                img_id = int(ann["image_id"])
+                cat_id = int(ann["category_id"])
+            except Exception:
+                continue
+            bbox = ann.get("bbox")
+            if bbox is None:
+                continue
+            gt_by_image_cat.setdefault(img_id, {}).setdefault(cat_id, []).append(list(bbox))
+    coco_merged["categories"] = sorted(categories_map.values(), key=lambda c: int(c.get("id", 0)))
+    coco_merged["images"] = list(
+        {
+            img_id: {
+                "id": img_id,
+                "file_name": str(img.get("file_name") or Path(img.get("path", "")).name),
+                "width": img.get("width"),
+                "height": img.get("height"),
+            }
+            for img_id, img in images.items()
+        }.values()
+    )
+    # Rebuild annotations from gt_by_image_cat so downstream uses the merged mapping.
+    annotations: List[Dict[str, Any]] = []
+    ann_id = 1
+    for img_id, cat_map in gt_by_image_cat.items():
+        for cat_id, boxes in cat_map.items():
+            for bbox in boxes:
+                annotations.append(
+                    {
+                        "id": ann_id,
+                        "image_id": img_id,
+                        "category_id": cat_id,
+                        "bbox": bbox,
+                    }
+                )
+                ann_id += 1
+    coco_merged["annotations"] = annotations
+    return coco_merged, gt_by_image_cat, images
+
+
 def _yolo_to_xyxy(width: int, height: int, bbox: Sequence[float]) -> Tuple[float, float, float, float]:
     cx, cy, bw, bh = map(float, bbox[:4])
     x1 = max(0.0, (cx - bw / 2.0) * width)
@@ -6588,33 +6812,7 @@ def _save_prompt_recipe_preset(
     return payload
 
 
-def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
-    ann_path, images_dir = _find_coco_split(dataset_root)
-    try:
-        with ann_path.open("r", encoding="utf-8") as handle:
-            coco = json.load(handle)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
-    images = {
-        img["id"]: {
-            **img,
-            "path": (images_dir / img["file_name"]).resolve(),
-        }
-        for img in coco.get("images", [])
-        if "id" in img and "file_name" in img
-    }
-    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]] = {}
-    for ann in coco.get("annotations", []):
-        try:
-            img_id = int(ann["image_id"])
-            cat_id = int(ann["category_id"])
-            bbox = ann.get("bbox")
-        except Exception:
-            continue
-        if bbox is None:
-            continue
-        gt_by_image_cat.setdefault(img_id, {}).setdefault(cat_id, []).append(list(bbox))
-    return coco, gt_by_image_cat, images
+    # (Legacy single-split loader removed; combined loader above)
 
 
 def _sample_images_for_category(cat_id: int, img_ids: List[int], sample_size: int, seed: int) -> List[int]:
@@ -6878,7 +7076,7 @@ def _expand_prompts_with_prompt_llm(
                 f"Known good prompts: {known_list_str}.",
             ]
             if class_hint:
-                base_prompt.append(f"Class note (must obey): {class_hint}.")
+                base_prompt.append(f"Class note (guidance only): {class_hint}.")
             base_prompt.extend(
                 [
                     f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).",
@@ -6917,6 +7115,14 @@ def _expand_prompts_with_prompt_llm(
                 )
                 if parsed:
                     return parsed
+                # If the only issue is duplication, don't treat it as a hard failure.
+                dup_check = _parse_prompt_candidates(text, set(), remaining)
+                if dup_check:
+                    _log(
+                        f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) "
+                        "produced only duplicates; keeping existing list."
+                    )
+                    return []
                 _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) yielded no valid candidates")
             _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}) failed after 3 attempts")
             return []
@@ -7916,7 +8122,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 "msg": (
                     f"Request: test_mode={payload.test_mode} "
                     f"train_limit={payload.test_train_limit} val_limit={payload.test_val_limit} "
-                    f"val_percent={payload.val_percent}"
+                    f"val_percent={payload.val_percent:.3f} ({payload.val_percent * 100:.1f}%) "
+                    f"split_seed={payload.split_seed}"
                 ),
             }
         )
@@ -7934,6 +8141,16 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         )
         job.progress = 0.2
         job.updated_at = time.time()
+        job.logs.append(
+            {
+                "ts": time.time(),
+                "msg": (
+                    f"Split { 'reused from cache' if split.get('_cached') else 'built fresh' } "
+                    f"(seed={payload.split_seed}, val%={payload.val_percent * 100:.1f}%, "
+                    f"reuse_split={payload.reuse_split})"
+                ),
+            }
+        )
         job.logs.append(
             {
                 "ts": time.time(),
@@ -8388,14 +8605,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
         total_images = len(val_ids)
         if total_images == 0 and train_ids:
-            # Fallback: reuse a slice of train as val so we don't run with 0 images.
+            # Fallback: carve a slice out of train for validation (keep splits disjoint).
             fallback = max(1, min(len(train_ids), payload.test_val_limit if payload.test_mode else 50))
             val_ids = train_ids[:fallback]
+            train_ids = train_ids[fallback:]
+            train_id_set = set(train_ids)
+            val_id_set = set(val_ids)
             total_images = len(val_ids)
             job.logs.append(
                 {
                     "ts": time.time(),
-                    "msg": f"Val split empty; reusing {total_images} train images as val for scoring.",
+                    "msg": f"Val split empty; moved {total_images} image(s) from train to val for scoring.",
                 }
             )
         job.logs.append(
@@ -9778,6 +9998,142 @@ def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
     return meta
 
 
+def _prepare_sam3_training_split(
+    dataset_root: Path,
+    meta: Dict[str, Any],
+    job_id: str,
+    *,
+    random_split: bool,
+    val_percent: float,
+    split_seed: int,
+    train_limit: Optional[int] = None,
+    val_limit: Optional[int] = None,
+    log_messages: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if not random_split:
+        return meta
+    coco_train_path = Path(meta.get("coco_train_json", ""))
+    coco_val_path = Path(meta.get("coco_val_json", ""))
+    if not coco_train_path.exists() or not coco_val_path.exists():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_coco_split_missing")
+    try:
+        with coco_train_path.open("r", encoding="utf-8") as handle:
+            coco_train = json.load(handle)
+        with coco_val_path.open("r", encoding="utf-8") as handle:
+            coco_val = json.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_load_failed:{exc}") from exc
+    categories = coco_train.get("categories") or coco_val.get("categories") or []
+    if not categories and meta.get("classes"):
+        categories = [{"id": idx + 1, "name": name} for idx, name in enumerate(meta.get("classes", []))]
+    if not categories:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_categories_missing")
+    images: Dict[int, Dict[str, Any]] = {}
+    ann_by_image: Dict[int, List[Dict[str, Any]]] = {}
+    for coco_blob in (coco_train, coco_val):
+        for img in coco_blob.get("images", []):
+            try:
+                img_id = int(img["id"])
+            except Exception:
+                continue
+            images[img_id] = {**img, "id": img_id, "file_name": str(img.get("file_name", ""))}
+        for ann in coco_blob.get("annotations", []):
+            try:
+                img_id = int(ann["image_id"])
+            except Exception:
+                continue
+            ann_by_image.setdefault(img_id, []).append(ann)
+    image_ids = list(images.keys())
+    if not image_ids:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_training_no_images")
+    rnd = random.Random(split_seed)
+    rnd.shuffle(image_ids)
+    total = len(image_ids)
+    vp = max(0.0, min(float(val_percent), 0.9))
+    val_count = int(total * vp)
+    if val_count <= 0 and total > 1:
+        val_count = 1
+    if val_limit is not None and val_limit > 0:
+        val_count = min(val_limit, val_count if val_count > 0 else val_limit, total - 1 if total > 1 else total)
+    val_ids = image_ids[:val_count]
+    train_ids = image_ids[val_count:]
+    if train_limit is not None and train_limit > 0:
+        train_ids = train_ids[:train_limit]
+    if not train_ids and val_ids:
+        train_ids, val_ids = val_ids, []
+    split_root = (SAM3_JOB_ROOT / "splits" / job_id).resolve()
+    if split_root.exists():
+        shutil.rmtree(split_root, ignore_errors=True)
+    (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)
+    (split_root / "val" / "images").mkdir(parents=True, exist_ok=True)
+
+    def _find_image_source(file_name: str) -> Optional[Path]:
+        rel_path = Path(file_name)
+        candidates = [
+            dataset_root / rel_path,
+            dataset_root / "train" / rel_path,
+            dataset_root / "val" / rel_path,
+            dataset_root / "train" / "images" / rel_path,
+            dataset_root / "val" / "images" / rel_path,
+        ]
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        if rel_path.is_absolute() and rel_path.exists():
+            return rel_path
+        return None
+
+    def _write_split(target_ids: List[int], split_name: str) -> Tuple[str, int]:
+        images_out: List[Dict[str, Any]] = []
+        anns_out: List[Dict[str, Any]] = []
+        for img_id in target_ids:
+            info = images.get(img_id)
+            if not info:
+                continue
+            file_name = info.get("file_name")
+            if not file_name:
+                continue
+            src_path = _find_image_source(file_name)
+            if src_path is None:
+                continue
+            dst_path = split_root / split_name / "images" / Path(file_name)
+            _link_or_copy_file(src_path, dst_path)
+            images_out.append(info)
+            anns_out.extend(ann_by_image.get(img_id, []))
+        ann_path = split_root / split_name / "_annotations.coco.json"
+        _write_coco_annotations(
+            ann_path,
+            dataset_id=meta.get("id") or dataset_root.name,
+            categories=categories,
+            images=images_out,
+            annotations=anns_out,
+        )
+        return str(ann_path), len(images_out)
+
+    coco_train_new, train_count = _write_split(train_ids, "train")
+    coco_val_new, val_count = _write_split(val_ids, "val")
+    new_meta = {
+        **meta,
+        "dataset_root": str(split_root),
+        "coco_train_json": coco_train_new,
+        "coco_val_json": coco_val_new,
+        "train_count": train_count,
+        "val_count": val_count,
+        "image_count": train_count + val_count,
+        "signature": _compute_dir_signature(split_root),
+        "source": meta.get("source", "resplit"),
+    }
+    _persist_sam3_dataset_metadata(split_root, new_meta)
+    summary = (
+        f"SAM3 split: {train_count} train / {val_count} val "
+        f"(seed={split_seed}, val_percent={vp:.2f}, src={dataset_root}) -> {split_root}"
+    )
+    logger.info(summary)
+    if log_messages is not None:
+        log_messages.append(summary)
+    return new_meta
+
+
 def _plan_segmentation_build(request: SegmentationBuildRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     dataset_root = _resolve_sam3_or_qwen_dataset(request.source_dataset_id)
     source_meta = _load_qwen_dataset_metadata(dataset_root) or _load_sam3_dataset_metadata(dataset_root)
@@ -11104,7 +11460,29 @@ def cancel_training_job(job_id: str):
     return {"status": next_status}
 
 
-def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: str) -> Tuple[OmegaConf, int]:
+def _build_sam3_config(
+    payload: Sam3TrainRequest,
+    meta: Dict[str, Any],
+    job_id: str,
+    job_logs: Optional[List[str]] = None,
+) -> Tuple[OmegaConf, int]:
+    dataset_root = Path(meta.get("dataset_root") or SAM3_DATASET_ROOT)
+    val_percent = payload.val_percent if payload.val_percent is not None else 0.3
+    split_seed = int(payload.split_seed) if payload.split_seed is not None else 42
+    random_split = payload.random_split if payload.random_split is not None else True
+    train_limit = int(payload.train_limit) if payload.train_limit is not None and payload.train_limit > 0 else None
+    val_limit = int(payload.val_limit) if payload.val_limit is not None and payload.val_limit > 0 else None
+    meta = _prepare_sam3_training_split(
+        dataset_root,
+        meta,
+        job_id,
+        random_split=random_split,
+        val_percent=val_percent,
+        split_seed=split_seed,
+        train_limit=train_limit,
+        val_limit=val_limit,
+        log_messages=job_logs,
+    )
     cfg = OmegaConf.load(str(SAM3_CONFIG_TEMPLATE))
     if not hasattr(cfg.scratch, "enable_segmentation_head"):
         cfg.scratch.enable_segmentation_head = True
@@ -11303,11 +11681,14 @@ def _build_sam3_config(payload: Sam3TrainRequest, meta: Dict[str, Any], job_id: 
 def create_sam3_training_job(payload: Sam3TrainRequest):
     meta = _resolve_sam3_dataset_meta(payload.dataset_id)
     job_id = uuid.uuid4().hex
-    cfg, num_gpus = _build_sam3_config(payload, meta, job_id)
+    prep_logs: List[str] = []
+    cfg, num_gpus = _build_sam3_config(payload, meta, job_id, prep_logs)
     config_dict = OmegaConf.to_container(cfg, resolve=False)  # type: ignore[arg-type]
     job = Sam3TrainingJob(job_id=job_id, config=config_dict)
     with SAM3_TRAINING_JOBS_LOCK:
         SAM3_TRAINING_JOBS[job_id] = job
+        for msg in prep_logs:
+            _sam3_job_log(job, msg)
         _sam3_job_log(job, "Job queued")
     logger.info("[sam3-train %s] dataset=%s gpus=%s", job_id[:8], payload.dataset_id, num_gpus)
     _start_sam3_training_worker(job, cfg, num_gpus)
@@ -11490,7 +11871,8 @@ def create_qwen_training_job(payload: QwenTrainRequest):
     if not payload.dataset_root:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_root_required")
     job_id = uuid.uuid4().hex
-    config = _build_qwen_config(payload, job_id)
+    prep_logs: List[str] = []
+    config = _build_qwen_config(payload, job_id, prep_logs)
     config_dict = asdict(config)
     job = QwenTrainingJob(job_id=job_id, config=config_dict)
     logger.info(
@@ -11502,6 +11884,8 @@ def create_qwen_training_job(payload: QwenTrainRequest):
     )
     with QWEN_TRAINING_JOBS_LOCK:
         QWEN_TRAINING_JOBS[job_id] = job
+        for msg in prep_logs:
+            _qwen_job_log(job, msg)
         _qwen_job_log(job, "Job queued")
     _start_qwen_training_worker(job, config)
     return {"job_id": job_id}

@@ -984,6 +984,9 @@ const qwenTrainElements = {
         lossCanvas: null,
         chartStatus: null,
         chartSmoothing: null,
+        randomSplit: null,
+        valPercent: null,
+        splitSeed: null,
     };
 
     const activeElements = {
@@ -1073,6 +1076,9 @@ const qwenTrainState = {
         log: null,
         history: null,
         activateButton: null,
+        randomSplit: null,
+        valPercent: null,
+        splitSeed: null,
     };
 
 const sam3TrainState = {
@@ -5096,6 +5102,17 @@ async function startSam3Training() {
         return;
     }
     const payload = { dataset_id: datasetId };
+    if (sam3TrainElements.randomSplit) {
+        payload.random_split = !!sam3TrainElements.randomSplit.checked;
+    }
+    const sam3ValPct = readNumberInput(sam3TrainElements.valPercent, { integer: true });
+    if (sam3ValPct !== undefined && sam3ValPct !== null) {
+        payload.val_percent = Math.max(1, Math.min(sam3ValPct, 90)) / 100;
+    }
+    const sam3Seed = readNumberInput(sam3TrainElements.splitSeed, { integer: true });
+    if (sam3Seed !== undefined && sam3Seed !== null) {
+        payload.split_seed = sam3Seed;
+    }
     const maybeNumber = (input) => {
         if (!input || !input.value) return null;
         const num = Number(input.value);
@@ -5633,6 +5650,15 @@ async function initSam3TrainUi() {
     if (sam3TrainElements.datasetRefresh) {
         sam3TrainElements.datasetRefresh.addEventListener("click", () => loadSam3Datasets());
     }
+    if (sam3TrainElements.randomSplit && sam3TrainElements.valPercent && sam3TrainElements.splitSeed) {
+        const syncSam3SplitControls = () => {
+            const enabled = !!sam3TrainElements.randomSplit.checked;
+            sam3TrainElements.valPercent.disabled = !enabled;
+            sam3TrainElements.splitSeed.disabled = !enabled;
+        };
+        sam3TrainElements.randomSplit.addEventListener("change", syncSam3SplitControls);
+        syncSam3SplitControls();
+    }
     if (sam3TrainElements.capEpoch && sam3TrainElements.targetEpochSize) {
         sam3TrainElements.capEpoch.addEventListener("change", () => {
             sam3TrainElements.targetEpochSize.disabled = !sam3TrainElements.capEpoch.checked;
@@ -5791,6 +5817,18 @@ function buildQwenTrainingPayload(datasetRoot, datasetRunName) {
     const runName = qwenTrainElements.runNameInput?.value?.trim() || datasetRunName;
     if (runName) {
         payload.run_name = runName;
+    }
+    if (qwenTrainElements.randomSplit) {
+        payload.random_split = !!qwenTrainElements.randomSplit.checked;
+    }
+    const valPct = readNumberInput(qwenTrainElements.valPercent, { integer: true });
+    if (valPct !== undefined) {
+        const clampedPct = Math.max(1, Math.min(valPct, 90));
+        payload.val_percent = clampedPct / 100;
+    }
+    const splitSeed = readNumberInput(qwenTrainElements.splitSeed, { integer: true });
+    if (splitSeed !== undefined) {
+        payload.split_seed = splitSeed;
     }
     const modelId = qwenTrainElements.modelIdInput?.value?.trim();
     if (modelId) {
@@ -6440,6 +6478,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         qwenTrainElements.datasetRefresh = document.getElementById("qwenDatasetRefresh");
         qwenTrainElements.datasetDelete = document.getElementById("qwenDatasetDelete");
         qwenTrainElements.datasetSummary = document.getElementById("qwenDatasetSummary");
+        qwenTrainElements.randomSplit = document.getElementById("qwenTrainRandomSplit");
+        qwenTrainElements.valPercent = document.getElementById("qwenTrainValPercent");
+        qwenTrainElements.splitSeed = document.getElementById("qwenTrainSplitSeed");
         qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
         qwenTrainElements.sampleButton = document.getElementById("qwenSampleBtn");
         qwenTrainElements.sampleCanvas = document.getElementById("qwenSampleCanvas");
@@ -6494,6 +6535,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
                 updateQwenDatasetSummary();
             });
+        }
+        if (qwenTrainElements.randomSplit && qwenTrainElements.valPercent && qwenTrainElements.splitSeed) {
+            const syncSplitInputs = () => {
+                const enabled = !!qwenTrainElements.randomSplit.checked;
+                qwenTrainElements.valPercent.disabled = !enabled;
+                qwenTrainElements.splitSeed.disabled = !enabled;
+            };
+            qwenTrainElements.randomSplit.addEventListener("change", syncSplitInputs);
+            syncSplitInputs();
         }
         if (qwenTrainElements.datasetRefresh) {
             qwenTrainElements.datasetRefresh.addEventListener("click", () => {

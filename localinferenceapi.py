@@ -5017,6 +5017,7 @@ def _collect_agent_mining_detections_image_first(
     *,
     candidates: Sequence[Dict[str, Any]],
     thresholds: Sequence[float],
+    similarity_scores: Optional[Sequence[float]],
     images: Dict[int, Dict[str, Any]],
     image_ids: Sequence[int],
     mask_threshold: float,
@@ -5036,6 +5037,9 @@ def _collect_agent_mining_detections_image_first(
     thresholds_list = [t for t in thresholds_list if 0.0 <= t <= 1.0]
     if not thresholds_list:
         thresholds_list = [0.3]
+    sim_list = [float(s) for s in (similarity_scores or []) if 0.0 <= float(s) <= 1.0]
+    if not sim_list:
+        sim_list = [None]
     min_threshold = min(thresholds_list)
     results: Dict[str, Dict[float, List[Dict[str, Any]]]] = {}
     missing: List[Dict[str, Any]] = []
@@ -5053,24 +5057,27 @@ def _collect_agent_mining_detections_image_first(
         results[cand_id] = {}
         all_cached = True
         for thr in thresholds_list:
-            cached = _load_agent_mining_detections(
-                cache_dir,
-                _agent_mining_cache_key(
-                    class_id=cand.get("class_id"),
-                    prompt=cand.get("prompt"),
-                    visual_ref=cand.get("visual_ref"),
-                    threshold=thr,
-                    mask_threshold=mask_threshold,
-                    min_size=min_size,
-                    simplify=simplify,
-                    max_results=max_results,
-                ),
-            )
-            if cached is not None:
-                results[cand_id][thr] = cached
-                cached_pairs += 1
-            else:
-                all_cached = False
+            for sim in sim_list:
+                cached = _load_agent_mining_detections(
+                    cache_dir,
+                    _agent_mining_cache_key(
+                        class_id=cand.get("class_id"),
+                        prompt=cand.get("prompt"),
+                        visual_ref=cand.get("visual_ref"),
+                        threshold=thr,
+                        mask_threshold=mask_threshold,
+                        min_size=min_size,
+                        simplify=simplify,
+                        max_results=max_results,
+                        similarity_score=sim,
+                    ),
+                )
+                if cached is not None:
+                    # Store under the threshold; we will apply sim filtering later when scoring.
+                    results[cand_id][thr] = cached
+                    cached_pairs += 1
+                else:
+                    all_cached = False
         if not all_cached:
             missing.append(cand)
     if missing and (cancel_event is None or not cancel_event.is_set()):
@@ -5084,17 +5091,19 @@ def _collect_agent_mining_detections_image_first(
         keys_to_reset: set[str] = set()
         for cand in missing:
             for thr in thresholds_list:
-                cache_key = _agent_mining_cache_key(
-                    class_id=cand.get("class_id"),
-                    prompt=cand.get("prompt"),
-                    visual_ref=cand.get("visual_ref"),
-                    threshold=thr,
-                    mask_threshold=mask_threshold,
-                    min_size=min_size,
-                    simplify=simplify,
-                    max_results=max_results,
-                )
-                keys_to_reset.add(cache_key)
+                for sim in sim_list:
+                    cache_key = _agent_mining_cache_key(
+                        class_id=cand.get("class_id"),
+                        prompt=cand.get("prompt"),
+                        visual_ref=cand.get("visual_ref"),
+                        threshold=thr,
+                        mask_threshold=mask_threshold,
+                        min_size=min_size,
+                        simplify=simplify,
+                        max_results=max_results,
+                        similarity_score=sim,
+                    )
+                    keys_to_reset.add(cache_key)
         for key in keys_to_reset:
             path_gz, path_json = _agent_mining_cache_paths(cache_dir, key)
             for p in (path_gz, path_json):
@@ -5193,20 +5202,22 @@ def _collect_agent_mining_detections_image_first(
                             for det in base_dets
                             if ((det.get("score") is None and thr <= min_threshold) or (det.get("score") or 0.0) >= thr)
                         ]
-                        cache_key = _agent_mining_cache_key(
-                            class_id=cand.get("class_id"),
-                            prompt=cand.get("prompt"),
-                            visual_ref=cand.get("visual_ref"),
-                            threshold=thr,
-                            mask_threshold=mask_threshold,
-                            min_size=min_size,
-                            simplify=simplify,
-                            max_results=max_results,
-                        )
-                        accumulator.setdefault(cache_key, []).extend(filtered)
-                        executed_keys.add(cache_key)
-                        if filtered:
-                            executed_keys_with_dets.add(cache_key)
+                        for sim in sim_list:
+                            cache_key = _agent_mining_cache_key(
+                                class_id=cand.get("class_id"),
+                                prompt=cand.get("prompt"),
+                                visual_ref=cand.get("visual_ref"),
+                                threshold=thr,
+                                mask_threshold=mask_threshold,
+                                min_size=min_size,
+                                simplify=simplify,
+                                max_results=max_results,
+                                similarity_score=sim,
+                            )
+                            accumulator.setdefault(cache_key, []).extend(filtered)
+                            executed_keys.add(cache_key)
+                            if filtered:
+                                executed_keys_with_dets.add(cache_key)
                 flush_accumulator()
                 try:
                     # Free pooled results explicitly to lower peak RAM.
@@ -5232,18 +5243,20 @@ def _collect_agent_mining_detections_image_first(
             if not cand_id:
                 continue
             for thr in thresholds_list:
-                cache_key = _agent_mining_cache_key(
-                    class_id=cand.get("class_id"),
-                    prompt=cand.get("prompt"),
-                    visual_ref=cand.get("visual_ref"),
-                    threshold=thr,
-                    mask_threshold=mask_threshold,
-                    min_size=min_size,
-                    simplify=simplify,
-                    max_results=max_results,
-                )
-                cached = _load_agent_mining_detections(cache_dir, cache_key) or []
-                results.setdefault(cand_id, {})[thr] = cached
+                for sim in sim_list:
+                    cache_key = _agent_mining_cache_key(
+                        class_id=cand.get("class_id"),
+                        prompt=cand.get("prompt"),
+                        visual_ref=cand.get("visual_ref"),
+                        threshold=thr,
+                        mask_threshold=mask_threshold,
+                        min_size=min_size,
+                        simplify=simplify,
+                        max_results=max_results,
+                        similarity_score=sim,
+                    )
+                    cached = _load_agent_mining_detections(cache_dir, cache_key) or []
+                    results.setdefault(cand_id, {})[thr] = cached
         executed_pairs += len(executed_keys)
         executed_pairs_with_dets += len(executed_keys_with_dets)
     stats = {
@@ -8866,47 +8879,54 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             text_prompt_count = len(text_prompts or [])
             thresholds_count = len(thresholds or [])
             visual_candidate_count = len(exemplars) * thresholds_count
+            sim_scores = payload.similarity_scores if payload.similarity_scores else [payload.similarity_score]
+            sim_scores = [float(s) for s in sim_scores if s is not None]
+            if not sim_scores:
+                sim_scores = [payload.similarity_score]
             for cand in class_candidates:
                 task_id = cand.get("id")
                 cand_type = cand.get("type")
                 label = cand.get("prompt") if cand_type == "text" else f"exemplar_{task_id.split('::')[-1]}"
                 for thr in thresholds:
-                    dets = det_cache.get(task_id, {}).get(thr, [])
-                    fp_warnings: List[str] = []
-                    if payload.use_clip_fp_guard and exemplar_embeddings:
-                        dets, fp_warnings = _clip_fp_filter_detections(
-                            dets,
-                            exemplar_embeddings=exemplar_embeddings,
-                            negative_embeddings=combined_neg_embeddings if payload.use_negative_exemplars else None,
-                            negative_strength=payload.negative_strength if payload.use_negative_exemplars else 0.0,
+                    base_dets = det_cache.get(task_id, {}).get(thr, [])
+                    for sim in sim_scores:
+                        dets = base_dets
+                        fp_warnings: List[str] = []
+                        if payload.use_clip_fp_guard and exemplar_embeddings:
+                            dets, fp_warnings = _clip_fp_filter_detections(
+                                dets,
+                                exemplar_embeddings=exemplar_embeddings,
+                                negative_embeddings=combined_neg_embeddings if payload.use_negative_exemplars else None,
+                                negative_strength=payload.negative_strength if payload.use_negative_exemplars else 0.0,
+                                images=images,
+                                similarity_floor=sim,
+                            )
+                        cache_map = _detections_to_eval_cache(dets, images)
+                        metrics = _evaluate_prompt_candidate(
+                            label,
+                            thr,
+                            cat_id=cat_id,
+                            image_ids=val_ids,
+                            gt_index=gt_index_val,
                             images=images,
-                            similarity_floor=payload.similarity_score,
+                            iou_threshold=0.5,
+                            max_dets=payload.max_results,
+                            image_cache={},
+                            cached_detections=cache_map,
                         )
-                    cache_map = _detections_to_eval_cache(dets, images)
-                    metrics = _evaluate_prompt_candidate(
-                        label,
-                        thr,
-                        cat_id=cat_id,
-                        image_ids=val_ids,
-                        gt_index=gt_index_val,
-                        images=images,
-                        iou_threshold=0.5,
-                        max_dets=payload.max_results,
-                        image_cache={},
-                        cached_detections=cache_map,
-                    )
-                    metrics["type"] = cand_type
-                    metrics["candidate_id"] = task_id
-                    if cand_type == "visual":
-                        metrics["exemplar"] = {
-                            "image_id": cand.get("visual_ref", {}).get("image_id"),
-                            "bbox": cand.get("visual_ref", {}).get("bbox"),
-                            "file_name": cand.get("visual_ref", {}).get("file_name"),
-                        }
-                    metrics["detections"] = len(dets)
-                    if fp_warnings:
-                        metrics["warnings"] = fp_warnings
-                    eval_candidates.append(metrics)
+                        metrics["type"] = cand_type
+                        metrics["candidate_id"] = task_id
+                        metrics["similarity_score"] = sim
+                        if cand_type == "visual":
+                            metrics["exemplar"] = {
+                                "image_id": cand.get("visual_ref", {}).get("image_id"),
+                                "bbox": cand.get("visual_ref", {}).get("bbox"),
+                                "file_name": cand.get("visual_ref", {}).get("file_name"),
+                            }
+                        metrics["detections"] = len(dets)
+                        if fp_warnings:
+                            metrics["warnings"] = fp_warnings
+                        eval_candidates.append(metrics)
 
             recipe: Optional[Dict[str, Any]] = None
             coverage_by_image: Optional[List[Dict[str, Any]]] = None

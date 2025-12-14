@@ -4228,9 +4228,11 @@ def _apply_agent_recipe_to_image(
     if use_clip_guard and use_negatives and negative_entries:
         negative_embeddings, _ = _clip_embed_regions(negative_entries, images, max_regions=len(negative_entries))
 
-    def _filter_with_clip(dets: List[QwenDetection]) -> List[QwenDetection]:
+    def _filter_with_clip(dets: List[QwenDetection], sim_override: Optional[float] = None) -> List[QwenDetection]:
+        nonlocal similarity_floor
         if not use_clip_guard or not exemplar_embeddings or not dets:
             return dets
+        sim_floor = similarity_floor if sim_override is None else sim_override
         det_dicts: List[Dict[str, Any]] = []
         img_id = image.get("id") or image.get("image_id")
         for d in dets:
@@ -4251,7 +4253,7 @@ def _apply_agent_recipe_to_image(
             negative_embeddings=negative_embeddings if use_negatives else None,
             negative_strength=neg_strength if use_negatives else 0.0,
             images=images,
-            similarity_floor=similarity_floor,
+            similarity_floor=sim_floor,
         )
         result: List[QwenDetection] = []
         for det in filtered:
@@ -4273,6 +4275,7 @@ def _apply_agent_recipe_to_image(
         prompt = step.get("prompt") or ""
         thr = float(step.get("threshold", 0.3))
         ex = step.get("exemplar")
+        step_sim = step.get("similarity_score")
         try:
             if ex:
                 bbox = ex.get("bbox")
@@ -4304,7 +4307,7 @@ def _apply_agent_recipe_to_image(
                 )
         except Exception:
             continue
-        filtered = _filter_with_clip(preds)
+        filtered = _filter_with_clip(preds, step_sim)
         detections.extend(filtered)
     # Simple NMS-style dedupe across all steps for this image to avoid double labels.
     def _bbox_xyxy(bbox: Sequence[float]) -> Tuple[float, float, float, float]:
@@ -5028,7 +5031,7 @@ def _collect_agent_mining_detections_image_first(
     pool: _Sam3MiningPool,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
-) -> Tuple[Dict[str, Dict[float, List[Dict[str, Any]]]], Dict[str, Any]]:
+) -> Tuple[Dict[str, Dict[float, Dict[Optional[float], List[Dict[str, Any]]]]], Dict[str, Any]]:
     """
     Collect detections for all candidates over all images in an image-first manner. We run the
     lowest threshold once per image and reuse scores to materialize higher-threshold variants.
@@ -5041,7 +5044,7 @@ def _collect_agent_mining_detections_image_first(
     if not sim_list:
         sim_list = [None]
     min_threshold = min(thresholds_list)
-    results: Dict[str, Dict[float, List[Dict[str, Any]]]] = {}
+    results: Dict[str, Dict[float, Dict[Optional[float], List[Dict[str, Any]]]]] = {}
     missing: List[Dict[str, Any]] = []
     # For streaming flush
     executed_keys: set[str] = set()
@@ -5073,8 +5076,7 @@ def _collect_agent_mining_detections_image_first(
                     ),
                 )
                 if cached is not None:
-                    # Store under the threshold; we will apply sim filtering later when scoring.
-                    results[cand_id][thr] = cached
+                    results[cand_id].setdefault(thr, {})[sim] = cached
                     cached_pairs += 1
                 else:
                     all_cached = False
@@ -5256,7 +5258,7 @@ def _collect_agent_mining_detections_image_first(
                         similarity_score=sim,
                     )
                     cached = _load_agent_mining_detections(cache_dir, cache_key) or []
-                    results.setdefault(cand_id, {})[thr] = cached
+                    results.setdefault(cand_id, {}).setdefault(thr, {})[sim] = cached
         executed_pairs += len(executed_keys)
         executed_pairs_with_dets += len(executed_keys_with_dets)
     stats = {
@@ -7681,6 +7683,7 @@ def _build_prompt_recipe(
                 "cum_fps": total_fps,
                 "_matches_by_image": step_hits_by_image,
                 "_prompt_precision": cand.get("precision"),
+                "similarity_score": cand.get("similarity_score"),
             }
         )
     coverage_rate = (len(all_gt_keys) - remaining_total) / len(all_gt_keys) if all_gt_keys else 0.0
@@ -8760,6 +8763,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         det_cache, det_stats_global = _collect_agent_mining_detections_image_first(
             candidates=global_candidates,
             thresholds=thresholds,
+            similarity_scores=payload.similarity_scores if payload.similarity_scores else [payload.similarity_score],
             images=images,
             image_ids=val_ids,
             mask_threshold=payload.mask_threshold,
@@ -8887,11 +8891,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 task_id = cand.get("id")
                 cand_type = cand.get("type")
                 label = cand.get("prompt") if cand_type == "text" else f"exemplar_{task_id.split('::')[-1]}"
-                for thr in thresholds:
-                    base_dets = det_cache.get(task_id, {}).get(thr, [])
-                    for sim in sim_scores:
-                        dets = base_dets
-                        fp_warnings: List[str] = []
+        for thr in thresholds:
+            dets_by_sim = det_cache.get(task_id, {}).get(thr, {})
+            if isinstance(dets_by_sim, list):
+                dets_by_sim = {sim_scores[0] if sim_scores else None: dets_by_sim}
+            for sim in sim_scores:
+                dets = dets_by_sim.get(sim)
+                if dets is None and dets_by_sim:
+                    dets = next(iter(dets_by_sim.values()))
+                if dets is None:
+                    dets = []
+                fp_warnings: List[str] = []
                         if payload.use_clip_fp_guard and exemplar_embeddings:
                             dets, fp_warnings = _clip_fp_filter_detections(
                                 dets,
@@ -8946,17 +8956,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     meta_map: Dict[Tuple[str, float], Dict[str, Any]] = {}
                     for cand in eval_candidates:
                         try:
-                            key = (cand.get("prompt"), float(cand.get("threshold")))
+                            key = (cand.get("prompt"), float(cand.get("threshold")), cand.get("similarity_score"))
                         except Exception:
                             continue
                         meta_map[key] = {
                             "type": cand.get("type"),
                             "exemplar": cand.get("exemplar"),
                             "warnings": cand.get("warnings"),
+                            "similarity_score": cand.get("similarity_score"),
                         }
                     for step in recipe.get("steps", []):
-                        key = (step.get("prompt"), float(step.get("threshold", 0)))
-                        meta = meta_map.get(key)
+                        key = (step.get("prompt"), float(step.get("threshold", 0)), step.get("similarity_score"))
+                        # Try fallback without sim if not found
+                        meta = meta_map.get(key) or meta_map.get((step.get("prompt"), float(step.get("threshold", 0)), None))
                         if meta:
                             step.update({k: v for k, v in meta.items() if v is not None})
                             if meta.get("candidate_id"):

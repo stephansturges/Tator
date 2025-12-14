@@ -4370,6 +4370,7 @@ def _ensure_agent_mining_split(
     image_ids = [int(img.get("id", idx)) for idx, img in enumerate(coco.get("images") or []) if "id" in img or idx >= 0]
     if not image_ids:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_images")
+    # Always rebuild split deterministically; ignore any baked-in splits.
     signature = _compute_dir_signature(dataset_root)
     if reuse_split and not test_mode:
         cached = _load_agent_mining_split(dataset_id)

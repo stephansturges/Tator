@@ -212,6 +212,13 @@
     const TAB_PREDICTORS = "predictors";
     const TAB_SETTINGS = "settings";
 
+    function formatBytesLabel(bytes) {
+        const mb = bytes / (1024 * 1024);
+        const gb = mb / 1024;
+        if (!Number.isFinite(bytes) || bytes < 0) return "n/a";
+        return gb >= 1 ? `${gb.toFixed(1)} GB` : `${mb.toFixed(1)} MB`;
+    }
+
     function loadStoredApiRoot() {
         try {
             const saved = localStorage.getItem(API_STORAGE_KEY);
@@ -230,10 +237,7 @@
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             const bytes = Number(data?.bytes) || 0;
-            const mb = bytes / (1024 * 1024);
-            const gb = mb / 1024;
-            const label = gb >= 1 ? `${gb.toFixed(1)} GB` : `${mb.toFixed(1)} MB`;
-            agentElements.cacheSize.textContent = `Cache: ${label}`;
+            agentElements.cacheSize.textContent = `Cache: ${formatBytesLabel(bytes)}`;
         } catch (err) {
             console.warn("Cache size check failed", err);
             agentElements.cacheSize.textContent = "Cache: n/a";
@@ -252,6 +256,64 @@
         } catch (err) {
             console.error("Agent cache purge failed", err);
             setAgentStatus(`Cache purge failed: ${err.message || err}`, "error");
+        }
+    }
+
+    async function refreshQwenSplitCache() {
+        if (!qwenTrainElements.cacheInfo) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/train/cache_size`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const bytes = Number(data?.bytes) || 0;
+            qwenTrainElements.cacheInfo.textContent = `Split cache: ${formatBytesLabel(bytes)}`;
+        } catch (err) {
+            console.warn("Qwen cache size check failed", err);
+            qwenTrainElements.cacheInfo.textContent = "Split cache: n/a";
+        }
+    }
+
+    async function purgeQwenSplitCache() {
+        if (!confirm("Purge cached train/val splits for Qwen training?")) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/train/cache/purge`, { method: "POST" });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const freedMb = formatBytesLabel(Number(data?.deleted_bytes) || 0);
+            setQwenStatus(`Split cache purged (${freedMb}).`, "success");
+            refreshQwenSplitCache();
+        } catch (err) {
+            console.error("Qwen cache purge failed", err);
+            setQwenStatus(`Split cache purge failed: ${err.message || err}`, "error");
+        }
+    }
+
+    async function refreshSam3SplitCache() {
+        if (!sam3TrainElements.cacheInfo) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/train/cache_size`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const bytes = Number(data?.bytes) || 0;
+            sam3TrainElements.cacheInfo.textContent = `Split cache: ${formatBytesLabel(bytes)}`;
+        } catch (err) {
+            console.warn("SAM3 cache size check failed", err);
+            sam3TrainElements.cacheInfo.textContent = "Split cache: n/a";
+        }
+    }
+
+    async function purgeSam3SplitCache() {
+        if (!confirm("Purge cached train/val splits for SAM3 training?")) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/sam3/train/cache/purge`, { method: "POST" });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const freed = formatBytesLabel(Number(data?.deleted_bytes) || 0);
+            setSam3Status(`Split cache purged (${freed}).`, "success");
+            refreshSam3SplitCache();
+        } catch (err) {
+            console.error("SAM3 cache purge failed", err);
+            setSam3Status(`Split cache purge failed: ${err.message || err}`, "error");
         }
     }
 
@@ -987,6 +1049,8 @@ const qwenTrainElements = {
         randomSplit: null,
         valPercent: null,
         splitSeed: null,
+        cacheInfo: null,
+        cachePurge: null,
     };
 
     const activeElements = {
@@ -1079,6 +1143,8 @@ const qwenTrainState = {
         randomSplit: null,
         valPercent: null,
         splitSeed: null,
+        cacheInfo: null,
+        cachePurge: null,
     };
 
 const sam3TrainState = {
@@ -5549,6 +5615,8 @@ async function initSam3TrainUi() {
     sam3TrainElements.randomSplit = document.getElementById("sam3RandomSplit");
     sam3TrainElements.valPercent = document.getElementById("sam3ValPercent");
     sam3TrainElements.splitSeed = document.getElementById("sam3SplitSeed");
+    sam3TrainElements.cacheInfo = document.getElementById("sam3CacheInfo");
+    sam3TrainElements.cachePurge = document.getElementById("sam3CachePurge");
     sam3TrainElements.runName = document.getElementById("sam3RunName");
     sam3TrainElements.trainBatch = document.getElementById("sam3TrainBatch");
     sam3TrainElements.valBatch = document.getElementById("sam3ValBatch");
@@ -5662,6 +5730,10 @@ async function initSam3TrainUi() {
         sam3TrainElements.randomSplit.addEventListener("change", syncSam3SplitControls);
         syncSam3SplitControls();
     }
+    if (sam3TrainElements.cachePurge) {
+        sam3TrainElements.cachePurge.addEventListener("click", purgeSam3SplitCache);
+    }
+    refreshSam3SplitCache();
     if (sam3TrainElements.capEpoch && sam3TrainElements.targetEpochSize) {
         sam3TrainElements.capEpoch.addEventListener("change", () => {
             sam3TrainElements.targetEpochSize.disabled = !sam3TrainElements.capEpoch.checked;
@@ -6484,6 +6556,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         qwenTrainElements.randomSplit = document.getElementById("qwenTrainRandomSplit");
         qwenTrainElements.valPercent = document.getElementById("qwenTrainValPercent");
         qwenTrainElements.splitSeed = document.getElementById("qwenTrainSplitSeed");
+        qwenTrainElements.cacheInfo = document.getElementById("qwenCacheInfo");
+        qwenTrainElements.cachePurge = document.getElementById("qwenCachePurge");
         qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
         qwenTrainElements.sampleButton = document.getElementById("qwenSampleBtn");
         qwenTrainElements.sampleCanvas = document.getElementById("qwenSampleCanvas");
@@ -6548,6 +6622,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             qwenTrainElements.randomSplit.addEventListener("change", syncSplitInputs);
             syncSplitInputs();
         }
+        if (qwenTrainElements.cachePurge) {
+            qwenTrainElements.cachePurge.addEventListener("click", purgeQwenSplitCache);
+        }
+        refreshQwenSplitCache();
         if (qwenTrainElements.datasetRefresh) {
             qwenTrainElements.datasetRefresh.addEventListener("click", () => {
                 loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh cached datasets", error));

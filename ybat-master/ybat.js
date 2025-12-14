@@ -5546,6 +5546,9 @@ async function initSam3TrainUi() {
     sam3TrainElements.datasetSummary = document.getElementById("sam3DatasetSummary");
     sam3TrainElements.datasetRefresh = document.getElementById("sam3DatasetRefresh");
     sam3TrainElements.datasetConvert = document.getElementById("sam3DatasetConvert");
+    sam3TrainElements.randomSplit = document.getElementById("sam3RandomSplit");
+    sam3TrainElements.valPercent = document.getElementById("sam3ValPercent");
+    sam3TrainElements.splitSeed = document.getElementById("sam3SplitSeed");
     sam3TrainElements.runName = document.getElementById("sam3RunName");
     sam3TrainElements.trainBatch = document.getElementById("sam3TrainBatch");
     sam3TrainElements.valBatch = document.getElementById("sam3ValBatch");

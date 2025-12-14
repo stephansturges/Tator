@@ -1043,6 +1043,24 @@
                         </div>
                     </section>
                     <section class="training-status-section">
+                        <details class="training-card" open>
+                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
+                            <div class="training-card__body">
+                                <p><strong>Goal:</strong> Mine per-class SAM3 “recipes” (text + exemplar steps) that maximize coverage and minimize FPs, then export them as portable zips for use in the annotator.</p>
+                                <ol>
+                                    <li><strong>Split & cache:</strong> Build a deterministic train/val split (test mode caps counts). Splits and detection caches are reused unless purged.</li>
+                                    <li><strong>Prompt expansion:</strong> Start from class names, optionally expand with GPT-OSS using your class hints. Prompts are sanitized and deduped.</li>
+                                    <li><strong>Exemplars:</strong> Sample GT crops (pool percent/count, optional diversity clustering). Positives are embedded if CLIP guard is on.</li>
+                                    <li><strong>Negatives (optional):</strong> Pull other-class GTs and/or FP negatives; embed for suppression when enabled.</li>
+                                    <li><strong>Sweeps:</strong> For every text/exemplar candidate, we sweep confidence thresholds and any similarity floors you list (CLIP guard). SAM3 runs once at the lowest threshold per candidate; higher thresholds and sim floors reuse that run.</li>
+                                    <li><strong>Image-first SAM3:</strong> Load each val image once per worker/GPU and run all candidates to reduce VRAM/CPU churn. Progress bar reflects this phase.</li>
+                                    <li><strong>Recipe building:</strong> Score candidates on val GTs, pick best threshold/sim floor per prompt, assemble a minimal step list that maximizes coverage while tracking FPs and duplicates.</li>
+                                    <li><strong>Outputs:</strong> Per-class summary + steps; recipes include exemplar crops and chosen similarity floor/thresholds. Saved as zip (JSON + crops).</li>
+                                    <li><strong>Apply path:</strong> In the annotator, recipe steps run with the stored similarity floor and a post-pass dedupe (IoU NMS) to avoid double-labeling the same object.</li>
+                                </ol>
+                                <p class="training-help">Tip: Use test mode for quick smoke tests; purge cache if disk grows or you change core settings.</p>
+                            </div>
+                        </details>
                         <h3>Progress & Logs</h3>
                         <div class="training-help">Live status and logs for the latest SAM3 Recipe Mining job.</div>
                         <div class="training-actions">

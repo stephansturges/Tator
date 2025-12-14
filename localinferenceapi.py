@@ -7130,13 +7130,14 @@ def _expand_prompts_with_prompt_llm(
                 f"Target class: '{_humanize_class_name(class_name)}'.",
                 f"Known good prompts: {known_list_str}.",
             ]
+            suffix = ""
             if class_hint:
-                base_prompt.append(f"Class note (guidance only): {class_hint}.")
+                suffix = f" Use this guidance: {class_hint}."
             base_prompt.extend(
                 [
-                    f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class (synonyms or sub-types).",
+                    f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class{suffix}",
                     "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.",
-                    "Return ONLY a comma-separated list. Example: pickup truck, delivery van, hatchback",
+                    "Return ONLY a comma-separated list. Example: thing one, thing two, thing three",
                 ]
             )
             last_text = ""

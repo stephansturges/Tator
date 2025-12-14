@@ -1,4 +1,4 @@
-/!\ this thing is under active development and some stuff is borked basically all the time. Right now I'm fixing CLIP training for instance. Expect some issues /!\
+/!\ this thing is under active development and some stuff is borked basically all the time. Right now I'm fixing the SAM3 Agent Mining train / val split. /!\
 
 # 🥔 Tator – Local CLIP + SAM Image Annotation Toolkit
 

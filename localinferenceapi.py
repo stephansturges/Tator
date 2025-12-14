@@ -4387,6 +4387,8 @@ def _ensure_agent_mining_split(
         val_ids = image_ids[: min(val_limit, total)]
         train_ids = image_ids[min(val_limit, total) : min(val_limit + train_limit, total)]
     else:
+        if val_limit is not None and val_limit <= 0:
+            val_limit = 1
         val_count = int(total * val_percent)
         if val_count <= 0:
             val_count = 1 if total > 1 else 0
@@ -8365,6 +8367,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 return
 
         total_images = len(val_ids)
+        if total_images == 0 and train_ids:
+            # Fallback: reuse a slice of train as val so we don't run with 0 images.
+            fallback = max(1, min(len(train_ids), payload.test_val_limit if payload.test_mode else 50))
+            val_ids = train_ids[:fallback]
+            total_images = len(val_ids)
+            job.logs.append(
+                {
+                    "ts": time.time(),
+                    "msg": f"Val split empty; reusing {total_images} train images as val for scoring.",
+                }
+            )
         job.logs.append(
             {
                 "ts": time.time(),

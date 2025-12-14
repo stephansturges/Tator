@@ -4306,7 +4306,40 @@ def _apply_agent_recipe_to_image(
             continue
         filtered = _filter_with_clip(preds)
         detections.extend(filtered)
-    return detections
+    # Simple NMS-style dedupe across all steps for this image to avoid double labels.
+    def _bbox_xyxy(bbox: Sequence[float]) -> Tuple[float, float, float, float]:
+        x, y, w, h = map(float, bbox[:4])
+        return x, y, x + w, y + h
+
+    def _iou(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(0.0, (ax2 - ax1)) * max(0.0, (ay2 - ay1))
+        area_b = max(0.0, (bx2 - bx1)) * max(0.0, (by2 - by1))
+        denom = area_a + area_b - inter
+        return inter / denom if denom > 0 else 0.0
+
+    iou_thresh = 0.5
+    kept: List[QwenDetection] = []
+    kept_boxes: List[Tuple[float, float, float, float]] = []
+    # Sort by score desc so highest-confidence survives.
+    sorted_dets = sorted(detections, key=lambda d: (d.score if d.score is not None else 0.0), reverse=True)
+    for det in sorted_dets:
+        bbox = det.bbox or []
+        if len(bbox) < 4:
+            continue
+        box_xyxy = _bbox_xyxy(bbox)
+        if any(_iou(box_xyxy, kb) > iou_thresh for kb in kept_boxes):
+            continue
+        kept.append(det)
+        kept_boxes.append(box_xyxy)
+    return kept
 
 
 def _detections_to_eval_cache(

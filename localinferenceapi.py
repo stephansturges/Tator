@@ -5048,8 +5048,8 @@ def _collect_agent_mining_detections_image_first(
                         logger.debug("Failed to remove stale cache file %s", p)
         # Stream in chunks to limit memory, flushing each chunk to cache.
         # Keep chunk_size small and also cap how many candidates are evaluated per chunk to limit RAM/VRAM.
-        chunk_size = 6
-        max_cands_per_chunk = 64
+        chunk_size = 4
+        max_cands_per_chunk = 16
         accumulator: Dict[str, List[Dict[str, Any]]] = {}
         processed_total = 0
 
@@ -5084,17 +5084,47 @@ def _collect_agent_mining_detections_image_first(
             for cand_slice in cand_chunks:
                 if cancel_event is not None and cancel_event.is_set():
                     break
-                pooled = pool.run(
-                    batch_entries,
-                    cand_slice,
-                    min_threshold=min_threshold,
-                    mask_threshold=mask_threshold,
-                    max_results=max_results,
-                    min_size=min_size,
-                    simplify=simplify,
-                    cancel_event=cancel_event,
-                    progress_callback=None,
-                )
+                try:
+                    pooled = pool.run(
+                        batch_entries,
+                        cand_slice,
+                        min_threshold=min_threshold,
+                        mask_threshold=mask_threshold,
+                        max_results=max_results,
+                        min_size=min_size,
+                        simplify=simplify,
+                        cancel_event=cancel_event,
+                        progress_callback=None,
+                    )
+                except torch.cuda.OutOfMemoryError:
+                    logger.warning(
+                        "SAM3 mining OOM; retrying slice with reduced candidate batch (cand_slice=%d)",
+                        len(cand_slice),
+                    )
+                    if torch.cuda.is_available():
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                    # Retry one-by-one to limp forward
+                    pooled = {}
+                    for single_cand in cand_slice:
+                        try:
+                            partial_single = pool.run(
+                                batch_entries,
+                                [single_cand],
+                                min_threshold=min_threshold,
+                                mask_threshold=mask_threshold,
+                                max_results=max_results,
+                                min_size=min_size,
+                                simplify=simplify,
+                                cancel_event=cancel_event,
+                                progress_callback=None,
+                            )
+                            pooled.update(partial_single)
+                        except torch.cuda.OutOfMemoryError:
+                            logger.error("SAM3 mining OOM even on single candidate; aborting batch.")
+                            raise
                 for cand in cand_slice:
                     cand_id = cand.get("id")
                     if not cand_id:

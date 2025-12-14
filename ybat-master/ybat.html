@@ -493,6 +493,12 @@
                             </div>
                         </div>
                         <div class="training-help">We rebuild the train/val split per job using this seed and percentage.</div>
+                        <div class="training-grid">
+                            <div class="training-help" id="qwenCacheInfo">Split cache: …</div>
+                            <div>
+                                <button id="qwenCachePurge" class="secondary">Purge split cache</button>
+                            </div>
+                        </div>
                         <div class="training-field">
                             <label for="qwenTrainModelId">Base model repo</label>
                             <input type="text" id="qwenTrainModelId" value="Qwen/Qwen2.5-VL-3B-Instruct" />
@@ -666,6 +672,12 @@
                             </div>
                         </div>
                         <div class="training-help">Train/val splits are rebuilt deterministically per job using this seed.</div>
+                        <div class="training-grid">
+                            <div class="training-help" id="sam3CacheInfo">Split cache: …</div>
+                            <div>
+                                <button id="sam3CachePurge" class="secondary">Purge split cache</button>
+                            </div>
+                        </div>
                         <div class="training-field">
                             <label for="sam3RunName">Run name / log dir</label>
                             <input type="text" id="sam3RunName" placeholder="Optional; defaults to job id" />

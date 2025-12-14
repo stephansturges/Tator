@@ -5721,6 +5721,21 @@ def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _normalize_qwen_image_rel(src_path: Path, dataset_root: Path, fallback: Path) -> Path:
+    try:
+        rel = src_path.relative_to(dataset_root)
+    except Exception:
+        rel = fallback
+    parts = list(rel.parts)
+    if parts and parts[0] in {"train", "val"}:
+        parts = parts[1:]
+    if parts and parts[0] == "images":
+        parts = parts[1:]
+    if not parts:
+        parts = [fallback.name]
+    return Path(*parts)
+
+
 def _prepare_qwen_training_split(
     dataset_root: Path,
     job_id: str,
@@ -5767,10 +5782,11 @@ def _prepare_qwen_training_split(
                     src_path = next((p for p in candidates if p.exists()), None)
                     if src_path is None:
                         continue
+                    normalized_rel = _normalize_qwen_image_rel(src_path, dataset_root, rel_path)
                     entries.append(
                         {
                             "raw": raw,
-                            "image_rel": rel_path,
+                            "image_rel": normalized_rel,
                             "src": src_path,
                         }
                     )
@@ -5794,6 +5810,7 @@ def _prepare_qwen_training_split(
     if not train_entries and val_entries:
         train_entries, val_entries = val_entries, []
     split_root = (QWEN_JOB_ROOT / "splits" / job_id).resolve()
+    split_root.parent.mkdir(parents=True, exist_ok=True)
     if split_root.exists():
         shutil.rmtree(split_root, ignore_errors=True)
     (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)
@@ -5805,7 +5822,12 @@ def _prepare_qwen_training_split(
             for entry in split_entries:
                 dst = split_root / split_name / "images" / entry["image_rel"]
                 _link_or_copy_file(entry["src"], dst)
-                handle.write(entry["raw"] + "\n")
+                try:
+                    record = json.loads(entry["raw"])
+                except Exception:
+                    record = {"image": ""}
+                record["image"] = entry["image_rel"].as_posix()
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 counts[split_name] += 1
     new_meta = {
         **meta,
@@ -5968,6 +5990,39 @@ def _link_or_copy_file(src: Path, dst: Path) -> None:
         os.link(src, dst)
     except Exception:
         shutil.copy2(src, dst)
+
+
+def _dir_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except Exception:
+            continue
+    return total
+
+
+def _purge_directory(path: Path) -> int:
+    if not path.exists():
+        return 0
+    deleted = 0
+    for p in sorted(path.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+        try:
+            if p.is_file():
+                deleted += p.stat().st_size
+                p.unlink()
+            elif p.is_dir():
+                p.rmdir()
+        except Exception:
+            continue
+    try:
+        path.rmdir()
+    except Exception:
+        pass
+    return deleted
 
 
 def _get_clip_dataset_job(job_id: str) -> ClipDatasetUploadJob:
@@ -10062,6 +10117,7 @@ def _prepare_sam3_training_split(
     if not train_ids and val_ids:
         train_ids, val_ids = val_ids, []
     split_root = (SAM3_JOB_ROOT / "splits" / job_id).resolve()
+    split_root.parent.mkdir(parents=True, exist_ok=True)
     if split_root.exists():
         shutil.rmtree(split_root, ignore_errors=True)
     (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)
@@ -11727,6 +11783,19 @@ def cancel_sam3_training_job(job_id: str):
     return {"status": job.status}
 
 
+@app.get("/sam3/train/cache_size")
+def sam3_train_cache_size():
+    cache_root = SAM3_JOB_ROOT / "splits"
+    return {"bytes": _dir_size_bytes(cache_root)}
+
+
+@app.post("/sam3/train/cache/purge")
+def sam3_train_cache_purge():
+    cache_root = SAM3_JOB_ROOT / "splits"
+    deleted = _purge_directory(cache_root)
+    return {"status": "ok", "deleted_bytes": deleted}
+
+
 @app.get("/sam3/storage/runs")
 def list_sam3_runs(variant: str = Query("sam3")):
     # SAM3-lite removed; always use sam3
@@ -11918,6 +11987,19 @@ def cancel_qwen_training_job(job_id: str):
         next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
         _qwen_job_update(job, status=next_status, message="Cancellation requested ...")
         return {"status": next_status}
+
+
+@app.get("/qwen/train/cache_size")
+def qwen_train_cache_size():
+    cache_root = QWEN_JOB_ROOT / "splits"
+    return {"bytes": _dir_size_bytes(cache_root)}
+
+
+@app.post("/qwen/train/cache/purge")
+def qwen_train_cache_purge():
+    cache_root = QWEN_JOB_ROOT / "splits"
+    deleted = _purge_directory(cache_root)
+    return {"status": "ok", "deleted_bytes": deleted}
 
 
 @app.get("/qwen/models")

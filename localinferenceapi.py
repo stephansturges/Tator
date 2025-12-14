@@ -5084,9 +5084,9 @@ def _collect_agent_mining_detections_image_first(
             for key, items in accumulator.items():
                 if cancel_event is not None and cancel_event.is_set():
                     break
-                existing = _load_agent_mining_detections(cache_dir, key) or []
-                existing.extend(items)
-                _save_agent_mining_detections(cache_dir, key, existing)
+                # We already cleared stale cache entries for these keys above,
+                # so write the accumulated detections directly to avoid repeated read/extend churn.
+                _save_agent_mining_detections(cache_dir, key, items)
             accumulator = {}
 
         for start in range(0, len(image_entries), chunk_size):
@@ -8443,12 +8443,15 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     job.logs[:] = job.logs[-MAX_JOB_LOGS:]
             except Exception:
                 pass
+            if payload.use_clip_fp_guard:
                 job.logs.append(
                     {
                         "ts": time.time(),
                         "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
                     }
                 )
+                if len(job.logs) > MAX_JOB_LOGS:
+                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
             # Negative exemplars from other classes.
             negatives: List[Dict[str, Any]] = []
             negative_embeddings: Dict[str, np.ndarray] = {}

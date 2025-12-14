@@ -4384,8 +4384,14 @@ def _ensure_agent_mining_split(
             val_limit = 10
         if train_limit is None or train_limit <= 0:
             train_limit = 10
-        val_ids = image_ids[: min(val_limit, total)]
-        train_ids = image_ids[min(val_limit, total) : min(val_limit + train_limit, total)]
+        if val_limit + train_limit >= total:
+            # If requested caps exceed dataset size, split deterministically: reserve val_limit (or half) and the rest train.
+            val_take = min(val_limit, max(1, total // 2))
+            val_ids = image_ids[:val_take]
+            train_ids = image_ids[val_take: min(total, val_take + train_limit)]
+        else:
+            val_ids = image_ids[: min(val_limit, total)]
+            train_ids = image_ids[min(val_limit, total) : min(val_limit + train_limit, total)]
     else:
         if val_limit is not None and val_limit <= 0:
             val_limit = 1

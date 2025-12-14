@@ -11736,7 +11736,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const exemplarPoolMode =
             agentElements.exemplarPoolMode && agentElements.exemplarPoolMode.value === "count" ? "count" : "percent";
         const exemplarPoolValue = readNumberInput(agentElements.exemplarPoolValue, { integer: true });
-        const similarityFloor = readNumberInput(agentElements.similarityScore, { integer: false });
+        const similarityRaw = agentElements.similarityScore?.value || "";
+        const similarityList = similarityRaw ? parseCsvNumbers(similarityRaw, { clampMin: 0, clampMax: 1 }) : [];
         const useNegExemplars = !!(agentElements.useNegExemplars && agentElements.useNegExemplars.checked);
         const maxNegExemplars = readNumberInput(agentElements.maxNegExemplars, { integer: true });
         const negStrength = readNumberInput(agentElements.negStrength, { integer: false });
@@ -11783,7 +11784,11 @@ return {
             negative_strength: Number.isFinite(negStrength) ? Math.max(0, Math.min(5, negStrength)) : 0.5,
             use_fp_negatives: useFpNeg,
             max_fp_negatives: Number.isFinite(maxFpNeg) ? Math.max(0, Math.min(64, maxFpNeg)) : 8,
-            similarity_score: Number.isFinite(similarityFloor) ? Math.max(0, Math.min(1, similarityFloor)) : 0.25,
+            similarity_score:
+                similarityList.length === 1 && Number.isFinite(similarityList[0])
+                    ? Math.max(0, Math.min(1, similarityList[0]))
+                    : 0.25,
+            similarity_scores: similarityList.length > 1 ? similarityList : undefined,
             classes: classes.length ? classes : null,
             class_hints: classHints && typeof classHints === "object" && Object.keys(classHints).length ? classHints : null,
             auto_mine_prompts: (agentElements.qwenMaxPrompts && readNumberInput(agentElements.qwenMaxPrompts, { integer: true }) > 0) || false,

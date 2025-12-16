@@ -904,15 +904,15 @@
 	                            </div>
                             <div class="training-help" id="agentDatasetSummary">Pick a converted SAM3/Qwen dataset.</div>
 		                        </div>
-		                        <div class="training-grid">
-		                            <div>
-		                                <label for="agentValPercent">Val %</label>
-		                                <input type="number" id="agentValPercent" min="5" max="95" value="30" title="How many images are held out to test the recipe. Example: 30 means we test on 30% of images." />
-		                            </div>
-		                            <div>
-		                                <label for="agentSplitSeed">Split seed</label>
-		                                <input type="number" id="agentSplitSeed" value="42" title="Same seed = same train/val split. Change it if you want a different random split." />
-		                            </div>
+			                        <div class="training-grid">
+			                            <div>
+			                                <label for="agentValPercent">Val %<span class="help-icon" title="How many images are held out for evaluation.&#10;We split your dataset into Train and Val.&#10;Mining uses Train; scoring uses Val.&#10;Higher = more reliable scores (slower).&#10;Lower = faster but noisier scores.">?</span></label>
+			                                <input type="number" id="agentValPercent" min="5" max="95" value="30" title="How many images are held out to test the recipe. Example: 30 means we test on 30% of images." />
+			                            </div>
+			                            <div>
+			                                <label for="agentSplitSeed">Split seed<span class="help-icon" title="Random seed for the train/val split.&#10;Same seed = same split (repeatable).&#10;Change it if you want a different random split.&#10;Default is 42.">?</span></label>
+			                                <input type="number" id="agentSplitSeed" value="42" title="Same seed = same train/val split. Change it if you want a different random split." />
+			                            </div>
 		                            <div class="training-field training-field--inline">
 		                                <label for="agentReuseSplit" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">Reuse cached split</label>
 		                                <input type="checkbox" id="agentReuseSplit" checked />
@@ -1013,10 +1013,10 @@
 		                                <label for="agentUseNegExemplars" title="Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes.">Use negative crops</label>
 		                                <input type="checkbox" id="agentUseNegExemplars" checked title="Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes." />
 		                            </div>
-		                            <div>
-		                                <label for="agentMaxNegExemplars">Max negatives/class</label>
-		                                <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
-		                            </div>
+			                            <div>
+			                                <label for="agentMaxNegExemplars">Max negatives/class<span class="help-icon" title="Crop-bank mode only.&#10;How many negative example crops we collect from other classes.&#10;Negatives suppress detections that look like another class.&#10;More negatives can reduce false positives but costs time and increases recipe zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+			                                <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
+			                            </div>
 		                            <div>
 		                                <label for="agentNegStrength" title="How strongly negative examples suppress detections. Set to 0 to disable negatives.">Negative filter strength</label>
 		                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" title="How strongly negative examples suppress detections. Higher = more suppression; 0 disables negatives." />
@@ -1031,39 +1031,39 @@
 	                                <label for="agentQwenMaxPrompts" title="Ask GPT-OSS for additional words to try for each class (in addition to the class name).">Extra text prompts/class</label>
 	                                <input type="number" id="agentQwenMaxPrompts" min="0" max="20" value="0" title="0 = only use the class name; higher values try more alternative phrases." />
 	                            </div>
-	                            <div>
-	                                <label for="agentPromptReasoning">GPT-OSS reasoning</label>
-	                                <select id="agentPromptReasoning" title="How much GPT-OSS “thinks” before proposing extra words. Higher uses more time and can be less stable.">
-	                                    <option value="none" selected>none (fastest)</option>
+		                            <div>
+		                                <label for="agentPromptReasoning">GPT-OSS reasoning<span class="help-icon" title="Controls how much the model “thinks” before proposing extra words.&#10;Higher can be slower and less stable.&#10;We recommend “none” for now.">?</span></label>
+		                                <select id="agentPromptReasoning" title="How much GPT-OSS “thinks” before proposing extra words. Higher uses more time and can be less stable.">
+		                                    <option value="none" selected>none (fastest)</option>
 	                                    <option value="low">low</option>
 	                                    <option value="medium">medium</option>
 	                                    <option value="high">high</option>
 	                                </select>
 	                                <div class="training-help" style="color: #b91c1c;">Only “none” is stable right now.</div>
-	                            </div>
-	                            <div>
-	                                <label for="agentPromptMaxTokens">GPT-OSS max tokens</label>
-	                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Maximum length of GPT-OSS output when proposing extra words." />
-	                            </div>
+		                            </div>
+		                            <div>
+		                                <label for="agentPromptMaxTokens">GPT-OSS max tokens<span class="help-icon" title="Maximum length of the model output when proposing extra prompts.&#10;Higher can be slower and use more GPU memory.&#10;If you see truncated lists, increase this.">?</span></label>
+		                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Maximum length of GPT-OSS output when proposing extra words." />
+		                            </div>
 	                            <div class="training-field training-field--inline">
 	                                <label for="agentTestMode" title="Runs on a small number of images so you can verify everything works (fast).">Test mode</label>
 	                                <input type="checkbox" id="agentTestMode" checked />
+		                            </div>
+		                            <div>
+		                                <label for="agentTrainLimit">Test train imgs<span class="help-icon" title="Test mode only.&#10;Number of training images sampled for mining.&#10;Smaller = faster smoke test.">?</span></label>
+		                                <input type="number" id="agentTrainLimit" min="1" value="10" />
 	                            </div>
 	                            <div>
-	                                <label for="agentTrainLimit">Test train imgs</label>
-	                                <input type="number" id="agentTrainLimit" min="1" value="10" />
-                            </div>
-                            <div>
-                                <label for="agentValLimit">Test val imgs</label>
-                                <input type="number" id="agentValLimit" min="1" value="10" />
-                            </div>
-	                        </div>
-			                        <div class="training-field">
-			                            <label for="agentExtraPrompts">Extra prompts (optional)</label>
-			                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"__base__": ["object", "small object"], "light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Special key &quot;__base__&quot; applies to all classes. Example: {&quot;__base__&quot;: [&quot;object&quot;, &quot;small object&quot;], &quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;]}"></textarea>
-			                            <div class="training-help">Optional extra words/phrases to try. They are appended to GPT-OSS suggestions. Use &quot;__base__&quot; to add prompts for all classes.</div>
-			                            <div class="training-help" id="agentExtraPromptsParseStatus" aria-live="polite"></div>
-			                        </div>
+	                                <label for="agentValLimit">Test val imgs<span class="help-icon" title="Test mode only.&#10;Number of validation images sampled for scoring.&#10;Smaller = faster smoke test; larger = more reliable scores.">?</span></label>
+	                                <input type="number" id="agentValLimit" min="1" value="10" />
+	                            </div>
+		                        </div>
+				                        <div class="training-field">
+				                            <label for="agentExtraPrompts">Extra prompts (optional)<span class="help-icon" title="Optional JSON dict of extra prompts to try.&#10;Keys: class names.&#10;Values: lists of strings.&#10;Special key “__base__” applies to all classes.&#10;These are appended to GPT-OSS suggestions.">?</span></label>
+				                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"__base__": ["object", "small object"], "light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Special key &quot;__base__&quot; applies to all classes. Example: {&quot;__base__&quot;: [&quot;object&quot;, &quot;small object&quot;], &quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;]}"></textarea>
+				                            <div class="training-help">Optional extra words/phrases to try. They are appended to GPT-OSS suggestions. Use &quot;__base__&quot; to add prompts for all classes.</div>
+				                            <div class="training-help" id="agentExtraPromptsParseStatus" aria-live="polite"></div>
+				                        </div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="agentRunBtn">Run SAM3 Recipe Mining</button>
                             <button type="button" class="training-button secondary" id="agentRefreshBtn">Refresh latest</button>
@@ -1140,11 +1140,11 @@
                                 <button type="button" class="training-button secondary" id="agentRecipeLoad">Load recipe</button>
                                 <button type="button" class="training-button secondary" id="agentRecipeDownload">Download zip</button>
                                 <button type="button" class="training-button secondary" id="agentRecipeApply">Apply to image</button>
-                            </div>
-                            <div class="training-field">
-                                <label for="agentRecipeFile">Import recipe zip</label>
-                                <div class="training-grid">
-                                    <input type="file" id="agentRecipeFile" accept=".zip" />
+	                            </div>
+	                            <div class="training-field">
+	                                <label for="agentRecipeFile">Import recipe zip<span class="help-icon" title="Import a recipe zip from another machine or previous run.&#10;The zip contains the recipe JSON plus any crops/weights needed, so it’s portable.">?</span></label>
+	                                <div class="training-grid">
+	                                    <input type="file" id="agentRecipeFile" accept=".zip" />
                                     <button type="button" class="training-button secondary" id="agentRecipeImport">Import</button>
                                 </div>
                                 <div class="training-help">Packages include the recipe JSON plus exemplar crops so they are portable between machines.</div>

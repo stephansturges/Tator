@@ -1297,41 +1297,33 @@ const sam3TrainState = {
         runButton: null,
         refreshButton: null,
         cancelButton: null,
-        status: null,
-        results: null,
-        recipeSelect: null,
-        recipeRefresh: null,
-        recipeLoad: null,
-        recipeDownload: null,
-        recipeApply: null,
-        recipeImageId: null,
-        recipeOverrideToggle: null,
-        recipeOverrideSelect: null,
-        recipeImport: null,
-        recipeFile: null,
-        recipeDetails: null,
-        logs: null,
-        cacheSize: null,
-        purgeCacheBtn: null,
-        progressFill: null,
-        progressText: null,
-    };
+	        status: null,
+	        results: null,
+	        recipeSelect: null,
+	        recipeRefresh: null,
+	        recipeDownload: null,
+	        recipeDelete: null,
+	        recipeImport: null,
+	        recipeFile: null,
+	        logs: null,
+	        cacheSize: null,
+	        purgeCacheBtn: null,
+	        progressFill: null,
+	        progressText: null,
+	    };
 
     const promptRecipeState = {
         activeJobId: null,
         pollHandle: null,
         lastJob: null,
     };
-	    const agentState = {
-	        lastJob: null,
-	        datasetsById: {},
-	        loadedRecipe: null,
-	        recipeClassOverride: null,
-	        pollTimer: null,
-	        pollInFlight: false,
-	        datasetClasses: { names: [], ids: [] },
-	        lastRenderedLogKey: null,
-	    };
+		    const agentState = {
+		        lastJob: null,
+		        datasetsById: {},
+		        pollTimer: null,
+		        pollInFlight: false,
+		        lastRenderedLogKey: null,
+		    };
 
     let promptHelperInitialized = false;
 
@@ -11857,145 +11849,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	    }
 
-    function getAgentSelectedDatasetMeta() {
-        const datasetId = agentElements.datasetSelect?.value;
-        if (!datasetId) return null;
-        return agentState.datasetsById[datasetId] || null;
-    }
-
-	    function renderAgentRecipeDetails(recipeData) {
-	        if (!agentElements.recipeDetails) return;
-	        agentElements.recipeDetails.innerHTML = "";
-	        agentElements.recipeDetails.style.display = recipeData ? "block" : "none";
-	        if (!recipeData) return;
-	        const dsMeta = getAgentSelectedDatasetMeta();
-	        const dsClasses = Array.isArray(dsMeta?.classes) ? dsMeta.classes : [];
-	        const recipeClasses = Array.isArray(recipeData.labelmap) ? recipeData.labelmap : [];
-	        const mismatchWarnings = [];
-	        if (dsMeta?.signature && recipeData.dataset_signature && dsMeta.signature !== recipeData.dataset_signature) {
-	            mismatchWarnings.push("Dataset signature differs from the recipe origin.");
-	        }
-	        if (recipeClasses.length && dsClasses.length && JSON.stringify(recipeClasses) !== JSON.stringify(dsClasses)) {
-	            mismatchWarnings.push("Label map differs; remap the class before applying.");
-	        }
-	        const recipeBody = recipeData.recipe || {};
-	        const steps = Array.isArray(recipeBody.steps) ? recipeBody.steps : [];
-	        const prompts = Array.isArray(recipeBody.text_prompts) ? recipeBody.text_prompts : [];
-	        const positives = Array.isArray(recipeBody.positives) ? recipeBody.positives : [];
-	        const negatives = Array.isArray(recipeBody.negatives) ? recipeBody.negatives : [];
-	        const params = recipeBody.params || {};
-	        const modeLabel = recipeBody.mode || (steps.length ? "legacy" : "sam3_greedy");
-	        const wrapper = document.createElement("div");
-	        wrapper.className = "training-card__body";
-	        const title = document.createElement("div");
-	        title.className = "training-history-title";
-	        title.textContent = recipeData.label || recipeData.id || "recipe";
-	        wrapper.appendChild(title);
-	        const meta = document.createElement("div");
-	        meta.className = "training-help";
-	        meta.textContent = [
-	            recipeData.class_name ? `Class: ${recipeData.class_name}` : null,
-	            recipeData.dataset_signature ? `Signature: ${recipeData.dataset_signature}` : null,
-	            recipeData.labelmap_hash ? `Labelmap hash: ${recipeData.labelmap_hash}` : null,
-	            `Mode: ${modeLabel}`,
-	        ]
-	            .filter(Boolean)
-	            .join(" • ");
-	        wrapper.appendChild(meta);
-	        if (mismatchWarnings.length) {
-	            const warn = document.createElement("div");
-	            warn.className = "training-message warn";
-	            warn.textContent = mismatchWarnings.join(" ");
-	            wrapper.appendChild(warn);
-	        }
-	        const counts = document.createElement("div");
-	        counts.className = "training-help";
-	        counts.textContent = `Text prompts: ${prompts.length} • +crops: ${positives.length} • -crops: ${negatives.length}`;
-	        wrapper.appendChild(counts);
-
-	        if (prompts.length) {
-	            const p = document.createElement("div");
-	            p.className = "training-help";
-	            const preview = prompts.slice(0, 24).join(", ");
-	            const extra = prompts.length > 24 ? ` (+${prompts.length - 24} more)` : "";
-	            p.textContent = `Prompts: ${preview}${extra}`;
-	            wrapper.appendChild(p);
-	        }
-	        if (params && typeof params === "object" && Object.keys(params).length) {
-	            const p = document.createElement("div");
-	            p.className = "training-help";
-	            const bits = [];
-	            if (typeof params.similarity_score === "number") bits.push(`sim ≥ ${params.similarity_score}`);
-	            if (typeof params.seed_threshold === "number") bits.push(`seed thr ${params.seed_threshold}`);
-	            if (typeof params.expand_threshold === "number") bits.push(`expand thr ${params.expand_threshold}`);
-	            if (typeof params.max_visual_seeds === "number") bits.push(`seeds ${params.max_visual_seeds}`);
-	            if (typeof params.negative_strength === "number" && params.use_negative_exemplars) bits.push(`λ ${params.negative_strength}`);
-	            if (bits.length) {
-	                p.textContent = `Params: ${bits.join(" • ")}`;
-	                wrapper.appendChild(p);
-	            }
-	        }
-
-	        const appendCropStrip = (label, entries) => {
-	            const head = document.createElement("div");
-	            head.className = "training-help";
-	            head.textContent = `${label} (${entries.length})`;
-	            wrapper.appendChild(head);
-	            const withImg = entries.filter((e) => e && e.crop_base64).slice(0, 8);
-	            if (withImg.length) {
-	                const row = document.createElement("div");
-	                row.style.display = "flex";
-	                row.style.gap = "8px";
-	                row.style.flexWrap = "wrap";
-	                row.style.margin = "6px 0 10px";
-	                withImg.forEach((e) => {
-	                    const img = document.createElement("img");
-	                    img.src = e.crop_base64;
-	                    img.alt = `${label} crop`;
-	                    img.style.width = "96px";
-	                    img.style.height = "96px";
-	                    img.style.objectFit = "cover";
-	                    img.style.borderRadius = "8px";
-	                    img.style.border = "1px solid #e5e7eb";
-	                    row.appendChild(img);
-	                });
-	                wrapper.appendChild(row);
-	            }
-	        };
-	        if (positives.length) appendCropStrip("Positive crops", positives);
-	        if (negatives.length) appendCropStrip("Negative crops", negatives);
-
-	        if (steps.length) {
-	            const list = document.createElement("div");
-	            list.className = "training-grid";
-	            steps.forEach((step, idx) => {
-	                const card = document.createElement("div");
-	                card.className = "training-card";
-                const body = document.createElement("div");
-                body.className = "training-card__body";
-                const header = document.createElement("div");
-                header.className = "training-history-row";
-                header.innerHTML = `<div class="training-history-title">Step ${idx + 1}: ${escapeHtml(step.type || "text")}</div><span class="badge">thr ${step.threshold ?? ""}</span>`;
-                body.appendChild(header);
-                const label = document.createElement("div");
-                label.className = "training-help";
-                label.textContent = step.prompt || (step.exemplar ? "Exemplar" : "");
-                body.appendChild(label);
-                if (step.exemplar && step.exemplar.crop_base64) {
-                    const img = document.createElement("img");
-                    img.src = step.exemplar.crop_base64;
-                    img.alt = "Exemplar crop";
-                    img.style.maxWidth = "120px";
-                    img.style.display = "block";
-                    img.style.marginTop = "6px";
-                    body.appendChild(img);
-                }
-                card.appendChild(body);
-                list.appendChild(card);
-            });
-	            wrapper.appendChild(list);
-	        }
-	        agentElements.recipeDetails.appendChild(wrapper);
+	    function getAgentSelectedDatasetMeta() {
+	        const datasetId = agentElements.datasetSelect?.value;
+	        if (!datasetId) return null;
+	        return agentState.datasetsById[datasetId] || null;
 	    }
 
     async function loadAgentDatasets() {
@@ -12409,17 +12266,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function fetchAgentRecipes() {
-        const datasetId = agentElements.datasetSelect?.value;
-        if (!agentElements.recipeSelect) return;
-        agentElements.recipeSelect.innerHTML = "";
-        try {
-            const url = new URL(`${API_ROOT}/agent_mining/recipes`);
-            if (datasetId) url.searchParams.set("dataset_id", datasetId);
-            const resp = await fetch(url.toString());
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.json();
-            const list = Array.isArray(data) ? data : [];
+	    async function fetchAgentRecipes() {
+	        if (!agentElements.recipeSelect) return;
+	        agentElements.recipeSelect.innerHTML = "";
+	        try {
+	            const resp = await fetch(`${API_ROOT}/agent_mining/recipes`);
+	            if (!resp.ok) throw new Error(await resp.text());
+	            const data = await resp.json();
+	            const list = Array.isArray(data) ? data : [];
             list.forEach((rec) => {
                 const opt = document.createElement("option");
                 opt.value = rec.id || "";
@@ -12438,54 +12292,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         } catch (err) {
             console.error("Fetch recipes failed", err);
             setAgentStatus(`Recipe list failed: ${err.message || err}`, "error");
-        }
-    }
+	        }
+	    }
 
-    async function loadSelectedAgentRecipe() {
-        const recipeId = agentElements.recipeSelect?.value;
-        if (!recipeId) {
-            setAgentStatus("Select a recipe to load.", "warn");
-            return;
-        }
-        try {
-            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${recipeId}`);
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.json();
-            const recipe = data.recipe || {};
-            agentState.lastJob = {
-                status: "completed",
-                message: `Loaded recipe ${data.label || data.id}`,
-                result: {
-                    classes: [
-                        {
-                            id: data.class_id,
-                            name: data.class_name,
-                            train_gt: null,
-                            val_gt: null,
-                            exemplars: [],
-                            clip_warnings: [],
-                            candidates: [],
-                            recipe,
-                            coverage_by_image: null,
-                        },
-                    ],
-                },
-            };
-            agentState.loadedRecipe = data;
-            agentState.recipeClassOverride = null;
-            renderAgentResults(agentState.lastJob.result);
-            renderAgentRecipeDetails(data);
-            renderAgentLogs(null);
-            setAgentStatus(`Loaded recipe ${data.label || data.id}`, "success");
-        } catch (err) {
-            console.error("Load recipe failed", err);
-            setAgentStatus(`Load failed: ${err.message || err}`, "error");
-        }
-    }
-
-    async function downloadSelectedAgentRecipe() {
-        const recipeId = agentElements.recipeSelect?.value;
-        if (!recipeId) {
+	    async function downloadSelectedAgentRecipe() {
+	        const recipeId = agentElements.recipeSelect?.value;
+	        if (!recipeId) {
             setAgentStatus("Select a recipe to download.", "warn");
             return;
         }
@@ -12505,13 +12317,34 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         } catch (err) {
             console.error("Recipe download failed", err);
             setAgentStatus(`Download failed: ${err.message || err}`, "error");
-        }
-    }
+	        }
+	    }
 
-    async function importAgentRecipe() {
-        if (!agentElements.recipeFile || !agentElements.recipeFile.files?.length) {
-            setAgentStatus("Choose a recipe file (.zip) to import.", "warn");
-            return;
+	    async function deleteSelectedAgentRecipe() {
+	        const recipeId = agentElements.recipeSelect?.value;
+	        if (!recipeId) {
+	            setAgentStatus("Select a recipe to delete.", "warn");
+	            return;
+	        }
+	        const label = agentElements.recipeSelect?.selectedOptions?.[0]?.textContent || recipeId;
+	        const ok = window.confirm(`Delete recipe "${label}"?\n\nThis removes it from the backend and cannot be undone.`);
+	        if (!ok) return;
+	        setAgentStatus("Deleting recipe…", "info");
+	        try {
+	            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${encodeURIComponent(recipeId)}`, { method: "DELETE" });
+	            if (!resp.ok) throw new Error(await resp.text());
+	            setAgentStatus(`Deleted recipe ${label}.`, "success");
+	            await fetchAgentRecipes();
+	        } catch (err) {
+	            console.error("Recipe delete failed", err);
+	            setAgentStatus(`Delete failed: ${err.message || err}`, "error");
+	        }
+	    }
+
+	    async function importAgentRecipe() {
+	        if (!agentElements.recipeFile || !agentElements.recipeFile.files?.length) {
+	            setAgentStatus("Choose a recipe file (.zip) to import.", "warn");
+	            return;
         }
         const file = agentElements.recipeFile.files[0];
         const formData = new FormData();
@@ -12521,87 +12354,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
                 method: "POST",
                 body: formData,
-            });
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.json();
-            agentState.loadedRecipe = data;
-            agentState.recipeClassOverride = null;
-            renderAgentRecipeDetails(data);
-            setAgentStatus(`Imported recipe ${data.label || data.id}`, "success");
-            await fetchAgentRecipes();
-        } catch (err) {
-            console.error("Recipe import failed", err);
-            setAgentStatus(`Import failed: ${err.message || err}`, "error");
-        } finally {
+	            });
+	            if (!resp.ok) throw new Error(await resp.text());
+	            const data = await resp.json();
+	            const importedId = data?.id;
+	            setAgentStatus(`Imported recipe ${data.label || data.id}`, "success");
+	            await fetchAgentRecipes();
+	            if (importedId && agentElements.recipeSelect) {
+	                agentElements.recipeSelect.value = importedId;
+	            }
+	        } catch (err) {
+	            console.error("Recipe import failed", err);
+	            setAgentStatus(`Import failed: ${err.message || err}`, "error");
+	        } finally {
             agentElements.recipeFile.value = "";
-        }
-    }
-
-    async function applySelectedAgentRecipe() {
-        const recipeId = agentElements.recipeSelect?.value;
-        const datasetId = agentElements.datasetSelect?.value;
-        if (!datasetId) {
-            setAgentStatus("Select a dataset first.", "warn");
-            return;
-        }
-        if (!recipeId) {
-            setAgentStatus("Select a recipe to apply.", "warn");
-            return;
-        }
-        const imageId = readNumberInput(agentElements.recipeImageId, { integer: true });
-        if (!Number.isInteger(imageId) || imageId < 0) {
-            setAgentStatus("Enter a valid COCO image id to apply.", "warn");
-            return;
-        }
-        try {
-            let recipeData = agentState.loadedRecipe;
-            if (!recipeData || recipeData.id !== recipeId) {
-                const recipeResp = await fetch(`${API_ROOT}/agent_mining/recipes/${recipeId}`);
-                if (!recipeResp.ok) throw new Error(await recipeResp.text());
-                recipeData = await recipeResp.json();
-            }
-            const override =
-                agentElements.recipeOverrideToggle?.checked && agentState.recipeClassOverride
-                    ? agentState.recipeClassOverride
-                    : null;
-            const params = {
-                ...(recipeData?.recipe?.params || {}),
-                ...(recipeData.params || {}),
-            };
-            const payload = {
-                dataset_id: datasetId,
-                image_id: imageId,
-                recipe: recipeData,
-                mask_threshold: params.mask_threshold ?? 0.5,
-                min_size: params.min_size ?? 0,
-                simplify_epsilon: params.simplify_epsilon ?? 0.0,
-                max_results: params.max_results ?? 100,
-                override_class_id: override?.class_id,
-                override_class_name: override?.class_name,
-            };
-            const resp = await fetch(`${API_ROOT}/agent_mining/apply`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.json();
-            const detections = Array.isArray(data?.detections) ? data.detections : [];
-            const warnList = Array.isArray(data?.warnings) ? data.warnings : [];
-            const classLabel =
-                override?.class_name || recipeData.class_name || (override?.class_id ? `class #${override.class_id}` : "");
-            const warnText = warnList.length ? ` • Warnings: ${warnList.join(", ")}` : "";
-            const classText = classLabel ? ` for class ${classLabel}` : "";
-            setAgentStatus(
-                `Apply succeeded${classText}: ${detections.length} detections${warnText}`,
-                warnList.length ? "warn" : "success"
-            );
-            // Optionally overlay on current view? Not wired to the annotator yet.
-        } catch (err) {
-            console.error("Agent recipe apply failed", err);
-            setAgentStatus(`Apply failed: ${err.message || err}`, "error");
-        }
-    }
+	        }
+	    }
 
     function initAgentMiningUi() {
         agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
@@ -12646,21 +12414,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.runButton = document.getElementById("agentRunBtn");
         agentElements.refreshButton = document.getElementById("agentRefreshBtn");
         agentElements.cancelButton = document.getElementById("agentCancelBtn");
-        agentElements.status = document.getElementById("agentStatus");
-        agentElements.results = document.getElementById("agentResults");
-        agentElements.recipeSelect = document.getElementById("agentRecipeSelect");
-        agentElements.recipeRefresh = document.getElementById("agentRecipeRefresh");
-        agentElements.recipeLoad = document.getElementById("agentRecipeLoad");
-        agentElements.recipeDownload = document.getElementById("agentRecipeDownload");
-        agentElements.recipeApply = document.getElementById("agentRecipeApply");
-        agentElements.recipeImageId = document.getElementById("agentRecipeImageId");
-        agentElements.recipeOverrideToggle = document.getElementById("agentRecipeOverrideToggle");
-        agentElements.recipeOverrideSelect = document.getElementById("agentRecipeOverrideSelect");
-        agentElements.recipeImport = document.getElementById("agentRecipeImport");
-        agentElements.recipeFile = document.getElementById("agentRecipeFile");
-        agentElements.recipeDetails = document.getElementById("agentRecipeDetails");
-        agentElements.logs = document.getElementById("agentLogs");
-        agentElements.progressFill = document.getElementById("agentProgressFill");
+	        agentElements.status = document.getElementById("agentStatus");
+	        agentElements.results = document.getElementById("agentResults");
+	        agentElements.recipeSelect = document.getElementById("agentRecipeSelect");
+	        agentElements.recipeRefresh = document.getElementById("agentRecipeRefresh");
+	        agentElements.recipeDownload = document.getElementById("agentRecipeDownload");
+	        agentElements.recipeDelete = document.getElementById("agentRecipeDelete");
+	        agentElements.recipeImport = document.getElementById("agentRecipeImport");
+	        agentElements.recipeFile = document.getElementById("agentRecipeFile");
+	        agentElements.logs = document.getElementById("agentLogs");
+	        agentElements.progressFill = document.getElementById("agentProgressFill");
 	        agentElements.progressText = document.getElementById("agentProgressText");
 	        if (agentElements.logs) agentElements.logs.innerHTML = "";
 	        if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
@@ -12670,32 +12433,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
-	        if (agentElements.recipeOverrideToggle) {
-	            agentElements.recipeOverrideToggle.addEventListener("change", syncRecipeOverrideState);
-	        }
-	        if (agentElements.recipeOverrideSelect) {
-	            agentElements.recipeOverrideSelect.addEventListener("change", syncRecipeOverrideState);
-	        }
 	        stopAgentPoll();
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
         }
-        if (agentElements.datasetSelect) {
-            agentElements.datasetSelect.addEventListener("change", () => {
-                updateAgentDatasetSummary();
-                agentState.loadedRecipe = null;
-                agentState.recipeClassOverride = null;
-                if (agentElements.recipeOverrideToggle) {
-                    agentElements.recipeOverrideToggle.checked = false;
-                }
-                populateAgentOverrideOptions([], []);
-                syncRecipeOverrideState();
-                renderAgentRecipeDetails(null);
-                fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
-                prefillExtraPrompts();
-                refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
-            });
-        }
+	        if (agentElements.datasetSelect) {
+	            agentElements.datasetSelect.addEventListener("change", () => {
+	                updateAgentDatasetSummary();
+	                fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
+	                prefillExtraPrompts();
+	                refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
+	            });
+	        }
         if (agentElements.purgeCacheBtn) {
             agentElements.purgeCacheBtn.addEventListener("click", () => purgeAgentCache().catch((err) => console.error("Agent cache purge failed", err)));
         }
@@ -12708,18 +12457,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.cancelButton) {
             agentElements.cancelButton.addEventListener("click", () => cancelAgentJob().catch((err) => console.error("Agent mining cancel failed", err)));
         }
-        if (agentElements.recipeRefresh) {
-            agentElements.recipeRefresh.addEventListener("click", () => fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err)));
-        }
-        if (agentElements.recipeLoad) {
-            agentElements.recipeLoad.addEventListener("click", () => loadSelectedAgentRecipe().catch((err) => console.error("Agent recipe load failed", err)));
-        }
-        if (agentElements.recipeDownload) {
-            agentElements.recipeDownload.addEventListener("click", () => downloadSelectedAgentRecipe().catch((err) => console.error("Agent recipe download failed", err)));
-        }
-        if (agentElements.recipeApply) {
-            agentElements.recipeApply.addEventListener("click", () => applySelectedAgentRecipe().catch((err) => console.error("Agent recipe apply failed", err)));
-        }
+	        if (agentElements.recipeRefresh) {
+	            agentElements.recipeRefresh.addEventListener("click", () => fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err)));
+	        }
+	        if (agentElements.recipeDownload) {
+	            agentElements.recipeDownload.addEventListener("click", () => downloadSelectedAgentRecipe().catch((err) => console.error("Agent recipe download failed", err)));
+	        }
+	        if (agentElements.recipeDelete) {
+	            agentElements.recipeDelete.addEventListener("click", () => deleteSelectedAgentRecipe().catch((err) => console.error("Agent recipe delete failed", err)));
+	        }
 	        if (agentElements.recipeImport && agentElements.recipeFile) {
 	            agentElements.recipeImport.addEventListener("click", () => importAgentRecipe().catch((err) => console.error("Agent recipe import failed", err)));
 	        }
@@ -12729,86 +12475,32 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
 	    }
 
-    function prefillExtraPrompts() {
-        if (!agentElements.extraPrompts) return;
-        const datasetId = agentElements.datasetSelect?.value;
-        if (!datasetId) return;
-        fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(datasetId)}/classes`)
+	    function prefillExtraPrompts() {
+	        if (!agentElements.extraPrompts) return;
+	        const datasetId = agentElements.datasetSelect?.value;
+	        if (!datasetId) return;
+	        fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(datasetId)}/classes`)
             .then((resp) => {
                 if (!resp.ok) throw new Error("Failed to load classes");
                 return resp.json();
-            })
-            .then((data) => {
-                const names = Array.isArray(data?.classes) ? data.classes : [];
-                const ids = Array.isArray(data?.class_ids) ? data.class_ids : names.map((_, idx) => idx + 1);
-                agentState.datasetClasses = { names, ids };
-                const template = {};
-                template["__base__"] = ["object", "small object"];
-                if (names.length) {
-                    names.forEach((name) => {
+	            })
+	            .then((data) => {
+	                const names = Array.isArray(data?.classes) ? data.classes : [];
+	                const template = {};
+	                template["__base__"] = ["object", "small object"];
+	                if (names.length) {
+	                    names.forEach((name) => {
                         template[String(name)] = [];
                     });
-                }
-                agentElements.extraPrompts.value = JSON.stringify(template, null, 2);
-                agentElements.extraPrompts.removeAttribute("readonly");
-                populateAgentOverrideOptions(names, ids);
-            })
-            .catch((err) => {
-                console.warn("Failed to prefill extra prompts", err);
-                agentElements.extraPrompts.value = "{}";
-                agentState.datasetClasses = { names: [], ids: [] };
-                populateAgentOverrideOptions([], []);
-            });
-    }
-
-    function populateAgentOverrideOptions(names = [], ids = []) {
-        if (!agentElements.recipeOverrideSelect || !agentElements.recipeOverrideToggle) return;
-        agentElements.recipeOverrideSelect.innerHTML = "";
-        if (!names.length) {
-            agentElements.recipeOverrideSelect.disabled = true;
-            agentElements.recipeOverrideToggle.disabled = true;
-            agentElements.recipeOverrideToggle.checked = false;
-            agentState.recipeClassOverride = null;
-            return;
-        }
-        agentElements.recipeOverrideToggle.disabled = false;
-        const normIds = Array.isArray(ids)
-            ? ids.map((v, idx) => {
-                  const parsed = parseInt(v, 10);
-                  return Number.isNaN(parsed) ? idx + 1 : parsed;
-              })
-            : [];
-        names.forEach((name, idx) => {
-            const opt = document.createElement("option");
-            const cid = Number.isFinite(normIds[idx]) ? normIds[idx] : idx + 1;
-            opt.value = cid.toString();
-            opt.textContent = name;
-            agentElements.recipeOverrideSelect.appendChild(opt);
-        });
-        agentElements.recipeOverrideSelect.disabled = !agentElements.recipeOverrideToggle?.checked;
-        syncRecipeOverrideState();
-    }
-
-    function syncRecipeOverrideState() {
-        if (!agentElements.recipeOverrideToggle || !agentElements.recipeOverrideSelect) return;
-        const enabled = agentElements.recipeOverrideToggle.checked;
-        agentElements.recipeOverrideSelect.disabled = !enabled || !agentElements.recipeOverrideSelect.options.length;
-        if (!enabled) {
-            agentState.recipeClassOverride = null;
-            return;
-        }
-        const val = parseInt(agentElements.recipeOverrideSelect.value, 10);
-        if (Number.isInteger(val)) {
-            const names = agentState.datasetClasses.names || [];
-            const ids = (agentState.datasetClasses.ids || []).map((v, idx) => {
-                const parsed = parseInt(v, 10);
-                return Number.isNaN(parsed) ? idx + 1 : parsed;
-            });
-            const idx = ids.findIndex((x) => x === val);
-            const name = idx >= 0 ? names[idx] : names[val - 1] || null;
-            agentState.recipeClassOverride = { class_id: val, class_name: name };
-        }
-    }
+	                }
+	                agentElements.extraPrompts.value = JSON.stringify(template, null, 2);
+	                agentElements.extraPrompts.removeAttribute("readonly");
+	            })
+	            .catch((err) => {
+	                console.warn("Failed to prefill extra prompts", err);
+	                agentElements.extraPrompts.value = "{}";
+	            });
+	    }
 
 	    document.addEventListener("DOMContentLoaded", () => {
 	        initHelpTooltips();

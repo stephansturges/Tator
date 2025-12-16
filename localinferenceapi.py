@@ -5876,6 +5876,7 @@ def _infer_sam3_greedy_recipe_on_image(
     clip_head_target_index: Optional[int] = None,
     clip_head_min_prob: float = 0.5,
     clip_head_margin: float = 0.0,
+    state: Optional[Any] = None,
 ) -> List[QwenDetection]:
     """
     Greedy SAM3 recipe inference on a single PIL image using *precomputed* CLIP embedding banks.
@@ -5889,10 +5890,15 @@ def _infer_sam3_greedy_recipe_on_image(
     prompts = [p for p in (_sanitize_prompts([str(p) for p in text_prompts if str(p).strip()]) or []) if p]
     if not prompts:
         return []
-    try:
-        state = processor.set_image(pil_img)
-    except Exception:
-        return []
+    img_state = state
+    if img_state is None:
+        try:
+            img_state = processor.set_image(pil_img)
+        except Exception:
+            return []
+    else:
+        # Ensure no stale prompt state leaks across calls when reusing an image state.
+        _reset_sam3_prompts_for_state(processor, img_state)
 
     ex_mat = exemplar_embeddings
     neg_mat = negative_embeddings
@@ -5931,7 +5937,7 @@ def _infer_sam3_greedy_recipe_on_image(
 
     seed_dets: List[QwenDetection] = []
     for prompt in prompts:
-        _reset_sam3_prompts_for_state(processor, state)
+        _reset_sam3_prompts_for_state(processor, img_state)
         try:
             dets = _run_sam3_text_inference(
                 pil_img,
@@ -5942,7 +5948,7 @@ def _infer_sam3_greedy_recipe_on_image(
                 min_size=min_size if min_size > 0 else None,
                 simplify_epsilon=simplify_epsilon,
                 processor_override=processor,
-                state=state,
+                state=img_state,
             )
         except Exception:
             continue
@@ -6014,7 +6020,7 @@ def _infer_sam3_greedy_recipe_on_image(
     for i in seed_indices:
         if i < 0 or i >= len(seed_boxes_xywh):
             continue
-        _reset_sam3_prompts_for_state(processor, state)
+        _reset_sam3_prompts_for_state(processor, img_state)
         try:
             dets = _run_sam3_visual_inference(
                 pil_img,
@@ -6025,7 +6031,7 @@ def _infer_sam3_greedy_recipe_on_image(
                 min_size=min_size if min_size > 0 else None,
                 simplify_epsilon=simplify_epsilon,
                 processor_override=processor,
-                state=state,
+                state=img_state,
             )
         except Exception:
             continue
@@ -6352,6 +6358,460 @@ def _evaluate_sam3_greedy_recipe(
         "coverage_rate": recall,
         "det_rate": det_rate,
     }
+
+
+class _Sam3GreedyEvalWorker:
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.model, self.processor = _build_sam3_text_processor_for_device(device)
+        self.lock = threading.Lock()
+
+    def close(self) -> None:
+        try:
+            del self.processor
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            del self.model
+        except Exception:  # noqa: BLE001
+            pass
+        if torch.cuda.is_available() and self.device.type == "cuda":
+            try:
+                torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def process_image(
+        self,
+        *,
+        image_id: int,
+        image_path: str,
+        class_entries: Sequence[Dict[str, Any]],
+        gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+        payload: AgentMiningRequest,
+        clip_head: Optional[Dict[str, Any]],
+        head_sweep_min_probs: Sequence[float],
+        head_fixed_margin: float,
+        log_fn: Optional[Callable[[str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        if cancel_event is not None and cancel_event.is_set():
+            return {}
+        try:
+            with Image.open(image_path) as img:
+                pil_img = img.convert("RGB")
+        except Exception:
+            return {}
+
+        out: Dict[int, Dict[str, Any]] = {}
+        gt_for_image = gt_by_image_cat.get(int(image_id)) or {}
+
+        def _counts_init() -> Dict[str, int]:
+            return {"matches": 0, "fps": 0, "duplicates": 0, "preds": 0, "det_images": 0}
+
+        with self.lock:
+            try:
+                state = self.processor.set_image(pil_img)
+            except Exception:
+                return {}
+
+            for entry in class_entries:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                cid = entry.get("id")
+                if cid is None:
+                    continue
+                try:
+                    cid_int = int(cid)
+                except Exception:
+                    continue
+
+                prompts = entry.get("text_prompts") or []
+                ex_mat = entry.get("exemplar_embeddings")
+                neg_mat = entry.get("negative_embeddings")
+                head_target_index = entry.get("clip_head_target_index")
+                head_active = bool(isinstance(clip_head, dict) and head_target_index is not None)
+
+                clip_head_min_prob = 0.0 if head_active else float(payload.clip_head_min_prob)
+                clip_head_margin = 0.0 if head_active else float(payload.clip_head_margin)
+
+                try:
+                    dets = _infer_sam3_greedy_recipe_on_image(
+                        pil_img=pil_img,
+                        processor=self.processor,
+                        text_prompts=prompts,
+                        exemplar_embeddings=ex_mat,
+                        negative_embeddings=neg_mat,
+                        seed_threshold=payload.seed_threshold,
+                        expand_threshold=payload.expand_threshold,
+                        max_visual_seeds=payload.max_visual_seeds,
+                        seed_dedupe_iou=payload.seed_dedupe_iou,
+                        out_dedupe_iou=payload.dedupe_iou,
+                        mask_threshold=payload.mask_threshold,
+                        min_size=payload.min_size,
+                        simplify_epsilon=payload.simplify_epsilon,
+                        max_results=payload.max_results,
+                        negative_strength=payload.negative_strength,
+                        similarity_floor=payload.similarity_score,
+                        clip_head=clip_head,
+                        clip_head_target_index=head_target_index,
+                        clip_head_min_prob=clip_head_min_prob,
+                        clip_head_margin=clip_head_margin,
+                        state=state,
+                    )
+                except torch.cuda.OutOfMemoryError:
+                    if log_fn:
+                        try:
+                            log_fn(f"SAM3 OOM while processing image {image_id} on {self.device}")
+                        except Exception:
+                            pass
+                    raise
+                except Exception:
+                    dets = []
+
+                gt_boxes = gt_for_image.get(cid_int) or []
+                gt_xyxy = [_xywh_to_xyxy(b) for b in gt_boxes]
+
+                rows: List[Tuple[float, float, float, Optional[int]]] = []
+                if dets:
+                    for det in dets:
+                        bbox = det.bbox or []
+                        if len(bbox) < 4:
+                            continue
+                        try:
+                            det_xyxy = yolo_to_corners(bbox, pil_img.width, pil_img.height)
+                        except Exception:
+                            continue
+                        best_iou = 0.0
+                        best_idx: Optional[int] = None
+                        for j, gt in enumerate(gt_xyxy):
+                            iou = _iou_xyxy(det_xyxy, gt)
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_idx = j
+                        prob = float(det.clip_head_prob) if det.clip_head_prob is not None else 0.0
+                        margin = float(det.clip_head_margin) if det.clip_head_margin is not None else 0.0
+                        rows.append((prob, margin, float(best_iou), best_idx))
+
+                if head_active:
+                    by_prob: Dict[float, Dict[str, int]] = {}
+                    for min_prob in head_sweep_min_probs:
+                        counts = _counts_init()
+                        used: set[int] = set()
+                        any_det = False
+                        for prob, margin, best_iou, best_idx in rows:
+                            if prob < float(min_prob):
+                                continue
+                            if head_fixed_margin > 0.0 and margin < float(head_fixed_margin):
+                                continue
+                            any_det = True
+                            counts["preds"] += 1
+                            if best_idx is not None and best_iou >= float(payload.iou_threshold):
+                                if best_idx in used:
+                                    counts["duplicates"] += 1
+                                else:
+                                    used.add(best_idx)
+                                    counts["matches"] += 1
+                            else:
+                                counts["fps"] += 1
+                        if any_det:
+                            counts["det_images"] = 1
+                        by_prob[float(min_prob)] = counts
+                    out[cid_int] = {"head_active": True, "by_prob": by_prob}
+                else:
+                    counts = _counts_init()
+                    used: set[int] = set()
+                    any_det = False
+                    for _prob, _margin, best_iou, best_idx in rows:
+                        any_det = True
+                        counts["preds"] += 1
+                        if best_idx is not None and best_iou >= float(payload.iou_threshold):
+                            if best_idx in used:
+                                counts["duplicates"] += 1
+                            else:
+                                used.add(best_idx)
+                                counts["matches"] += 1
+                        else:
+                            counts["fps"] += 1
+                    if any_det:
+                        counts["det_images"] = 1
+                    out[cid_int] = {"head_active": False, "counts": counts}
+        return out
+
+
+def _evaluate_sam3_greedy_recipes_image_first(
+    *,
+    class_entries: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: AgentMiningRequest,
+    clip_head: Optional[Dict[str, Any]] = None,
+    cancel_event: Optional[threading.Event] = None,
+    log_every: int = 25,
+    log_fn: Optional[Callable[[str], None]] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> Dict[int, Dict[str, Any]]:
+    total_images = len(val_ids)
+    if total_images <= 0:
+        return {}
+
+    # Head threshold sweep list (applied only when clip_head is active for a class).
+    head_sweep_min_probs = [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.9,
+    ]
+    try:
+        base_min = float(payload.clip_head_min_prob)
+        if 0.0 <= base_min <= 1.0:
+            head_sweep_min_probs.append(base_min)
+    except Exception:
+        pass
+    head_sweep_min_probs = sorted({float(max(0.0, min(1.0, p))) for p in head_sweep_min_probs})
+    head_fixed_margin = float(payload.clip_head_margin)
+
+    # Build image entries upfront (id, path).
+    image_entries: List[Tuple[int, str]] = []
+    for img_id in val_ids:
+        info = images.get(int(img_id)) or {}
+        path = info.get("path")
+        if path:
+            image_entries.append((int(img_id), str(path)))
+    skipped = max(0, total_images - len(image_entries))
+
+    # Precompute total GTs per class (for recall denominator).
+    total_gt_by_class: Dict[int, int] = {}
+    for entry in class_entries:
+        cid = entry.get("id")
+        if cid is None:
+            continue
+        try:
+            cid_int = int(cid)
+        except Exception:
+            continue
+        total_gt = 0
+        for img_id in val_ids:
+            total_gt += len((gt_by_image_cat.get(int(img_id)) or {}).get(cid_int) or [])
+        total_gt_by_class[cid_int] = total_gt
+
+    def _counts_init() -> Dict[str, int]:
+        return {"matches": 0, "fps": 0, "duplicates": 0, "preds": 0, "det_images": 0}
+
+    agg: Dict[int, Dict[str, Any]] = {}
+    for cid_int, total_gt in total_gt_by_class.items():
+        head_target_index = None
+        for entry in class_entries:
+            if int(entry.get("id")) == cid_int:
+                head_target_index = entry.get("clip_head_target_index")
+                break
+        head_active = bool(isinstance(clip_head, dict) and head_target_index is not None)
+        if head_active:
+            agg[cid_int] = {
+                "head_active": True,
+                "by_prob": {p: _counts_init() for p in head_sweep_min_probs},
+                "total_gt": total_gt,
+            }
+        else:
+            agg[cid_int] = {"head_active": False, "counts": _counts_init(), "total_gt": total_gt}
+
+    devices: List[torch.device] = []
+    if torch.cuda.is_available():
+        try:
+            devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
+        except Exception:
+            devices = [torch.device("cuda")]
+    if not devices:
+        devices = [torch.device("cpu")]
+
+    workers: List[_Sam3GreedyEvalWorker] = []
+    try:
+        for dev in devices:
+            try:
+                workers.append(_Sam3GreedyEvalWorker(dev))
+            except Exception as exc:  # noqa: BLE001
+                if log_fn:
+                    try:
+                        log_fn(f"Failed to initialize SAM3 greedy worker on {dev}: {exc}")
+                    except Exception:
+                        pass
+        if not workers:
+            raise RuntimeError("sam3_greedy_workers_unavailable")
+
+        if log_fn:
+            try:
+                labels = ", ".join(str(w.device) for w in workers)
+                extra = f"; skipped {skipped} images missing paths" if skipped else ""
+                log_fn(
+                    f"Starting global image-first sweep (sam3_greedy): {total_images} val images, "
+                    f"{len(class_entries)} classes on {len(workers)} worker(s): {labels}{extra}"
+                )
+            except Exception:
+                pass
+
+        processed = int(skipped)
+        if progress_callback:
+            try:
+                progress_callback(processed, total_images)
+            except Exception:
+                pass
+        max_workers = max(1, len(workers))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for idx, (img_id, path) in enumerate(image_entries):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                worker = workers[idx % max_workers]
+                futures.append(
+                    executor.submit(
+                        worker.process_image,
+                        image_id=img_id,
+                        image_path=path,
+                        class_entries=class_entries,
+                        gt_by_image_cat=gt_by_image_cat,
+                        payload=payload,
+                        clip_head=clip_head,
+                        head_sweep_min_probs=head_sweep_min_probs,
+                        head_fixed_margin=head_fixed_margin,
+                        log_fn=log_fn,
+                        cancel_event=cancel_event,
+                    )
+                )
+            for future in as_completed(futures):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                try:
+                    per_image = future.result()
+                except torch.cuda.OutOfMemoryError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if log_fn:
+                        try:
+                            log_fn(f"SAM3 greedy worker failed: {exc}")
+                        except Exception:
+                            pass
+                    continue
+                processed += 1
+                if progress_callback:
+                    try:
+                        progress_callback(processed, total_images)
+                    except Exception:
+                        pass
+                for cid_int, data in per_image.items():
+                    dst = agg.get(cid_int)
+                    if not dst:
+                        continue
+                    if data.get("head_active"):
+                        by_prob = data.get("by_prob") or {}
+                        dst_by_prob = dst.get("by_prob") or {}
+                        for p, counts in by_prob.items():
+                            dst_counts = dst_by_prob.get(float(p))
+                            if not isinstance(dst_counts, dict) or not isinstance(counts, dict):
+                                continue
+                            for k in ("matches", "fps", "duplicates", "preds", "det_images"):
+                                try:
+                                    dst_counts[k] = int(dst_counts.get(k, 0)) + int(counts.get(k, 0))
+                                except Exception:
+                                    continue
+                    else:
+                        counts = data.get("counts") or {}
+                        dst_counts = dst.get("counts")
+                        if isinstance(dst_counts, dict) and isinstance(counts, dict):
+                            for k in ("matches", "fps", "duplicates", "preds", "det_images"):
+                                try:
+                                    dst_counts[k] = int(dst_counts.get(k, 0)) + int(counts.get(k, 0))
+                                except Exception:
+                                    continue
+                if log_fn and log_every > 0 and processed % log_every == 0:
+                    try:
+                        log_fn(f"Processed {processed}/{total_images} val images (global) for all classes")
+                    except Exception:
+                        pass
+    finally:
+        for w in workers:
+            try:
+                w.close()
+            except Exception:
+                continue
+
+    summaries: Dict[int, Dict[str, Any]] = {}
+    for cid_int, data in agg.items():
+        total_gt = int(data.get("total_gt") or 0)
+        if data.get("head_active"):
+            best_summary: Optional[Dict[str, Any]] = None
+            best_key: Optional[Tuple[int, int, float, float]] = None
+            by_prob = data.get("by_prob") or {}
+            for min_prob in head_sweep_min_probs:
+                counts = by_prob.get(float(min_prob)) if isinstance(by_prob, dict) else None
+                if not isinstance(counts, dict):
+                    continue
+                matched = int(counts.get("matches") or 0)
+                fps = int(counts.get("fps") or 0)
+                duplicates = int(counts.get("duplicates") or 0)
+                preds = int(counts.get("preds") or 0)
+                det_images = int(counts.get("det_images") or 0)
+                recall = matched / total_gt if total_gt else 0.0
+                precision = matched / max(1, matched + fps)
+                det_rate = det_images / total_images if total_images else 0.0
+                key = (matched, -fps, float(precision), float(min_prob))
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_summary = {
+                        "gts": total_gt,
+                        "matches": matched,
+                        "fps": fps,
+                        "duplicates": duplicates,
+                        "preds": preds,
+                        "precision": precision,
+                        "recall": recall,
+                        "coverage_rate": recall,
+                        "det_rate": det_rate,
+                        "clip_head_min_prob": float(min_prob),
+                        "clip_head_margin": float(head_fixed_margin),
+                    }
+            if best_summary is None:
+                best_summary = {
+                    "gts": total_gt,
+                    "matches": 0,
+                    "fps": 0,
+                    "duplicates": 0,
+                    "preds": 0,
+                    "precision": 0.0,
+                    "recall": 0.0,
+                    "coverage_rate": 0.0,
+                    "det_rate": 0.0,
+                    "clip_head_min_prob": float(payload.clip_head_min_prob),
+                    "clip_head_margin": float(payload.clip_head_margin),
+                }
+            summaries[cid_int] = best_summary
+        else:
+            counts = data.get("counts") or {}
+            matched = int(counts.get("matches") or 0)
+            fps = int(counts.get("fps") or 0)
+            duplicates = int(counts.get("duplicates") or 0)
+            preds = int(counts.get("preds") or 0)
+            det_images = int(counts.get("det_images") or 0)
+            recall = matched / total_gt if total_gt else 0.0
+            precision = matched / max(1, matched + fps)
+            det_rate = det_images / total_images if total_images else 0.0
+            summaries[cid_int] = {
+                "gts": total_gt,
+                "matches": matched,
+                "fps": fps,
+                "duplicates": duplicates,
+                "preds": preds,
+                "precision": precision,
+                "recall": recall,
+                "coverage_rate": recall,
+                "det_rate": det_rate,
+            }
+    return summaries
 
 
 def _detections_to_eval_cache(
@@ -11688,10 +12148,6 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
     job.request = payload.dict()
     job.updated_at = time.time()
 
-    sam3_model: Optional[Any] = None
-    sam3_processor: Optional[Any] = None
-    sam3_shared_runtime = False
-
     def _log(msg: str) -> None:
         try:
             job.logs.append({"ts": time.time(), "msg": msg})
@@ -11778,16 +12234,34 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         # Optional pretrained CLIP head (LogReg) used as an additional filter during mining.
         clip_head_path = _resolve_agent_clip_classifier_path(payload.clip_head_classifier_path)
         clip_head: Optional[Dict[str, Any]] = None
+        clip_head_enabled = False
         if clip_head_path is not None:
             clip_head = _load_clip_head_from_classifier(clip_head_path)
+            clip_head_enabled = bool(isinstance(clip_head, dict))
             _log(
                 "Pretrained CLIP head enabled: "
                 f"{clip_head_path.name} "
                 f"(classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
                 f"(min_prob/margin are tuned per class; starting values min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
             )
+            _log("CLIP head mode: example crops / CLIP similarity / negative crops are ignored (head-only filtering).")
+
+        # Crop-bank mode (raw CLIP similarity) is disabled whenever a CLIP head is selected.
+        # It also requires at least 1 positive crop per class; otherwise there's nothing to compare against.
+        crop_banks_enabled = bool(payload.use_clip_fp_guard) and not clip_head_enabled and int(payload.positives_per_class) > 0
 
         # Prompt mining (GPT-OSS) per class.
+        base_prompts_all: List[str] = []
+        if payload.extra_prompts_by_class and isinstance(payload.extra_prompts_by_class, dict):
+            raw_base = payload.extra_prompts_by_class.get("__base__")
+            if isinstance(raw_base, list):
+                base_prompts_all = [p for p in raw_base if isinstance(p, str) and p.strip()]
+            elif isinstance(raw_base, str) and raw_base.strip():
+                base_prompts_all = [raw_base.strip()]
+        base_prompts_all = _sanitize_prompts(base_prompts_all)
+        if base_prompts_all:
+            _log(f"Base prompts (all classes): {', '.join(base_prompts_all)}")
+
         prepared_prompts: Dict[int, List[str]] = {}
         for cid, name in selected_categories:
             if _cancelled():
@@ -11804,6 +12278,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     user_extras = [p for p in raw_extra if isinstance(p, str) and p.strip()]
                 elif isinstance(raw_extra, str) and raw_extra.strip():
                     user_extras = [raw_extra.strip()]
+            if user_extras:
+                _log(f"User extra prompts for {name}: {', '.join(user_extras)}")
             base = _sanitize_prompts([*base, *user_extras]) or [name]
             extras: List[str] = []
             if payload.prompt_llm_max_prompts > 0:
@@ -11817,7 +12293,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 )
             merged: List[str] = []
             seen = set()
-            for p in [*base, *extras]:
+            for p in [*base, *extras, *base_prompts_all]:
                 key = str(p).lower().strip()
                 if not key or key in seen:
                     continue
@@ -11828,27 +12304,16 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
         try:
             _unload_prompt_llm_runtime()
-            _log("Prompt LLM unloaded to free memory before SAM3 init")
+            _log("Prompt LLM unloaded to free memory before SAM3 mining")
         except Exception:
             pass
-        job.progress = max(job.progress, 0.15)
-
-        # Prefer a dedicated SAM3 processor for mining so it doesn't interfere with interactive SAM3 use.
-        # If it fails (e.g., transient GPU init issues), fall back to the shared SAM3 runtime.
-        device = _resolve_sam3_mining_devices()[0]
-        _log(f"Using SAM3 mining device: {device}")
-        try:
-            sam3_model, sam3_processor = _build_sam3_text_processor_for_device(device)
-        except Exception as exc:  # noqa: BLE001
-            sam3_shared_runtime = True
-            _log(f"Dedicated SAM3 mining init failed; falling back to shared runtime: {exc}")
-            sam3_model, sam3_processor, _ = _ensure_sam3_text_runtime()
-        job.progress = max(job.progress, 0.2)
+        job.progress = max(job.progress, 0.07)
 
         train_set = set(train_ids)
         val_set = set(val_ids)
-        results: List[Dict[str, Any]] = []
+        class_entries: List[Dict[str, Any]] = []
         total_classes = len(selected_categories)
+        _log(f"Building crop banks for {total_classes} class(es)…")
 
         for class_idx, (cid, name) in enumerate(selected_categories, start=1):
             if _cancelled():
@@ -11869,43 +12334,46 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 elif img_id in val_set:
                     val_gt += count
 
-            # Positive crop bank from train GTs.
-            pos_candidates: List[Dict[str, Any]] = []
-            for img_id in train_ids:
-                boxes = (gt_by_image_cat.get(img_id) or {}).get(cid) or []
-                for b_idx, bbox in enumerate(boxes):
-                    if not bbox or len(bbox) < 4:
-                        continue
-                    try:
-                        x, y, w, h = map(float, bbox[:4])
-                    except Exception:
-                        continue
-                    area = max(0.0, w) * max(0.0, h)
-                    embed_id = f"pos:{cid}:{img_id}:{b_idx}"
-                    pos_candidates.append(
-                        {
-                            "id": embed_id,
-                            "image_id": int(img_id),
-                            "bbox": [x, y, w, h],
-                            "area": area,
-                            "embed_id": embed_id,
-                        }
-                    )
-            rng = random.Random(payload.split_seed + cid)
-            rng.shuffle(pos_candidates)
-            if payload.exemplar_candidate_mode == "percent":
-                pct = max(1, min(100, int(payload.exemplar_candidate_value)))
-                pool_cap = max(1, int(math.ceil(len(pos_candidates) * (pct / 100.0)))) if pos_candidates else 0
-            else:
-                pool_cap = max(1, min(int(payload.exemplar_candidate_value), len(pos_candidates))) if pos_candidates else 0
-            pool = pos_candidates[:pool_cap] if pool_cap else []
-            positives_target = max(0, int(payload.positives_per_class))
-            use_clip = bool(payload.use_clip_fp_guard)
+            positives_target = max(0, int(payload.positives_per_class)) if crop_banks_enabled else 0
+            use_clip = bool(crop_banks_enabled and positives_target > 0)
             positives: List[Dict[str, Any]] = []
             pos_embeddings: Dict[str, np.ndarray] = {}
             pos_warnings: List[str] = []
+            pool: List[Dict[str, Any]] = []
 
-            if positives_target > 0 and pool:
+            if positives_target > 0:
+                # Positive crop bank from train GTs.
+                pos_candidates: List[Dict[str, Any]] = []
+                for img_id in train_ids:
+                    boxes = (gt_by_image_cat.get(img_id) or {}).get(cid) or []
+                    for b_idx, bbox in enumerate(boxes):
+                        if not bbox or len(bbox) < 4:
+                            continue
+                        try:
+                            x, y, w, h = map(float, bbox[:4])
+                        except Exception:
+                            continue
+                        area = max(0.0, w) * max(0.0, h)
+                        embed_id = f"pos:{cid}:{img_id}:{b_idx}"
+                        pos_candidates.append(
+                            {
+                                "id": embed_id,
+                                "image_id": int(img_id),
+                                "bbox": [x, y, w, h],
+                                "area": area,
+                                "embed_id": embed_id,
+                            }
+                        )
+                rng = random.Random(payload.split_seed + cid)
+                rng.shuffle(pos_candidates)
+                if payload.exemplar_candidate_mode == "percent":
+                    pct = max(1, min(100, int(payload.exemplar_candidate_value)))
+                    pool_cap = max(1, int(math.ceil(len(pos_candidates) * (pct / 100.0)))) if pos_candidates else 0
+                else:
+                    pool_cap = max(1, min(int(payload.exemplar_candidate_value), len(pos_candidates))) if pos_candidates else 0
+                pool = pos_candidates[:pool_cap] if pool_cap else []
+
+            if positives_target > 0 and pool and use_clip:
                 if payload.cluster_exemplars and use_clip:
                     # CLIP-diverse crop bank selection requires embeddings for the pool.
                     pos_embeddings_all, pos_warnings = _clip_embed_regions(pool, images, max_regions=len(pool))
@@ -11917,10 +12385,18 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     positives = pool[:positives_target]
                     if use_clip and positives:
                         pos_embeddings, pos_warnings = _clip_embed_regions(positives, images, max_regions=len(positives))
-            _log(
-                f"Exemplars for {name}: {len(pos_candidates)} candidates -> pool {len(pool)}, "
-                f"embedded {len(pos_embeddings)}, selected {len(positives)}"
-            )
+            if positives_target <= 0:
+                if clip_head_enabled:
+                    _log(f"Exemplars for {name}: skipped (CLIP head mode)")
+                elif not bool(payload.use_clip_fp_guard):
+                    _log(f"Exemplars for {name}: skipped (CLIP crop-bank disabled)")
+                else:
+                    _log(f"Exemplars for {name}: skipped (positives_per_class=0)")
+            else:
+                _log(
+                    f"Exemplars for {name}: {len(pos_candidates)} candidates -> pool {len(pool)}, "
+                    f"embedded {len(pos_embeddings)}, selected {len(positives)}"
+                )
             for w in pos_warnings:
                 _log(f"CLIP warning for {name}: {w}")
 
@@ -11981,6 +12457,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 )
                 for w in neg_warnings:
                     _log(f"CLIP warning (negatives) for {name}: {w}")
+            elif clip_head_enabled:
+                _log(f"Negatives for {name}: skipped (CLIP head mode)")
+            elif not use_clip and not crop_banks_enabled and bool(payload.use_negative_exemplars):
+                _log(f"Negatives for {name}: skipped (CLIP crop-bank disabled)")
 
             ex_mat = None
             if pos_embeddings:
@@ -12004,24 +12484,79 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 head_target_index = _find_clip_head_target_index(classes_list, name)
                 if head_target_index is None:
                     _log(f"CLIP head: class '{name}' not found; skipping head filter for this class.")
-            summary = _evaluate_sam3_greedy_recipe(
-                cat_id=cid,
-                image_ids=val_ids,
+            class_entries.append(
+                {
+                    "id": int(cid),
+                    "name": name,
+                    "train_gt": train_gt,
+                    "val_gt": val_gt,
+                    "text_prompts": prompts_for_class,
+                    "positives": positives,
+                    "negatives": negatives,
+                    "exemplar_embeddings": ex_mat,
+                    "negative_embeddings": neg_mat,
+                    "clip_head_target_index": head_target_index,
+                }
+            )
+
+            # Building crop banks is "setup" work; keep this to ~10% so the remaining bar maps to validation eval.
+            job.progress = max(job.progress, 0.07 + 0.03 * (class_idx / max(1, total_classes)))
+            job.updated_at = time.time()
+
+        if _cancelled():
+            summaries: Dict[int, Dict[str, Any]] = {}
+        else:
+            job.message = "Evaluating recipes on validation split (global)…"
+            job.updated_at = time.time()
+            job.progress = max(job.progress, 0.1)
+            eval_log_every = 50 if not payload.test_mode else 5
+
+            def _on_eval_progress(done: int, total: int) -> None:
+                if total <= 0:
+                    return
+                if done != total and (eval_log_every <= 0 or done % eval_log_every != 0):
+                    return
+                frac = max(0.0, min(1.0, float(done) / float(total)))
+                job.progress = max(job.progress, 0.1 + 0.9 * frac)
+                job.message = f"Evaluating recipes: {done}/{total} val images"
+                job.updated_at = time.time()
+
+            summaries = _evaluate_sam3_greedy_recipes_image_first(
+                class_entries=class_entries,
+                val_ids=val_ids,
                 images=images,
                 gt_by_image_cat=gt_by_image_cat,
-                processor=sam3_processor,
-                text_prompts=prompts_for_class,
-                exemplar_embeddings=ex_mat,
-                negative_embeddings=neg_mat,
-                clip_head=clip_head,
-                clip_head_target_index=head_target_index,
-                clip_head_min_prob=payload.clip_head_min_prob,
-                clip_head_margin=payload.clip_head_margin,
                 payload=payload,
+                clip_head=clip_head,
                 cancel_event=job.cancel_event,
-                log_every=50 if not payload.test_mode else 5,
+                log_every=eval_log_every,
                 log_fn=_log,
+                progress_callback=_on_eval_progress,
             )
+            job.progress = max(job.progress, 0.98)
+
+        results: List[Dict[str, Any]] = []
+        for entry in class_entries:
+            cid = int(entry.get("id"))
+            name = str(entry.get("name") or f"class_{cid}")
+            prompts_for_class = entry.get("text_prompts") or [name]
+            positives = entry.get("positives") or []
+            negatives = entry.get("negatives") or []
+            head_target_index = entry.get("clip_head_target_index")
+            summary = summaries.get(cid)
+            if summary is None:
+                summary = {
+                    "gts": int(entry.get("val_gt") or 0),
+                    "matches": 0,
+                    "fps": 0,
+                    "duplicates": 0,
+                    "preds": 0,
+                    "precision": 0.0,
+                    "recall": 0.0,
+                    "coverage_rate": 0.0,
+                    "det_rate": 0.0,
+                }
+
             if clip_head is not None and head_target_index is not None and isinstance(summary, dict):
                 try:
                     tuned_min_prob = summary.get("clip_head_min_prob")
@@ -12034,16 +12569,16 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 except Exception:
                     pass
 
-            recipe = {
+            recipe: Dict[str, Any] = {
                 "mode": "sam3_greedy",
                 "text_prompts": prompts_for_class,
                 "positives": positives,
                 "negatives": negatives,
                 "params": {
-                    "use_clip_fp_guard": bool(payload.use_clip_fp_guard),
-                    "use_negative_exemplars": bool(payload.use_clip_fp_guard and payload.use_negative_exemplars and negatives),
-                    "negative_strength": float(payload.negative_strength),
-                    "similarity_score": float(payload.similarity_score),
+                    "use_clip_fp_guard": bool(crop_banks_enabled),
+                    "use_negative_exemplars": bool(crop_banks_enabled and payload.use_negative_exemplars and negatives),
+                    "negative_strength": float(payload.negative_strength) if crop_banks_enabled else 0.0,
+                    "similarity_score": float(payload.similarity_score) if crop_banks_enabled else 0.0,
                     "seed_threshold": float(payload.seed_threshold),
                     "expand_threshold": float(payload.expand_threshold),
                     "max_visual_seeds": int(payload.max_visual_seeds),
@@ -12076,18 +12611,16 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     "min_prob": tuned_min_prob_f,
                     "margin": tuned_margin_f,
                 }
+
             results.append(
                 {
                     "id": cid,
                     "name": name,
-                    "train_gt": train_gt,
-                    "val_gt": val_gt,
+                    "train_gt": int(entry.get("train_gt") or 0),
+                    "val_gt": int(entry.get("val_gt") or 0),
                     "recipe": recipe,
                 }
             )
-
-            job.progress = max(job.progress, 0.2 + 0.8 * (class_idx / max(1, total_classes)))
-            job.updated_at = time.time()
 
         job.result = {
             "dataset_id": payload.dataset_id,
@@ -12109,19 +12642,6 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.error = str(exc)
         job.message = "Failed"
     finally:
-        try:
-            if not sam3_shared_runtime:
-                if sam3_processor is not None:
-                    del sam3_processor
-                if sam3_model is not None:
-                    del sam3_model
-        except Exception:
-            pass
-        if torch.cuda.is_available() and not sam3_shared_runtime:
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
         job.updated_at = time.time()
 
 

@@ -12236,16 +12236,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        const extraParse = parseAgentExtraPrompts(agentElements.extraPrompts?.value || "");
 		        if (extraParse.data) extraPromptsByClass = extraParse.data;
 		        if (agentElements.extraPromptsStatus) {
-		            const classCount = extraPromptsByClass ? Object.keys(extraPromptsByClass).length : 0;
+		            const hasBasePrompts = !!(extraPromptsByClass && Object.prototype.hasOwnProperty.call(extraPromptsByClass, "__base__"));
+		            const classCount = extraPromptsByClass ? Object.keys(extraPromptsByClass).filter((k) => k !== "__base__").length : 0;
+		            const baseSuffix = hasBasePrompts ? " + base prompts" : "";
 		            if (extraParse.mode === "empty") {
 		                agentElements.extraPromptsStatus.textContent = "";
 		                agentElements.extraPromptsStatus.style.color = "";
 		            } else if (extraParse.mode === "json") {
-		                agentElements.extraPromptsStatus.textContent = `Extra prompts loaded for ${classCount} class(es).`;
+		                agentElements.extraPromptsStatus.textContent = `Extra prompts loaded for ${classCount} class(es)${baseSuffix}.`;
 		                agentElements.extraPromptsStatus.style.color = "";
 		            } else if (extraParse.mode === "loose") {
 		                agentElements.extraPromptsStatus.textContent =
-		                    `Extra prompts parsed (lenient mode) for ${classCount} class(es). Tip: use JSON quotes for clarity.`;
+		                    `Extra prompts parsed (lenient mode) for ${classCount} class(es)${baseSuffix}. Tip: use JSON quotes for clarity.`;
 		                agentElements.extraPromptsStatus.style.color = "#b45309";
 		            } else {
 		                agentElements.extraPromptsStatus.textContent = "Extra prompts format invalid; ignored.";
@@ -12731,6 +12733,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 const ids = Array.isArray(data?.class_ids) ? data.class_ids : names.map((_, idx) => idx + 1);
                 agentState.datasetClasses = { names, ids };
                 const template = {};
+                template["__base__"] = ["object", "small object"];
                 if (names.length) {
                     names.forEach((name) => {
                         template[String(name)] = [];

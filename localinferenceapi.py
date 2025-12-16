@@ -5262,14 +5262,28 @@ def _clip_head_keep_mask(
         return None
     if target_index < 0 or target_index >= probs.shape[1]:
         return None
+    try:
+        min_prob_f = float(min_prob)
+    except Exception:
+        min_prob_f = 0.0
+    try:
+        margin_f = float(margin)
+    except Exception:
+        margin_f = 0.0
+
     p_target = probs[:, target_index]
-    if probs.shape[1] > 1:
-        masked = probs.copy()
-        masked[:, target_index] = -1.0
-        p_other = np.max(masked, axis=1)
-    else:
-        p_other = np.zeros_like(p_target)
-    keep = (p_target >= float(min_prob)) & (p_target >= (p_other + float(margin)))
+    keep = p_target >= min_prob_f
+
+    # "Margin" is optional: a value of 0 disables the margin check (i.e., do not require the target
+    # class to be the argmax). When enabled, require p(target) >= p(best_other) + margin.
+    if margin_f > 0.0:
+        if probs.shape[1] > 1:
+            masked = probs.copy()
+            masked[:, target_index] = -1.0
+            p_other = np.max(masked, axis=1)
+        else:
+            p_other = np.zeros_like(p_target)
+        keep &= p_target >= (p_other + margin_f)
     return keep
 
 
@@ -6124,6 +6138,7 @@ def _infer_sam3_greedy_recipe_on_image(
                     proba = None
                 if proba is not None:
                     t_idx = int(clip_head_target_index)
+                    p_target: Optional[np.ndarray] = None
                     try:
                         p_target = proba[:, t_idx]
                         if proba.shape[1] > 1:
@@ -6145,7 +6160,8 @@ def _infer_sam3_greedy_recipe_on_image(
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
-                    scores_for_diverse = p_target
+                    if p_target is not None:
+                        scores_for_diverse = p_target
             kept_seed_indices_all = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
             seed_scores_for_diverse = scores_for_diverse
             if kept_seed_indices_all and max_visual_seeds > 0:
@@ -6309,6 +6325,10 @@ def _evaluate_sam3_greedy_recipe(
         sweep_min_probs = sorted({float(max(0.0, min(1.0, p))) for p in sweep_min_probs})
 
         per_image_rows: Dict[int, List[Tuple[float, float, float, Optional[int]]]] = {}
+        observed_prob_min: Optional[float] = None
+        observed_prob_max: Optional[float] = None
+        observed_rows = 0
+        observed_with_prob = 0
         for idx, img_id in enumerate(image_ids, start=1):
             if cancel_event is not None and cancel_event.is_set():
                 break
@@ -6364,12 +6384,28 @@ def _evaluate_sam3_greedy_recipe(
                 prob = float(det.clip_head_prob) if det.clip_head_prob is not None else 0.0
                 margin = float(det.clip_head_margin) if det.clip_head_margin is not None else 0.0
                 rows.append((prob, margin, float(best_iou), best_idx))
+                observed_rows += 1
+                if det.clip_head_prob is not None:
+                    observed_with_prob += 1
+                    if observed_prob_min is None or prob < observed_prob_min:
+                        observed_prob_min = float(prob)
+                    if observed_prob_max is None or prob > observed_prob_max:
+                        observed_prob_max = float(prob)
             per_image_rows[int(img_id)] = rows
             if log_fn and log_every > 0 and idx % log_every == 0:
                 try:
                     log_fn(f"Processed {idx}/{len(image_ids)} val images for class {cat_id}")
                 except Exception:
                     pass
+
+        if log_fn and total_gt:
+            try:
+                if observed_rows == 0:
+                    log_fn(f"CLIP head sweep: no base detections for class {cat_id} (gt={total_gt}).")
+                elif observed_with_prob == 0:
+                    log_fn(f"CLIP head sweep: base dets={observed_rows} but no head probs for class {cat_id} (gt={total_gt}).")
+            except Exception:
+                pass
 
         best_summary: Optional[Dict[str, Any]] = None
         best_key: Optional[Tuple[int, int, float, float]] = None
@@ -6420,6 +6456,20 @@ def _evaluate_sam3_greedy_recipe(
                     "clip_head_min_prob": float(min_prob),
                     "clip_head_margin": float(fixed_margin),
                 }
+        if log_fn and total_gt and best_summary is not None:
+            try:
+                if int(best_summary.get("preds") or 0) == 0 and observed_rows > 0:
+                    if observed_prob_max is not None:
+                        log_fn(
+                            f"CLIP head sweep: class {cat_id} prob_range={float(observed_prob_min or observed_prob_max):.3f}..{float(observed_prob_max):.3f} "
+                            f"over {observed_rows} dets; tuned min_prob={float(best_summary.get('clip_head_min_prob') or 0.0):.3f}"
+                        )
+                    else:
+                        log_fn(
+                            f"CLIP head sweep: class {cat_id} had {observed_rows} dets but no head probs; tuned min_prob={float(best_summary.get('clip_head_min_prob') or 0.0):.3f}"
+                        )
+            except Exception:
+                pass
         if best_summary is None:
             best_summary = {
                 "gts": total_gt,

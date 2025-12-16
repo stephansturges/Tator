@@ -12711,13 +12711,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.recipeApply) {
             agentElements.recipeApply.addEventListener("click", () => applySelectedAgentRecipe().catch((err) => console.error("Agent recipe apply failed", err)));
         }
-        if (agentElements.recipeImport && agentElements.recipeFile) {
-            agentElements.recipeImport.addEventListener("click", () => importAgentRecipe().catch((err) => console.error("Agent recipe import failed", err)));
-        }
-        loadAgentDatasets().catch((err) => console.error("Agent dataset load failed", err));
-        fetchAgentRecipes().catch((err) => console.error("Agent recipe init failed", err));
-        prefillExtraPrompts();
-    }
+	        if (agentElements.recipeImport && agentElements.recipeFile) {
+	            agentElements.recipeImport.addEventListener("click", () => importAgentRecipe().catch((err) => console.error("Agent recipe import failed", err)));
+	        }
+	        loadAgentDatasets().catch((err) => console.error("Agent dataset load failed", err));
+	        fetchAgentRecipes().catch((err) => console.error("Agent recipe init failed", err));
+	        prefillExtraPrompts();
+	        refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
+	    }
 
     function prefillExtraPrompts() {
         if (!agentElements.extraPrompts) return;

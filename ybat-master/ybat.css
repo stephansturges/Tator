@@ -1362,6 +1362,10 @@ details.training-card > summary::marker {
     margin: 0;
 }
 
+.training-field--inline-tight label {
+    flex: 0 0 auto;
+}
+
 .training-field--inline input[type="checkbox"] {
     margin: 0;
 }

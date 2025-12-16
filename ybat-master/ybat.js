@@ -219,6 +219,15 @@
         return gb >= 1 ? `${gb.toFixed(1)} GB` : `${mb.toFixed(1)} MB`;
     }
 
+    function initHelpTooltips() {
+        document.querySelectorAll(".help-icon[title]").forEach((el) => {
+            const title = el.getAttribute("title");
+            if (!title) return;
+            el.dataset.tooltip = title;
+            el.removeAttribute("title");
+        });
+    }
+
     function loadStoredApiRoot() {
         try {
             const saved = localStorage.getItem(API_STORAGE_KEY);
@@ -12801,11 +12810,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    document.addEventListener("DOMContentLoaded", () => {
-        autoModeCheckbox = document.getElementById("autoMode");
-        samModeCheckbox = document.getElementById("samMode");
-        pointModeCheckbox = document.getElementById("pointMode");
-        multiPointModeCheckbox = document.getElementById("multiPointMode");
+	    document.addEventListener("DOMContentLoaded", () => {
+	        initHelpTooltips();
+	        autoModeCheckbox = document.getElementById("autoMode");
+	        samModeCheckbox = document.getElementById("samMode");
+	        pointModeCheckbox = document.getElementById("pointMode");
+	        multiPointModeCheckbox = document.getElementById("multiPointMode");
         samVariantSelect = document.getElementById("samVariant");
         samPreloadCheckbox = document.getElementById("samPreload");
         polygonSimplifyInput = document.getElementById("polygonSimplifyEpsilon");

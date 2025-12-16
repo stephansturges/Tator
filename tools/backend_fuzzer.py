@@ -79,7 +79,7 @@ def _poll_job(url: str, timeout: float = 30.0, interval: float = 1.0) -> Tuple[b
             data = {}
         state = data.get("status")
         if state in {"completed", "failed", "cancelled"}:
-            return state == "completed", data, ""
+            return state == "completed", data, str(state)
         last_err = f"state={state}"
         time.sleep(interval)
     return False, None, last_err
@@ -148,14 +148,12 @@ def run_tests(
     if include_clip:
         tests.append(("clip/backbones", lambda: _http_get(f"{base_url}/clip/backbones", timeout=request_timeout)))
         tests.append(("clip/active_model (GET)", lambda: _http_get(f"{base_url}/clip/active_model", timeout=request_timeout)))
-        classifier_path = os.path.abspath("my_logreg_model.pkl")
-        labelmap_path = os.path.abspath("my_label_list.pkl")
         tests.append(
             (
                 "clip/active_model (POST)",
                 lambda: _http_post_json(
                     f"{base_url}/clip/active_model",
-                    {"classifier_path": classifier_path, "labelmap_path": labelmap_path},
+                    {},
                     timeout=request_timeout,
                 ),
             )
@@ -446,7 +444,7 @@ def run_tests(
             job_id = data.get("job_id")
             if job_id:
                 ok_poll, job_data, poll_err = _poll_job(f"{base_url}/agent_mining/jobs/{job_id}", timeout=120.0, interval=1.0)
-                results.append((f"agent_mining/jobs/{job_id} poll", ok_poll, poll_err or "completed"))
+                results.append((f"agent_mining/jobs/{job_id} poll", ok_poll, poll_err or "unknown"))
                 if ok_poll:
                     st, body_latest, err_latest = _http_get(f"{base_url}/agent_mining/results/latest", timeout=request_timeout)
                     ok_latest = st is not None and 200 <= st < 300

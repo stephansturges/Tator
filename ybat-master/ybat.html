@@ -1058,12 +1058,12 @@
                                 <input type="number" id="agentValLimit" min="1" value="10" />
                             </div>
 	                        </div>
-		                        <div class="training-field">
-		                            <label for="agentExtraPrompts">Extra prompts (optional)</label>
-		                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Example: {&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], &quot;person&quot;: [&quot;human&quot;, &quot;pedestrian&quot;]}"></textarea>
-		                            <div class="training-help">Optional extra words/phrases to try for each class. They are appended to GPT-OSS suggestions (no hint injection).</div>
-		                            <div class="training-help" id="agentExtraPromptsParseStatus" aria-live="polite"></div>
-		                        </div>
+			                        <div class="training-field">
+			                            <label for="agentExtraPrompts">Extra prompts (optional)</label>
+			                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"__base__": ["object", "small object"], "light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Special key &quot;__base__&quot; applies to all classes. Example: {&quot;__base__&quot;: [&quot;object&quot;, &quot;small object&quot;], &quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;]}"></textarea>
+			                            <div class="training-help">Optional extra words/phrases to try. They are appended to GPT-OSS suggestions. Use &quot;__base__&quot; to add prompts for all classes.</div>
+			                            <div class="training-help" id="agentExtraPromptsParseStatus" aria-live="polite"></div>
+			                        </div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="agentRunBtn">Run SAM3 Recipe Mining</button>
                             <button type="button" class="training-button secondary" id="agentRefreshBtn">Refresh latest</button>
@@ -1077,21 +1077,22 @@
 	                        <div class="training-help" id="agentProgressText" aria-live="polite"></div>
 	                    </section>
 	                    <section class="training-status-section">
-	                        <details class="training-card" open>
-	                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
-	                            <div class="training-card__body">
-	                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
-	                                <ol>
-	                                    <li><strong>Split:</strong> We split your dataset into “train” (to pick example crops) and “val” (to test how good the recipe is). The split is repeatable using the seed.</li>
-	                                    <li><strong>Words:</strong> We try the class name (and optional extra phrases) to ask SAM3 to propose candidate boxes.</li>
-	                                    <li><strong>Example crops:</strong> We save a small set of example cut-outs of the object from your dataset (e.g., a few cars of different sizes/angles).</li>
-	                                    <li><strong>Seed boxes:</strong> On each validation image we run a very “loose” text pass to get lots of candidate boxes.</li>
-	                                    <li><strong>Image similarity filter:</strong> We keep boxes that look like the examples, and optionally suppress boxes that look like other classes.</li>
-	                                    <li><strong>Refine:</strong> We optionally run a second SAM3 pass starting from selected boxes to improve coverage/quality.</li>
-	                                    <li><strong>Remove duplicates:</strong> If two detections overlap heavily, we keep the best one so the same object isn’t labeled twice.</li>
-	                                    <li><strong>Score:</strong> We measure how many ground-truth objects were found (“coverage”) and how many extra/wrong boxes were added (“false positives”).</li>
-	                                    <li><strong>Portable output:</strong> Saved recipes export as a zip containing <code>recipe.json</code> + all crops under <code>crops/</code> so you can copy it to another machine.</li>
-	                                </ol>
+		                        <details class="training-card" open>
+		                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
+		                            <div class="training-card__body">
+		                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
+		                                <p><strong>What “Greedy” means here:</strong> We build one “wide net” recipe per class (text → filter → refine → de-dupe). It keeps anything that passes the filters instead of doing a complex multi-step search over many combinations.</p>
+		                                <ol>
+		                                    <li><strong>Split:</strong> We split your dataset into “train” (to pick example crops) and “val” (to test how good the recipe is). The split is repeatable using the seed.</li>
+		                                    <li><strong>Words:</strong> We try the class name (and optional extra phrases) to ask SAM3 to propose candidate boxes.</li>
+		                                    <li><strong>Example crops (optional):</strong> If you are using crop-bank mode, we save a small set of example cut-outs of the object from your dataset (e.g., a few cars of different sizes/angles). If you select a pretrained CLIP head, we skip crops and use the head instead.</li>
+		                                    <li><strong>Seed boxes:</strong> On each validation image we run a very “loose” text pass to get lots of candidate boxes.</li>
+		                                    <li><strong>Filter:</strong> We keep boxes that look like the target class (either by comparing to example crops with CLIP, or by using the pretrained CLIP head probabilities). Optional negative crops can suppress common confusions in crop-bank mode.</li>
+		                                    <li><strong>Refine:</strong> We optionally run a second SAM3 pass starting from selected boxes to improve coverage/quality.</li>
+		                                    <li><strong>Remove duplicates:</strong> If two detections overlap heavily, we keep the best one so the same object isn’t labeled twice.</li>
+		                                    <li><strong>Score:</strong> We measure how many ground-truth objects were found (“coverage”) and how many extra/wrong boxes were added (“false positives”).</li>
+		                                    <li><strong>Portable output:</strong> Saved recipes export as a zip containing <code>recipe.json</code> + all crops under <code>crops/</code> so you can copy it to another machine.</li>
+		                                </ol>
 	                                <ul class="training-help" style="margin-top: 10px;">
 	                                    <li><strong>SAM3:</strong> the model that proposes boxes/polygons when you give it words (text prompt) or a box (visual prompt).</li>
 	                                    <li><strong>CLIP:</strong> an image “similarity checker” we use to decide whether a candidate box looks like your saved examples.</li>

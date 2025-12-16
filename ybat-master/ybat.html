@@ -992,13 +992,13 @@
 		                            </div>
 		                        </div>
 		                        <div class="training-grid">
-			                            <div>
-			                                <label for="agentClipHeadSelect" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections. The head is embedded into saved recipe zips (portable).">Pretrained CLIP head (optional)</label>
-				                                <select id="agentClipHeadSelect" style="min-width: 260px;">
-				                                    <option value="">(none)</option>
-				                                </select>
-				                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.</div>
-				                            </div>
+				                            <div>
+				                                <label for="agentClipHeadSelect" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections. The head is embedded into saved recipe zips (portable).">Pretrained CLIP head (optional)</label>
+					                                <select id="agentClipHeadSelect">
+					                                    <option value="">(none)</option>
+					                                </select>
+					                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.</div>
+					                            </div>
 			                            <div>
 			                                <label for="agentClipHeadMinProb" title="Minimum probability required for the target class when using the pretrained CLIP head. Higher = fewer boxes, cleaner results.">Head min prob</label>
 			                                <input type="number" id="agentClipHeadMinProb" step="0.05" min="0" max="1" value="0.5" />

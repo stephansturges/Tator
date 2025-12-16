@@ -1232,13 +1232,13 @@ details.training-card > summary::marker {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 16px;
-    height: 16px;
-    margin-left: 6px;
+    width: 14px;
+    height: 14px;
+    margin-left: 4px;
     border-radius: 999px;
     border: 1px solid #94a3b8;
     color: #475569;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 800;
     line-height: 1;
     cursor: help;

@@ -1022,15 +1022,15 @@
 			                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" />
 			                            </div>
 			                        </div>
-	                        <div class="two-col-grid">
-	                            <div>
-	                                <label for="agentClasses" title="Optional: restrict mining to specific class IDs. Leave blank to mine all classes.">Class IDs (optional)</label>
-	                                <input type="text" id="agentClasses" placeholder="blank = all" />
-	                            </div>
-	                            <div>
-	                                <label for="agentQwenMaxPrompts" title="Ask GPT-OSS for additional words to try for each class (in addition to the class name).">Extra text prompts/class</label>
-	                                <input type="number" id="agentQwenMaxPrompts" min="0" max="20" value="0" title="0 = only use the class name; higher values try more alternative phrases." />
-	                            </div>
+		                        <div class="two-col-grid">
+		                            <div>
+		                                <label for="agentClasses">Class IDs (optional)<span class="help-icon" title="Optional: restrict mining to specific class IDs. Leave blank to mine all classes.&#10;Example: 1,2,5">?</span></label>
+		                                <input type="text" id="agentClasses" placeholder="blank = all" />
+		                            </div>
+		                            <div>
+		                                <label for="agentQwenMaxPrompts">Extra text prompts/class<span class="help-icon" title="Ask GPT-OSS for additional words to try for each class (in addition to the class name).&#10;0 = only use the class name; higher values try more alternative phrases.">?</span></label>
+		                                <input type="number" id="agentQwenMaxPrompts" min="0" max="20" value="0" title="0 = only use the class name; higher values try more alternative phrases." />
+		                            </div>
 		                            <div>
 		                                <label for="agentPromptReasoning">GPT-OSS reasoning<span class="help-icon" title="Controls how much the model “thinks” before proposing extra words.&#10;Higher can be slower and less stable.&#10;We recommend “none” for now.">?</span></label>
 		                                <select id="agentPromptReasoning" title="How much GPT-OSS “thinks” before proposing extra words. Higher uses more time and can be less stable.">
@@ -1045,10 +1045,10 @@
 		                                <label for="agentPromptMaxTokens">GPT-OSS max tokens<span class="help-icon" title="Maximum length of the model output when proposing extra prompts.&#10;Higher can be slower and use more GPU memory.&#10;If you see truncated lists, increase this.">?</span></label>
 		                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Maximum length of GPT-OSS output when proposing extra words." />
 		                            </div>
-	                            <div class="training-field training-field--inline">
-	                                <label for="agentTestMode" title="Runs on a small number of images so you can verify everything works (fast).">Test mode</label>
-	                                <input type="checkbox" id="agentTestMode" checked />
-		                            </div>
+		                            <div class="training-field training-field--inline training-field--inline-tight">
+		                                <label for="agentTestMode">Test mode<span class="help-icon" title="Runs on a small number of images so you can verify everything works (fast).">?</span></label>
+		                                <input type="checkbox" id="agentTestMode" checked />
+			                            </div>
 		                            <div>
 		                                <label for="agentTrainLimit">Test train imgs<span class="help-icon" title="Test mode only.&#10;Number of training images sampled for mining.&#10;Smaller = faster smoke test.">?</span></label>
 		                                <input type="number" id="agentTrainLimit" min="1" value="10" />

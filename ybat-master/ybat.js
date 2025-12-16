@@ -1312,15 +1312,16 @@ const sam3TrainState = {
         pollHandle: null,
         lastJob: null,
     };
-    const agentState = {
-        lastJob: null,
-        datasetsById: {},
-        loadedRecipe: null,
-        recipeClassOverride: null,
-        pollTimer: null,
-        pollInFlight: false,
-        datasetClasses: { names: [], ids: [] },
-    };
+	    const agentState = {
+	        lastJob: null,
+	        datasetsById: {},
+	        loadedRecipe: null,
+	        recipeClassOverride: null,
+	        pollTimer: null,
+	        pollInFlight: false,
+	        datasetClasses: { names: [], ids: [] },
+	        lastRenderedLogKey: null,
+	    };
 
     let promptHelperInitialized = false;
 
@@ -11792,27 +11793,49 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         agentElements.results.appendChild(frag);
     }
 
-    function renderAgentLogs(job) {
-        if (!agentElements.logs) return;
-        agentElements.logs.innerHTML = "";
-        if (!job || !Array.isArray(job.logs)) return;
-        const frag = document.createDocumentFragment();
-        job.logs.slice(-200).forEach((entry) => {
-            const div = document.createElement("div");
-            div.className = "training-log-line";
-            const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
-            div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
-            frag.appendChild(div);
-        });
-        agentElements.logs.appendChild(frag);
-        // Keep view pinned to latest.
-        agentElements.logs.scrollTop = agentElements.logs.scrollHeight;
-        if (agentElements.purgeCacheBtn) {
-            const disabled = job && job.status === "running";
-            agentElements.purgeCacheBtn.disabled = disabled;
-            agentElements.purgeCacheBtn.title = disabled ? "Purge disabled while a job is running." : "Purge cached detections to free disk space.";
-        }
-    }
+	    function renderAgentLogs(job) {
+	        if (!agentElements.logs) return;
+	        const logs = job && Array.isArray(job.logs) ? job.logs : [];
+	        const jobId = job?.job_id || "";
+	        const lastEntry = logs.length ? logs[logs.length - 1] : null;
+	        const lastMsgRaw = lastEntry ? lastEntry.msg || lastEntry.message || lastEntry : "";
+	        const lastMsg = typeof lastMsgRaw === "string" ? lastMsgRaw : JSON.stringify(lastMsgRaw);
+	        const logKey = `${jobId}:${logs.length}:${lastEntry?.ts ?? ""}:${lastMsg}`;
+
+	        if (agentState.lastRenderedLogKey === logKey) {
+	            if (agentElements.purgeCacheBtn) {
+	                const disabled = job && job.status === "running";
+	                agentElements.purgeCacheBtn.disabled = disabled;
+	                agentElements.purgeCacheBtn.title = disabled ? "Purge disabled while a job is running." : "Purge cached detections to free disk space.";
+	            }
+	            return;
+	        }
+
+	        const distanceFromBottom =
+	            agentElements.logs.scrollHeight - agentElements.logs.scrollTop - agentElements.logs.clientHeight;
+	        const stickToBottom = distanceFromBottom < 40;
+	        const prevScrollTop = agentElements.logs.scrollTop;
+
+	        agentElements.logs.innerHTML = "";
+	        if (logs.length) {
+	            const frag = document.createDocumentFragment();
+	            logs.slice(-200).forEach((entry) => {
+	                const div = document.createElement("div");
+	                div.className = "training-log-line";
+	                const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : "";
+	                div.textContent = `${ts ? `[${ts}] ` : ""}${entry.msg || entry.message || entry}`;
+	                frag.appendChild(div);
+	            });
+	            agentElements.logs.appendChild(frag);
+	            agentElements.logs.scrollTop = stickToBottom ? agentElements.logs.scrollHeight : prevScrollTop;
+	        }
+	        agentState.lastRenderedLogKey = logKey;
+	        if (agentElements.purgeCacheBtn) {
+	            const disabled = job && job.status === "running";
+	            agentElements.purgeCacheBtn.disabled = disabled;
+	            agentElements.purgeCacheBtn.title = disabled ? "Purge disabled while a job is running." : "Purge cached detections to free disk space.";
+	        }
+	    }
 
 	    function updateAgentProgress(job) {
 	        if (!agentElements.progressFill) return;

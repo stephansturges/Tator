@@ -332,22 +332,43 @@ def run_tests(
             )
         if include_agent_mining and sam3_dataset_id:
             def _start_agent_job():
+                # Try to restrict mining to a single class to keep test runs fast.
+                class_ids = None
+                try:
+                    st_cls, body_cls, _ = _http_get(f"{base_url}/sam3/datasets/{urllib.parse.quote(sam3_dataset_id)}/classes", timeout=request_timeout)
+                    if st_cls and 200 <= st_cls < 300 and body_cls:
+                        parsed_cls = json.loads(body_cls.decode("utf-8"))
+                        class_ids = parsed_cls.get("class_ids") or []
+                except Exception:
+                    class_ids = None
+                first_class = None
+                if isinstance(class_ids, list) and class_ids:
+                    try:
+                        first_class = int(class_ids[0])
+                    except Exception:
+                        first_class = None
                 return _http_post_json(
                     f"{base_url}/agent_mining/jobs",
                     {
                         "dataset_id": sam3_dataset_id,
                         "val_percent": 0.3,
+                        "split_seed": 42,
+                        "reuse_split": True,
                         "test_mode": True,
                         "test_train_limit": 2,
                         "test_val_limit": 2,
-                        "thresholds": [0.2],
+                        "classes": [first_class] if first_class is not None else None,
+                        # Keep prompt expansion off for smoke tests unless explicitly desired.
+                        "prompt_llm_max_prompts": 0,
                         "mask_threshold": 0.5,
                         "max_results": 5,
                         "min_size": 0,
                         "simplify_epsilon": 0.5,
-                        "exemplar_per_class": 1,
+                        "positives_per_class": 2,
                         "cluster_exemplars": False,
-                        "use_clip_fp_guard": False,
+                        "use_negative_exemplars": False,
+                        "max_negatives_per_class": 0,
+                        "use_clip_fp_guard": True,
                     },
                     timeout=request_timeout,
                 )
@@ -424,7 +445,7 @@ def run_tests(
                 data = {}
             job_id = data.get("job_id")
             if job_id:
-                ok_poll, job_data, poll_err = _poll_job(f"{base_url}/agent_mining/jobs/{job_id}", timeout=20.0, interval=1.0)
+                ok_poll, job_data, poll_err = _poll_job(f"{base_url}/agent_mining/jobs/{job_id}", timeout=120.0, interval=1.0)
                 results.append((f"agent_mining/jobs/{job_id} poll", ok_poll, poll_err or "completed"))
                 if ok_poll:
                     st, body_latest, err_latest = _http_get(f"{base_url}/agent_mining/results/latest", timeout=request_timeout)
@@ -441,30 +462,80 @@ def run_tests(
                     results.append(("agent_mining/results/latest", ok_latest, detail_latest))
                     if ok_latest and latest_payload:
                         try:
+                            # Save a recipe for the first mined class, then apply it to a synthetic image payload.
                             job_res = latest_payload.get("result") or {}
-                            split = job_res.get("split") or {}
-                            val_ids = split.get("val") or []
                             classes = job_res.get("classes") or []
                             first_class = classes[0] if classes else None
-                            recipe = (first_class or {}).get("recipe") or {}
-                            if val_ids and recipe and recipe.get("steps"):
-                                apply_payload = {
-                                    "dataset_id": job_res.get("dataset_id"),
-                                    "image_id": val_ids[0],
-                                    "recipe": recipe,
-                                    "mask_threshold": 0.5,
-                                    "min_size": 0,
-                                    "simplify_epsilon": 0.5,
-                                    "max_results": 10,
-                                }
-                                st_app, body_app, err_app = _http_post_json(
-                                    f"{base_url}/agent_mining/apply", apply_payload, timeout=request_timeout
+                            recipe_body = (first_class or {}).get("recipe") or {}
+                            class_id = (first_class or {}).get("id")
+                            class_name = (first_class or {}).get("name")
+                            dataset_id = job_res.get("dataset_id") or sam3_dataset_id
+
+                            if recipe_body and class_name:
+                                label = f"fuzz_{class_name}_{int(time.time())}"
+                                st_save, body_save, err_save = _http_post_json(
+                                    f"{base_url}/agent_mining/recipes",
+                                    {
+                                        "dataset_id": dataset_id,
+                                        "class_id": class_id,
+                                        "class_name": class_name,
+                                        "label": label,
+                                        "recipe": recipe_body,
+                                    },
+                                    timeout=request_timeout,
                                 )
-                                ok_app = st_app is not None and 200 <= st_app < 300
-                                detail_app = f"HTTP {st_app}" if st_app is not None else (err_app or "no response")
-                                results.append(("agent_mining/apply", ok_app, detail_app))
+                                ok_save = st_save is not None and 200 <= st_save < 300
+                                detail_save = f"HTTP {st_save}" if st_save is not None else (err_save or "no response")
+                                saved = None
+                                if body_save:
+                                    try:
+                                        saved = json.loads(body_save.decode("utf-8"))
+                                    except Exception:
+                                        saved = None
+                                results.append(("agent_mining/recipes (save)", ok_save, detail_save))
+
+                                if ok_save and isinstance(saved, dict) and saved.get("id"):
+                                    rid = saved.get("id")
+                                    st_zip, _, err_zip = _http_get(
+                                        f"{base_url}/agent_mining/recipes/{urllib.parse.quote(str(rid))}/export",
+                                        timeout=request_timeout,
+                                    )
+                                    ok_zip = st_zip is not None and 200 <= st_zip < 300
+                                    detail_zip = f"HTTP {st_zip}" if st_zip is not None else (err_zip or "no response")
+                                    results.append(("agent_mining/recipes export", ok_zip, detail_zip))
+
+                                    # Apply to an in-memory image payload to validate the portable recipe path.
+                                    st_app, _, err_app = _http_post_json(
+                                        f"{base_url}/agent_mining/apply_image",
+                                        {
+                                            "image_base64": img_b64,
+                                            "image_name": image_name,
+                                            "sam_variant": "sam3",
+                                            "recipe": saved,
+                                            "mask_threshold": 0.5,
+                                            "min_size": 0,
+                                            "simplify_epsilon": 0.5,
+                                            "max_results": 50,
+                                        },
+                                        timeout=request_timeout,
+                                    )
+                                    ok_app = st_app is not None and 200 <= st_app < 300
+                                    detail_app = f"HTTP {st_app}" if st_app is not None else (err_app or "no response")
+                                    results.append(("agent_mining/apply_image", ok_app, detail_app))
+
+                                    # Cleanup saved recipe so fuzzing doesn't spam the recipe list.
+                                    try:
+                                        del_req = urllib.request.Request(
+                                            f"{base_url}/agent_mining/recipes/{urllib.parse.quote(str(rid))}",
+                                            method="DELETE",
+                                        )
+                                        with urllib.request.urlopen(del_req, timeout=request_timeout) as resp_del:
+                                            ok_del = 200 <= resp_del.status < 300
+                                        results.append(("agent_mining/recipes delete", ok_del, ""))
+                                    except Exception as exc:
+                                        results.append(("agent_mining/recipes delete", False, f"exception:{exc}"))
                         except Exception as exc:
-                            results.append(("agent_mining/apply", False, f"exception:{exc}"))
+                            results.append(("agent_mining recipe save/apply", False, f"exception:{exc}"))
     return results
 
 

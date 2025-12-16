@@ -969,6 +969,8 @@
         log: null,
         includeQwen: null,
         includeSam3: null,
+        includeClip: null,
+        includeAgent: null,
     };
 
     const trainingElements = {
@@ -8902,6 +8904,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     backendFuzzerElements.includeQwen = document.getElementById("fuzzerIncludeQwen");
     backendFuzzerElements.includeSam3 = document.getElementById("fuzzerIncludeSam3");
     backendFuzzerElements.includeClip = document.getElementById("fuzzerIncludeClip");
+    backendFuzzerElements.includeAgent = document.getElementById("fuzzerIncludeAgent");
         if (settingsElements.apiInput) {
             settingsElements.apiInput.value = API_ROOT;
         }
@@ -8937,6 +8940,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const includeQwen = Boolean(backendFuzzerElements.includeQwen?.checked);
         const includeSam3 = Boolean(backendFuzzerElements.includeSam3?.checked);
         const includeClip = Boolean(backendFuzzerElements.includeClip?.checked);
+        const includeAgent = Boolean(backendFuzzerElements.includeAgent?.checked);
         const tests = [];
         const addLog = (line) => {
             backendFuzzerElements.log.textContent += `${line}\n`;
@@ -9029,6 +9033,39 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 });
                 if (!resp.ok) throw new Error(await resp.text());
             });
+        }
+        if (includeAgent) {
+            addTest("Agent Mining cache size", async () => {
+                const resp = await fetch(`${API_ROOT}/agent_mining/cache_size`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+            addTest("Agent recipes list", async () => {
+                const resp = await fetch(`${API_ROOT}/agent_mining/recipes`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+            if (includeSam3) {
+                addTest("Agent apply_image (minimal recipe)", async () => {
+                    const payload = {
+                        image_base64: baseImage,
+                        sam_variant: "sam3",
+                        recipe: {
+                            mode: "sam3_greedy",
+                            text_prompts: ["object"],
+                            params: { use_clip_fp_guard: false, seed_threshold: 0.2, expand_threshold: 0.2, max_visual_seeds: 3 },
+                        },
+                        mask_threshold: 0.5,
+                        min_size: 0,
+                        simplify_epsilon: 1.0,
+                        max_results: 10,
+                    };
+                    const resp = await fetch(`${API_ROOT}/agent_mining/apply_image`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                    if (!resp.ok) throw new Error(await resp.text());
+                });
+            }
         }
         let failures = 0;
         for (const test of tests) {

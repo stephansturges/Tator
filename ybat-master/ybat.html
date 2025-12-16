@@ -913,10 +913,10 @@
 			                                <label for="agentSplitSeed">Split seed<span class="help-icon" title="Random seed for the train/val split.&#10;Same seed = same split (repeatable).&#10;Change it if you want a different random split.&#10;Default is 42.">?</span></label>
 			                                <input type="number" id="agentSplitSeed" value="42" title="Same seed = same train/val split. Change it if you want a different random split." />
 			                            </div>
-		                            <div class="training-field training-field--inline">
-		                                <label for="agentReuseSplit" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">Reuse cached split</label>
-		                                <input type="checkbox" id="agentReuseSplit" checked />
-		                            </div>
+			                            <div class="training-field training-field--inline">
+			                                <label for="agentReuseSplit">Reuse cached split<span class="help-icon" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">?</span></label>
+			                                <input type="checkbox" id="agentReuseSplit" checked />
+			                            </div>
 			                            <div>
 			                                <label for="agentIouThreshold">Match overlap (Eval IoU)<span class="help-icon" title="Used only for scoring (evaluation), not for running the recipe.&#10;IoU = how much the predicted box overlaps the ground-truth box (0–1).&#10;0.5 ≈ “at least about half overlap”.&#10;Higher = stricter scoring (coverage may look lower).">?</span></label>
 			                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" />

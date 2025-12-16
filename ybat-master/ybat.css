@@ -1212,6 +1212,15 @@ details.training-card > summary::marker {
     gap: 12px 16px;
 }
 
+.training-grid--buttons {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px 12px;
+}
+
+.agent-recipe-controls {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
 .two-col-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(200px, 1fr));

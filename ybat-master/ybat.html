@@ -1117,44 +1117,45 @@
 	                        <h3>Results</h3>
 	                        <div class="training-help">Coverage = % of ground-truth objects found. FPs = extra detections that shouldn’t be there. Higher coverage and lower FPs is better.</div>
 	                        <div id="agentResults"></div>
-	                        <div class="training-divider"></div>
-	                        <h3>Saved Recipes</h3>
-	                        <div class="training-field">
-	                            <label>Recipes for this dataset</label>
-                            <div class="training-grid">
-                                <div>
-                                    <select id="agentRecipeSelect" style="min-width: 220px;"></select>
-	                                </div>
-	                                <div class="training-field">
-	                                    <label for="agentRecipeImageId" title="Optional: run the selected recipe on a specific image from this dataset by numeric image id. If you’re labeling interactively, use the recipe presets in the labeling tab instead.">Apply to dataset image id</label>
-	                                    <input type="number" id="agentRecipeImageId" min="0" placeholder="e.g. 123" />
-	                                </div>
-	                                <div class="training-field">
-	                                    <label title="Assign detections to a different class than the recipe’s default (only changes the label, not the detection)."><input type="checkbox" id="agentRecipeOverrideToggle" /> Override output class</label>
-	                                    <select id="agentRecipeOverrideSelect" disabled style="min-width: 180px;"></select>
-	                                    <div class="training-help">Use a different label for the detections than the one stored in the recipe.</div>
-	                                </div>
-                            </div>
-                            <div class="training-actions">
-                                <button type="button" class="training-button" id="agentRecipeRefresh">Refresh list</button>
-                                <button type="button" class="training-button secondary" id="agentRecipeLoad">Load recipe</button>
-                                <button type="button" class="training-button secondary" id="agentRecipeDownload">Download zip</button>
-                                <button type="button" class="training-button secondary" id="agentRecipeApply">Apply to image</button>
-	                            </div>
-	                            <div class="training-field">
-	                                <label for="agentRecipeFile">Import recipe zip<span class="help-icon" title="Import a recipe zip from another machine or previous run.&#10;The zip contains the recipe JSON plus any crops/weights needed, so it’s portable.">?</span></label>
-	                                <div class="training-grid">
-	                                    <input type="file" id="agentRecipeFile" accept=".zip" />
-                                    <button type="button" class="training-button secondary" id="agentRecipeImport">Import</button>
-                                </div>
-                                <div class="training-help">Packages include the recipe JSON plus exemplar crops so they are portable between machines.</div>
-                            </div>
-                            <div id="agentRecipeDetails" class="training-card" style="display: none;"></div>
-                            <div class="training-help">Pick a dataset, refresh, then load, download, import, or apply to a specific COCO image id.</div>
-                        </div>
-                    </section>
-                </div>
-            </div>
+		                        <div class="training-divider"></div>
+		                        <h3>Saved Recipes</h3>
+		                        <div class="training-grid agent-recipe-controls">
+		                            <div class="training-field">
+		                                <label for="agentRecipeSelect">Recipes for this dataset<span class="help-icon" title="Saved recipe zips on the backend. Use Refresh if you just mined or imported a recipe.">?</span></label>
+		                                <select id="agentRecipeSelect"></select>
+		                            </div>
+		                            <div class="training-field">
+		                                <label for="agentRecipeImageId">Apply to dataset image id<span class="help-icon" title="Optional: run the selected recipe on a specific image from this dataset (by numeric COCO image id). If you’re labeling interactively, use the recipe presets in the labeling tab instead.">?</span></label>
+		                                <input type="number" id="agentRecipeImageId" min="0" placeholder="e.g. 123" />
+		                            </div>
+		                            <div class="training-field">
+		                                <div class="training-field training-field--inline training-field--inline-tight">
+		                                    <label for="agentRecipeOverrideToggle">Override output class<span class="help-icon" title="Assign detections to a different class than the recipe’s default (only changes the label, not the detection).">?</span></label>
+		                                    <input type="checkbox" id="agentRecipeOverrideToggle" />
+		                                </div>
+		                                <select id="agentRecipeOverrideSelect" disabled></select>
+		                                <div class="training-help">Use a different label for the detections than the one stored in the recipe.</div>
+		                            </div>
+		                        </div>
+		                        <div class="training-grid training-grid--buttons agent-recipe-actions">
+		                            <button type="button" class="training-button" id="agentRecipeRefresh">Refresh list</button>
+		                            <button type="button" class="training-button secondary" id="agentRecipeLoad">Load recipe</button>
+		                            <button type="button" class="training-button secondary" id="agentRecipeDownload">Download zip</button>
+		                            <button type="button" class="training-button secondary" id="agentRecipeApply">Apply to image</button>
+		                        </div>
+		                        <div class="training-field">
+		                            <label for="agentRecipeFile">Import recipe zip<span class="help-icon" title="Import a recipe zip from another machine or previous run.&#10;The zip contains the recipe JSON plus any crops/weights needed, so it’s portable.">?</span></label>
+		                            <div class="training-grid training-grid--buttons">
+		                                <input type="file" id="agentRecipeFile" accept=".zip" />
+		                                <button type="button" class="training-button secondary" id="agentRecipeImport">Import</button>
+		                            </div>
+		                            <div class="training-help">Packages include the recipe JSON plus exemplar crops so they are portable between machines.</div>
+		                        </div>
+		                        <div id="agentRecipeDetails" class="training-card" style="display: none;"></div>
+		                        <div class="training-help">Pick a dataset, refresh, then load, download, import, or apply to a specific COCO image id.</div>
+	                    </section>
+	                </div>
+	            </div>
             <div class="tab-panel" id="tabPromptHelper" data-tab-panel="prompt-helper">
                 <div class="training-wrapper">
                     <section class="training-form-section">

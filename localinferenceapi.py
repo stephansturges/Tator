@@ -405,6 +405,14 @@ clip_lock = threading.Lock()
 if clip_model is None or clf is None:
     clip_initialized = False
 
+# Agent Mining often evaluates across multiple GPUs. The global CLIP backbone is pinned to
+# `device` (typically "cuda" == GPU0) and guarded by `clip_lock`. To avoid serializing all CLIP
+# embedding work onto a single GPU during mining/eval, we maintain per-device CLIP backbones
+# (raw CLIP, not trained heads) with per-device locks.
+_agent_clip_backbones: Dict[Tuple[str, str], Tuple[Any, Any]] = {}
+_agent_clip_locks: Dict[Tuple[str, str], threading.Lock] = {}
+_agent_clip_backbones_lock = threading.Lock()
+
 
 def _suspend_clip_backbone() -> None:
     global clip_model, clip_preprocess, clip_initialized, _clip_reload_needed
@@ -416,6 +424,13 @@ def _suspend_clip_backbone() -> None:
         clip_preprocess = None
         clip_initialized = False
         _clip_reload_needed = True
+    # Also clear any per-device mining CLIP backbones to free VRAM.
+    try:
+        with _agent_clip_backbones_lock:
+            _agent_clip_backbones.clear()
+            _agent_clip_locks.clear()
+    except Exception:
+        pass
 
 
 def _resume_clip_backbone() -> None:
@@ -1678,7 +1693,19 @@ def _sam3_text_detections(
         else:
             if numeric_limit <= 0:
                 numeric_limit = None
-    for idx, box in enumerate(boxes_iter):
+    # Prefer highest-score boxes first when scores are available, since we may be limiting outputs.
+    order = list(range(len(boxes_iter)))
+    try:
+        if scores_iter is not None and len(scores_iter) >= len(order):
+            order.sort(
+                key=lambda i: float(scores_iter[i]) if i < len(scores_iter) and scores_iter[i] is not None else -1e9,
+                reverse=True,
+            )
+    except Exception:
+        order = list(range(len(boxes_iter)))
+
+    for idx in order:
+        box = boxes_iter[idx]
         coords = np.asarray(box, dtype=np.float32).tolist()
         if len(coords) < 4:
             continue
@@ -4999,27 +5026,93 @@ def _dedupe_qwen_detections_iou(
     return kept
 
 
-def _clip_encode_pil_batch(crops: Sequence[Image.Image]) -> Optional[np.ndarray]:
+def _ensure_agent_clip_backbone_for_device(
+    device_str: str,
+) -> Tuple[Optional[Any], Optional[Any], threading.Lock, str]:
+    """
+    Return (model, preprocess, lock, normalized_device_str) for encoding crops on a specific device.
+    Reuses the global CLIP model for cuda:0/cuda when available; otherwise loads a per-device backbone.
+    """
+    model_name = clip_model_name or DEFAULT_CLIP_MODEL
+    normalized_device = str(device_str or "").strip() or str(device)
+    # Reuse the global backbone for GPU0 when possible to avoid duplicate VRAM usage.
+    if normalized_device in {"cuda", "cuda:0"} and clip_model is not None and clip_preprocess is not None:
+        return clip_model, clip_preprocess, clip_lock, "cuda"
+    key = (model_name, normalized_device)
+    with _agent_clip_backbones_lock:
+        cached = _agent_clip_backbones.get(key)
+        cached_lock = _agent_clip_locks.get(key)
+        if cached is not None and cached_lock is not None:
+            return cached[0], cached[1], cached_lock, normalized_device
+        # Initialize lock early so concurrent callers for the same key serialize load.
+        if cached_lock is None:
+            cached_lock = threading.Lock()
+            _agent_clip_locks[key] = cached_lock
+    # Load outside the global cache lock (but guarded by the per-key lock).
+    with cached_lock:
+        with _agent_clip_backbones_lock:
+            cached = _agent_clip_backbones.get(key)
+            if cached is not None:
+                return cached[0], cached[1], cached_lock, normalized_device
+        try:
+            if clip is None:
+                return None, None, cached_lock, normalized_device
+            model, preprocess = clip.load(model_name, device=normalized_device)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load CLIP backbone %s on %s: %s", model_name, normalized_device, exc)
+            return None, None, cached_lock, normalized_device
+        with _agent_clip_backbones_lock:
+            _agent_clip_backbones[key] = (model, preprocess)
+        return model, preprocess, cached_lock, normalized_device
+
+
+def _clip_encode_pil_batch(
+    crops: Sequence[Image.Image],
+    *,
+    device_override: Optional[str] = None,
+) -> Optional[np.ndarray]:
     """Encode a batch of PIL crops with raw CLIP, returning (N, D) float32 normalized embeddings."""
-    model, preprocess = _ensure_clip_backbone_for_mining()
-    if model is None or preprocess is None or not crops:
+    if not crops:
+        return None
+    if device_override is None:
+        model, preprocess = _ensure_clip_backbone_for_mining()
+        lock = clip_lock
+        target_device = str(device)
+    else:
+        model, preprocess, lock, target_device = _ensure_agent_clip_backbone_for_device(str(device_override))
+    if model is None or preprocess is None:
         return None
     try:
-        with clip_lock:
-            inp = torch.stack([preprocess(c) for c in crops], dim=0).to(device)
+        batch_size = 64
+        try:
+            raw = os.environ.get("AGENT_CLIP_BATCH_SIZE")
+            if raw is not None and str(raw).strip():
+                batch_size = max(1, int(raw))
+        except Exception:
+            batch_size = 64
+        batch_size = max(1, min(int(batch_size), 512))
+
+        chunks: List[torch.Tensor] = []
+        with lock:
             try:
                 target_dtype = next(model.parameters()).dtype
             except Exception:
                 target_dtype = torch.float32
-            if inp.dtype != target_dtype:
-                inp = inp.to(dtype=target_dtype)
-            with torch.no_grad():
-                feats = model.encode_image(inp)
-            feats = feats.to(dtype=torch.float32, device="cpu")
-        feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-8)
-        return feats.cpu().numpy()
+            for start in range(0, len(crops), batch_size):
+                batch = crops[start : start + batch_size]
+                inp = torch.stack([preprocess(c) for c in batch], dim=0).to(target_device)
+                if inp.dtype != target_dtype:
+                    inp = inp.to(dtype=target_dtype)
+                with torch.no_grad():
+                    feats = model.encode_image(inp)
+                chunks.append(feats.to(dtype=torch.float32, device="cpu"))
+        if not chunks:
+            return None
+        feats_all = torch.cat(chunks, dim=0)
+        feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
+        return feats_all.cpu().numpy()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("CLIP batch encode failed: %s", exc)
+        logger.debug("CLIP batch encode failed on %s: %s", target_device, exc)
         return None
 
 
@@ -5708,7 +5801,10 @@ def _apply_agent_recipe_to_image(
         seed_keep_refs.append(det)
     need_seed_feats = bool(seed_crops) and (use_clip_guard or clip_head_active)
     feats = _clip_encode_pil_batch(seed_crops) if need_seed_feats else None
-    seed_indices: List[int] = []
+    # IMPORTANT: max_visual_seeds should NOT cap how many detections we keep.
+    # We keep all filtered seed detections, and use max_visual_seeds only to bound visual expansion/refinement.
+    kept_seed_idx_all: List[int] = []
+    expand_seed_idx: List[int] = []
     if feats is not None and feats.size:
         keep_mask = np.ones((feats.shape[0],), dtype=bool)
         scores_for_diverse: Optional[np.ndarray] = None
@@ -5716,42 +5812,64 @@ def _apply_agent_recipe_to_image(
             pos_s, _, score_s = _clip_score(feats)
             keep_mask &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
             scores_for_diverse = score_s
-        if clip_head_active:
-            proba = _clip_head_predict_proba(feats, clip_head) if isinstance(clip_head, dict) else None
-            if proba is not None and clip_head_target_index is not None:
+        if clip_head_active and isinstance(clip_head, dict) and clip_head_target_index is not None:
+            proba = _clip_head_predict_proba(feats, clip_head)
+            if proba is not None:
+                t_idx = int(clip_head_target_index)
                 try:
-                    scores_for_diverse = proba[:, int(clip_head_target_index)]
+                    p_target = proba[:, t_idx]
+                    if proba.shape[1] > 1:
+                        masked = proba.copy()
+                        masked[:, t_idx] = -1.0
+                        p_other = np.max(masked, axis=1)
+                    else:
+                        p_other = np.zeros_like(p_target)
+                    for det_obj, p_t, p_o in zip(seed_keep_refs, p_target.tolist(), p_other.tolist()):
+                        det_obj.clip_head_prob = float(p_t)
+                        det_obj.clip_head_margin = float(p_t - p_o)
                 except Exception:
                     pass
-        kept_idx = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
-        if kept_idx:
-            kept_feats = feats[kept_idx]
-            kept_scores = scores_for_diverse[kept_idx] if scores_for_diverse is not None else None
-            if max_visual_seeds > 0:
-                diverse_local = _select_diverse_indices(kept_feats, k=min(max_visual_seeds, len(kept_idx)), scores=kept_scores)
-                seed_indices = [kept_idx[i] for i in diverse_local]
-            else:
-                seed_indices = kept_idx
-        else:
-            seed_indices = []
-            _add_warning("visual_seed_not_found")
+                head_keep = _clip_head_keep_mask(
+                    proba,
+                    target_index=t_idx,
+                    min_prob=float(clip_head_min_prob),
+                    margin=float(clip_head_margin),
+                )
+                if head_keep is not None:
+                    keep_mask &= head_keep
+                scores_for_diverse = proba[:, t_idx]
+        kept_seed_idx_all = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
+        if not kept_seed_idx_all:
+            _add_warning("clip_filtered_all")
+            return []
+        if max_visual_seeds > 0:
+            kept_feats = feats[kept_seed_idx_all]
+            kept_scores = scores_for_diverse[kept_seed_idx_all] if scores_for_diverse is not None else None
+            diverse_local = _select_diverse_indices(
+                kept_feats,
+                k=min(int(max_visual_seeds), len(kept_seed_idx_all)),
+                scores=kept_scores,
+            )
+            expand_seed_idx = [kept_seed_idx_all[i] for i in diverse_local]
     else:
-        # No CLIP features available: expand from a small top-score subset to bound runtime.
-        ranked = sorted(
-            range(len(seed_keep_refs)),
-            key=lambda i: (seed_keep_refs[i].score if seed_keep_refs[i].score is not None else 0.0),
-            reverse=True,
-        )
-        seed_indices = ranked[: max(0, min(max_visual_seeds, len(ranked)))]
+        # No CLIP features available: keep all seeds, but only expand from a small top-score subset to bound runtime.
+        kept_seed_idx_all = list(range(len(seed_keep_refs)))
+        if max_visual_seeds > 0:
+            ranked = sorted(
+                range(len(seed_keep_refs)),
+                key=lambda i: (seed_keep_refs[i].score if seed_keep_refs[i].score is not None else 0.0),
+                reverse=True,
+            )
+            expand_seed_idx = ranked[: max(0, min(int(max_visual_seeds), len(ranked)))]
 
-    # Always include the kept seed detections as potential outputs (they will be filtered/deduped later).
-    kept_seed_dets: List[QwenDetection] = []
-    if seed_indices:
-        kept_seed_dets = [seed_keep_refs[i] for i in seed_indices if 0 <= i < len(seed_keep_refs)]
+    kept_seed_dets: List[QwenDetection] = [seed_keep_refs[i] for i in kept_seed_idx_all if 0 <= i < len(seed_keep_refs)]
+    if not kept_seed_dets:
+        _add_warning("no_results")
+        return []
 
     # 3) Visual expansion from each chosen seed.
     expanded: List[QwenDetection] = []
-    for i in seed_indices:
+    for i in expand_seed_idx:
         if i < 0 or i >= len(seed_boxes_xywh):
             continue
         _reset_prompts()
@@ -5877,6 +5995,7 @@ def _infer_sam3_greedy_recipe_on_image(
     clip_head_min_prob: float = 0.5,
     clip_head_margin: float = 0.0,
     state: Optional[Any] = None,
+    clip_device_override: Optional[str] = None,
 ) -> List[QwenDetection]:
     """
     Greedy SAM3 recipe inference on a single PIL image using *precomputed* CLIP embedding banks.
@@ -5979,45 +6098,88 @@ def _infer_sam3_greedy_recipe_on_image(
     if not seed_refs:
         return []
 
-    seed_indices: List[int] = []
+    # IMPORTANT: max_visual_seeds should NOT cap how many detections we keep. In crowded scenes the
+    # text stage can legitimately return hundreds of objects. We keep *all* filtered seed detections
+    # and use max_visual_seeds only to bound any optional visual expansion/refinement work.
+    kept_seed_indices_all: List[int] = []
+    expand_seed_indices: List[int] = []
     had_seed_feats = False
+    seed_feats: Optional[np.ndarray] = None
+    seed_scores_for_diverse: Optional[np.ndarray] = None
+
     if use_clip and seed_crops:
-        feats = _clip_encode_pil_batch(seed_crops)
-        if feats is not None and feats.size:
+        seed_feats = _clip_encode_pil_batch(seed_crops, device_override=clip_device_override)
+        if seed_feats is not None and seed_feats.size:
             had_seed_feats = True
-            keep_mask = np.ones((feats.shape[0],), dtype=bool)
+            keep_mask = np.ones((seed_feats.shape[0],), dtype=bool)
             scores_for_diverse: Optional[np.ndarray] = None
             if ex_mat is not None:
-                pos_s, _, score_s = _clip_score(feats)
+                pos_s, _, score_s = _clip_score(seed_feats)
                 keep_mask &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
                 scores_for_diverse = score_s
             if isinstance(clip_head, dict) and clip_head_target_index is not None:
                 try:
-                    proba = _clip_head_predict_proba(feats, clip_head)
-                    if proba is not None:
-                        scores_for_diverse = proba[:, int(clip_head_target_index)]
+                    proba = _clip_head_predict_proba(seed_feats, clip_head)
                 except Exception:
-                    pass
-            kept = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
-            if kept:
-                kept_feats = feats[kept]
-                kept_scores = scores_for_diverse[kept] if scores_for_diverse is not None else None
-                if max_visual_seeds > 0:
-                    diverse_local = _select_diverse_indices(kept_feats, k=min(max_visual_seeds, len(kept)), scores=kept_scores)
-                    seed_indices = [kept[i] for i in diverse_local]
-                else:
-                    seed_indices = kept
-    if not seed_indices and not had_seed_feats:
-        ranked = sorted(
-            range(len(seed_refs)),
-            key=lambda i: (seed_refs[i].score if seed_refs[i].score is not None else 0.0),
-            reverse=True,
-        )
-        seed_indices = ranked[: max(0, min(int(max_visual_seeds) if max_visual_seeds else 0, len(ranked)))]
-    kept_seed_dets = [seed_refs[i] for i in seed_indices if 0 <= i < len(seed_refs)]
+                    proba = None
+                if proba is not None:
+                    t_idx = int(clip_head_target_index)
+                    try:
+                        p_target = proba[:, t_idx]
+                        if proba.shape[1] > 1:
+                            masked = proba.copy()
+                            masked[:, t_idx] = -1.0
+                            p_other = np.max(masked, axis=1)
+                        else:
+                            p_other = np.zeros_like(p_target)
+                        for det_obj, p_t, p_o in zip(seed_refs, p_target.tolist(), p_other.tolist()):
+                            det_obj.clip_head_prob = float(p_t)
+                            det_obj.clip_head_margin = float(p_t - p_o)
+                    except Exception:
+                        pass
+                    head_keep = _clip_head_keep_mask(
+                        proba,
+                        target_index=t_idx,
+                        min_prob=float(clip_head_min_prob),
+                        margin=float(clip_head_margin),
+                    )
+                    if head_keep is not None:
+                        keep_mask &= head_keep
+                    scores_for_diverse = p_target
+            kept_seed_indices_all = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
+            seed_scores_for_diverse = scores_for_diverse
+            if kept_seed_indices_all and max_visual_seeds > 0:
+                kept_feats = seed_feats[kept_seed_indices_all]
+                kept_scores = (
+                    seed_scores_for_diverse[kept_seed_indices_all]
+                    if seed_scores_for_diverse is not None
+                    else None
+                )
+                diverse_local = _select_diverse_indices(
+                    kept_feats,
+                    k=min(int(max_visual_seeds), len(kept_seed_indices_all)),
+                    scores=kept_scores,
+                )
+                expand_seed_indices = [kept_seed_indices_all[i] for i in diverse_local]
+    if not kept_seed_indices_all:
+        # If we successfully ran CLIP filtering and it rejected everything, return no detections.
+        if had_seed_feats:
+            return []
+        kept_seed_indices_all = list(range(len(seed_refs)))
+        if max_visual_seeds and int(max_visual_seeds) > 0:
+            ranked = sorted(
+                range(len(seed_refs)),
+                key=lambda i: (seed_refs[i].score if seed_refs[i].score is not None else 0.0),
+                reverse=True,
+            )
+            expand_seed_indices = ranked[: min(int(max_visual_seeds), len(ranked))]
+        else:
+            expand_seed_indices = []
+
+    kept_seed_dets = [seed_refs[i] for i in kept_seed_indices_all if 0 <= i < len(seed_refs)]
 
     expanded: List[QwenDetection] = []
-    for i in seed_indices:
+    for i in expand_seed_indices:
         if i < 0 or i >= len(seed_boxes_xywh):
             continue
         _reset_sam3_prompts_for_state(processor, img_state)
@@ -6042,10 +6204,12 @@ def _infer_sam3_greedy_recipe_on_image(
         return []
     combined = _dedupe_qwen_detections_iou(combined, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)
 
-    if use_clip:
+    # Avoid re-encoding potentially huge seed sets: seeds are already CLIP-filtered above (and have
+    # clip_head_prob/margin attached when head mode is active). Only CLIP-filter the expanded items.
+    if use_clip and expanded:
         det_crops: List[Image.Image] = []
         det_refs: List[QwenDetection] = []
-        for det in combined:
+        for det in expanded:
             bbox_xyxy = _bbox_to_xyxy_pixels(det.bbox or [], pil_img.width, pil_img.height)
             if bbox_xyxy is None:
                 continue
@@ -6057,23 +6221,23 @@ def _infer_sam3_greedy_recipe_on_image(
             except Exception:
                 continue
             det_refs.append(det)
-        feats = _clip_encode_pil_batch(det_crops) if det_crops else None
-        if feats is not None and feats.size:
-            keep_mask = np.ones((feats.shape[0],), dtype=bool)
+        feats2 = _clip_encode_pil_batch(det_crops, device_override=clip_device_override) if det_crops else None
+        if feats2 is not None and feats2.size:
+            keep_mask2 = np.ones((feats2.shape[0],), dtype=bool)
             if ex_mat is not None:
-                pos_s, _, score_s = _clip_score(feats)
-                keep_mask &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
+                pos_s, _, score_s = _clip_score(feats2)
+                keep_mask2 &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
             if isinstance(clip_head, dict) and clip_head_target_index is not None:
                 try:
-                    proba = _clip_head_predict_proba(feats, clip_head)
+                    proba2 = _clip_head_predict_proba(feats2, clip_head)
                 except Exception:
-                    proba = None
-                if proba is not None:
+                    proba2 = None
+                if proba2 is not None:
                     t_idx = int(clip_head_target_index)
                     try:
-                        p_target = proba[:, t_idx]
-                        if proba.shape[1] > 1:
-                            masked = proba.copy()
+                        p_target = proba2[:, t_idx]
+                        if proba2.shape[1] > 1:
+                            masked = proba2.copy()
                             masked[:, t_idx] = -1.0
                             p_other = np.max(masked, axis=1)
                         else:
@@ -6083,17 +6247,18 @@ def _infer_sam3_greedy_recipe_on_image(
                             det_obj.clip_head_margin = float(p_t - p_o)
                     except Exception:
                         pass
-                    head_keep = _clip_head_keep_mask(
-                        proba,
+                    head_keep2 = _clip_head_keep_mask(
+                        proba2,
                         target_index=t_idx,
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
                     )
-                    if head_keep is not None:
-                        keep_mask &= head_keep
-            filtered = [d for d, ok in zip(det_refs, keep_mask.tolist()) if ok]
-            combined = filtered
-    return _dedupe_qwen_detections_iou(combined, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)
+                    if head_keep2 is not None:
+                        keep_mask2 &= head_keep2
+            expanded_filtered = [d for d, ok in zip(det_refs, keep_mask2.tolist()) if ok]
+            combined = [*kept_seed_dets, *expanded_filtered]
+            combined = _dedupe_qwen_detections_iou(combined, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)
+    return combined
 
 
 def _evaluate_sam3_greedy_recipe(
@@ -6389,6 +6554,7 @@ class _Sam3GreedyEvalWorker:
         class_entries: Sequence[Dict[str, Any]],
         gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
         payload: AgentMiningRequest,
+        per_class_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
         clip_head: Optional[Dict[str, Any]],
         head_sweep_min_probs: Sequence[float],
         head_fixed_margin: float,
@@ -6435,6 +6601,39 @@ class _Sam3GreedyEvalWorker:
                 clip_head_min_prob = 0.0 if head_active else float(payload.clip_head_min_prob)
                 clip_head_margin = 0.0 if head_active else float(payload.clip_head_margin)
 
+                # Apply per-class tuned overrides (beam search) for the shared greedy knobs.
+                seed_thr = float(payload.seed_threshold)
+                expand_thr = float(payload.expand_threshold)
+                sim_floor = float(payload.similarity_score)
+                max_seeds = int(payload.max_visual_seeds)
+                if per_class_overrides and isinstance(per_class_overrides, dict):
+                    ov = per_class_overrides.get(cid_int)
+                    if isinstance(ov, dict):
+                        try:
+                            if ov.get("seed_threshold") is not None:
+                                seed_thr = float(ov.get("seed_threshold"))
+                        except Exception:
+                            pass
+                        try:
+                            if ov.get("expand_threshold") is not None:
+                                expand_thr = float(ov.get("expand_threshold"))
+                        except Exception:
+                            pass
+                        try:
+                            if ov.get("similarity_score") is not None:
+                                sim_floor = float(ov.get("similarity_score"))
+                        except Exception:
+                            pass
+                        try:
+                            if ov.get("max_visual_seeds") is not None:
+                                max_seeds = int(ov.get("max_visual_seeds"))
+                        except Exception:
+                            pass
+                seed_thr = float(max(0.0, min(1.0, seed_thr)))
+                expand_thr = float(max(0.0, min(1.0, expand_thr)))
+                sim_floor = float(max(0.0, min(1.0, sim_floor)))
+                max_seeds = max(0, int(max_seeds))
+
                 try:
                     dets = _infer_sam3_greedy_recipe_on_image(
                         pil_img=pil_img,
@@ -6442,9 +6641,9 @@ class _Sam3GreedyEvalWorker:
                         text_prompts=prompts,
                         exemplar_embeddings=ex_mat,
                         negative_embeddings=neg_mat,
-                        seed_threshold=payload.seed_threshold,
-                        expand_threshold=payload.expand_threshold,
-                        max_visual_seeds=payload.max_visual_seeds,
+                        seed_threshold=seed_thr,
+                        expand_threshold=expand_thr,
+                        max_visual_seeds=max_seeds,
                         seed_dedupe_iou=payload.seed_dedupe_iou,
                         out_dedupe_iou=payload.dedupe_iou,
                         mask_threshold=payload.mask_threshold,
@@ -6452,12 +6651,13 @@ class _Sam3GreedyEvalWorker:
                         simplify_epsilon=payload.simplify_epsilon,
                         max_results=payload.max_results,
                         negative_strength=payload.negative_strength,
-                        similarity_floor=payload.similarity_score,
+                        similarity_floor=sim_floor,
                         clip_head=clip_head,
                         clip_head_target_index=head_target_index,
                         clip_head_min_prob=clip_head_min_prob,
                         clip_head_margin=clip_head_margin,
                         state=state,
+                        clip_device_override=str(self.device),
                     )
                 except torch.cuda.OutOfMemoryError:
                     if log_fn:
@@ -6539,6 +6739,42 @@ class _Sam3GreedyEvalWorker:
         return out
 
 
+def _build_sam3_greedy_eval_workers(
+    payload: "AgentMiningRequest",
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List["_Sam3GreedyEvalWorker"]:
+    base_devices = _resolve_sam3_mining_devices()
+    per_dev = 1
+    try:
+        per_dev = max(1, int(getattr(payload, "max_workers_per_device", 1) or 1))
+    except Exception:
+        per_dev = 1
+    expanded: List[torch.device] = []
+    for dev in base_devices:
+        expanded.extend([dev] * per_dev)
+    max_total = None
+    try:
+        max_total = getattr(payload, "max_workers", None)
+    except Exception:
+        max_total = None
+    if isinstance(max_total, int) and max_total > 0:
+        expanded = expanded[: max_total]
+    workers: List[_Sam3GreedyEvalWorker] = []
+    for dev in expanded:
+        try:
+            workers.append(_Sam3GreedyEvalWorker(dev))
+        except Exception as exc:  # noqa: BLE001
+            if log_fn:
+                try:
+                    log_fn(f"Failed to initialize SAM3 greedy worker on {dev}: {exc}")
+                except Exception:
+                    pass
+    if not workers:
+        raise RuntimeError("sam3_greedy_workers_unavailable")
+    return workers
+
+
 def _evaluate_sam3_greedy_recipes_image_first(
     *,
     class_entries: Sequence[Dict[str, Any]],
@@ -6546,11 +6782,14 @@ def _evaluate_sam3_greedy_recipes_image_first(
     images: Dict[int, Dict[str, Any]],
     gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
     payload: AgentMiningRequest,
+    per_class_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
     clip_head: Optional[Dict[str, Any]] = None,
     cancel_event: Optional[threading.Event] = None,
     log_every: int = 25,
     log_fn: Optional[Callable[[str], None]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    workers: Optional[List["_Sam3GreedyEvalWorker"]] = None,
+    close_workers: bool = True,
 ) -> Dict[int, Dict[str, Any]]:
     total_images = len(val_ids)
     if total_images <= 0:
@@ -6621,36 +6860,26 @@ def _evaluate_sam3_greedy_recipes_image_first(
         else:
             agg[cid_int] = {"head_active": False, "counts": _counts_init(), "total_gt": total_gt}
 
-    devices: List[torch.device] = []
-    if torch.cuda.is_available():
-        try:
-            devices = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
-        except Exception:
-            devices = [torch.device("cuda")]
-    if not devices:
-        devices = [torch.device("cpu")]
+    owned_workers = False
+    if workers is None:
+        workers = _build_sam3_greedy_eval_workers(payload, log_fn=log_fn)
+        owned_workers = True
 
-    workers: List[_Sam3GreedyEvalWorker] = []
     try:
-        for dev in devices:
-            try:
-                workers.append(_Sam3GreedyEvalWorker(dev))
-            except Exception as exc:  # noqa: BLE001
-                if log_fn:
-                    try:
-                        log_fn(f"Failed to initialize SAM3 greedy worker on {dev}: {exc}")
-                    except Exception:
-                        pass
-        if not workers:
-            raise RuntimeError("sam3_greedy_workers_unavailable")
-
         if log_fn:
             try:
                 labels = ", ".join(str(w.device) for w in workers)
                 extra = f"; skipped {skipped} images missing paths" if skipped else ""
+                per_dev = getattr(payload, "max_workers_per_device", 1)
+                per_dev_txt = ""
+                try:
+                    if int(per_dev) > 1:
+                        per_dev_txt = f"; up to {int(per_dev)} worker(s) per device"
+                except Exception:
+                    per_dev_txt = ""
                 log_fn(
                     f"Starting global image-first sweep (sam3_greedy): {total_images} val images, "
-                    f"{len(class_entries)} classes on {len(workers)} worker(s): {labels}{extra}"
+                    f"{len(class_entries)} classes on {len(workers)} worker(s): {labels}{per_dev_txt}{extra}"
                 )
             except Exception:
                 pass
@@ -6661,48 +6890,19 @@ def _evaluate_sam3_greedy_recipes_image_first(
                 progress_callback(processed, total_images)
             except Exception:
                 pass
-        max_workers = max(1, len(workers))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for idx, (img_id, path) in enumerate(image_entries):
-                if cancel_event is not None and cancel_event.is_set():
-                    break
-                worker = workers[idx % max_workers]
-                futures.append(
-                    executor.submit(
-                        worker.process_image,
-                        image_id=img_id,
-                        image_path=path,
-                        class_entries=class_entries,
-                        gt_by_image_cat=gt_by_image_cat,
-                        payload=payload,
-                        clip_head=clip_head,
-                        head_sweep_min_probs=head_sweep_min_probs,
-                        head_fixed_margin=head_fixed_margin,
-                        log_fn=log_fn,
-                        cancel_event=cancel_event,
-                    )
-                )
-            for future in as_completed(futures):
-                if cancel_event is not None and cancel_event.is_set():
-                    break
-                try:
-                    per_image = future.result()
-                except torch.cuda.OutOfMemoryError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    if log_fn:
-                        try:
-                            log_fn(f"SAM3 greedy worker failed: {exc}")
-                        except Exception:
-                            pass
-                    continue
-                processed += 1
-                if progress_callback:
-                    try:
-                        progress_callback(processed, total_images)
-                    except Exception:
-                        pass
+        # Use a shared work queue and one thread per worker. Submitting one future per image can
+        # accidentally starve some workers (threads can block on a worker lock while other GPUs sit idle).
+        work_q: "queue.Queue[Tuple[int, str]]" = queue.Queue()
+        for entry in image_entries:
+            work_q.put(entry)
+
+        agg_lock = threading.Lock()
+        progress_lock = threading.Lock()
+
+        def _merge(per_image: Optional[Dict[int, Dict[str, Any]]]) -> None:
+            if not per_image:
+                return
+            with agg_lock:
                 for cid_int, data in per_image.items():
                     dst = agg.get(cid_int)
                     if not dst:
@@ -6728,17 +6928,81 @@ def _evaluate_sam3_greedy_recipes_image_first(
                                     dst_counts[k] = int(dst_counts.get(k, 0)) + int(counts.get(k, 0))
                                 except Exception:
                                     continue
+
+        def _mark_progress() -> None:
+            nonlocal processed
+            with progress_lock:
+                processed += 1
+                if progress_callback:
+                    try:
+                        progress_callback(processed, total_images)
+                    except Exception:
+                        pass
                 if log_fn and log_every > 0 and processed % log_every == 0:
                     try:
                         log_fn(f"Processed {processed}/{total_images} val images (global) for all classes")
                     except Exception:
                         pass
+
+        def _worker_loop(worker: "_Sam3GreedyEvalWorker") -> None:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                try:
+                    img_id, path = work_q.get_nowait()
+                except queue.Empty:
+                    break
+                per_image: Optional[Dict[int, Dict[str, Any]]] = None
+                try:
+                    per_image = worker.process_image(
+                        image_id=img_id,
+                        image_path=path,
+                        class_entries=class_entries,
+                        gt_by_image_cat=gt_by_image_cat,
+                        payload=payload,
+                        per_class_overrides=per_class_overrides,
+                        clip_head=clip_head,
+                        head_sweep_min_probs=head_sweep_min_probs,
+                        head_fixed_margin=head_fixed_margin,
+                        log_fn=log_fn,
+                        cancel_event=cancel_event,
+                    )
+                except torch.cuda.OutOfMemoryError:
+                    # Propagate OOM so the caller can fail fast.
+                    if cancel_event is not None:
+                        try:
+                            cancel_event.set()
+                        except Exception:
+                            pass
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if log_fn:
+                        try:
+                            log_fn(f"SAM3 greedy worker failed: {exc}")
+                        except Exception:
+                            pass
+                    per_image = None
+                finally:
+                    try:
+                        work_q.task_done()
+                    except Exception:
+                        pass
+                _merge(per_image)
+                _mark_progress()
+
+        max_workers = max(1, len(workers))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_worker_loop, w) for w in workers]
+            for future in futures:
+                # Propagate OOM and other failures.
+                future.result()
     finally:
-        for w in workers:
-            try:
-                w.close()
-            except Exception:
-                continue
+        if owned_workers and close_workers:
+            for w in workers or []:
+                try:
+                    w.close()
+                except Exception:
+                    continue
 
     summaries: Dict[int, Dict[str, Any]] = {}
     for cid_int, data in agg.items():
@@ -6812,6 +7076,341 @@ def _evaluate_sam3_greedy_recipes_image_first(
                 "det_rate": det_rate,
             }
     return summaries
+
+
+def _score_greedy_eval_summaries(
+    summaries: Dict[int, Dict[str, Any]],
+) -> Dict[str, Any]:
+    total_gt = 0
+    matched = 0
+    fps = 0
+    preds = 0
+    for _cid, s in (summaries or {}).items():
+        if not isinstance(s, dict):
+            continue
+        try:
+            total_gt += int(s.get("gts") or 0)
+        except Exception:
+            pass
+        try:
+            matched += int(s.get("matches") or 0)
+        except Exception:
+            pass
+        try:
+            fps += int(s.get("fps") or 0)
+        except Exception:
+            pass
+        try:
+            preds += int(s.get("preds") or 0)
+        except Exception:
+            pass
+    precision = matched / max(1, matched + fps)
+    recall = matched / max(1, total_gt)
+    f1 = 0.0
+    if precision + recall > 1e-9:
+        f1 = 2.0 * precision * recall / (precision + recall)
+    score_key = (matched, -fps, float(precision))
+    return {
+        "gts": total_gt,
+        "matches": matched,
+        "fps": fps,
+        "preds": preds,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "key": score_key,
+    }
+
+
+def _beam_tune_sam3_greedy_params(
+    *,
+    class_entries: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: AgentMiningRequest,
+    clip_head: Optional[Dict[str, Any]],
+    workers: List[_Sam3GreedyEvalWorker],
+    log_fn: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[AgentMiningRequest, Dict[int, Dict[str, Any]]]:
+    """
+    Beam search (v2): tune shared greedy parameters per class on a capped subset of val images.
+
+    We keep the eval loop image-first and evaluate each proposal across all classes in one pass
+    (reusing loaded SAM3 workers), then pick the best proposal independently per class. This avoids
+    GPU load/unload churn while still producing per-class tuned knobs for recipe export.
+    """
+
+    def _log(msg: str) -> None:
+        if not log_fn:
+            return
+        try:
+            log_fn(msg)
+        except Exception:
+            return
+
+    if not val_ids:
+        return payload, {}
+
+    class_ids: List[int] = []
+    class_names: Dict[int, str] = {}
+    val_gt_by_id: Dict[int, int] = {}
+    for entry in class_entries:
+        try:
+            cid_int = int(entry.get("id"))
+        except Exception:
+            continue
+        class_ids.append(cid_int)
+        class_names[cid_int] = str(entry.get("name") or f"class_{cid_int}")
+        try:
+            val_gt_by_id[cid_int] = int(entry.get("val_gt") or 0)
+        except Exception:
+            val_gt_by_id[cid_int] = 0
+    class_ids = list(dict.fromkeys(class_ids))
+    if not class_ids:
+        return payload, {}
+
+    # Deterministic sample of validation images for the search.
+    cap = max(1, min(int(payload.beam_eval_cap), len(val_ids)))
+    sample_ids = list(val_ids)
+    if cap < len(sample_ids):
+        rng = random.Random(int(payload.split_seed))
+        rng.shuffle(sample_ids)
+        sample_ids = sample_ids[:cap]
+
+    beam_k = max(1, min(int(payload.beam_width), 16))
+    rounds = max(1, min(int(payload.beam_rounds), 10))
+    min_improve = max(0.0, min(float(payload.beam_min_improve), 1.0))
+
+    # Start at the user-provided settings, then explore neighbors.
+    base_seed = float(payload.seed_threshold)
+    base_expand = float(payload.expand_threshold)
+    base_sim = float(payload.similarity_score)
+    base_seeds = int(payload.max_visual_seeds)
+
+    def _clamp01(v: float) -> float:
+        return max(0.0, min(1.0, float(v)))
+
+    def _clamp_seeds(v: int) -> int:
+        return max(0, min(500, int(v)))
+
+    delta_thr = 0.05
+    delta_expand = 0.05
+    delta_sim = 0.05
+    delta_seeds = 10
+
+    def _make_key(seed_thr: float, expand_thr: float, sim: float, seeds: int) -> Tuple[float, float, float, int]:
+        return (round(_clamp01(seed_thr), 4), round(_clamp01(expand_thr), 4), round(_clamp01(sim), 4), _clamp_seeds(seeds))
+
+    evaluated: Dict[Tuple[float, float, float, int], Dict[int, Dict[str, Any]]] = {}
+
+    # Seed proposals (keep small).
+    proposals: List[Tuple[float, float, float, int]] = [
+        _make_key(base_seed, base_expand, base_sim, base_seeds),
+        _make_key(base_seed - delta_thr, base_expand, base_sim, base_seeds),
+        _make_key(base_seed + delta_thr, base_expand, base_sim, base_seeds),
+        _make_key(base_seed, base_expand - delta_expand, base_sim, base_seeds),
+        _make_key(base_seed, base_expand + delta_expand, base_sim, base_seeds),
+        _make_key(base_seed, base_expand, base_sim - delta_sim, base_seeds),
+        _make_key(base_seed, base_expand, base_sim + delta_sim, base_seeds),
+        _make_key(base_seed, base_expand, base_sim, base_seeds - delta_seeds),
+        _make_key(base_seed, base_expand, base_sim, base_seeds + delta_seeds),
+    ]
+    proposals = list(dict.fromkeys(proposals))
+
+    prev_best_avg_f1: Optional[float] = None
+
+    _log(
+        f"Beam search enabled (per-class): tuning on {len(sample_ids)}/{len(val_ids)} val images; "
+        f"k={beam_k} rounds={rounds} eps={min_improve}"
+    )
+
+    for round_idx in range(rounds):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        new_props = [p for p in proposals if p not in evaluated]
+        if not new_props:
+            break
+        _log(f"Beam round {round_idx + 1}/{rounds}: evaluating {len(new_props)} proposal(s)…")
+        for seed_thr, expand_thr, sim, seeds in new_props:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            variant = payload.copy(
+                update={
+                    "seed_threshold": float(seed_thr),
+                    "expand_threshold": float(expand_thr),
+                    "similarity_score": float(sim),
+                    "max_visual_seeds": int(seeds),
+                }
+            )
+            summaries = _evaluate_sam3_greedy_recipes_image_first(
+                class_entries=class_entries,
+                val_ids=sample_ids,
+                images=images,
+                gt_by_image_cat=gt_by_image_cat,
+                payload=variant,
+                clip_head=clip_head,
+                cancel_event=cancel_event,
+                log_every=0,
+                log_fn=None,
+                progress_callback=None,
+                workers=workers,
+                    close_workers=False,
+                )
+            evaluated[(seed_thr, expand_thr, sim, seeds)] = summaries
+
+        # Rank per-class (best proposal per class) based on lexicographic key.
+        best_by_class: Dict[int, Tuple[Tuple[float, float, float, int], Tuple[int, int, float], float]] = {}
+        for cid in class_ids:
+            scored_for_class: List[Tuple[Tuple[float, float, float, int], Tuple[int, int, float], float]] = []
+            for prop, summaries in evaluated.items():
+                s = summaries.get(int(cid)) if isinstance(summaries, dict) else None
+                if not isinstance(s, dict):
+                    continue
+                try:
+                    matched = int(s.get("matches") or 0)
+                except Exception:
+                    matched = 0
+                try:
+                    fps = int(s.get("fps") or 0)
+                except Exception:
+                    fps = 0
+                try:
+                    precision = float(s.get("precision"))
+                except Exception:
+                    precision = matched / max(1, matched + fps)
+                try:
+                    recall = float(s.get("recall"))
+                except Exception:
+                    gts = int(s.get("gts") or 0)
+                    recall = matched / gts if gts else 0.0
+                f1 = 0.0
+                if precision + recall > 1e-9:
+                    f1 = 2.0 * precision * recall / (precision + recall)
+                key = (matched, -fps, float(precision))
+                scored_for_class.append((prop, key, float(f1)))
+            if not scored_for_class:
+                continue
+            scored_for_class.sort(key=lambda x: x[1], reverse=True)
+            best_by_class[int(cid)] = scored_for_class[0]
+
+        if not best_by_class:
+            _log("Beam search produced no valid per-class scores; falling back to Greedy settings.")
+            break
+
+        # Compute an aggregate progress metric for early-stop (average F1 across classes with scores).
+        avg_f1 = 0.0
+        try:
+            avg_f1 = float(sum(v[2] for v in best_by_class.values()) / max(1, len(best_by_class)))
+        except Exception:
+            avg_f1 = 0.0
+        _log(
+            f"Beam aggregate: avg_F1={avg_f1:.3f} across {len(best_by_class)}/{len(class_ids)} classes "
+            f"({len(evaluated)} total proposal(s) evaluated)"
+        )
+        if prev_best_avg_f1 is not None and (avg_f1 - prev_best_avg_f1) < min_improve:
+            _log("Beam early-stop: average improvement below ε.")
+            break
+        prev_best_avg_f1 = avg_f1
+
+        # Propose neighbors around top-k (shrink step each round).
+        delta_thr *= 0.5
+        delta_expand *= 0.5
+        delta_sim *= 0.5
+        delta_seeds = max(1, int(delta_seeds * 0.5))
+        next_props: List[Tuple[float, float, float, int]] = []
+        # Generate neighbors around a small set of "anchor" proposals (bounded by beam_k).
+        votes: Dict[Tuple[float, float, float, int], Dict[str, int]] = {}
+        for cid, best in best_by_class.items():
+            prop = best[0]
+            row = votes.get(prop)
+            if row is None:
+                row = {"votes": 0, "gt": 0}
+                votes[prop] = row
+            row["votes"] += 1
+            row["gt"] += int(val_gt_by_id.get(int(cid), 0) or 0)
+        anchors = sorted(votes.items(), key=lambda kv: (kv[1].get("votes", 0), kv[1].get("gt", 0)), reverse=True)
+        anchor_props = [p for p, _info in anchors[:beam_k]] if anchors else []
+        for seed_thr, expand_thr, sim, seeds in sorted(anchor_props):
+            # Axis-aligned neighbors only (keeps proposal count bounded).
+            next_props.extend(
+                [
+                    _make_key(seed_thr - delta_thr, expand_thr, sim, int(seeds)),
+                    _make_key(seed_thr + delta_thr, expand_thr, sim, int(seeds)),
+                    _make_key(seed_thr, expand_thr - delta_expand, sim, int(seeds)),
+                    _make_key(seed_thr, expand_thr + delta_expand, sim, int(seeds)),
+                    _make_key(seed_thr, expand_thr, sim - delta_sim, int(seeds)),
+                    _make_key(seed_thr, expand_thr, sim + delta_sim, int(seeds)),
+                    _make_key(seed_thr, expand_thr, sim, int(seeds) - delta_seeds),
+                    _make_key(seed_thr, expand_thr, sim, int(seeds) + delta_seeds),
+                ]
+            )
+        proposals = list(dict.fromkeys(next_props))
+
+    if not evaluated:
+        _log("Beam search produced no valid proposals; falling back to Greedy settings.")
+        return payload, {}
+
+    per_class_overrides: Dict[int, Dict[str, Any]] = {}
+    for cid in class_ids:
+        best: Optional[Tuple[Tuple[float, float, float, int], Tuple[int, int, float], float]] = None
+        best_key: Optional[Tuple[int, int, float]] = None
+        for prop, summaries in evaluated.items():
+            s = summaries.get(int(cid)) if isinstance(summaries, dict) else None
+            if not isinstance(s, dict):
+                continue
+            try:
+                matched = int(s.get("matches") or 0)
+            except Exception:
+                matched = 0
+            try:
+                fps = int(s.get("fps") or 0)
+            except Exception:
+                fps = 0
+            try:
+                precision = float(s.get("precision"))
+            except Exception:
+                precision = matched / max(1, matched + fps)
+            key = (matched, -fps, float(precision))
+            if best_key is None or key > best_key:
+                best_key = key
+                try:
+                    recall = float(s.get("recall"))
+                except Exception:
+                    gts = int(s.get("gts") or 0)
+                    recall = matched / gts if gts else 0.0
+                f1 = 0.0
+                if precision + recall > 1e-9:
+                    f1 = 2.0 * precision * recall / (precision + recall)
+                best = (prop, key, float(f1))
+        if best is None:
+            continue
+        seed_thr, expand_thr, sim, seeds = best[0]
+        per_class_overrides[int(cid)] = {
+            "seed_threshold": float(seed_thr),
+            "expand_threshold": float(expand_thr),
+            "similarity_score": float(sim),
+            "max_visual_seeds": int(seeds),
+        }
+
+    # Log the final per-class selection (kept concise).
+    if per_class_overrides:
+        for cid in class_ids:
+            ov = per_class_overrides.get(int(cid))
+            if not isinstance(ov, dict):
+                continue
+            name = class_names.get(int(cid)) or f"class_{cid}"
+            try:
+                _log(
+                    f"Beam selected for {name} (id={int(cid)}): seed_thr={float(ov['seed_threshold']):.3f} "
+                    f"expand_thr={float(ov['expand_threshold']):.3f} sim={float(ov['similarity_score']):.3f} "
+                    f"max_seeds={int(ov['max_visual_seeds'])}"
+                )
+            except Exception:
+                continue
+
+    return payload, per_class_overrides
 
 
 def _detections_to_eval_cache(
@@ -7224,7 +7823,9 @@ def _collect_agent_mining_detections(
 def _build_sam3_text_processor_for_device(device: torch.device) -> Tuple[Any, Any]:
     if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None or Sam3ImageProcessor is None:
         raise RuntimeError(f"sam3_text_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}")
-    device_str = "cuda" if device.type == "cuda" else "cpu"
+    # Use the full device string (e.g. "cuda:1") so multi-GPU mining doesn't accidentally pin all
+    # workers to cuda:0 during model construction.
+    device_str = str(device) if device.type == "cuda" else "cpu"
     try:
         model = build_sam3_image_model(
             checkpoint_path=active_sam3_checkpoint,
@@ -9959,6 +10560,20 @@ class AgentMiningRequest(BaseModel):
     split_seed: int = 42
     reuse_split: bool = True
 
+    # Search strategy. Greedy is fastest; beam tries more parameter combinations and can be much slower.
+    search_mode: Literal["greedy", "beam"] = "greedy"
+    beam_width: int = Field(4, ge=1, le=16)
+    beam_rounds: int = Field(3, ge=1, le=10)
+    beam_min_improve: float = Field(0.005, ge=0.0, le=1.0)
+    beam_eval_cap: int = Field(48, ge=1, le=50_000)
+    reuse_cache: bool = True
+
+    # Mining concurrency controls (SAM3 workers).
+    # By default we fan out across all CUDA devices; this controls how many workers we run per device.
+    max_workers_per_device: int = Field(1, ge=1, le=8)
+    # Optional global cap on the total number of workers (after per-device expansion).
+    max_workers: Optional[int] = Field(None, ge=1, le=256)
+
     # Prompt mining (GPT-OSS).
     text_prompts_by_class: Optional[Dict[int, List[str]]] = None
     prompt_llm_max_prompts: int = Field(10, ge=0, le=50)
@@ -10004,7 +10619,7 @@ class AgentMiningRequest(BaseModel):
     dedupe_iou: float = Field(0.5, ge=0.0, le=1.0)
     mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
     similarity_score: float = Field(0.25, ge=0.0, le=1.0)
-    max_results: int = Field(100, ge=1, le=5000)
+    max_results: int = Field(1000, ge=1, le=5000)
     min_size: int = Field(0, ge=0, le=10_000)
     simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
 
@@ -12222,13 +12837,20 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
         _log(
             "Config: "
+            f"mode={payload.search_mode} "
             f"seed_thr={payload.seed_threshold} expand_thr={payload.expand_threshold} sim_floor={payload.similarity_score} "
             f"pos_crops={payload.positives_per_class} "
             f"neg_crops={payload.max_negatives_per_class if payload.use_negative_exemplars else 0} "
             f"neg_strength={payload.negative_strength} "
             f"max_seeds={payload.max_visual_seeds} seed_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
             f"mask_thr={payload.mask_threshold} max_results={payload.max_results} iou_eval={payload.iou_threshold} "
-            f"cluster_exemplars={payload.cluster_exemplars} llm_prompts={payload.prompt_llm_max_prompts}"
+            f"cluster_exemplars={payload.cluster_exemplars} llm_prompts={payload.prompt_llm_max_prompts} "
+            f"workers_per_gpu={getattr(payload, 'max_workers_per_device', 1)}"
+            + (
+                f" beam(k={payload.beam_width}, rounds={payload.beam_rounds}, eps={payload.beam_min_improve}, cap={payload.beam_eval_cap})"
+                if payload.search_mode == "beam"
+                else ""
+            )
         )
 
         # Optional pretrained CLIP head (LogReg) used as an additional filter during mining.
@@ -12503,6 +13125,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             job.progress = max(job.progress, 0.07 + 0.03 * (class_idx / max(1, total_classes)))
             job.updated_at = time.time()
 
+        eval_payload = payload
+        per_class_overrides: Optional[Dict[int, Dict[str, Any]]] = None
         if _cancelled():
             summaries: Dict[int, Dict[str, Any]] = {}
         else:
@@ -12521,19 +13145,51 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 job.message = f"Evaluating recipes: {done}/{total} val images"
                 job.updated_at = time.time()
 
-            summaries = _evaluate_sam3_greedy_recipes_image_first(
-                class_entries=class_entries,
-                val_ids=val_ids,
-                images=images,
-                gt_by_image_cat=gt_by_image_cat,
-                payload=payload,
-                clip_head=clip_head,
-                cancel_event=job.cancel_event,
-                log_every=eval_log_every,
-                log_fn=_log,
-                progress_callback=_on_eval_progress,
-            )
-            job.progress = max(job.progress, 0.98)
+            eval_workers: Optional[List[_Sam3GreedyEvalWorker]] = None
+            try:
+                eval_workers = _build_sam3_greedy_eval_workers(eval_payload, log_fn=_log)
+                if payload.search_mode == "beam" and not _cancelled():
+                    job.message = "Beam search: tuning parameters (slow)…"
+                    job.updated_at = time.time()
+                    job.progress = max(job.progress, 0.12)
+                    eval_payload, per_class_overrides = _beam_tune_sam3_greedy_params(
+                        class_entries=class_entries,
+                        val_ids=val_ids,
+                        images=images,
+                        gt_by_image_cat=gt_by_image_cat,
+                        payload=payload,
+                        clip_head=clip_head,
+                        workers=eval_workers,
+                        log_fn=_log,
+                        cancel_event=job.cancel_event,
+                    )
+                    job.progress = max(job.progress, 0.18)
+                    job.message = "Evaluating recipes on validation split (global)…"
+                    job.updated_at = time.time()
+
+                summaries = _evaluate_sam3_greedy_recipes_image_first(
+                    class_entries=class_entries,
+                    val_ids=val_ids,
+                    images=images,
+                    gt_by_image_cat=gt_by_image_cat,
+                    payload=eval_payload,
+                    per_class_overrides=per_class_overrides,
+                    clip_head=clip_head,
+                    cancel_event=job.cancel_event,
+                    log_every=eval_log_every,
+                    log_fn=_log,
+                    progress_callback=_on_eval_progress,
+                    workers=eval_workers,
+                    close_workers=False,
+                )
+                job.progress = max(job.progress, 0.98)
+            finally:
+                if eval_workers:
+                    for w in eval_workers:
+                        try:
+                            w.close()
+                        except Exception:
+                            continue
 
         results: List[Dict[str, Any]] = []
         for entry in class_entries:
@@ -12569,6 +13225,39 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 except Exception:
                     pass
 
+            # Per-class tuned greedy params (beam search). Falls back to global payload values.
+            tuned_seed_thr = float(eval_payload.seed_threshold)
+            tuned_expand_thr = float(eval_payload.expand_threshold)
+            tuned_sim = float(eval_payload.similarity_score)
+            tuned_max_seeds = int(eval_payload.max_visual_seeds)
+            if per_class_overrides and isinstance(per_class_overrides, dict):
+                ov = per_class_overrides.get(int(cid))
+                if isinstance(ov, dict):
+                    try:
+                        if ov.get("seed_threshold") is not None:
+                            tuned_seed_thr = float(ov.get("seed_threshold"))
+                    except Exception:
+                        pass
+                    try:
+                        if ov.get("expand_threshold") is not None:
+                            tuned_expand_thr = float(ov.get("expand_threshold"))
+                    except Exception:
+                        pass
+                    try:
+                        if ov.get("similarity_score") is not None:
+                            tuned_sim = float(ov.get("similarity_score"))
+                    except Exception:
+                        pass
+                    try:
+                        if ov.get("max_visual_seeds") is not None:
+                            tuned_max_seeds = int(ov.get("max_visual_seeds"))
+                    except Exception:
+                        pass
+            tuned_seed_thr = float(max(0.0, min(1.0, tuned_seed_thr)))
+            tuned_expand_thr = float(max(0.0, min(1.0, tuned_expand_thr)))
+            tuned_sim = float(max(0.0, min(1.0, tuned_sim)))
+            tuned_max_seeds = max(0, int(tuned_max_seeds))
+
             recipe: Dict[str, Any] = {
                 "mode": "sam3_greedy",
                 "text_prompts": prompts_for_class,
@@ -12578,16 +13267,16 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     "use_clip_fp_guard": bool(crop_banks_enabled),
                     "use_negative_exemplars": bool(crop_banks_enabled and payload.use_negative_exemplars and negatives),
                     "negative_strength": float(payload.negative_strength) if crop_banks_enabled else 0.0,
-                    "similarity_score": float(payload.similarity_score) if crop_banks_enabled else 0.0,
-                    "seed_threshold": float(payload.seed_threshold),
-                    "expand_threshold": float(payload.expand_threshold),
-                    "max_visual_seeds": int(payload.max_visual_seeds),
-                    "seed_dedupe_iou": float(payload.seed_dedupe_iou),
-                    "dedupe_iou": float(payload.dedupe_iou),
-                    "mask_threshold": float(payload.mask_threshold),
-                    "min_size": int(payload.min_size),
-                    "simplify_epsilon": float(payload.simplify_epsilon),
-                    "max_results": int(payload.max_results),
+                    "similarity_score": float(tuned_sim) if crop_banks_enabled else 0.0,
+                    "seed_threshold": float(tuned_seed_thr),
+                    "expand_threshold": float(tuned_expand_thr),
+                    "max_visual_seeds": int(tuned_max_seeds),
+                    "seed_dedupe_iou": float(eval_payload.seed_dedupe_iou),
+                    "dedupe_iou": float(eval_payload.dedupe_iou),
+                    "mask_threshold": float(eval_payload.mask_threshold),
+                    "min_size": int(eval_payload.min_size),
+                    "simplify_epsilon": float(eval_payload.simplify_epsilon),
+                    "max_results": int(eval_payload.max_results),
                 },
                 "summary": summary,
             }
@@ -12626,8 +13315,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             "dataset_id": payload.dataset_id,
             "split": {"train": len(train_ids), "val": len(val_ids), "seed": payload.split_seed, "val_percent": payload.val_percent},
             "classes": results,
-            "config": payload.dict(),
-            "note": "Agent mining completed (sam3_greedy mode).",
+            "config": {**eval_payload.dict(), "per_class_overrides": per_class_overrides or {}},
+            "note": f"Agent mining completed ({eval_payload.search_mode} mode).",
         }
         if _cancelled():
             job.status = "cancelled"
@@ -12794,7 +13483,7 @@ class AgentApplyRequest(BaseModel):
     mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
     min_size: int = Field(0, ge=0, le=10_000)
     simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
-    max_results: int = Field(100, ge=1, le=5000)
+    max_results: int = Field(1000, ge=1, le=5000)
     override_class_id: Optional[int] = Field(None, ge=0)
     override_class_name: Optional[str] = None
 
@@ -12908,7 +13597,7 @@ class AgentApplyImageRequest(BaseModel):
     mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
     min_size: int = Field(0, ge=0, le=10_000)
     simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
-    max_results: int = Field(100, ge=1, le=5000)
+    max_results: int = Field(1000, ge=1, le=5000)
     override_class_id: Optional[int] = Field(None, ge=0)
     override_class_name: Optional[str] = None
 

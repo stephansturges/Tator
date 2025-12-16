@@ -1256,17 +1256,25 @@ const sam3TrainState = {
         results: null,
         message: null,
     };
-    const agentElements = {
-        datasetSelect: null,
-        datasetRefresh: null,
-        datasetSummary: null,
-        valPercent: null,
-        splitSeed: null,
-        reuseSplit: null,
-        iouThreshold: null,
-        seedThreshold: null,
-        expandThreshold: null,
-        maxVisualSeeds: null,
+	    const agentElements = {
+	        datasetSelect: null,
+	        datasetRefresh: null,
+	        datasetSummary: null,
+	        valPercent: null,
+	        splitSeed: null,
+	        reuseSplit: null,
+	        workersPerGpu: null,
+	        searchMode: null,
+	        beamOptions: null,
+	        beamWidth: null,
+	        beamRounds: null,
+	        beamMinImprove: null,
+	        beamEvalCap: null,
+	        beamReuseCache: null,
+	        iouThreshold: null,
+	        seedThreshold: null,
+	        expandThreshold: null,
+	        maxVisualSeeds: null,
         seedDedupeIou: null,
         dedupeIou: null,
         maskThreshold: null,
@@ -12016,17 +12024,31 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-		    function parseAgentPayload() {
+	    function parseAgentPayload() {
 	        const datasetId = agentElements.datasetSelect?.value;
 	        if (!datasetId) {
 	            setAgentStatus("Select a dataset.", "warn");
 	            return null;
 	        }
 
+	        const searchMode =
+	            agentElements.searchMode && agentElements.searchMode.value === "beam" ? "beam" : "greedy";
+	        const beamWidthRaw = readNumberInput(agentElements.beamWidth, { integer: true });
+	        const beamWidth = Number.isFinite(beamWidthRaw) ? Math.max(1, Math.min(16, beamWidthRaw)) : 4;
+	        const beamRoundsRaw = readNumberInput(agentElements.beamRounds, { integer: true });
+	        const beamRounds = Number.isFinite(beamRoundsRaw) ? Math.max(1, Math.min(10, beamRoundsRaw)) : 3;
+	        const beamMinImproveRaw = readNumberInput(agentElements.beamMinImprove, { integer: false });
+	        const beamMinImprove = Number.isFinite(beamMinImproveRaw) ? Math.max(0, Math.min(1, beamMinImproveRaw)) : 0.005;
+	        const beamEvalCapRaw = readNumberInput(agentElements.beamEvalCap, { integer: true });
+	        const beamEvalCap = Number.isFinite(beamEvalCapRaw) ? Math.max(1, Math.min(50000, beamEvalCapRaw)) : 48;
+	        const beamReuseCache = !!(agentElements.beamReuseCache && agentElements.beamReuseCache.checked);
+
 	        const valPctRaw = readNumberInput(agentElements.valPercent, { integer: false });
 	        const valPercent = Number.isFinite(valPctRaw) ? Math.max(5, Math.min(95, valPctRaw)) / 100 : 0.3;
 	        const splitSeed = readNumberInput(agentElements.splitSeed, { integer: true });
 	        const reuseSplit = !!(agentElements.reuseSplit && agentElements.reuseSplit.checked);
+	        const workersPerGpuRaw = readNumberInput(agentElements.workersPerGpu, { integer: true });
+	        const workersPerGpu = Number.isFinite(workersPerGpuRaw) ? Math.max(1, Math.min(8, workersPerGpuRaw)) : 1;
 
 	        const iouThresholdRaw = readNumberInput(agentElements.iouThreshold, { integer: false });
 	        const iouThreshold = Number.isFinite(iouThresholdRaw) ? Math.max(0, Math.min(1, iouThresholdRaw)) : 0.5;
@@ -12047,7 +12069,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const similarityScoreRaw = readNumberInput(agentElements.similarityScore, { integer: false });
 	        const similarityScore = Number.isFinite(similarityScoreRaw) ? Math.max(0, Math.min(1, similarityScoreRaw)) : 0.25;
 	        const maxResultsRaw = readNumberInput(agentElements.maxResults, { integer: true });
-	        const maxResults = Number.isFinite(maxResultsRaw) ? Math.max(1, Math.min(5000, maxResultsRaw)) : 100;
+	        const maxResults = Number.isFinite(maxResultsRaw) ? Math.max(1, Math.min(5000, maxResultsRaw)) : 1000;
 	        const minSizeRaw = readNumberInput(agentElements.minSize, { integer: true });
 	        const minSize = Number.isFinite(minSizeRaw) ? Math.max(0, Math.min(10000, minSizeRaw)) : 0;
 	        const simplifyEpsRaw = readNumberInput(agentElements.simplifyEps, { integer: false });
@@ -12127,9 +12149,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 	        return {
 	            dataset_id: datasetId,
+	            search_mode: searchMode,
+	            beam_width: beamWidth,
+	            beam_rounds: beamRounds,
+	            beam_min_improve: beamMinImprove,
+	            beam_eval_cap: beamEvalCap,
+	            reuse_cache: beamReuseCache,
 	            val_percent: valPercent,
 	            split_seed: Number.isFinite(splitSeed) ? splitSeed : 42,
 	            reuse_split: reuseSplit,
+	            max_workers_per_device: workersPerGpu,
 	            iou_threshold: iouThreshold,
 
 	            prompt_llm_max_prompts: promptMaxPrompts,
@@ -12371,13 +12400,21 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	    }
 
-    function initAgentMiningUi() {
-        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
+	    function initAgentMiningUi() {
+	        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
 	        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
 	        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
 	        agentElements.valPercent = document.getElementById("agentValPercent");
 	        agentElements.splitSeed = document.getElementById("agentSplitSeed");
 	        agentElements.reuseSplit = document.getElementById("agentReuseSplit");
+	        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
+	        agentElements.searchMode = document.getElementById("agentSearchMode");
+	        agentElements.beamOptions = document.getElementById("agentBeamOptions");
+	        agentElements.beamWidth = document.getElementById("agentBeamWidth");
+	        agentElements.beamRounds = document.getElementById("agentBeamRounds");
+	        agentElements.beamMinImprove = document.getElementById("agentBeamMinImprove");
+	        agentElements.beamEvalCap = document.getElementById("agentBeamEvalCap");
+	        agentElements.beamReuseCache = document.getElementById("agentBeamReuseCache");
 	        agentElements.iouThreshold = document.getElementById("agentIouThreshold");
 	        agentElements.seedThreshold = document.getElementById("agentSeedThreshold");
 	        agentElements.expandThreshold = document.getElementById("agentExpandThreshold");
@@ -12433,6 +12470,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
+	        const syncBeamUi = () => {
+	            const isBeam = !!(agentElements.searchMode && agentElements.searchMode.value === "beam");
+	            if (agentElements.beamOptions) agentElements.beamOptions.style.display = isBeam ? "block" : "none";
+	        };
+	        if (agentElements.searchMode) agentElements.searchMode.addEventListener("change", syncBeamUi);
+	        syncBeamUi();
 	        stopAgentPoll();
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());

@@ -917,15 +917,53 @@
 			                                <label for="agentReuseSplit">Reuse cached split<span class="help-icon" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">?</span></label>
 			                                <input type="checkbox" id="agentReuseSplit" checked />
 			                            </div>
-			                            <div>
-			                                <label for="agentIouThreshold">Match overlap (Eval IoU)<span class="help-icon" title="Used only for scoring (evaluation), not for running the recipe.&#10;IoU = how much the predicted box overlaps the ground-truth box (0–1).&#10;0.5 ≈ “at least about half overlap”.&#10;Higher = stricter scoring (coverage may look lower).">?</span></label>
-			                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" />
-			                            </div>
-			                        </div>
-			                        <div class="training-grid">
-			                            <div>
-			                                <label for="agentSeedThreshold">Seed text threshold<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
-			                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" />
+				                            <div>
+				                                <label for="agentIouThreshold">Match overlap (Eval IoU)<span class="help-icon" title="Used only for scoring (evaluation), not for running the recipe.&#10;IoU = how much the predicted box overlaps the ground-truth box (0–1).&#10;0.5 ≈ “at least about half overlap”.&#10;Higher = stricter scoring (coverage may look lower).">?</span></label>
+				                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" />
+				                            </div>
+					                            <div>
+					                                <label for="agentWorkersPerGpu">Predictors per GPU<span class="help-icon" title="How many SAM3 workers to run per GPU during mining.&#10;1 = one worker per GPU (safest).&#10;Higher can speed up mining if you have VRAM headroom, but uses more GPU memory and can trigger CUDA OOM.">?</span></label>
+					                                <input type="number" id="agentWorkersPerGpu" min="1" max="8" value="1" />
+					                            </div>
+					                            <div>
+					                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Greedy is the default and is fastest.&#10;Beam search tries many parameter combinations to improve coverage/precision, so it is usually MUCH slower.&#10;Start with Test mode first.">?</span></label>
+					                                <select id="agentSearchMode">
+					                                    <option value="greedy" selected>Greedy (fast)</option>
+					                                    <option value="beam">Beam search (slower)</option>
+					                                </select>
+					                            </div>
+					                        </div>
+					                        <div id="agentBeamOptions" class="training-card" style="display: none; margin-bottom: 12px;">
+					                            <div class="training-card__body">
+					                                <div class="training-message warn" style="margin-bottom: 10px;">Beam search is slower than Greedy because it runs many trial evaluations. Use Test mode first.</div>
+					                                <div class="training-grid">
+					                                    <div>
+					                                        <label for="agentBeamWidth">Beam width (k)<span class="help-icon" title="How many best parameter settings we keep each round.&#10;Higher = more thorough, slower.">?</span></label>
+					                                        <input type="number" id="agentBeamWidth" min="1" max="16" value="4" />
+					                                    </div>
+					                                    <div>
+					                                        <label for="agentBeamRounds">Beam rounds<span class="help-icon" title="How many refinement rounds to run.&#10;More rounds = slower, can find better settings.">?</span></label>
+					                                        <input type="number" id="agentBeamRounds" min="1" max="10" value="3" />
+					                                    </div>
+					                                    <div>
+					                                        <label for="agentBeamMinImprove">Min improvement (ε)<span class="help-icon" title="Early-stop threshold. If the score improves by less than this, we stop searching.&#10;Smaller = more thorough, slower.">?</span></label>
+					                                        <input type="number" id="agentBeamMinImprove" step="0.001" min="0" max="1" value="0.005" />
+					                                    </div>
+					                                    <div>
+					                                        <label for="agentBeamEvalCap">Beam eval cap (images)<span class="help-icon" title="How many validation images to use during the search.&#10;Lower = faster but noisier. Higher = slower but more reliable.">?</span></label>
+					                                        <input type="number" id="agentBeamEvalCap" min="1" value="48" />
+					                                    </div>
+					                                    <div class="training-field training-field--inline">
+					                                        <label for="agentBeamReuseCache">Reuse trial evals<span class="help-icon" title="Skip repeating identical trial parameters within this run.">?</span></label>
+					                                        <input type="checkbox" id="agentBeamReuseCache" checked />
+					                                    </div>
+					                                </div>
+					                            </div>
+					                        </div>
+					                        <div class="training-grid">
+					                            <div>
+					                                <label for="agentSeedThreshold">Seed text threshold<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
+					                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" />
 			                            </div>
 			                            <div>
 			                                <label for="agentExpandThreshold">Expand threshold<span class="help-icon" title="Second pass (optional): after choosing seed boxes, we run a refine/expand pass from those boxes.&#10;This threshold controls how strict that refine pass is.&#10;Higher = fewer but cleaner results.">?</span></label>
@@ -955,7 +993,7 @@
 			                            </div>
 			                            <div>
 			                                <label for="agentMaxResults">Max dets/image<span class="help-icon" title="Safety cap: maximum number of detections kept per image per prompt/pass.&#10;Prevents runaway outputs on noisy prompts.&#10;If too low, crowded images may be clipped.">?</span></label>
-			                                <input type="number" id="agentMaxResults" min="1" value="100" />
+			                                <input type="number" id="agentMaxResults" min="1" value="1000" />
 			                            </div>
 			                            <div>
 			                                <label for="agentMinSize">Min area (px²)<span class="help-icon" title="Drop detections smaller than this pixel area.&#10;Useful to remove tiny specks.&#10;0 keeps all (including very small objects).">?</span></label>
@@ -1080,9 +1118,10 @@
 		                        <details class="training-card" open>
 		                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
 		                            <div class="training-card__body">
-		                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
-		                                <p><strong>What “Greedy” means here:</strong> We build one “wide net” recipe per class (text → filter → refine → de-dupe). It keeps anything that passes the filters instead of doing a complex multi-step search over many combinations.</p>
-		                                <ol>
+			                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
+			                                <p><strong>What “Greedy” means here:</strong> We build one “wide net” recipe per class (text → filter → refine → de-dupe). It keeps anything that passes the filters instead of doing a complex multi-step search over many combinations.</p>
+			                                <p><strong>What “Beam search” means here:</strong> We repeatedly try different parameter settings and keep the best few each round. This is more thorough than Greedy, but it is usually MUCH slower.</p>
+			                                <ol>
 		                                    <li><strong>Split:</strong> We split your dataset into “train” (to pick example crops) and “val” (to test how good the recipe is). The split is repeatable using the seed.</li>
 		                                    <li><strong>Words:</strong> We try the class name (and optional extra phrases) to ask SAM3 to propose candidate boxes.</li>
 		                                    <li><strong>Example crops (optional):</strong> If you are using crop-bank mode, we save a small set of example cut-outs of the object from your dataset (e.g., a few cars of different sizes/angles). If you select a pretrained CLIP head, we skip crops and use the head instead.</li>

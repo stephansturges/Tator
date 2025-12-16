@@ -12043,14 +12043,21 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	    }
 
     function syncAgentClipHeadControls() {
-        const clipOn = !!(agentElements.clipGuard && agentElements.clipGuard.checked);
         const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
-        if (agentElements.clipHeadSelect) {
-            agentElements.clipHeadSelect.disabled = !clipOn;
-        }
-        const enableParams = clipOn && hasHead;
-        if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !enableParams;
-        if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !enableParams;
+
+        if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !hasHead;
+        if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !hasHead;
+
+        const disableCropBank = hasHead;
+        if (agentElements.exemplars) agentElements.exemplars.disabled = disableCropBank;
+        if (agentElements.exemplarPoolMode) agentElements.exemplarPoolMode.disabled = disableCropBank;
+        if (agentElements.exemplarPoolValue) agentElements.exemplarPoolValue.disabled = disableCropBank;
+        if (agentElements.clusterExemplars) agentElements.clusterExemplars.disabled = disableCropBank;
+        if (agentElements.clipGuard) agentElements.clipGuard.disabled = disableCropBank;
+        if (agentElements.similarityScore) agentElements.similarityScore.disabled = disableCropBank;
+        if (agentElements.useNegExemplars) agentElements.useNegExemplars.disabled = disableCropBank;
+        if (agentElements.maxNegExemplars) agentElements.maxNegExemplars.disabled = disableCropBank;
+        if (agentElements.negStrength) agentElements.negStrength.disabled = disableCropBank;
     }
 
     async function loadAgentClipClassifiers() {
@@ -12122,7 +12129,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const simplifyEps = Number.isFinite(simplifyEpsRaw) ? Math.max(0, Math.min(1000, simplifyEpsRaw)) : 0.0;
 
 	        const positivesRaw = readNumberInput(agentElements.exemplars, { integer: true });
-	        const positivesPerClass = Number.isFinite(positivesRaw) ? Math.max(0, Math.min(500, positivesRaw)) : 20;
+	        let positivesPerClass = Number.isFinite(positivesRaw) ? Math.max(0, Math.min(500, positivesRaw)) : 20;
 	        const exemplarPoolMode =
 	            agentElements.exemplarPoolMode && agentElements.exemplarPoolMode.value === "count" ? "count" : "percent";
 	        const exemplarPoolValueRaw = readNumberInput(agentElements.exemplarPoolValue, { integer: true });
@@ -12137,18 +12144,28 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const promptMaxPromptsRaw = readNumberInput(agentElements.qwenMaxPrompts, { integer: true });
 	        const promptMaxPrompts = Number.isFinite(promptMaxPromptsRaw) ? Math.max(0, Math.min(50, promptMaxPromptsRaw)) : 0;
 
-	        const useClipGuard = !!(agentElements.clipGuard && agentElements.clipGuard.checked);
+	        let useClipGuard = !!(agentElements.clipGuard && agentElements.clipGuard.checked);
 	        const clipHeadPathRaw = agentElements.clipHeadSelect?.value || "";
-	        const clipHeadClassifierPath = useClipGuard && clipHeadPathRaw ? clipHeadPathRaw : null;
+	        const clipHeadClassifierPath = clipHeadPathRaw ? clipHeadPathRaw : null;
 	        const clipHeadMinProbRaw = readNumberInput(agentElements.clipHeadMinProb, { integer: false });
 	        const clipHeadMinProb = Number.isFinite(clipHeadMinProbRaw) ? Math.max(0, Math.min(1, clipHeadMinProbRaw)) : 0.5;
 	        const clipHeadMarginRaw = readNumberInput(agentElements.clipHeadMargin, { integer: false });
 	        const clipHeadMargin = Number.isFinite(clipHeadMarginRaw) ? Math.max(0, Math.min(1, clipHeadMarginRaw)) : 0.0;
-	        const useNegExemplars = !!(agentElements.useNegExemplars && agentElements.useNegExemplars.checked);
+	        let useNegExemplars = !!(agentElements.useNegExemplars && agentElements.useNegExemplars.checked);
 	        const maxNegExemplarsRaw = readNumberInput(agentElements.maxNegExemplars, { integer: true });
-	        const maxNegExemplars = Number.isFinite(maxNegExemplarsRaw) ? Math.max(0, Math.min(256, maxNegExemplarsRaw)) : 25;
+	        let maxNegExemplars = Number.isFinite(maxNegExemplarsRaw) ? Math.max(0, Math.min(256, maxNegExemplarsRaw)) : 25;
 	        const negStrengthRaw = readNumberInput(agentElements.negStrength, { integer: false });
-	        const negStrength = Number.isFinite(negStrengthRaw) ? Math.max(0, Math.min(5, negStrengthRaw)) : 0.5;
+	        let negStrength = Number.isFinite(negStrengthRaw) ? Math.max(0, Math.min(5, negStrengthRaw)) : 0.5;
+
+	        const hasClipHead = !!clipHeadClassifierPath;
+	        if (hasClipHead) {
+	            // When a pretrained CLIP head is selected, we don't use crop-bank exemplars/negatives.
+	            useClipGuard = false;
+	            positivesPerClass = 0;
+	            useNegExemplars = false;
+	            maxNegExemplars = 0;
+	            negStrength = 0;
+	        }
 
 	        const classesRaw = agentElements.classesInput?.value || "";
 	        const classes =
@@ -12209,10 +12226,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            clip_head_min_prob: clipHeadMinProb,
 	            clip_head_margin: clipHeadMargin,
 
-	            positives_per_class: positivesPerClass,
-	            exemplar_candidate_mode: exemplarPoolMode,
-	            exemplar_candidate_value: exemplarPoolValue,
-	            cluster_exemplars: !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
+		            positives_per_class: positivesPerClass,
+		            exemplar_candidate_mode: exemplarPoolMode,
+		            exemplar_candidate_value: exemplarPoolValue,
+		            cluster_exemplars: clipHeadClassifierPath ? false : !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
 	            use_clip_fp_guard: useClipGuard,
 	            use_negative_exemplars: useNegExemplars,
 	            max_negatives_per_class: maxNegExemplars,

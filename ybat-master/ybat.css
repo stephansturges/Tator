@@ -1228,6 +1228,36 @@ details.training-card > summary::marker {
     color: #334155;
 }
 
+.help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-left: 6px;
+    border-radius: 999px;
+    border: 1px solid #94a3b8;
+    color: #475569;
+    font-size: 11px;
+    font-weight: 800;
+    line-height: 1;
+    cursor: help;
+    user-select: none;
+    vertical-align: middle;
+}
+
+.training-form-section input:disabled,
+.training-form-section select:disabled,
+.training-form-section textarea:disabled,
+.training-status-section input:disabled,
+.training-status-section select:disabled,
+.training-status-section textarea:disabled {
+    background: #e2e8f0;
+    color: #64748b;
+    cursor: not-allowed;
+    opacity: 0.75;
+}
+
 .training-field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-field select,
 .training-field-double input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),

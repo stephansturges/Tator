@@ -917,71 +917,71 @@
 		                                <label for="agentReuseSplit" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">Reuse cached split</label>
 		                                <input type="checkbox" id="agentReuseSplit" checked />
 		                            </div>
-		                            <div>
-		                                <label for="agentIouThreshold" title="How much a predicted box must overlap the ground-truth box to count as correct. 0.5 means “at least about half overlap”.">Match overlap (Eval IoU)</label>
-		                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" title="How much a predicted box must overlap the ground-truth box to count as correct. Higher = stricter." />
-		                            </div>
-		                        </div>
-		                        <div class="training-grid">
-		                            <div>
-		                                <label for="agentSeedThreshold">Seed text threshold</label>
-		                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" title="How “loose” the first text pass is. Lower = more candidate boxes (and more noise), higher = fewer candidates." />
-		                            </div>
-		                            <div>
-		                                <label for="agentExpandThreshold">Expand threshold</label>
-		                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.3" title="How “strict” the refine pass is when we expand from seed boxes. Higher = fewer but cleaner results." />
-		                            </div>
-		                            <div>
-		                                <label for="agentMaxVisualSeeds">Max visual seeds</label>
-		                                <input type="number" id="agentMaxVisualSeeds" min="0" value="25" title="How many candidate boxes per image we try to refine/expand (after filtering). 0 disables the visual refine pass." />
-		                            </div>
-		                            <div>
-		                                <label for="agentSeedDedupeIou" title="Overlap threshold for considering two seed boxes “the same object” before expansion. Lower = more aggressive de-duplication.">Seed de-dupe overlap (IoU)</label>
-		                                <input type="number" id="agentSeedDedupeIou" step="0.05" min="0" max="1" value="0.9" title="Overlap threshold for considering two seed boxes duplicates. Lower = remove more overlapping boxes; higher = keep more." />
-		                            </div>
-		                            <div>
-		                                <label for="agentDedupeIou" title="Final overlap de-duplication across everything the recipe returns. Lower = more aggressive merging.">Output de-dupe overlap (IoU)</label>
-		                                <input type="number" id="agentDedupeIou" step="0.05" min="0" max="1" value="0.5" title="Final overlap de-duplication across all detections. Lower = remove more overlaps; higher = keep more." />
-		                            </div>
-		                            <div>
-		                                <label for="agentSimilarityScore" title="How much a candidate must look like your saved example crops (CLIP is an image-similarity model). Higher = stricter filtering.">Image similarity filter (CLIP)</label>
-		                                <input type="number" id="agentSimilarityScore" step="0.01" min="0" max="1" value="0.25" title="Minimum image similarity to your positive crop bank required to keep a box. Higher = stricter; lower = more permissive." />
-		                            </div>
-		                        </div>
-		                        <div class="training-grid">
-		                            <div>
-		                                <label for="agentMaskThreshold">Mask threshold</label>
-		                                <input type="number" id="agentMaskThreshold" step="0.05" min="0" max="1" value="0.5" title="Only matters when generating polygons: controls how “filled” a mask must be to count as part of the object." />
-		                            </div>
-		                            <div>
-		                                <label for="agentMaxResults">Max dets/image</label>
-		                                <input type="number" id="agentMaxResults" min="1" value="100" title="Safety cap: maximum number of boxes kept per image per prompt. Prevents extreme outputs." />
-		                            </div>
-		                            <div>
-		                                <label for="agentMinSize">Min area (px²)</label>
-		                                <input type="number" id="agentMinSize" min="0" value="0" title="Ignore very tiny detections by pixel area. 0 keeps everything (including small objects)." />
-		                            </div>
-		                            <div>
-		                                <label for="agentSimplifyEps">Simplify ε</label>
-		                                <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" title="Only affects polygons: higher values simplify shapes (fewer points). 0 keeps maximum detail." />
-		                            </div>
-		                        </div>
-		                        <div class="training-grid">
-		                            <div>
-		                                <label for="agentExemplars" title="How many example cut-outs (“crops”) to store in the recipe zip for this class. More examples can reduce false positives but takes longer.">Example crops/class</label>
-		                                <input type="number" id="agentExemplars" min="0" value="20" />
-		                            </div>
-		                            <div>
-		                                <label for="agentExemplarPoolValue">Candidate pool size</label>
-		                                <input type="number" id="agentExemplarPoolValue" min="1" value="25" title="We first build a pool of training examples, then pick a diverse subset. This controls how big that pool is." />
-		                            </div>
-		                            <div>
-		                                <label for="agentExemplarPoolMode">Pool mode</label>
-		                                <select id="agentExemplarPoolMode" title="Build the candidate pool as a percent of labeled objects, or as a fixed count.">
-		                                    <option value="percent" selected>% of labeled objects</option>
-		                                    <option value="count">Fixed count</option>
-		                                </select>
-		                            </div>
+			                            <div>
+			                                <label for="agentIouThreshold">Match overlap (Eval IoU)<span class="help-icon" title="Used only for scoring (evaluation), not for running the recipe.&#10;IoU = how much the predicted box overlaps the ground-truth box (0–1).&#10;0.5 ≈ “at least about half overlap”.&#10;Higher = stricter scoring (coverage may look lower).">?</span></label>
+			                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" />
+			                            </div>
+			                        </div>
+			                        <div class="training-grid">
+			                            <div>
+			                                <label for="agentSeedThreshold">Seed text threshold<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
+			                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" />
+			                            </div>
+			                            <div>
+			                                <label for="agentExpandThreshold">Expand threshold<span class="help-icon" title="Second pass (optional): after choosing seed boxes, we run a refine/expand pass from those boxes.&#10;This threshold controls how strict that refine pass is.&#10;Higher = fewer but cleaner results.">?</span></label>
+			                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.3" />
+			                            </div>
+			                            <div>
+			                                <label for="agentMaxVisualSeeds">Max visual seeds<span class="help-icon" title="How many seed boxes per image we select for the refine/expand pass.&#10;0 = skip refine/expand (only use seed text detections).&#10;Higher = more compute; can increase coverage on hard objects.">?</span></label>
+			                                <input type="number" id="agentMaxVisualSeeds" min="0" value="25" />
+			                            </div>
+			                            <div>
+			                                <label for="agentSeedDedupeIou">Seed de-dupe overlap (IoU)<span class="help-icon" title="After the seed text pass, we remove near-duplicate seed boxes.&#10;If two seed boxes overlap more than this IoU, we keep one.&#10;Higher (e.g., 0.9) only removes almost-identical boxes.&#10;Lower removes more overlaps (can collapse crowded scenes).">?</span></label>
+			                                <input type="number" id="agentSeedDedupeIou" step="0.05" min="0" max="1" value="0.9" />
+			                            </div>
+			                            <div>
+			                                <label for="agentDedupeIou">Output de-dupe overlap (IoU)<span class="help-icon" title="Final de-duplication across all detections the recipe outputs.&#10;If two output boxes overlap more than this IoU, we keep the best one.&#10;Lower = more aggressive de-dup (fewer duplicates; may drop close objects).&#10;Higher = allows more overlaps (risk duplicate labels).">?</span></label>
+			                                <input type="number" id="agentDedupeIou" step="0.05" min="0" max="1" value="0.5" />
+			                            </div>
+			                            <div>
+			                                <label for="agentSimilarityScore">Image similarity filter (CLIP)<span class="help-icon" title="Crop-bank mode only.&#10;For each candidate box, we crop the image and compare it to saved example crops using CLIP.&#10;We keep boxes with similarity ≥ this number.&#10;Higher = stricter (fewer false positives, can miss true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+			                                <input type="number" id="agentSimilarityScore" step="0.01" min="0" max="1" value="0.25" />
+			                            </div>
+			                        </div>
+			                        <div class="training-grid">
+			                            <div>
+			                                <label for="agentMaskThreshold">Mask threshold<span class="help-icon" title="Polygons only.&#10;Controls how the mask is turned into a polygon (higher trims uncertain pixels).&#10;Higher = tighter/smaller shapes; lower = looser/bigger shapes.">?</span></label>
+			                                <input type="number" id="agentMaskThreshold" step="0.05" min="0" max="1" value="0.5" />
+			                            </div>
+			                            <div>
+			                                <label for="agentMaxResults">Max dets/image<span class="help-icon" title="Safety cap: maximum number of detections kept per image per prompt/pass.&#10;Prevents runaway outputs on noisy prompts.&#10;If too low, crowded images may be clipped.">?</span></label>
+			                                <input type="number" id="agentMaxResults" min="1" value="100" />
+			                            </div>
+			                            <div>
+			                                <label for="agentMinSize">Min area (px²)<span class="help-icon" title="Drop detections smaller than this pixel area.&#10;Useful to remove tiny specks.&#10;0 keeps all (including very small objects).">?</span></label>
+			                                <input type="number" id="agentMinSize" min="0" value="0" />
+			                            </div>
+			                            <div>
+			                                <label for="agentSimplifyEps">Simplify ε<span class="help-icon" title="Polygons only.&#10;Douglas–Peucker simplification in pixels.&#10;Higher = fewer points (simpler shapes).&#10;0 = no simplification (max detail).">?</span></label>
+			                                <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" />
+			                            </div>
+			                        </div>
+			                        <div class="training-grid">
+			                            <div>
+			                                <label for="agentExemplars">Example crops/class<span class="help-icon" title="Crop-bank mode only.&#10;How many positive example cut-outs we save into the recipe zip for each class.&#10;More examples can reduce false positives but increases mining time and zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+			                                <input type="number" id="agentExemplars" min="0" value="20" />
+			                            </div>
+			                            <div>
+			                                <label for="agentExemplarPoolValue">Candidate pool size<span class="help-icon" title="Crop-bank mode only.&#10;We build a pool of labeled boxes from the training split, then choose diverse examples from that pool.&#10;This controls how many candidate boxes we consider before picking the final crops.&#10;Bigger = more diversity, more CLIP work.">?</span></label>
+			                                <input type="number" id="agentExemplarPoolValue" min="1" value="25" />
+			                            </div>
+			                            <div>
+			                                <label for="agentExemplarPoolMode">Pool mode<span class="help-icon" title="How to interpret “candidate pool size”.&#10;% mode: pool = that percent of all labeled boxes for the class.&#10;Count mode: pool = fixed number of boxes.&#10;Only used when selecting example crops.">?</span></label>
+			                                <select id="agentExemplarPoolMode">
+			                                    <option value="percent" selected>% of labeled objects</option>
+			                                    <option value="count">Fixed count</option>
+			                                </select>
+			                            </div>
 		                            <div class="training-field training-field--inline">
 		                                <label for="agentClusterExemplars" title="Try to pick different-looking examples (sizes/angles) instead of many near-identical ones. Recommended on.">Diversify crops</label>
 		                                <input type="checkbox" id="agentClusterExemplars" checked title="Try to pick different-looking examples (sizes/angles) instead of many near-identical ones. Recommended on." />
@@ -994,11 +994,11 @@
 		                        <div class="training-grid">
 			                            <div>
 			                                <label for="agentClipHeadSelect" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections. The head is embedded into saved recipe zips (portable).">Pretrained CLIP head (optional)</label>
-			                                <select id="agentClipHeadSelect" style="min-width: 260px;">
-			                                    <option value="">(none)</option>
-			                                </select>
-			                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded).</div>
-			                            </div>
+				                                <select id="agentClipHeadSelect" style="min-width: 260px;">
+				                                    <option value="">(none)</option>
+				                                </select>
+				                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.</div>
+				                            </div>
 			                            <div>
 			                                <label for="agentClipHeadMinProb" title="Minimum probability required for the target class when using the pretrained CLIP head. Higher = fewer boxes, cleaner results.">Head min prob</label>
 			                                <input type="number" id="agentClipHeadMinProb" step="0.05" min="0" max="1" value="0.5" />

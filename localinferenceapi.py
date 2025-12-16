@@ -339,6 +339,40 @@ if active_labelmap_path:
         active_labelmap_path = None
         active_label_list = []
 
+# Keep default CLIP artifacts usable with path allowlists by mirroring them into uploads/.
+# This preserves older workflows that write my_logreg_model.pkl/my_label_list.pkl at repo root.
+try:
+    _uploads_root_early = Path("uploads")
+    _uploads_root_early.mkdir(exist_ok=True)
+    _classifiers_root_early = (_uploads_root_early / "classifiers").resolve()
+    _labelmaps_root_early = (_uploads_root_early / "labelmaps").resolve()
+    _classifiers_root_early.mkdir(parents=True, exist_ok=True)
+    _labelmaps_root_early.mkdir(parents=True, exist_ok=True)
+
+    if active_classifier_path and os.path.isfile(active_classifier_path):
+        src = Path(active_classifier_path).resolve()
+        if not str(src).startswith(str(_classifiers_root_early)):
+            dst = _classifiers_root_early / src.name
+            try:
+                if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime or dst.stat().st_size != src.stat().st_size:
+                    shutil.copy2(src, dst)
+                active_classifier_path = str(dst)
+            except Exception:
+                pass
+
+    if active_labelmap_path and os.path.isfile(active_labelmap_path):
+        src = Path(active_labelmap_path).resolve()
+        if not str(src).startswith(str(_labelmaps_root_early)):
+            dst = _labelmaps_root_early / src.name
+            try:
+                if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime or dst.stat().st_size != src.stat().st_size:
+                    shutil.copy2(src, dst)
+                active_labelmap_path = str(dst)
+            except Exception:
+                pass
+except Exception:
+    pass
+
 # 3) Attempt to load the CLIP model
 device = "cuda" if torch.cuda.is_available() else "cpu"
 if torch.cuda.is_available():
@@ -1371,22 +1405,49 @@ def _render_qwen_prompt(
 
 
 def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
-    candidates = re.findall(r"```json\s*(.*?)```", text, flags=re.DOTALL)
-    search_space = candidates or [text]
-    for raw in search_space:
-        snippet = raw.strip()
+    def _attempt_parse(raw: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+        snippet = (raw or "").strip()
         if not snippet:
-            continue
+            return None
+        snippet = snippet.strip("`").strip()
+
+        parsed: Any = None
         try:
             parsed = json.loads(snippet)
         except json.JSONDecodeError:
-            continue
+            parsed = None
+
+        if parsed is None:
+            for start_char, end_char in (("{", "}"), ("[", "]")):
+                start = snippet.find(start_char)
+                end = snippet.rfind(end_char)
+                if start < 0 or end < 0 or end <= start:
+                    continue
+                candidate = snippet[start : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    snippet = candidate
+                    break
+                except json.JSONDecodeError:
+                    parsed = None
+
+        if parsed is None:
+            return None
+
         if isinstance(parsed, dict):
             if "detections" in parsed and isinstance(parsed["detections"], list):
                 return snippet, [item for item in parsed["detections"] if isinstance(item, dict)]
             return snippet, [parsed]
         if isinstance(parsed, list):
             return snippet, [item for item in parsed if isinstance(item, dict)]
+        return None
+
+    fenced = re.findall(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)```", text, flags=re.DOTALL)
+    for raw in [*fenced, text]:
+        parsed = _attempt_parse(raw)
+        if parsed is not None:
+            return parsed
+
     raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_parse_error:no_json_block_found")
 
 
@@ -11629,6 +11690,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
     sam3_model: Optional[Any] = None
     sam3_processor: Optional[Any] = None
+    sam3_shared_runtime = False
 
     def _log(msg: str) -> None:
         try:
@@ -11771,10 +11833,16 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             pass
         job.progress = max(job.progress, 0.15)
 
-        # Use a dedicated SAM3 processor for mining so it doesn't interfere with interactive SAM3 use.
+        # Prefer a dedicated SAM3 processor for mining so it doesn't interfere with interactive SAM3 use.
+        # If it fails (e.g., transient GPU init issues), fall back to the shared SAM3 runtime.
         device = _resolve_sam3_mining_devices()[0]
         _log(f"Using SAM3 mining device: {device}")
-        sam3_model, sam3_processor = _build_sam3_text_processor_for_device(device)
+        try:
+            sam3_model, sam3_processor = _build_sam3_text_processor_for_device(device)
+        except Exception as exc:  # noqa: BLE001
+            sam3_shared_runtime = True
+            _log(f"Dedicated SAM3 mining init failed; falling back to shared runtime: {exc}")
+            sam3_model, sam3_processor, _ = _ensure_sam3_text_runtime()
         job.progress = max(job.progress, 0.2)
 
         train_set = set(train_ids)
@@ -12042,13 +12110,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.message = "Failed"
     finally:
         try:
-            if sam3_processor is not None:
-                del sam3_processor
-            if sam3_model is not None:
-                del sam3_model
+            if not sam3_shared_runtime:
+                if sam3_processor is not None:
+                    del sam3_processor
+                if sam3_model is not None:
+                    del sam3_model
         except Exception:
             pass
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and not sam3_shared_runtime:
             try:
                 torch.cuda.empty_cache()
             except Exception:
@@ -15786,16 +15855,33 @@ def qwen_infer(payload: QwenInferenceRequest):
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_inference_failed:{exc}") from exc
     print("[Qwen prompt]", final_prompt)
     print("[Qwen raw output]", qwen_text)
+    warnings: List[str] = []
     try:
         _, items = _extract_qwen_json_block(qwen_text)
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        warnings.append(f"parse_error:{detail}")
         print(f"[Qwen parse error] {detail}; raw text follows:\n{qwen_text}")
-        raise
+        return QwenInferenceResponse(
+            boxes=[],
+            raw_response=qwen_text,
+            prompt=final_prompt,
+            prompt_type=prompt_type,  # type: ignore[arg-type]
+            warnings=warnings,
+            image_token=token,
+        )
     normalized_items = _qwen_items_from_payload(items)
     if not normalized_items:
         print("[Qwen parsed but empty list]", qwen_text)
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_empty_payload")
+        warnings.append("no_results")
+        return QwenInferenceResponse(
+            boxes=[],
+            raw_response=qwen_text,
+            prompt=final_prompt,
+            prompt_type=prompt_type,  # type: ignore[arg-type]
+            warnings=warnings,
+            image_token=token,
+        )
     variant = _default_variant(getattr(payload, "sam_variant", None))
     limit = payload.max_results or 8
     image_name = getattr(payload, "image_name", None)
@@ -15825,7 +15911,6 @@ def qwen_infer(payload: QwenInferenceRequest):
             image_name=image_name,
             limit=limit,
         )
-    warnings: List[str] = []
     if not boxes:
         warnings.append("no_results")
     return QwenInferenceResponse(

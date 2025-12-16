@@ -882,6 +882,88 @@ hr {
     align-items: flex-start;
 }
 
+.training-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    box-shadow: 0 10px 22px rgba(15, 23, 42, 0.04);
+    overflow: hidden;
+}
+
+.training-card__header {
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.training-card__title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.25;
+}
+
+.training-card__body {
+    padding: 16px 18px 18px;
+}
+
+.training-card__footer {
+    padding: 14px 18px 16px;
+    border-top: 1px solid rgba(226, 232, 240, 0.9);
+    background: #f8fafc;
+}
+
+details.training-card > summary {
+    padding: 14px 18px;
+    font-size: 15px;
+    font-weight: 700;
+    color: #0f172a;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+    background: #f8fafc;
+    list-style: none;
+}
+
+details.training-card > summary::-webkit-details-marker {
+    display: none;
+}
+
+details.training-card > summary::marker {
+    content: "";
+}
+
+.training-subsection {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.training-subsection__title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.training-subsection h4,
+.training-subsection h5 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.training-divider {
+    height: 1px;
+    background: rgba(148, 163, 184, 0.5);
+    margin: 14px 0;
+}
+
 .metrics-table {
     width: 100%;
     border-collapse: collapse;
@@ -938,6 +1020,35 @@ hr {
 .metric-table__highlight {
     background: #ecfeff;
     font-weight: 600;
+}
+
+.training-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-size: 12px;
+    color: #0f172a;
+}
+
+.training-table th,
+.training-table td {
+    border: 1px solid #e2e8f0;
+    padding: 6px 8px;
+    text-align: left;
+}
+
+.training-table th:not(:nth-child(3)),
+.training-table td:not(:nth-child(3)) {
+    text-align: center;
+}
+
+.training-table th {
+    background: #f8fafc;
+    font-weight: 700;
+}
+
+.training-table tr:nth-child(even) {
+    background: #f8fafc;
 }
 
 .qwen-train-intro {
@@ -1117,16 +1228,16 @@ hr {
     color: #334155;
 }
 
-.training-field input,
+.training-field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-field select,
-.training-field-double input,
+.training-field-double input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-field-double select,
-.training-advanced-grid input,
+.training-advanced-grid input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-advanced-grid select,
-.training-picker input,
-.active-controls input,
+.training-picker input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+.active-controls input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .active-controls select,
-.training-grid input,
+.training-grid input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-grid select {
     border: 1px solid #cbd5e1;
     border-radius: 8px;
@@ -1142,21 +1253,46 @@ hr {
 }
 
 /* Uniform form alignment */
-.training-field input,
+.training-field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-field select,
 .training-field textarea,
-.training-field-double input,
+.training-field-double input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-field-double select,
 .training-field-double textarea,
-.training-advanced-grid input,
+.training-advanced-grid input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-advanced-grid select,
 .training-advanced-grid textarea,
-.training-grid input,
+.training-grid input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 .training-grid select,
 .training-grid textarea {
     width: 100%;
     box-sizing: border-box;
     min-height: 36px;
+}
+
+.training-field--inline label {
+    flex: 1;
+    margin: 0;
+}
+
+.training-field--inline input[type="checkbox"] {
+    margin: 0;
+}
+
+.training-field label > input[type="checkbox"],
+.training-grid label > input[type="checkbox"] {
+    margin: 0 8px 0 0;
+}
+
+.training-field input[type="range"] {
+    width: 100%;
+    margin: 0;
+}
+
+.training-field input[type="file"],
+.training-grid input[type="file"] {
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .training-grid .training-actions {
@@ -1307,6 +1443,13 @@ hr {
 }
 
 .training-progress-fill {
+    width: 0;
+    height: 100%;
+    background: linear-gradient(90deg, #2563eb 0%, #38bdf8 100%);
+    transition: width 0.25s ease;
+}
+
+.training-progress__fill {
     width: 0;
     height: 100%;
     background: linear-gradient(90deg, #2563eb 0%, #38bdf8 100%);
@@ -1566,6 +1709,60 @@ hr {
     display: flex;
     flex-direction: column;
     gap: 10px;
+}
+
+.training-history-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.training-history-title {
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.training-history-actions {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    margin-left: auto;
+}
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #0f172a;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.button {
+    border: 1px solid #cbd5e1;
+    background: #ffffff;
+    color: #0f172a;
+    padding: 6px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.button:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+
+.button-outline {
+    background: transparent;
 }
 
 #trainingHistory {

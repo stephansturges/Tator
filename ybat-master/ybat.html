@@ -198,33 +198,40 @@
                                         <label for="sam3SimplifyEpsilon">Simplify epsilon (px)</label>
                                         <input type="number" id="sam3SimplifyEpsilon" min="0" step="0.1" value="1.0" title="Douglas–Peucker epsilon in pixels on the downsampled mask: higher = smoother polygons, lower = more detail." />
                                     </div>
-                                    <label for="sam3ClassSelect">Assign detections to class</label>
-                                    <select id="sam3ClassSelect"></select>
-                                    <div class="sam3-text-buttons">
-                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
-                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
-                                        <label for="sam3RecipeFile" class="training-button secondary">Load recipe (zip)</label>
-                                        <input type="file" id="sam3RecipeFile" accept=".zip,.json" class="file-input-hidden" />
-                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr;">
-                                            <div>
-                                                <label for="sam3RecipePresetSelect">Recipe presets</label>
-                                                <select id="sam3RecipePresetSelect"></select>
-                                            </div>
-                                            <div>
-                                                <label for="sam3RecipePresetName">Save preset as</label>
-                                                <input type="text" id="sam3RecipePresetName" placeholder="Optional label" />
-                                            </div>
-                                        </div>
-                                        <div class="training-actions">
-                                            <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh</button>
-                                            <button type="button" id="sam3RecipePresetSave" class="training-button secondary">Save recipe preset</button>
-                                            <button type="button" id="sam3RecipePresetLoad" class="training-button secondary">Load preset</button>
-                                            <button type="button" id="sam3RecipePresetDelete" class="training-button danger">Delete preset</button>
-                                            <button type="button" id="sam3RecipeApplyButton" class="training-button secondary">Apply recipe to image</button>
-                                        </div>
-                                        <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
-                                    </div>
-                                </section>
+	                                    <label for="sam3ClassSelect">Assign detections to class</label>
+	                                    <select id="sam3ClassSelect"></select>
+	                                    <div class="sam3-text-buttons">
+	                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
+	                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
+	                                        <label for="sam3RecipeFile" class="training-button secondary" title="Load a portable recipe zip (from Agent Mining or another machine). It contains a JSON recipe + example crops.">Load recipe (zip)</label>
+	                                        <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
+	                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr;">
+	                                            <div>
+	                                                <label for="sam3RecipePresetSelect" title="Saved recipes on the backend. Use Refresh if you just mined/imported a recipe.">Recipe presets</label>
+	                                                <select id="sam3RecipePresetSelect" title="Saved recipes on the backend. Use Refresh if you just mined/imported a recipe."></select>
+	                                            </div>
+	                                            <div>
+	                                                <label for="sam3RecipePresetName" title="Optional friendly name when saving the currently loaded recipe into your preset list.">Save preset as</label>
+	                                                <input type="text" id="sam3RecipePresetName" placeholder="Optional label" />
+	                                            </div>
+	                                        </div>
+	                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr;">
+	                                            <label title="Assign detections to a different class than the recipe’s default (useful when applying a recipe to a dataset with different class names)."><input type="checkbox" id="sam3RecipeOverrideToggle" /> Override output class</label>
+	                                            <select id="sam3RecipeOverrideSelect" disabled></select>
+	                                        </div>
+	                                        <div class="training-actions">
+	                                            <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh</button>
+	                                            <button type="button" id="sam3RecipePresetSave" class="training-button secondary">Save recipe preset</button>
+	                                            <button type="button" id="sam3RecipePresetLoad" class="training-button secondary">Load preset</button>
+	                                            <button type="button" id="sam3RecipePresetDelete" class="training-button danger">Delete preset</button>
+	                                            <button type="button" id="sam3RecipeApplyButton" class="training-button secondary">Apply recipe to image</button>
+	                                        </div>
+	                                        <div class="training-help">
+	                                            Recipes are saved “find this object” strategies from the <strong>SAM3 Recipe Mining</strong> tab. Load a recipe zip or pick a preset, then click “Apply recipe to image” to add boxes/polygons to the current image.
+	                                        </div>
+	                                        <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
+	                                    </div>
+	                                </section>
                             </section>
                             <br />
                             <hr />
@@ -884,153 +891,178 @@
                     </section>
                 </div>
             </div>
-            <div class="tab-panel" id="tabAgentMining" data-tab-panel="agent-mining">
-                <div class="training-wrapper two-col">
-                    <section class="training-form-section">
-                        <h2>SAM3 Recipe Mining</h2>
-                        <p class="training-help">Run SAM3 text/visual sweeps with optional CLIP FP guard to propose per-class recipes. Test mode limits images for fast smoke tests.</p>
-                        <div class="training-field">
-                            <label>Dataset</label>
-                            <div class="sam3-dataset-row">
-                                <select id="agentDatasetSelect"></select>
-                                <button type="button" class="training-button" id="agentDatasetRefresh">Refresh</button>
-                            </div>
+	            <div class="tab-panel" id="tabAgentMining" data-tab-panel="agent-mining">
+	                <div class="training-wrapper two-col">
+	                    <section class="training-form-section">
+	                        <h2>SAM3 Recipe Mining</h2>
+	                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip file (JSON + example crops) you can reuse in the labeling panel.</p>
+	                        <div class="training-field">
+	                            <label>Dataset</label>
+	                            <div class="sam3-dataset-row">
+	                                <select id="agentDatasetSelect"></select>
+	                                <button type="button" class="training-button" id="agentDatasetRefresh">Refresh</button>
+	                            </div>
                             <div class="training-help" id="agentDatasetSummary">Pick a converted SAM3/Qwen dataset.</div>
-                        </div>
-                        <div class="training-grid">
-                            <div>
-                                <label for="agentValPercent">Val %</label>
-                                <input type="number" id="agentValPercent" min="5" max="95" value="30" title="Percent of images for validation split." />
-                                <label for="agentSplitSeed">Split seed</label>
-                                <input type="number" id="agentSplitSeed" value="42" title="Random seed for deterministic train/val split." />
-                                <div class="training-help">Controls the random train/val split for mining (seeded for repeatability).</div>
-                            </div>
-                            <div>
-                                <label for="agentThresholds">Thresholds</label>
-                                <input type="text" id="agentThresholds" value="0.2,0.3,0.4" title="Comma-separated score thresholds to try." />
-                            </div>
-                            <div>
-                                <label for="agentMaskThreshold">Mask threshold</label>
-                                <input type="number" id="agentMaskThreshold" step="0.05" min="0" max="1" value="0.5" />
-                            </div>
-                            <div>
-                                <label for="agentMaxResults">Max dets/image</label>
-                                <input type="number" id="agentMaxResults" min="1" value="100" />
-                            </div>
-                            <div>
-                                <label for="agentMinSize">Min area (px²)</label>
-                                <input type="number" id="agentMinSize" min="0" value="0" />
-                            </div>
-                            <div>
-                                <label for="agentSimplifyEps">Simplify ε</label>
-                                <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" />
-                            </div>
-                            <div>
-                                <label for="agentMaxWorkers">Max workers</label>
-                                <input type="number" id="agentMaxWorkers" min="1" max="16" value="1" title="Total SAM3 worker processes for mining (capped per GPU)." />
-                            </div>
-                            <div>
-                                <label for="agentWorkersPerGpu">Workers per GPU</label>
-                                <input type="number" id="agentWorkersPerGpu" min="1" max="8" value="1" title="How many workers to launch per detected GPU (caps above apply)." />
-                            </div>
-                        </div>
-                        <div class="training-grid">
-                            <div>
-                                <label for="agentExemplars">Exemplars/class</label>
-                                <input type="number" id="agentExemplars" min="0" value="4" />
-                            </div>
-                            <div>
-                                <label for="agentExemplarPoolValue">Exemplar pool size</label>
-                                <input type="number" id="agentExemplarPoolValue" min="1" value="25" title="How many GT boxes to consider before picking exemplars." />
-                                <div class="training-help">Controls the candidate pool before CLIP diversity selection.</div>
-                            </div>
-                            <div>
-                                <label for="agentExemplarPoolMode">Pool mode</label>
-                                <select id="agentExemplarPoolMode" title="Pool as percent of GT boxes or fixed count.">
-                                    <option value="percent" selected>% of GT boxes</option>
-                                    <option value="count">Fixed count</option>
-                                </select>
-                            </div>
-                            <div class="training-field training-field--inline">
-                                <label for="agentClusterExemplars" title="Keep a more diverse exemplar set (discourages near-duplicate crops). Recommended on.">Diversify exemplars</label>
-                                <input type="checkbox" id="agentClusterExemplars" checked title="Keep a more diverse exemplar set (discourages near-duplicate crops). Recommended on." />
-                            </div>
-                            <div class="training-field training-field--inline">
-                                <label for="agentClipGuard" title="Filters detections by CLIP similarity to the recipe’s positive exemplars (and penalizes negatives when enabled). Uses the exemplar crops baked into the recipe for this class; if none exist, the guard is a no-op. Helps trim false positives; may lower recall if too strict.">Use CLIP FP guard</label>
-                                <input
-                                    type="checkbox"
-                                    id="agentClipGuard"
-                                    title="Filters detections by CLIP similarity to the recipe’s positive exemplars (and penalizes negatives when enabled). Uses the exemplar crops baked into the recipe for this class; if none exist, the guard is a no-op. Helps trim false positives; may lower recall if too strict."
-                                />
-                            </div>
-                            <div>
-                                <label for="agentSimilarityScore">Similarity floor(s)</label>
-                                <input type="text" id="agentSimilarityScore" value="0.25" placeholder="e.g., 0.1,0.25,0.4" />
-                                <div class="training-help">Comma-separated list to sweep when scoring (higher = stricter CLIP guard).</div>
-                            </div>
-                            <div class="training-field training-field--inline">
-                                <label for="agentUseNegExemplars">Use negative exemplars</label>
-                                <input type="checkbox" id="agentUseNegExemplars" title="Suppress detections that look like other classes (auto-select negatives from GT of other classes)." />
-                            </div>
-                            <div>
-                                <label for="agentMaxNegExemplars">Max negatives/class</label>
-                                <input type="number" id="agentMaxNegExemplars" min="0" max="64" value="8" />
-                            </div>
-                            <div>
-                                <label for="agentNegStrength">Negative strength (λ)</label>
-                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" title="How much a match to a negative exemplar suppresses detections. Higher = stronger suppression; 0 disables negatives." />
-                                <div class="training-help">Higher = stronger suppression; 0 disables negatives.</div>
-                            </div>
-                            <div class="training-field training-field--inline">
-                                <label for="agentUseFpNeg">Use FP negatives (this run)</label>
-                                <input type="checkbox" id="agentUseFpNeg" title="Harvest high-confidence false positives from this run as extra negatives (no extra SAM pass)." />
-                            </div>
-                            <div>
-                                <label for="agentMaxFpNeg">Max FP negatives/class</label>
-                                <input type="number" id="agentMaxFpNeg" min="0" max="64" value="8" />
-                            </div>
-                        </div>
-                        <div class="two-col-grid">
-                            <div>
-                                <label for="agentClasses">Class IDs (comma)</label>
-                                <input type="text" id="agentClasses" placeholder="blank = all" />
-                            </div>
-                            <div>
-                                <label for="agentQwenMaxPrompts">GPT-OSS extra prompts/class</label>
-                                <input type="number" id="agentQwenMaxPrompts" min="0" max="20" value="0" />
-                            </div>
-                            <div>
-                                <label for="agentPromptReasoning">GPT-OSS reasoning</label>
-                                <select id="agentPromptReasoning" title="Harmony reasoning level for GPT-OSS prompt expansion.">
-                                    <option value="none" selected>none (fastest)</option>
-                                    <option value="low">low</option>
-                                    <option value="medium">medium</option>
-                                    <option value="high">high</option>
-                                </select>
-                                <div class="training-help" style="color: #b91c1c;">Only “none” is stable right now.</div>
-                            </div>
-                            <div>
-                                <label for="agentPromptMaxTokens">GPT-OSS max tokens</label>
-                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Max new tokens for GPT-OSS prompt expansion." />
-                            </div>
-                            <div class="training-field training-field--inline">
-                                <label for="agentTestMode">Test mode</label>
-                                <input type="checkbox" id="agentTestMode" checked />
-                            </div>
-                            <div>
-                                <label for="agentTrainLimit">Test train imgs</label>
-                                <input type="number" id="agentTrainLimit" min="1" value="10" />
+		                        </div>
+		                        <div class="training-grid">
+		                            <div>
+		                                <label for="agentValPercent">Val %</label>
+		                                <input type="number" id="agentValPercent" min="5" max="95" value="30" title="How many images are held out to test the recipe. Example: 30 means we test on 30% of images." />
+		                            </div>
+		                            <div>
+		                                <label for="agentSplitSeed">Split seed</label>
+		                                <input type="number" id="agentSplitSeed" value="42" title="Same seed = same train/val split. Change it if you want a different random split." />
+		                            </div>
+		                            <div class="training-field training-field--inline">
+		                                <label for="agentReuseSplit" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">Reuse cached split</label>
+		                                <input type="checkbox" id="agentReuseSplit" checked />
+		                            </div>
+		                            <div>
+		                                <label for="agentIouThreshold" title="How much a predicted box must overlap the ground-truth box to count as correct. 0.5 means “at least about half overlap”.">Match overlap (Eval IoU)</label>
+		                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" title="How much a predicted box must overlap the ground-truth box to count as correct. Higher = stricter." />
+		                            </div>
+		                        </div>
+		                        <div class="training-grid">
+		                            <div>
+		                                <label for="agentSeedThreshold">Seed text threshold</label>
+		                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" title="How “loose” the first text pass is. Lower = more candidate boxes (and more noise), higher = fewer candidates." />
+		                            </div>
+		                            <div>
+		                                <label for="agentExpandThreshold">Expand threshold</label>
+		                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.3" title="How “strict” the refine pass is when we expand from seed boxes. Higher = fewer but cleaner results." />
+		                            </div>
+		                            <div>
+		                                <label for="agentMaxVisualSeeds">Max visual seeds</label>
+		                                <input type="number" id="agentMaxVisualSeeds" min="0" value="25" title="How many candidate boxes per image we try to refine/expand (after filtering). 0 disables the visual refine pass." />
+		                            </div>
+		                            <div>
+		                                <label for="agentSeedDedupeIou" title="Overlap threshold for considering two seed boxes “the same object” before expansion. Lower = more aggressive de-duplication.">Seed de-dupe overlap (IoU)</label>
+		                                <input type="number" id="agentSeedDedupeIou" step="0.05" min="0" max="1" value="0.9" title="Overlap threshold for considering two seed boxes duplicates. Lower = remove more overlapping boxes; higher = keep more." />
+		                            </div>
+		                            <div>
+		                                <label for="agentDedupeIou" title="Final overlap de-duplication across everything the recipe returns. Lower = more aggressive merging.">Output de-dupe overlap (IoU)</label>
+		                                <input type="number" id="agentDedupeIou" step="0.05" min="0" max="1" value="0.5" title="Final overlap de-duplication across all detections. Lower = remove more overlaps; higher = keep more." />
+		                            </div>
+		                            <div>
+		                                <label for="agentSimilarityScore" title="How much a candidate must look like your saved example crops (CLIP is an image-similarity model). Higher = stricter filtering.">Image similarity filter (CLIP)</label>
+		                                <input type="number" id="agentSimilarityScore" step="0.01" min="0" max="1" value="0.25" title="Minimum image similarity to your positive crop bank required to keep a box. Higher = stricter; lower = more permissive." />
+		                            </div>
+		                        </div>
+		                        <div class="training-grid">
+		                            <div>
+		                                <label for="agentMaskThreshold">Mask threshold</label>
+		                                <input type="number" id="agentMaskThreshold" step="0.05" min="0" max="1" value="0.5" title="Only matters when generating polygons: controls how “filled” a mask must be to count as part of the object." />
+		                            </div>
+		                            <div>
+		                                <label for="agentMaxResults">Max dets/image</label>
+		                                <input type="number" id="agentMaxResults" min="1" value="100" title="Safety cap: maximum number of boxes kept per image per prompt. Prevents extreme outputs." />
+		                            </div>
+		                            <div>
+		                                <label for="agentMinSize">Min area (px²)</label>
+		                                <input type="number" id="agentMinSize" min="0" value="0" title="Ignore very tiny detections by pixel area. 0 keeps everything (including small objects)." />
+		                            </div>
+		                            <div>
+		                                <label for="agentSimplifyEps">Simplify ε</label>
+		                                <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" title="Only affects polygons: higher values simplify shapes (fewer points). 0 keeps maximum detail." />
+		                            </div>
+		                        </div>
+		                        <div class="training-grid">
+		                            <div>
+		                                <label for="agentExemplars" title="How many example cut-outs (“crops”) to store in the recipe zip for this class. More examples can reduce false positives but takes longer.">Example crops/class</label>
+		                                <input type="number" id="agentExemplars" min="0" value="20" />
+		                            </div>
+		                            <div>
+		                                <label for="agentExemplarPoolValue">Candidate pool size</label>
+		                                <input type="number" id="agentExemplarPoolValue" min="1" value="25" title="We first build a pool of training examples, then pick a diverse subset. This controls how big that pool is." />
+		                            </div>
+		                            <div>
+		                                <label for="agentExemplarPoolMode">Pool mode</label>
+		                                <select id="agentExemplarPoolMode" title="Build the candidate pool as a percent of labeled objects, or as a fixed count.">
+		                                    <option value="percent" selected>% of labeled objects</option>
+		                                    <option value="count">Fixed count</option>
+		                                </select>
+		                            </div>
+		                            <div class="training-field training-field--inline">
+		                                <label for="agentClusterExemplars" title="Try to pick different-looking examples (sizes/angles) instead of many near-identical ones. Recommended on.">Diversify crops</label>
+		                                <input type="checkbox" id="agentClusterExemplars" checked title="Try to pick different-looking examples (sizes/angles) instead of many near-identical ones. Recommended on." />
+		                            </div>
+		                            <div class="training-field training-field--inline">
+		                                <label for="agentClipGuard" title="Use image similarity (CLIP) to keep boxes that look like your example crops, and optionally suppress boxes that look like negatives. Recommended on.">Use CLIP filter</label>
+		                                <input type="checkbox" id="agentClipGuard" checked title="Use image similarity (CLIP) to keep boxes that look like your example crops, and optionally suppress boxes that look like negatives. Recommended on." />
+		                            </div>
+		                        </div>
+		                        <div class="training-grid">
+			                            <div>
+			                                <label for="agentClipHeadSelect" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections. The head is embedded into saved recipe zips (portable).">Pretrained CLIP head (optional)</label>
+			                                <select id="agentClipHeadSelect" style="min-width: 260px;">
+			                                    <option value="">(none)</option>
+			                                </select>
+			                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded).</div>
+			                            </div>
+			                            <div>
+			                                <label for="agentClipHeadMinProb" title="Minimum probability required for the target class when using the pretrained CLIP head. Higher = fewer boxes, cleaner results.">Head min prob</label>
+			                                <input type="number" id="agentClipHeadMinProb" step="0.05" min="0" max="1" value="0.5" />
+			                            </div>
+		                            <div>
+		                                <label for="agentClipHeadMargin" title="Require the target class probability to beat the best other class by this margin. 0 disables the margin check.">Head margin</label>
+		                                <input type="number" id="agentClipHeadMargin" step="0.05" min="0" max="1" value="0.0" />
+		                            </div>
+		                        </div>
+		                        <div class="training-grid">
+		                            <div class="training-field training-field--inline">
+		                                <label for="agentUseNegExemplars" title="Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes.">Use negative crops</label>
+		                                <input type="checkbox" id="agentUseNegExemplars" checked title="Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes." />
+		                            </div>
+		                            <div>
+		                                <label for="agentMaxNegExemplars">Max negatives/class</label>
+		                                <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
+		                            </div>
+		                            <div>
+		                                <label for="agentNegStrength" title="How strongly negative examples suppress detections. Set to 0 to disable negatives.">Negative filter strength</label>
+		                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" title="How strongly negative examples suppress detections. Higher = more suppression; 0 disables negatives." />
+		                            </div>
+		                        </div>
+	                        <div class="two-col-grid">
+	                            <div>
+	                                <label for="agentClasses" title="Optional: restrict mining to specific class IDs. Leave blank to mine all classes.">Class IDs (optional)</label>
+	                                <input type="text" id="agentClasses" placeholder="blank = all" />
+	                            </div>
+	                            <div>
+	                                <label for="agentQwenMaxPrompts" title="Ask GPT-OSS for additional words to try for each class (in addition to the class name).">Extra text prompts/class</label>
+	                                <input type="number" id="agentQwenMaxPrompts" min="0" max="20" value="0" title="0 = only use the class name; higher values try more alternative phrases." />
+	                            </div>
+	                            <div>
+	                                <label for="agentPromptReasoning">GPT-OSS reasoning</label>
+	                                <select id="agentPromptReasoning" title="How much GPT-OSS “thinks” before proposing extra words. Higher uses more time and can be less stable.">
+	                                    <option value="none" selected>none (fastest)</option>
+	                                    <option value="low">low</option>
+	                                    <option value="medium">medium</option>
+	                                    <option value="high">high</option>
+	                                </select>
+	                                <div class="training-help" style="color: #b91c1c;">Only “none” is stable right now.</div>
+	                            </div>
+	                            <div>
+	                                <label for="agentPromptMaxTokens">GPT-OSS max tokens</label>
+	                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Maximum length of GPT-OSS output when proposing extra words." />
+	                            </div>
+	                            <div class="training-field training-field--inline">
+	                                <label for="agentTestMode" title="Runs on a small number of images so you can verify everything works (fast).">Test mode</label>
+	                                <input type="checkbox" id="agentTestMode" checked />
+	                            </div>
+	                            <div>
+	                                <label for="agentTrainLimit">Test train imgs</label>
+	                                <input type="number" id="agentTrainLimit" min="1" value="10" />
                             </div>
                             <div>
                                 <label for="agentValLimit">Test val imgs</label>
                                 <input type="number" id="agentValLimit" min="1" value="10" />
                             </div>
-                        </div>
-                        <div class="training-field">
-                            <label for="agentClassHints">Class hints (JSON dict)</label>
-                            <textarea id="agentClassHints" rows="8" style="min-width: 420px;" placeholder='{"1": "cars and pickup trucks only", "2": "people on foot"}' title="Optional JSON dict of class_id -> hint. Example: {&quot;1&quot;: &quot;cars and pickup trucks only&quot;, &quot;2&quot;: &quot;people on foot&quot;}"></textarea>
-                            <div class="training-help">Provide per-class guidance for Qwen (JSON object). IDs should match the dataset labelmap.</div>
-                        </div>
+	                        </div>
+	                        <div class="training-field">
+	                            <label for="agentExtraPrompts">Extra prompts (optional)</label>
+	                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Example: {&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], &quot;person&quot;: [&quot;human&quot;, &quot;pedestrian&quot;]}"></textarea>
+	                            <div class="training-help">Optional extra words/phrases to try for each class. They are appended to GPT-OSS suggestions (no hint injection).</div>
+	                        </div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="agentRunBtn">Run SAM3 Recipe Mining</button>
                             <button type="button" class="training-button secondary" id="agentRefreshBtn">Refresh latest</button>
@@ -1041,26 +1073,36 @@
                         <div class="training-progress" aria-hidden="true">
                             <div id="agentProgressFill" class="training-progress__fill"></div>
                         </div>
+                        <div class="training-help" id="agentProgressText" aria-live="polite"></div>
                     </section>
-                    <section class="training-status-section">
-                        <details class="training-card" open>
-                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
-                            <div class="training-card__body">
-                                <p><strong>Goal:</strong> Mine per-class SAM3 “recipes” (text + exemplar steps) that maximize coverage and minimize FPs, then export them as portable zips for use in the annotator.</p>
-                                <ol>
-                                    <li><strong>Split & cache:</strong> Build a deterministic train/val split (test mode caps counts). Splits and detection caches are reused unless purged.</li>
-                                    <li><strong>Prompt expansion:</strong> Start from class names, optionally expand with GPT-OSS using your class hints. Prompts are sanitized and deduped.</li>
-                                    <li><strong>Exemplars:</strong> Sample GT crops (pool percent/count, optional diversity clustering). Positives are embedded if CLIP guard is on.</li>
-                                    <li><strong>Negatives (optional):</strong> Pull other-class GTs and/or FP negatives; embed for suppression when enabled.</li>
-                                    <li><strong>Sweeps:</strong> For every text/exemplar candidate, we sweep confidence thresholds and any similarity floors you list (CLIP guard). SAM3 runs once at the lowest threshold per candidate; higher thresholds and sim floors reuse that run.</li>
-                                    <li><strong>Image-first SAM3:</strong> Load each val image once per worker/GPU and run all candidates to reduce VRAM/CPU churn. Progress bar reflects this phase.</li>
-                                    <li><strong>Recipe building:</strong> Score candidates on val GTs, pick best threshold/sim floor per prompt, assemble a minimal step list that maximizes coverage while tracking FPs and duplicates.</li>
-                                    <li><strong>Outputs:</strong> Per-class summary + steps; recipes include exemplar crops and chosen similarity floor/thresholds. Saved as zip (JSON + crops).</li>
-                                    <li><strong>Apply path:</strong> In the annotator, recipe steps run with the stored similarity floor and a post-pass dedupe (IoU NMS) to avoid double-labeling the same object.</li>
-                                </ol>
-                                <p class="training-help">Tip: Use test mode for quick smoke tests; purge cache if disk grows or you change core settings.</p>
-                            </div>
-                        </details>
+	                    <section class="training-status-section">
+	                        <details class="training-card" open>
+	                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
+	                            <div class="training-card__body">
+	                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
+	                                <ol>
+	                                    <li><strong>Split:</strong> We split your dataset into “train” (to pick example crops) and “val” (to test how good the recipe is). The split is repeatable using the seed.</li>
+	                                    <li><strong>Words:</strong> We try the class name (and optional extra phrases) to ask SAM3 to propose candidate boxes.</li>
+	                                    <li><strong>Example crops:</strong> We save a small set of example cut-outs of the object from your dataset (e.g., a few cars of different sizes/angles).</li>
+	                                    <li><strong>Seed boxes:</strong> On each validation image we run a very “loose” text pass to get lots of candidate boxes.</li>
+	                                    <li><strong>Image similarity filter:</strong> We keep boxes that look like the examples, and optionally suppress boxes that look like other classes.</li>
+	                                    <li><strong>Refine:</strong> We optionally run a second SAM3 pass starting from selected boxes to improve coverage/quality.</li>
+	                                    <li><strong>Remove duplicates:</strong> If two detections overlap heavily, we keep the best one so the same object isn’t labeled twice.</li>
+	                                    <li><strong>Score:</strong> We measure how many ground-truth objects were found (“coverage”) and how many extra/wrong boxes were added (“false positives”).</li>
+	                                    <li><strong>Portable output:</strong> Saved recipes export as a zip containing <code>recipe.json</code> + all crops under <code>crops/</code> so you can copy it to another machine.</li>
+	                                </ol>
+	                                <ul class="training-help" style="margin-top: 10px;">
+	                                    <li><strong>SAM3:</strong> the model that proposes boxes/polygons when you give it words (text prompt) or a box (visual prompt).</li>
+	                                    <li><strong>CLIP:</strong> an image “similarity checker” we use to decide whether a candidate box looks like your saved examples.</li>
+	                                    <li><strong>Threshold:</strong> how confident the model must be before we keep a box; lower = more boxes (more noise), higher = fewer (cleaner).</li>
+	                                    <li><strong>Overlap (IoU):</strong> how much two boxes overlap; we use it to decide “same object” for de-duplication and scoring.</li>
+	                                    <li><strong>Coverage:</strong> how many true objects we found (higher is better).</li>
+	                                    <li><strong>False positives:</strong> boxes we found that are not actually that class (lower is better).</li>
+	                                </ul>
+	                                <p class="training-help" style="margin-top: 10px;"><strong>Typical workflow:</strong> Pick a dataset → keep test mode on → run mining → review results → save the best class recipes → go back to the labeling tab and apply the saved recipe presets to new images.</p>
+	                                <p class="training-help">Tip: Start with test mode first. If disk usage grows, use “Purge cache” to delete cached detections (it only affects speed, not your datasets).</p>
+	                            </div>
+	                        </details>
                         <h3>Progress & Logs</h3>
                         <div class="training-help">Live status and logs for the latest SAM3 Recipe Mining job.</div>
                         <div class="training-actions">
@@ -1069,22 +1111,27 @@
                         <div class="training-logs" style="margin-bottom: 12px;">
                             <div id="agentLogs" class="training-log" style="max-height: 220px;"></div>
                         </div>
-                        <div class="training-divider"></div>
-                        <h3>Results</h3>
-                        <div class="training-help">Shows the latest completed SAM3 Recipe Mining job (test mode if selected). Recipes export as a portable zip (JSON + exemplar crops).</div>
-                        <div id="agentResults"></div>
-                        <div class="training-divider"></div>
-                        <h3>Saved Recipes</h3>
-                        <div class="training-field">
-                            <label>Recipes for this dataset</label>
+	                        <div class="training-divider"></div>
+	                        <h3>Results</h3>
+	                        <div class="training-help">Coverage = % of ground-truth objects found. FPs = extra detections that shouldn’t be there. Higher coverage and lower FPs is better.</div>
+	                        <div id="agentResults"></div>
+	                        <div class="training-divider"></div>
+	                        <h3>Saved Recipes</h3>
+	                        <div class="training-field">
+	                            <label>Recipes for this dataset</label>
                             <div class="training-grid">
                                 <div>
                                     <select id="agentRecipeSelect" style="min-width: 220px;"></select>
-                                </div>
-                                <div class="training-field">
-                                    <label for="agentRecipeImageId">Apply to image id</label>
-                                    <input type="number" id="agentRecipeImageId" min="0" placeholder="e.g. 123" />
-                                </div>
+	                                </div>
+	                                <div class="training-field">
+	                                    <label for="agentRecipeImageId" title="Optional: run the selected recipe on a specific image from this dataset by numeric image id. If you’re labeling interactively, use the recipe presets in the labeling tab instead.">Apply to dataset image id</label>
+	                                    <input type="number" id="agentRecipeImageId" min="0" placeholder="e.g. 123" />
+	                                </div>
+	                                <div class="training-field">
+	                                    <label title="Assign detections to a different class than the recipe’s default (only changes the label, not the detection)."><input type="checkbox" id="agentRecipeOverrideToggle" /> Override output class</label>
+	                                    <select id="agentRecipeOverrideSelect" disabled style="min-width: 180px;"></select>
+	                                    <div class="training-help">Use a different label for the detections than the one stored in the recipe.</div>
+	                                </div>
                             </div>
                             <div class="training-actions">
                                 <button type="button" class="training-button" id="agentRecipeRefresh">Refresh list</button>
@@ -1093,9 +1140,9 @@
                                 <button type="button" class="training-button secondary" id="agentRecipeApply">Apply to image</button>
                             </div>
                             <div class="training-field">
-                                <label for="agentRecipeFile">Import recipe zip / JSON</label>
+                                <label for="agentRecipeFile">Import recipe zip</label>
                                 <div class="training-grid">
-                                    <input type="file" id="agentRecipeFile" accept=".zip,.json" />
+                                    <input type="file" id="agentRecipeFile" accept=".zip" />
                                     <button type="button" class="training-button secondary" id="agentRecipeImport">Import</button>
                                 </div>
                                 <div class="training-help">Packages include the recipe JSON plus exemplar crops so they are portable between machines.</div>
@@ -1543,6 +1590,26 @@
                     </div>
                     <div id="backendFuzzerStatus" class="settings-status" role="status" aria-live="polite"></div>
                     <pre id="backendFuzzerLog" class="training-log" style="max-height: 220px; overflow-y: auto;"></pre>
+                    <div class="training-divider"></div>
+                    <h3>Default upload and payload limits</h3>
+                    <p class="settings-help">
+                        Defaults are tuned for LAN use. You can override any of these on the backend by setting
+                        environment variables (e.g. <code>CLIP_TRAIN_UPLOAD_QUOTA_BYTES</code>,
+                        <code>DATASET_ZIP_MAX_BYTES</code>, <code>AGENT_RECIPE_MAX_BYTES</code>,
+                        <code>AGENT_MINING_CACHE_MAX_BYTES</code>, <code>MAX_RESPONSE_DETECTIONS</code>,
+                        <code>SAM_PRELOAD_MAX_BYTES</code>, <code>FS_DIALOG_ENABLED</code>/<code>FS_DIALOG_ALLOW_REMOTE</code>).
+                        If the backend is configured with lower limits, uploads over those caps will be rejected.
+                    </p>
+                    <ul class="settings-help">
+                        <li>Dataset zips (SAM3/Qwen): up to ~100GB zip, ~50GB per entry.</li>
+                        <li>CLIP/Qwen chunked uploads: ~10GB per file, ~100GB per job quota.</li>
+                        <li>CLIP training uploads: ~10GB per file, ~100GB per job quota.</li>
+                        <li>Classifier/labelmap/general assets: ~10GB per file, ~100GB per uploads quota.</li>
+                        <li>Agent recipe zips: ~2GB total; crops capped (~1000 pngs / ~512MB total).</li>
+                        <li>Responses: max ~5000 detections / 2000 masks; SAM preload cache ~2GB.</li>
+                        <li>Agent mining cache: ~80GB default; TTL off by default (set <code>AGENT_MINING_CACHE_TTL_HOURS</code> to enable purge).</li>
+                        <li>FS directory picker: controlled by <code>FS_DIALOG_ENABLED</code> (default on, localhost-only unless <code>FS_DIALOG_ALLOW_REMOTE</code> is true).</li>
+                    </ul>
                 </div>
             </div>
         </div>

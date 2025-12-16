@@ -928,6 +928,9 @@
         presetSaveButton: null,
         presetLoadButton: null,
         presetRefreshButton: null,
+        presetDeleteButton: null,
+        overrideToggle: null,
+        overrideSelect: null,
     };
     const sam3RecipeState = {
         recipe: null,
@@ -1247,26 +1250,35 @@ const sam3TrainState = {
         datasetRefresh: null,
         datasetSummary: null,
         valPercent: null,
-        thresholds: null,
+        splitSeed: null,
+        reuseSplit: null,
+        iouThreshold: null,
+        seedThreshold: null,
+        expandThreshold: null,
+        maxVisualSeeds: null,
+        seedDedupeIou: null,
+        dedupeIou: null,
         maskThreshold: null,
+        similarityScore: null,
         maxResults: null,
         minSize: null,
         simplifyEps: null,
-        maxWorkers: null,
-        workersPerGpu: null,
         exemplars: null,
         exemplarPoolMode: null,
         exemplarPoolValue: null,
         clusterExemplars: null,
         clipGuard: null,
-        similarityScore: null,
+        clipHeadSelect: null,
+        clipHeadMinProb: null,
+        clipHeadMargin: null,
         useNegExemplars: null,
         maxNegExemplars: null,
         negStrength: null,
-        useFpNeg: null,
-        maxFpNeg: null,
         classesInput: null,
-        classHints: null,
+        extraPrompts: null,
+        qwenMaxPrompts: null,
+        promptReasoning: null,
+        promptMaxTokens: null,
         testMode: null,
         trainLimit: null,
         valLimit: null,
@@ -1281,11 +1293,16 @@ const sam3TrainState = {
         recipeDownload: null,
         recipeApply: null,
         recipeImageId: null,
+        recipeOverrideToggle: null,
+        recipeOverrideSelect: null,
         recipeImport: null,
         recipeFile: null,
         recipeDetails: null,
         logs: null,
+        cacheSize: null,
+        purgeCacheBtn: null,
         progressFill: null,
+        progressText: null,
     };
 
     const promptRecipeState = {
@@ -1300,6 +1317,7 @@ const sam3TrainState = {
         recipeClassOverride: null,
         pollTimer: null,
         pollInFlight: false,
+        datasetClasses: { names: [], ids: [] },
     };
 
     let promptHelperInitialized = false;
@@ -9108,6 +9126,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3RecipeElements.presetLoadButton = document.getElementById("sam3RecipePresetLoad");
         sam3RecipeElements.presetRefreshButton = document.getElementById("sam3RecipePresetRefresh");
         sam3RecipeElements.presetDeleteButton = document.getElementById("sam3RecipePresetDelete");
+        sam3RecipeElements.overrideToggle = document.getElementById("sam3RecipeOverrideToggle");
+        sam3RecipeElements.overrideSelect = document.getElementById("sam3RecipeOverrideSelect");
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest({ auto: false }));
         }
@@ -9138,7 +9158,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3RecipeElements.presetDeleteButton) {
             sam3RecipeElements.presetDeleteButton.addEventListener("click", deleteSam3RecipePreset);
         }
+        if (sam3RecipeElements.overrideToggle) {
+            sam3RecipeElements.overrideToggle.addEventListener("change", () => {
+                if (sam3RecipeElements.overrideSelect) {
+                    sam3RecipeElements.overrideSelect.disabled = !sam3RecipeElements.overrideToggle.checked;
+                }
+            });
+        }
         updateSam3ClassOptions({ resetOverride: true });
+        updateSam3RecipeOverrideOptions({ resetOverride: true });
         updateSam3TextButtons();
         loadSam3RecipePresets().catch((err) => console.error("Load recipe presets failed", err));
     }
@@ -9196,57 +9224,116 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
+    function normalizeAgentRecipePayload(data) {
+        if (!data || typeof data !== "object") {
+            return null;
+        }
+        const recipeBody =
+            data.recipe && typeof data.recipe === "object" && !Array.isArray(data.recipe) ? data.recipe : data;
+        const steps = Array.isArray(recipeBody.steps) ? recipeBody.steps : Array.isArray(data.steps) ? data.steps : [];
+        const textPrompts = Array.isArray(recipeBody.text_prompts)
+            ? recipeBody.text_prompts
+            : Array.isArray(data.text_prompts)
+                ? data.text_prompts
+                : [];
+        const positives = Array.isArray(recipeBody.positives)
+            ? recipeBody.positives
+            : Array.isArray(data.positives)
+                ? data.positives
+                : [];
+        const negatives = Array.isArray(recipeBody.negatives)
+            ? recipeBody.negatives
+            : Array.isArray(data.negatives)
+                ? data.negatives
+                : [];
+        const params =
+            data.params && typeof data.params === "object"
+                ? data.params
+                : recipeBody?.params && typeof recipeBody.params === "object"
+                    ? recipeBody.params
+                    : {};
+        const mode = recipeBody?.mode || data.mode || null;
+        return {
+            raw: data,
+            id: data.id || null,
+            label: data.label || data.id || "recipe",
+            class_name: data.class_name || data?.recipe?.class_name || "",
+            class_id: typeof data.class_id === "number" ? data.class_id : data?.recipe?.class_id,
+            mode,
+            params,
+            steps: Array.isArray(steps) ? steps : [],
+            text_prompts: Array.isArray(textPrompts) ? textPrompts : [],
+            positives: Array.isArray(positives) ? positives : [],
+            negatives: Array.isArray(negatives) ? negatives : [],
+            summary: data?.recipe?.summary ?? data.summary ?? null,
+            dataset_id: data.dataset_id ?? null,
+            labelmap_hash: data.labelmap_hash ?? null,
+            labelmap: data.labelmap ?? null,
+            dataset_signature: data.dataset_signature ?? null,
+            _zip: data._zip ?? null,
+            _path: data._path ?? null,
+        };
+    }
+
     async function handleSam3RecipeFile(event) {
         const file = event.target?.files?.[0];
         if (!file) {
             return;
         }
         try {
-            let recipe = null;
-            if (file.name.toLowerCase().endsWith(".zip")) {
-                const formData = new FormData();
-                formData.append("file", file);
-                const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
-                    method: "POST",
-                    body: formData,
-                });
-                if (!resp.ok) throw new Error(await resp.text());
-                const data = await resp.json();
-                recipe = data.recipe || data;
-                recipe.label = data.label || data.id || recipe.label;
-                if (!recipe.class_name && data.class_name) recipe.class_name = data.class_name;
-                if (recipe.class_id === undefined && data.class_id !== undefined) recipe.class_id = data.class_id;
-            } else {
-                const text = await file.text();
-                recipe = parseRecipeJson(text);
+            if (!file.name.toLowerCase().endsWith(".zip")) {
+                throw new Error("zip_only");
             }
-            // Validate class exists in labelmap.
+            const formData = new FormData();
+            formData.append("file", file);
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
+                method: "POST",
+                body: formData,
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const recipe = normalizeAgentRecipePayload(data);
+            const hasContent =
+                recipe &&
+                ((Array.isArray(recipe.steps) && recipe.steps.length > 0) ||
+                    (Array.isArray(recipe.text_prompts) && recipe.text_prompts.length > 0) ||
+                    (Array.isArray(recipe.positives) && recipe.positives.length > 0));
+            if (!hasContent) {
+                throw new Error("no_steps");
+            }
             const classNames = orderedClassNames();
-            const targetName = recipe.class_name;
             const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
+            const targetName = (recipe.class_name || "").trim();
             if (targetName) {
                 const found = lowerToName.get(targetName.toLowerCase());
-                if (!found) {
-                    throw new Error(`class_missing:${targetName}`);
+                if (found) {
+                    recipe.class_name = found;
+                } else {
+                    setSam3RecipeStatus(
+                        `Loaded recipe ${recipe.label}. Note: class ${targetName} not in label map; use output class override to apply.`,
+                        "warn"
+                    );
                 }
-                recipe.class_name = found;
-            } else if (typeof recipe.class_id === "number" && classNames[recipe.class_id]) {
-                recipe.class_name = classNames[recipe.class_id];
-            } else {
-                throw new Error("class_missing");
             }
             sam3RecipeState.recipe = recipe;
             if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
             if (sam3RecipeElements.presetNameInput) {
                 sam3RecipeElements.presetNameInput.value = recipe.label || recipe.class_name;
             }
-            setSam3RecipeStatus(`Loaded recipe for ${recipe.class_name} (${recipe.steps.length} steps).`, "success");
+            if (!sam3RecipeElements.status?.textContent) {
+                const parts = [];
+                if (recipe.mode) parts.push(recipe.mode);
+                const promptCount = Array.isArray(recipe.text_prompts) ? recipe.text_prompts.length : 0;
+                const posCount = Array.isArray(recipe.positives) ? recipe.positives.length : 0;
+                const stepCount = Array.isArray(recipe.steps) ? recipe.steps.length : 0;
+                parts.push(`${promptCount} prompts`);
+                parts.push(`${posCount} crops`);
+                if (stepCount) parts.push(`${stepCount} steps`);
+                setSam3RecipeStatus(`Loaded recipe ${recipe.label} (${parts.join(", ")}).`, "success");
+            }
         } catch (err) {
             console.error("Failed to load recipe", err);
-            const msg =
-                (err && err.message && err.message.startsWith("class_missing"))
-                    ? `Class not in label map: ${err.message.split(":")[1] || ""}`
-                    : "Invalid recipe file (use zip/json).";
+            const msg = err?.message === "zip_only" ? "Recipes must be loaded from a .zip file." : "Invalid recipe file (use zip).";
             setSam3RecipeStatus(msg, "error");
             sam3RecipeState.recipe = null;
             if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
@@ -9257,8 +9344,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     async function runSam3RecipeOnImage() {
         const recipe = sam3RecipeState.recipe;
-        if (!recipe || !recipe.steps || !recipe.steps.length) {
-            setSam3RecipeStatus("Load a recipe JSON first.", "warn");
+        const hasContent =
+            recipe &&
+            ((Array.isArray(recipe.steps) && recipe.steps.length > 0) ||
+                (Array.isArray(recipe.text_prompts) && recipe.text_prompts.length > 0) ||
+                (Array.isArray(recipe.positives) && recipe.positives.length > 0));
+        if (!hasContent) {
+            setSam3RecipeStatus("Load a recipe zip first.", "warn");
             return;
         }
         if (!currentImage) {
@@ -9266,38 +9358,101 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return;
         }
         const classNames = orderedClassNames();
-        if (!classNames.includes(recipe.class_name)) {
-            setSam3RecipeStatus(`Class ${recipe.class_name} not in current label map.`, "error");
-            return;
+        const overrideEnabled = Boolean(sam3RecipeElements.overrideToggle?.checked);
+        let outputClassName = null;
+        let outputClassId = null;
+        if (overrideEnabled) {
+            outputClassName = sam3RecipeElements.overrideSelect?.value || null;
+            if (!outputClassName || !classNames.includes(outputClassName)) {
+                setSam3RecipeStatus("Select an output class override before applying.", "warn");
+                return;
+            }
+            outputClassId = typeof classes[outputClassName] !== "undefined" ? classes[outputClassName] : null;
+        } else {
+            const target = (recipe.class_name || "").trim();
+            if (!target) {
+                setSam3RecipeStatus("Recipe is missing a target class; enable output class override.", "error");
+                return;
+            }
+            const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
+            const found = lowerToName.get(target.toLowerCase());
+            if (!found) {
+                setSam3RecipeStatus(`Class ${target} not in current label map. Enable output class override.`, "error");
+                return;
+            }
+            outputClassName = found;
+            outputClassId = typeof classes[outputClassName] !== "undefined" ? classes[outputClassName] : null;
         }
         if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
         setSam3RecipeStatus(`Running recipe on ${currentImage.name}…`, "info");
-        let totalAdded = 0;
-        let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
-        if (Number.isNaN(maskThreshold)) {
-            maskThreshold = 0.5;
-        }
-        maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
-        const minSize = Math.max(0, getMinMaskArea());
-        const simplifyEps = Math.max(0, getSimplifyEpsilon());
         try {
-            for (const step of recipe.steps) {
-                const result = await invokeSam3TextPrompt(
-                    {
-                        text_prompt: step.prompt,
-                        threshold: step.threshold,
+            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || String(recipe.params?.mask_threshold ?? "0.5"));
+            if (Number.isNaN(maskThreshold)) {
+                maskThreshold = 0.5;
+            }
+            maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
+            const minSize = Math.max(0, getMinMaskArea());
+            const simplifyEps = Math.max(0, getSimplifyEpsilon());
+            let maxResults = parseInt(sam3TextElements.maxResultsInput?.value || String(recipe.params?.max_results ?? "100"), 10);
+            if (!Number.isFinite(maxResults) || maxResults <= 0) {
+                maxResults = 100;
+            }
+            maxResults = Math.min(Math.max(maxResults, 1), 5000);
+            const imageNameForRequest = currentImage.name;
+            const variantForRequest = "sam3";
+            const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
+            let imagePayload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+            imagePayload.sam_variant = variantForRequest;
+            const recipePayload = recipe?.raw && typeof recipe.raw === "object" ? recipe.raw : recipe;
+            let resp = await fetch(`${API_ROOT}/agent_mining/apply_image`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    ...imagePayload,
+                    recipe: recipePayload,
+                    mask_threshold: maskThreshold,
+                    min_size: minSize,
+                    simplify_epsilon: simplifyEps,
+                    max_results: maxResults,
+                    override_class_id: overrideEnabled ? outputClassId : null,
+                    override_class_name: overrideEnabled ? outputClassName : null,
+                }),
+            });
+            if (resp.status === 428) {
+                imagePayload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+                imagePayload.sam_variant = variantForRequest;
+                resp = await fetch(`${API_ROOT}/agent_mining/apply_image`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        ...imagePayload,
+                        recipe: recipePayload,
                         mask_threshold: maskThreshold,
-                        max_results: 100,
                         min_size: minSize,
                         simplify_epsilon: simplifyEps,
-                    },
-                    { auto: false }
-                );
-                const detections = Array.isArray(result?.detections) ? result.detections : [];
-                const added = applySegAwareDetections(detections, recipe.class_name, "SAM3 recipe");
-                totalAdded += added;
+                        max_results: maxResults,
+                        override_class_id: overrideEnabled ? outputClassId : null,
+                        override_class_name: overrideEnabled ? outputClassName : null,
+                    }),
+                });
             }
-            setSam3RecipeStatus(`Recipe applied: added ${totalAdded} boxes to ${recipe.class_name}.`, "success");
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            }
+            const result = await resp.json();
+            if (currentImage && result?.image_token) {
+                rememberSamToken(currentImage.name, variantForRequest, result.image_token);
+            }
+            const detections = Array.isArray(result?.detections) ? result.detections : [];
+            const warnList = Array.isArray(result?.warnings) ? result.warnings : [];
+            const added = applySegAwareDetections(detections, outputClassName, "Agent recipe");
+            const warnText = warnList.length ? ` Warnings: ${warnList.join(", ")}` : "";
+            if (added > 0) {
+                setSam3RecipeStatus(`Recipe applied: added ${added} ${datasetType === "seg" ? "polygons" : "boxes"} to ${outputClassName}.${warnText}`, warnList.length ? "warn" : "success");
+            } else {
+                setSam3RecipeStatus(`Recipe applied: no detections.${warnText}`, warnList.length ? "warn" : "warn");
+            }
         } catch (err) {
             console.error("Recipe apply failed", err);
             setSam3RecipeStatus(`Recipe failed: ${err.message || err}`, "error");
@@ -9441,6 +9596,45 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (resetOverride && classNames.length) {
             sam3TextElements.classSelect.value = targetValue;
         }
+        updateSam3RecipeOverrideOptions({ resetOverride, preserveSelection: true });
+    }
+
+    function updateSam3RecipeOverrideOptions({ resetOverride = false, preserveSelection = true } = {}) {
+        if (!sam3RecipeElements.overrideSelect) {
+            return;
+        }
+        const select = sam3RecipeElements.overrideSelect;
+        const classNames = orderedClassNames();
+        const enabled = Boolean(sam3RecipeElements.overrideToggle?.checked);
+        select.innerHTML = "";
+        if (!classNames.length) {
+            const placeholder = document.createElement("option");
+            placeholder.textContent = "Load classes first";
+            placeholder.value = "";
+            select.appendChild(placeholder);
+            select.disabled = true;
+            return;
+        }
+        const previousValue = preserveSelection ? select.value : null;
+        classNames.forEach((name) => {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name;
+            select.appendChild(option);
+        });
+        let targetValue = null;
+        if (preserveSelection && previousValue && classNames.includes(previousValue)) {
+            targetValue = previousValue;
+        } else if (currentClass && classNames.includes(currentClass)) {
+            targetValue = currentClass;
+        } else {
+            targetValue = classNames[0];
+        }
+        select.value = targetValue;
+        if (resetOverride && classNames.length) {
+            select.value = targetValue;
+        }
+        select.disabled = !enabled;
     }
 
     function updateQwenRunButton() {
@@ -11389,113 +11583,139 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         console.log("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
     }
 
-    function renderAgentResults(result) {
-        if (!agentElements.results) return;
-        agentElements.results.innerHTML = "";
-        if (!result || !Array.isArray(result.classes)) {
-            setAgentResultsMessage("No agent mining results yet.", "warn");
-            return;
-        }
-        const frag = document.createDocumentFragment();
-        result.classes.forEach((cls) => {
-            const card = document.createElement("div");
-            card.className = "training-card";
-            const body = document.createElement("div");
-            body.className = "training-card__body";
-            const recipe = cls.recipe || {};
-            const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
-            const summary = recipe.summary || {};
-            const negatives = Array.isArray(recipe.negatives) ? recipe.negatives : [];
-            const params = recipe.params || {};
-            const guardBits = [];
-            if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
-                guardBits.push(`CLIP guard on (floor ${params.similarity_score ?? recipe.similarity_score ?? 0.25})`);
-            } else {
-                guardBits.push("CLIP guard off");
-            }
-            if (params.use_negative_exemplars || recipe.use_negative_exemplars) {
-                guardBits.push(`Negatives used: ${negatives.length || 0} (strength ${params.negative_strength ?? recipe.negative_strength ?? 0})`);
-            }
-            const covPct = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0.0";
-            body.innerHTML = `
-                <div class="training-history-row">
-                    <div class="training-history-title">${escapeHtml(cls.name || cls.id)}</div>
-                    <span class="badge">${steps.length} step${steps.length === 1 ? "" : "s"}</span>
-                </div>
-                <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
-                <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%) • FPs: ${summary.fps || 0}</div>
-                <div class="training-help">${guardBits.join(" • ")}</div>
-            `;
-            if (steps.length) {
-                const expl = recipe.explanation
-                    ? recipe.explanation
-                    : `Kept ${steps.length} step(s). Coverage ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%), FPs ${summary.fps || 0}.`;
-                const explDiv = document.createElement("div");
-                explDiv.className = "training-help";
-                explDiv.textContent = expl;
-                body.appendChild(explDiv);
+	    function renderAgentResults(result) {
+	        if (!agentElements.results) return;
+	        agentElements.results.innerHTML = "";
+	        if (!result || !Array.isArray(result.classes)) {
+	            setAgentResultsMessage("No agent mining results yet.", "warn");
+	            return;
+	        }
+	        const frag = document.createDocumentFragment();
+	        result.classes.forEach((cls) => {
+	            const card = document.createElement("div");
+	            card.className = "training-card";
+	            const body = document.createElement("div");
+	            body.className = "training-card__body";
+	            const recipe = cls.recipe || {};
+	            const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+	            const prompts = Array.isArray(recipe.text_prompts) ? recipe.text_prompts : [];
+	            const positives = Array.isArray(recipe.positives) ? recipe.positives : [];
+	            const negatives = Array.isArray(recipe.negatives) ? recipe.negatives : [];
+	            const params = recipe.params || {};
+	            const summary = recipe.summary || {};
 
-                const table = document.createElement("table");
-                table.className = "training-table";
-                table.innerHTML = `
-                    <thead>
-                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Adds</th><th>Cov after %</th><th>FPs (step)</th><th>FPs (total)</th><th>Prec</th></tr>
-                    </thead>
-                `;
-                const tbody = document.createElement("tbody");
-                steps.forEach((step, idx) => {
-                    const covVal =
-                        Number.isFinite(step.cum_coverage) && step.cum_coverage >= 0
-                            ? (step.cum_coverage * 100).toFixed(1)
-                            : Number.isFinite(step.coverage_after)
-                            ? (step.coverage_after * 100).toFixed(1)
-                            : "";
-                    const label =
-                        step.type === "visual" && step.exemplar
-                            ? `Exemplar img ${step.exemplar.image_id} bbox ${Array.isArray(step.exemplar.bbox) ? step.exemplar.bbox.join(",") : ""}`
-                            : step.prompt || "";
-                    const row = document.createElement("tr");
-                    if (idx === 0) row.classList.add("metric-table__highlight");
-                    row.innerHTML = `
-                        <td>${idx + 1}</td>
-                        <td>${step.type || "text"}</td>
-                        <td>${escapeHtml(label)}</td>
-                        <td>${(step.threshold ?? "").toString()}</td>
-                        <td>${step.gain ?? ""}</td>
-                        <td>${covVal}</td>
-                        <td>${step.fps ?? 0}</td>
-                        <td>${step.cum_fps ?? step.fps ?? 0}</td>
-                        <td>${formatMetric(step.precision, 3)}</td>
-                    `;
-                    tbody.appendChild(row);
-                });
-                table.appendChild(tbody);
-                body.appendChild(table);
-            }
-            // Show exemplars/negatives snapshot for transparency.
-            const exemplarList = Array.isArray(cls.exemplars) ? cls.exemplars : [];
-            if (exemplarList.length) {
-                const exDiv = document.createElement("div");
-                exDiv.className = "training-help";
-                const sample = exemplarList.slice(0, 6).map((ex) => `img ${ex.image_id} bbox ${Array.isArray(ex.bbox) ? ex.bbox.join(",") : ""}`);
-                exDiv.textContent = `Exemplars (${exemplarList.length}): ${sample.join(" • ")}`;
-                body.appendChild(exDiv);
-            }
-            if (negatives.length) {
-                const negDiv = document.createElement("div");
-                negDiv.className = "training-help";
-                const sampleNeg = negatives.slice(0, 6).map((ex) => `img ${ex.image_id} bbox ${Array.isArray(ex.bbox) ? ex.bbox.join(",") : ""}`);
-                negDiv.textContent = `Negatives (${negatives.length}): ${sampleNeg.join(" • ")}`;
-                body.appendChild(negDiv);
-            } else {
-                const empty = document.createElement("div");
-                empty.className = "training-help";
-                empty.textContent = "No steps proposed for this class.";
-                body.appendChild(empty);
-            }
-            const foot = document.createElement("div");
-            foot.className = "training-actions";
-            const saveBtn = document.createElement("button");
+	            const totalGt = Number.isFinite(summary.gts) ? summary.gts : (Number.isFinite(summary.total_gt) ? summary.total_gt : 0);
+	            const matched = Number.isFinite(summary.matches) ? summary.matches : (Number.isFinite(summary.covered) ? summary.covered : 0);
+	            const recall = Number.isFinite(summary.recall) ? summary.recall : (Number.isFinite(summary.coverage_rate) ? summary.coverage_rate : 0);
+	            const precision = Number.isFinite(summary.precision) ? summary.precision : 0;
+	            const fps = Number.isFinite(summary.fps) ? summary.fps : 0;
+	            const duplicates = Number.isFinite(summary.duplicates) ? summary.duplicates : 0;
+	            const detRate = Number.isFinite(summary.det_rate) ? summary.det_rate : 0;
+
+	            const covPct = Number.isFinite(recall) ? (recall * 100).toFixed(1) : "0.0";
+	            const precPct = Number.isFinite(precision) ? (precision * 100).toFixed(1) : "0.0";
+	            const detPct = Number.isFinite(detRate) ? (detRate * 100).toFixed(1) : "0.0";
+	            const modeLabel = recipe.mode || (steps.length ? "legacy" : "sam3_greedy");
+
+	            body.innerHTML = `
+	                <div class="training-history-row">
+	                    <div class="training-history-title" style="font-size: 20px; font-weight: 700;">${escapeHtml(cls.name || cls.id)}</div>
+	                    <span class="badge">${escapeHtml(modeLabel)}</span>
+	                </div>
+	                <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
+	                <div><strong>Coverage:</strong> ${matched}/${totalGt} (${covPct}%) • Precision: ${precPct}% • FPs: ${fps} • Duplicates: ${duplicates} • Det rate: ${detPct}%</div>
+	            `;
+
+	            const configBits = [];
+	            if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
+	                configBits.push(`CLIP on (sim ≥ ${params.similarity_score ?? 0.25})`);
+	            } else {
+	                configBits.push("CLIP off");
+	            }
+	            if (params.use_negative_exemplars || recipe.use_negative_exemplars) {
+	                configBits.push(`negatives=${negatives.length || 0} (λ ${params.negative_strength ?? 0})`);
+	            } else if (negatives.length) {
+	                configBits.push(`negatives=${negatives.length || 0} (disabled)`);
+	            }
+	            if (recipe.clip_head) {
+	                const head = recipe.clip_head || {};
+	                const nClasses = Array.isArray(head.classes) ? head.classes.length : null;
+	                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
+	                const margin = Number.isFinite(head.margin) ? head.margin : null;
+		                const parts = ["pretrained CLIP head"];
+	                if (nClasses) parts.push(`${nClasses} classes`);
+	                if (minProb !== null) parts.push(`p≥${minProb}`);
+	                if (margin !== null && margin > 0) parts.push(`Δ≥${margin}`);
+	                configBits.push(parts.join(" "));
+	            }
+	            if (typeof params.seed_threshold === "number") configBits.push(`seed thr ${params.seed_threshold}`);
+	            if (typeof params.expand_threshold === "number") configBits.push(`expand thr ${params.expand_threshold}`);
+	            if (typeof params.max_visual_seeds === "number") configBits.push(`seeds ${params.max_visual_seeds}`);
+	            if (configBits.length) {
+	                const meta = document.createElement("div");
+	                meta.className = "training-help";
+	                meta.textContent = `Prompts: ${prompts.length} • +crops: ${positives.length} • -crops: ${negatives.length} • ${configBits.join(" • ")}`;
+	                body.appendChild(meta);
+	            }
+
+	            if (prompts.length) {
+	                const list = document.createElement("div");
+	                list.className = "training-help";
+	                const preview = prompts.slice(0, 16).join(", ");
+	                const extra = prompts.length > 16 ? ` (+${prompts.length - 16} more)` : "";
+	                list.textContent = `Text prompts: ${preview}${extra}`;
+	                body.appendChild(list);
+	            }
+
+	            if (steps.length) {
+	                const table = document.createElement("table");
+	                table.className = "training-table";
+	                table.innerHTML = `
+	                    <thead>
+	                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Adds</th><th>Cov after %</th><th>FPs (step)</th><th>FPs (total)</th><th>Prec</th></tr>
+	                    </thead>
+	                `;
+	                const tbody = document.createElement("tbody");
+	                steps.forEach((step, idx) => {
+	                    const covVal =
+	                        Number.isFinite(step.cum_coverage) && step.cum_coverage >= 0
+	                            ? (step.cum_coverage * 100).toFixed(1)
+	                            : Number.isFinite(step.coverage_after)
+	                            ? (step.coverage_after * 100).toFixed(1)
+	                            : "";
+	                    const label =
+	                        step.type === "visual" && step.exemplar
+	                            ? `Exemplar img ${step.exemplar.image_id} bbox ${Array.isArray(step.exemplar.bbox) ? step.exemplar.bbox.join(",") : ""}`
+	                            : step.prompt || "";
+	                    const row = document.createElement("tr");
+	                    if (idx === 0) row.classList.add("metric-table__highlight");
+	                    row.innerHTML = `
+	                        <td>${idx + 1}</td>
+	                        <td>${step.type || "text"}</td>
+	                        <td>${escapeHtml(label)}</td>
+	                        <td>${(step.threshold ?? "").toString()}</td>
+	                        <td>${step.gain ?? ""}</td>
+	                        <td>${covVal}</td>
+	                        <td>${step.fps ?? 0}</td>
+	                        <td>${step.cum_fps ?? step.fps ?? 0}</td>
+	                        <td>${formatMetric(step.precision, 3)}</td>
+	                    `;
+	                    tbody.appendChild(row);
+	                });
+	                table.appendChild(tbody);
+	                body.appendChild(table);
+	            }
+
+	            if (!prompts.length && !steps.length) {
+	                const empty = document.createElement("div");
+	                empty.className = "training-help";
+	                empty.textContent = "No recipe produced for this class (try increasing crops/prompts or lowering thresholds).";
+	                body.appendChild(empty);
+	            }
+
+	            const foot = document.createElement("div");
+	            foot.className = "training-actions";
+	            const saveBtn = document.createElement("button");
             saveBtn.type = "button";
             saveBtn.className = "training-button secondary";
             saveBtn.textContent = "Save recipe";
@@ -11548,6 +11768,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             frag.appendChild(div);
         });
         agentElements.logs.appendChild(frag);
+        // Keep view pinned to latest.
+        agentElements.logs.scrollTop = agentElements.logs.scrollHeight;
         if (agentElements.purgeCacheBtn) {
             const disabled = job && job.status === "running";
             agentElements.purgeCacheBtn.disabled = disabled;
@@ -11555,11 +11777,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    function updateAgentProgress(job) {
-        if (!agentElements.progressFill) return;
-        const pct = Number.isFinite(job?.progress) ? Math.max(0, Math.min(1, job.progress)) * 100 : 0;
-        agentElements.progressFill.style.width = `${pct}%`;
-    }
+	    function updateAgentProgress(job) {
+	        if (!agentElements.progressFill) return;
+	        const pct = Number.isFinite(job?.progress) ? Math.max(0, Math.min(1, job.progress)) * 100 : 0;
+	        agentElements.progressFill.style.width = `${pct}%`;
+	        if (agentElements.progressText) {
+	            const extra = job?.message ? ` • ${job.message}` : job?.current_class ? ` • Class: ${job.current_class}` : "";
+	            agentElements.progressText.textContent = `Progress: ${pct.toFixed(1)}%${extra}`;
+	        }
+	    }
 
     function getAgentSelectedDatasetMeta() {
         const datasetId = agentElements.datasetSelect?.value;
@@ -11567,76 +11793,114 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return agentState.datasetsById[datasetId] || null;
     }
 
-    function renderAgentRecipeDetails(recipeData) {
-        if (!agentElements.recipeDetails) return;
-        agentElements.recipeDetails.innerHTML = "";
-        agentElements.recipeDetails.style.display = recipeData ? "block" : "none";
-        if (!recipeData) return;
-        const dsMeta = getAgentSelectedDatasetMeta();
-        const dsClasses = Array.isArray(dsMeta?.classes) ? dsMeta.classes : [];
-        const recipeClasses = Array.isArray(recipeData.labelmap) ? recipeData.labelmap : [];
-        const mismatchWarnings = [];
-        if (dsMeta?.signature && recipeData.dataset_signature && dsMeta.signature !== recipeData.dataset_signature) {
-            mismatchWarnings.push("Dataset signature differs from the recipe origin.");
-        }
-        if (recipeClasses.length && dsClasses.length && JSON.stringify(recipeClasses) !== JSON.stringify(dsClasses)) {
-            mismatchWarnings.push("Label map differs; remap the class before applying.");
-        }
-        const wrapper = document.createElement("div");
-        wrapper.className = "training-card__body";
-        const title = document.createElement("div");
-        title.className = "training-history-title";
-        title.textContent = recipeData.label || recipeData.id || "recipe";
-        wrapper.appendChild(title);
-            const meta = document.createElement("div");
-            meta.className = "training-help";
-            meta.textContent = [
-                recipeData.class_name ? `Class: ${recipeData.class_name}` : null,
-                recipeData.dataset_id ? `Dataset: ${recipeData.dataset_id}` : null,
-                recipeData.dataset_signature ? `Signature: ${recipeData.dataset_signature}` : null,
-                recipeData.labelmap_hash ? `Labelmap hash: ${recipeData.labelmap_hash}` : null,
-            ]
-                .filter(Boolean)
-                .join(" • ");
-            wrapper.appendChild(meta);
-        if (mismatchWarnings.length) {
-            const warn = document.createElement("div");
-            warn.className = "training-message warn";
-            warn.textContent = mismatchWarnings.join(" ");
-            wrapper.appendChild(warn);
-        }
-        if (dsClasses.length) {
-            const mapRow = document.createElement("div");
-            mapRow.className = "training-field";
-            const lbl = document.createElement("label");
-            lbl.textContent = "Remap class";
-            mapRow.appendChild(lbl);
-            const select = document.createElement("select");
-            dsClasses.forEach((clsName, idx) => {
-                const opt = document.createElement("option");
-                opt.value = (idx + 1).toString();
-                opt.textContent = clsName;
-                if (recipeData.class_name && clsName.toLowerCase() === recipeData.class_name.toLowerCase()) {
-                    opt.selected = true;
-                }
-                select.appendChild(opt);
-            });
-            select.addEventListener("change", () => {
-                const val = parseInt(select.value, 10);
-                if (Number.isInteger(val)) {
-                    agentState.recipeClassOverride = { class_id: val, class_name: dsClasses[val - 1] };
-                }
-            });
-            mapRow.appendChild(select);
-            wrapper.appendChild(mapRow);
-        }
-        const steps = recipeData.recipe?.steps || [];
-        if (steps.length) {
-            const list = document.createElement("div");
-            list.className = "training-grid";
-            steps.forEach((step, idx) => {
-                const card = document.createElement("div");
-                card.className = "training-card";
+	    function renderAgentRecipeDetails(recipeData) {
+	        if (!agentElements.recipeDetails) return;
+	        agentElements.recipeDetails.innerHTML = "";
+	        agentElements.recipeDetails.style.display = recipeData ? "block" : "none";
+	        if (!recipeData) return;
+	        const dsMeta = getAgentSelectedDatasetMeta();
+	        const dsClasses = Array.isArray(dsMeta?.classes) ? dsMeta.classes : [];
+	        const recipeClasses = Array.isArray(recipeData.labelmap) ? recipeData.labelmap : [];
+	        const mismatchWarnings = [];
+	        if (dsMeta?.signature && recipeData.dataset_signature && dsMeta.signature !== recipeData.dataset_signature) {
+	            mismatchWarnings.push("Dataset signature differs from the recipe origin.");
+	        }
+	        if (recipeClasses.length && dsClasses.length && JSON.stringify(recipeClasses) !== JSON.stringify(dsClasses)) {
+	            mismatchWarnings.push("Label map differs; remap the class before applying.");
+	        }
+	        const recipeBody = recipeData.recipe || {};
+	        const steps = Array.isArray(recipeBody.steps) ? recipeBody.steps : [];
+	        const prompts = Array.isArray(recipeBody.text_prompts) ? recipeBody.text_prompts : [];
+	        const positives = Array.isArray(recipeBody.positives) ? recipeBody.positives : [];
+	        const negatives = Array.isArray(recipeBody.negatives) ? recipeBody.negatives : [];
+	        const params = recipeBody.params || {};
+	        const modeLabel = recipeBody.mode || (steps.length ? "legacy" : "sam3_greedy");
+	        const wrapper = document.createElement("div");
+	        wrapper.className = "training-card__body";
+	        const title = document.createElement("div");
+	        title.className = "training-history-title";
+	        title.textContent = recipeData.label || recipeData.id || "recipe";
+	        wrapper.appendChild(title);
+	        const meta = document.createElement("div");
+	        meta.className = "training-help";
+	        meta.textContent = [
+	            recipeData.class_name ? `Class: ${recipeData.class_name}` : null,
+	            recipeData.dataset_signature ? `Signature: ${recipeData.dataset_signature}` : null,
+	            recipeData.labelmap_hash ? `Labelmap hash: ${recipeData.labelmap_hash}` : null,
+	            `Mode: ${modeLabel}`,
+	        ]
+	            .filter(Boolean)
+	            .join(" • ");
+	        wrapper.appendChild(meta);
+	        if (mismatchWarnings.length) {
+	            const warn = document.createElement("div");
+	            warn.className = "training-message warn";
+	            warn.textContent = mismatchWarnings.join(" ");
+	            wrapper.appendChild(warn);
+	        }
+	        const counts = document.createElement("div");
+	        counts.className = "training-help";
+	        counts.textContent = `Text prompts: ${prompts.length} • +crops: ${positives.length} • -crops: ${negatives.length}`;
+	        wrapper.appendChild(counts);
+
+	        if (prompts.length) {
+	            const p = document.createElement("div");
+	            p.className = "training-help";
+	            const preview = prompts.slice(0, 24).join(", ");
+	            const extra = prompts.length > 24 ? ` (+${prompts.length - 24} more)` : "";
+	            p.textContent = `Prompts: ${preview}${extra}`;
+	            wrapper.appendChild(p);
+	        }
+	        if (params && typeof params === "object" && Object.keys(params).length) {
+	            const p = document.createElement("div");
+	            p.className = "training-help";
+	            const bits = [];
+	            if (typeof params.similarity_score === "number") bits.push(`sim ≥ ${params.similarity_score}`);
+	            if (typeof params.seed_threshold === "number") bits.push(`seed thr ${params.seed_threshold}`);
+	            if (typeof params.expand_threshold === "number") bits.push(`expand thr ${params.expand_threshold}`);
+	            if (typeof params.max_visual_seeds === "number") bits.push(`seeds ${params.max_visual_seeds}`);
+	            if (typeof params.negative_strength === "number" && params.use_negative_exemplars) bits.push(`λ ${params.negative_strength}`);
+	            if (bits.length) {
+	                p.textContent = `Params: ${bits.join(" • ")}`;
+	                wrapper.appendChild(p);
+	            }
+	        }
+
+	        const appendCropStrip = (label, entries) => {
+	            const head = document.createElement("div");
+	            head.className = "training-help";
+	            head.textContent = `${label} (${entries.length})`;
+	            wrapper.appendChild(head);
+	            const withImg = entries.filter((e) => e && e.crop_base64).slice(0, 8);
+	            if (withImg.length) {
+	                const row = document.createElement("div");
+	                row.style.display = "flex";
+	                row.style.gap = "8px";
+	                row.style.flexWrap = "wrap";
+	                row.style.margin = "6px 0 10px";
+	                withImg.forEach((e) => {
+	                    const img = document.createElement("img");
+	                    img.src = e.crop_base64;
+	                    img.alt = `${label} crop`;
+	                    img.style.width = "96px";
+	                    img.style.height = "96px";
+	                    img.style.objectFit = "cover";
+	                    img.style.borderRadius = "8px";
+	                    img.style.border = "1px solid #e5e7eb";
+	                    row.appendChild(img);
+	                });
+	                wrapper.appendChild(row);
+	            }
+	        };
+	        if (positives.length) appendCropStrip("Positive crops", positives);
+	        if (negatives.length) appendCropStrip("Negative crops", negatives);
+
+	        if (steps.length) {
+	            const list = document.createElement("div");
+	            list.className = "training-grid";
+	            steps.forEach((step, idx) => {
+	                const card = document.createElement("div");
+	                card.className = "training-card";
                 const body = document.createElement("div");
                 body.className = "training-card__body";
                 const header = document.createElement("div");
@@ -11659,10 +11923,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 card.appendChild(body);
                 list.appendChild(card);
             });
-            wrapper.appendChild(list);
-        }
-        agentElements.recipeDetails.appendChild(wrapper);
-    }
+	            wrapper.appendChild(list);
+	        }
+	        agentElements.recipeDetails.appendChild(wrapper);
+	    }
 
     async function loadAgentDatasets() {
         if (!agentElements.datasetSelect || !agentElements.datasetSummary) return;
@@ -11692,10 +11956,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 if (first.source) parts.push(first.source);
                 if (first.image_count) parts.push(`${first.image_count} images`);
                 agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
-                prefillClassHints();
+                prefillExtraPrompts();
             } else {
                 agentElements.datasetSummary.textContent = "No datasets found.";
-                if (agentElements.classHints) agentElements.classHints.value = "{}";
+                if (agentElements.extraPrompts) agentElements.extraPrompts.value = "{}";
             }
         } catch (err) {
             console.error("Agent datasets load failed", err);
@@ -11715,96 +11979,202 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const parts = [];
         if (meta.source) parts.push(meta.source);
         if (meta.image_count) parts.push(`${meta.image_count} images`);
-        agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
+	        agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
+	    }
+
+    function syncAgentClipHeadControls() {
+        const clipOn = !!(agentElements.clipGuard && agentElements.clipGuard.checked);
+        const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
+        if (agentElements.clipHeadSelect) {
+            agentElements.clipHeadSelect.disabled = !clipOn;
+        }
+        const enableParams = clipOn && hasHead;
+        if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !enableParams;
+        if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !enableParams;
     }
 
-    function parseAgentPayload() {
-        const datasetId = agentElements.datasetSelect?.value;
-        if (!datasetId) {
-            setAgentStatus("Select a dataset.", "warn");
-            return null;
+    async function loadAgentClipClassifiers() {
+        if (!agentElements.clipHeadSelect) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/clip/classifiers`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const list = Array.isArray(data) ? data : [];
+            agentElements.clipHeadSelect.innerHTML = "";
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = "(none)";
+            agentElements.clipHeadSelect.appendChild(empty);
+            list.forEach((entry) => {
+                const rel = entry.rel_path || "";
+                if (!rel) return;
+                const opt = document.createElement("option");
+                opt.value = rel;
+                const bits = [];
+                if (entry.filename) bits.push(entry.filename);
+                if (entry.n_classes) bits.push(`${entry.n_classes} classes`);
+                if (entry.clip_model) bits.push(entry.clip_model);
+                opt.textContent = bits.join(" • ") || rel;
+                agentElements.clipHeadSelect.appendChild(opt);
+            });
+        } catch (err) {
+            console.warn("Failed to load CLIP classifiers", err);
+        } finally {
+            syncAgentClipHeadControls();
         }
-        const valPct = readNumberInput(agentElements.valPercent, { integer: false });
-        const thresholds = parseCsvNumbers(agentElements.thresholds?.value, { clampMin: 0, clampMax: 1 });
-        const maskThreshold = readNumberInput(agentElements.maskThreshold, { integer: false });
-        const maxResults = readNumberInput(agentElements.maxResults, { integer: true });
-        const minSize = readNumberInput(agentElements.minSize, { integer: true });
-        const simplifyEps = readNumberInput(agentElements.simplifyEps, { integer: false });
-        const maxWorkers = readNumberInput(agentElements.maxWorkers, { integer: true });
-        const workersPerGpu = readNumberInput(agentElements.workersPerGpu, { integer: true });
-        const exemplars = readNumberInput(agentElements.exemplars, { integer: true });
-        const exemplarPoolMode =
-            agentElements.exemplarPoolMode && agentElements.exemplarPoolMode.value === "count" ? "count" : "percent";
-        const exemplarPoolValue = readNumberInput(agentElements.exemplarPoolValue, { integer: true });
-        const similarityRaw = agentElements.similarityScore?.value || "";
-        const similarityList = similarityRaw ? parseCsvNumbers(similarityRaw, { clampMin: 0, clampMax: 1 }) : [];
-        const useNegExemplars = !!(agentElements.useNegExemplars && agentElements.useNegExemplars.checked);
-        const maxNegExemplars = readNumberInput(agentElements.maxNegExemplars, { integer: true });
-        const negStrength = readNumberInput(agentElements.negStrength, { integer: false });
-        const useFpNeg = !!(agentElements.useFpNeg && agentElements.useFpNeg.checked);
-        const maxFpNeg = readNumberInput(agentElements.maxFpNeg, { integer: true });
-        const promptReasoning =
-            agentElements.promptReasoning && agentElements.promptReasoning.value ? agentElements.promptReasoning.value : "none";
-        const promptMaxTokens = readNumberInput(agentElements.promptMaxTokens, { integer: true });
-        const classesRaw = agentElements.classesInput?.value || "";
-        const classes =
-            classesRaw
-                .split(/[,\\s]+/)
+    }
+
+	    function parseAgentPayload() {
+	        const datasetId = agentElements.datasetSelect?.value;
+	        if (!datasetId) {
+	            setAgentStatus("Select a dataset.", "warn");
+	            return null;
+	        }
+
+	        const valPctRaw = readNumberInput(agentElements.valPercent, { integer: false });
+	        const valPercent = Number.isFinite(valPctRaw) ? Math.max(5, Math.min(95, valPctRaw)) / 100 : 0.3;
+	        const splitSeed = readNumberInput(agentElements.splitSeed, { integer: true });
+	        const reuseSplit = !!(agentElements.reuseSplit && agentElements.reuseSplit.checked);
+
+	        const iouThresholdRaw = readNumberInput(agentElements.iouThreshold, { integer: false });
+	        const iouThreshold = Number.isFinite(iouThresholdRaw) ? Math.max(0, Math.min(1, iouThresholdRaw)) : 0.5;
+
+	        const seedThrRaw = readNumberInput(agentElements.seedThreshold, { integer: false });
+	        const seedThreshold = Number.isFinite(seedThrRaw) ? Math.max(0, Math.min(1, seedThrRaw)) : 0.05;
+	        const expandThrRaw = readNumberInput(agentElements.expandThreshold, { integer: false });
+	        const expandThreshold = Number.isFinite(expandThrRaw) ? Math.max(0, Math.min(1, expandThrRaw)) : 0.3;
+	        const maxVisualSeedsRaw = readNumberInput(agentElements.maxVisualSeeds, { integer: true });
+	        const maxVisualSeeds = Number.isFinite(maxVisualSeedsRaw) ? Math.max(0, Math.min(500, maxVisualSeedsRaw)) : 25;
+	        const seedDedupeIouRaw = readNumberInput(agentElements.seedDedupeIou, { integer: false });
+	        const seedDedupeIou = Number.isFinite(seedDedupeIouRaw) ? Math.max(0, Math.min(1, seedDedupeIouRaw)) : 0.9;
+	        const dedupeIouRaw = readNumberInput(agentElements.dedupeIou, { integer: false });
+	        const dedupeIou = Number.isFinite(dedupeIouRaw) ? Math.max(0, Math.min(1, dedupeIouRaw)) : 0.5;
+
+	        const maskThresholdRaw = readNumberInput(agentElements.maskThreshold, { integer: false });
+	        const maskThreshold = Number.isFinite(maskThresholdRaw) ? Math.max(0, Math.min(1, maskThresholdRaw)) : 0.5;
+	        const similarityScoreRaw = readNumberInput(agentElements.similarityScore, { integer: false });
+	        const similarityScore = Number.isFinite(similarityScoreRaw) ? Math.max(0, Math.min(1, similarityScoreRaw)) : 0.25;
+	        const maxResultsRaw = readNumberInput(agentElements.maxResults, { integer: true });
+	        const maxResults = Number.isFinite(maxResultsRaw) ? Math.max(1, Math.min(5000, maxResultsRaw)) : 100;
+	        const minSizeRaw = readNumberInput(agentElements.minSize, { integer: true });
+	        const minSize = Number.isFinite(minSizeRaw) ? Math.max(0, Math.min(10000, minSizeRaw)) : 0;
+	        const simplifyEpsRaw = readNumberInput(agentElements.simplifyEps, { integer: false });
+	        const simplifyEps = Number.isFinite(simplifyEpsRaw) ? Math.max(0, Math.min(1000, simplifyEpsRaw)) : 0.0;
+
+	        const positivesRaw = readNumberInput(agentElements.exemplars, { integer: true });
+	        const positivesPerClass = Number.isFinite(positivesRaw) ? Math.max(0, Math.min(500, positivesRaw)) : 20;
+	        const exemplarPoolMode =
+	            agentElements.exemplarPoolMode && agentElements.exemplarPoolMode.value === "count" ? "count" : "percent";
+	        const exemplarPoolValueRaw = readNumberInput(agentElements.exemplarPoolValue, { integer: true });
+	        const exemplarPoolValue = Number.isFinite(exemplarPoolValueRaw)
+	            ? Math.max(1, Math.min(10000, exemplarPoolValueRaw))
+	            : 25;
+
+	        const promptReasoning =
+	            agentElements.promptReasoning && agentElements.promptReasoning.value ? agentElements.promptReasoning.value : "none";
+	        const promptMaxTokensRaw = readNumberInput(agentElements.promptMaxTokens, { integer: true });
+	        const promptMaxTokens = Number.isFinite(promptMaxTokensRaw) ? Math.max(16, Math.min(800, promptMaxTokensRaw)) : 160;
+	        const promptMaxPromptsRaw = readNumberInput(agentElements.qwenMaxPrompts, { integer: true });
+	        const promptMaxPrompts = Number.isFinite(promptMaxPromptsRaw) ? Math.max(0, Math.min(50, promptMaxPromptsRaw)) : 0;
+
+	        const useClipGuard = !!(agentElements.clipGuard && agentElements.clipGuard.checked);
+	        const clipHeadPathRaw = agentElements.clipHeadSelect?.value || "";
+	        const clipHeadClassifierPath = useClipGuard && clipHeadPathRaw ? clipHeadPathRaw : null;
+	        const clipHeadMinProbRaw = readNumberInput(agentElements.clipHeadMinProb, { integer: false });
+	        const clipHeadMinProb = Number.isFinite(clipHeadMinProbRaw) ? Math.max(0, Math.min(1, clipHeadMinProbRaw)) : 0.5;
+	        const clipHeadMarginRaw = readNumberInput(agentElements.clipHeadMargin, { integer: false });
+	        const clipHeadMargin = Number.isFinite(clipHeadMarginRaw) ? Math.max(0, Math.min(1, clipHeadMarginRaw)) : 0.0;
+	        const useNegExemplars = !!(agentElements.useNegExemplars && agentElements.useNegExemplars.checked);
+	        const maxNegExemplarsRaw = readNumberInput(agentElements.maxNegExemplars, { integer: true });
+	        const maxNegExemplars = Number.isFinite(maxNegExemplarsRaw) ? Math.max(0, Math.min(256, maxNegExemplarsRaw)) : 25;
+	        const negStrengthRaw = readNumberInput(agentElements.negStrength, { integer: false });
+	        const negStrength = Number.isFinite(negStrengthRaw) ? Math.max(0, Math.min(5, negStrengthRaw)) : 0.5;
+
+	        const classesRaw = agentElements.classesInput?.value || "";
+	        const classes =
+	            classesRaw
+	                .split(/[,\\s]+/)
                 .map((p) => parseInt(p.trim(), 10))
                 .filter((v) => Number.isInteger(v)) || [];
-        const hintsRaw = agentElements.classHints?.value || "";
-        let classHints = null;
-        if (hintsRaw.trim()) {
-            try {
-                const parsed = JSON.parse(hintsRaw);
-                if (parsed && typeof parsed === "object") {
-                    classHints = parsed;
-                }
-            } catch (err) {
-                console.warn("Invalid class hints JSON", err);
-            }
-        }
-return {
-            dataset_id: datasetId,
-            val_percent: Number.isFinite(valPct) ? Math.max(5, Math.min(95, valPct)) / 100 : 0.3,
-            thresholds: thresholds.length ? thresholds : [0.2],
-            mask_threshold: Number.isFinite(maskThreshold) ? Math.max(0, Math.min(1, maskThreshold)) : 0.5,
-            max_results: Number.isFinite(maxResults) ? Math.max(1, maxResults) : 100,
-            min_size: Number.isFinite(minSize) ? Math.max(0, minSize) : 0,
-            simplify_epsilon: Number.isFinite(simplifyEps) ? Math.max(0, simplifyEps) : 0,
-            max_workers: Number.isFinite(maxWorkers) ? Math.max(1, Math.min(16, maxWorkers)) : 1,
-            max_workers_per_device: Number.isFinite(workersPerGpu) ? Math.max(1, Math.min(8, workersPerGpu)) : 1,
-            exemplar_per_class: Number.isFinite(exemplars) ? Math.max(0, exemplars) : 4,
-            exemplar_candidate_mode: exemplarPoolMode,
-            exemplar_candidate_value: Number.isFinite(exemplarPoolValue) ? Math.max(1, Math.min(10000, exemplarPoolValue)) : 25,
-            cluster_exemplars: !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
-            use_clip_fp_guard: !!(agentElements.clipGuard && agentElements.clipGuard.checked),
-            use_negative_exemplars: useNegExemplars,
-            max_negatives_per_class: Number.isFinite(maxNegExemplars) ? Math.max(0, Math.min(64, maxNegExemplars)) : 8,
-            negative_strength: Number.isFinite(negStrength) ? Math.max(0, Math.min(5, negStrength)) : 0.5,
-            use_fp_negatives: useFpNeg,
-            max_fp_negatives: Number.isFinite(maxFpNeg) ? Math.max(0, Math.min(64, maxFpNeg)) : 8,
-            similarity_score:
-                similarityList.length === 1 && Number.isFinite(similarityList[0])
-                    ? Math.max(0, Math.min(1, similarityList[0]))
-                    : 0.25,
-            similarity_scores: similarityList.length > 1 ? similarityList : undefined,
-            classes: classes.length ? classes : null,
-            class_hints: classHints && typeof classHints === "object" && Object.keys(classHints).length ? classHints : null,
-            auto_mine_prompts: (agentElements.qwenMaxPrompts && readNumberInput(agentElements.qwenMaxPrompts, { integer: true }) > 0) || false,
-            qwen_max_prompts: Number.isFinite(readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
-                ? Math.max(0, readNumberInput(agentElements.qwenMaxPrompts, { integer: true }))
-                : 0,
-            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
-            prompt_max_new_tokens: Number.isFinite(promptMaxTokens) ? Math.max(16, Math.min(400, promptMaxTokens)) : 160,
-            split_seed: Number.isFinite(readNumberInput(agentElements.splitSeed, { integer: true }))
-                ? readNumberInput(agentElements.splitSeed, { integer: true })
-                : 42,
-            test_mode: !!(agentElements.testMode && agentElements.testMode.checked),
-            test_train_limit: readNumberInput(agentElements.trainLimit, { integer: true }) ?? 10,
-            test_val_limit: readNumberInput(agentElements.valLimit, { integer: true }) ?? 10,
-        };
-    }
+        const extraRaw = agentElements.extraPrompts?.value || "";
+	        let extraPromptsByClass = null;
+	        if (extraRaw.trim()) {
+	            try {
+	                const parsed = JSON.parse(extraRaw);
+	                if (parsed && typeof parsed === "object") {
+	                    const cleaned = {};
+	                    Object.entries(parsed).forEach(([key, val]) => {
+	                        if (!key || typeof key !== "string") return;
+	                        const name = key.trim();
+	                        if (!name) return;
+	                        if (Array.isArray(val)) {
+	                            const items = val
+	                                .filter((v) => typeof v === "string")
+	                                .map((v) => v.trim())
+	                                .filter(Boolean);
+	                            if (items.length) cleaned[name] = items;
+	                        } else if (typeof val === "string") {
+	                            const items = val
+	                                .split(/[,\\n]+/)
+	                                .map((v) => v.trim())
+	                                .filter(Boolean);
+	                            if (items.length) cleaned[name] = items;
+	                        }
+	                    });
+	                    if (Object.keys(cleaned).length) {
+	                        extraPromptsByClass = cleaned;
+	                    }
+	                }
+	            } catch (err) {
+	                console.warn("Invalid extra prompts JSON", err);
+	            }
+	        }
+
+	        const testMode = !!(agentElements.testMode && agentElements.testMode.checked);
+	        const testTrainLimitRaw = readNumberInput(agentElements.trainLimit, { integer: true });
+	        const testValLimitRaw = readNumberInput(agentElements.valLimit, { integer: true });
+
+	        return {
+	            dataset_id: datasetId,
+	            val_percent: valPercent,
+	            split_seed: Number.isFinite(splitSeed) ? splitSeed : 42,
+	            reuse_split: reuseSplit,
+	            iou_threshold: iouThreshold,
+
+	            prompt_llm_max_prompts: promptMaxPrompts,
+	            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
+	            prompt_max_new_tokens: promptMaxTokens,
+	            extra_prompts_by_class: extraPromptsByClass,
+	            clip_head_classifier_path: clipHeadClassifierPath,
+	            clip_head_min_prob: clipHeadMinProb,
+	            clip_head_margin: clipHeadMargin,
+
+	            positives_per_class: positivesPerClass,
+	            exemplar_candidate_mode: exemplarPoolMode,
+	            exemplar_candidate_value: exemplarPoolValue,
+	            cluster_exemplars: !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
+	            use_clip_fp_guard: useClipGuard,
+	            use_negative_exemplars: useNegExemplars,
+	            max_negatives_per_class: maxNegExemplars,
+	            negative_strength: negStrength,
+
+	            seed_threshold: seedThreshold,
+	            expand_threshold: expandThreshold,
+	            max_visual_seeds: maxVisualSeeds,
+	            seed_dedupe_iou: seedDedupeIou,
+	            dedupe_iou: dedupeIou,
+	            mask_threshold: maskThreshold,
+	            similarity_score: similarityScore,
+	            max_results: maxResults,
+	            min_size: minSize,
+	            simplify_epsilon: simplifyEps,
+
+	            classes: classes.length ? classes : null,
+	            test_mode: testMode,
+	            test_train_limit: Number.isFinite(testTrainLimitRaw) ? Math.max(1, Math.min(10000, testTrainLimitRaw)) : 10,
+	            test_val_limit: Number.isFinite(testValLimitRaw) ? Math.max(1, Math.min(10000, testValLimitRaw)) : 10,
+	        };
+	    }
 
     async function startAgentMiningJob() {
         const payload = parseAgentPayload();
@@ -12006,7 +12376,7 @@ return {
 
     async function importAgentRecipe() {
         if (!agentElements.recipeFile || !agentElements.recipeFile.files?.length) {
-            setAgentStatus("Choose a recipe file (.zip or .json) to import.", "warn");
+            setAgentStatus("Choose a recipe file (.zip) to import.", "warn");
             return;
         }
         const file = agentElements.recipeFile.files[0];
@@ -12056,26 +12426,24 @@ return {
                 if (!recipeResp.ok) throw new Error(await recipeResp.text());
                 recipeData = await recipeResp.json();
             }
-            if (agentState.recipeClassOverride) {
-                recipeData = {
-                    ...recipeData,
-                    class_id: agentState.recipeClassOverride.class_id,
-                    class_name: agentState.recipeClassOverride.class_name,
-                };
-            }
-            const params = recipeData.params || {};
+            const override =
+                agentElements.recipeOverrideToggle?.checked && agentState.recipeClassOverride
+                    ? agentState.recipeClassOverride
+                    : null;
+            const params = {
+                ...(recipeData?.recipe?.params || {}),
+                ...(recipeData.params || {}),
+            };
             const payload = {
                 dataset_id: datasetId,
                 image_id: imageId,
                 recipe: recipeData,
                 mask_threshold: params.mask_threshold ?? 0.5,
                 min_size: params.min_size ?? 0,
-                simplify_epsilon: params.simplify_epsilon ?? 0.5,
+                simplify_epsilon: params.simplify_epsilon ?? 0.0,
                 max_results: params.max_results ?? 100,
-                use_negative_exemplars: params.use_negative_exemplars ?? recipeData.use_negative_exemplars ?? false,
-                negative_strength: params.negative_strength ?? recipeData.negative_strength ?? 0,
-                use_clip_fp_guard: params.use_clip_fp_guard ?? recipeData.use_clip_fp_guard ?? false,
-                similarity_score: params.similarity_score ?? recipeData.similarity_score ?? 0.25,
+                override_class_id: override?.class_id,
+                override_class_name: override?.class_name,
             };
             const resp = await fetch(`${API_ROOT}/agent_mining/apply`, {
                 method: "POST",
@@ -12086,8 +12454,14 @@ return {
             const data = await resp.json();
             const detections = Array.isArray(data?.detections) ? data.detections : [];
             const warnList = Array.isArray(data?.warnings) ? data.warnings : [];
+            const classLabel =
+                override?.class_name || recipeData.class_name || (override?.class_id ? `class #${override.class_id}` : "");
             const warnText = warnList.length ? ` • Warnings: ${warnList.join(", ")}` : "";
-            setAgentStatus(`Apply succeeded: ${detections.length} detections${warnText}`, warnList.length ? "warn" : "success");
+            const classText = classLabel ? ` for class ${classLabel}` : "";
+            setAgentStatus(
+                `Apply succeeded${classText}: ${detections.length} detections${warnText}`,
+                warnList.length ? "warn" : "success"
+            );
             // Optionally overlay on current view? Not wired to the annotator yet.
         } catch (err) {
             console.error("Agent recipe apply failed", err);
@@ -12097,35 +12471,40 @@ return {
 
     function initAgentMiningUi() {
         agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
-        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
-        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
-        agentElements.valPercent = document.getElementById("agentValPercent");
-        agentElements.splitSeed = document.getElementById("agentSplitSeed");
-        agentElements.thresholds = document.getElementById("agentThresholds");
-        agentElements.maskThreshold = document.getElementById("agentMaskThreshold");
-        agentElements.maxResults = document.getElementById("agentMaxResults");
-        agentElements.minSize = document.getElementById("agentMinSize");
-        agentElements.simplifyEps = document.getElementById("agentSimplifyEps");
-        agentElements.maxWorkers = document.getElementById("agentMaxWorkers");
-        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
-        agentElements.exemplars = document.getElementById("agentExemplars");
-        agentElements.exemplarPoolMode = document.getElementById("agentExemplarPoolMode");
-        agentElements.exemplarPoolValue = document.getElementById("agentExemplarPoolValue");
-        agentElements.clusterExemplars = document.getElementById("agentClusterExemplars");
-        agentElements.clipGuard = document.getElementById("agentClipGuard");
-        agentElements.similarityScore = document.getElementById("agentSimilarityScore");
-        agentElements.useNegExemplars = document.getElementById("agentUseNegExemplars");
-        agentElements.maxNegExemplars = document.getElementById("agentMaxNegExemplars");
-        agentElements.negStrength = document.getElementById("agentNegStrength");
-        agentElements.useFpNeg = document.getElementById("agentUseFpNeg");
-        agentElements.maxFpNeg = document.getElementById("agentMaxFpNeg");
-        agentElements.classesInput = document.getElementById("agentClasses");
-        agentElements.classHints = document.getElementById("agentClassHints");
-        agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
-        agentElements.promptReasoning = document.getElementById("agentPromptReasoning");
-        agentElements.promptMaxTokens = document.getElementById("agentPromptMaxTokens");
-        agentElements.cacheSize = document.getElementById("agentCacheSize");
-        agentElements.purgeCacheBtn = document.getElementById("agentPurgeCacheBtn");
+	        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
+	        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
+	        agentElements.valPercent = document.getElementById("agentValPercent");
+	        agentElements.splitSeed = document.getElementById("agentSplitSeed");
+	        agentElements.reuseSplit = document.getElementById("agentReuseSplit");
+	        agentElements.iouThreshold = document.getElementById("agentIouThreshold");
+	        agentElements.seedThreshold = document.getElementById("agentSeedThreshold");
+	        agentElements.expandThreshold = document.getElementById("agentExpandThreshold");
+	        agentElements.maxVisualSeeds = document.getElementById("agentMaxVisualSeeds");
+	        agentElements.seedDedupeIou = document.getElementById("agentSeedDedupeIou");
+	        agentElements.dedupeIou = document.getElementById("agentDedupeIou");
+	        agentElements.maskThreshold = document.getElementById("agentMaskThreshold");
+	        agentElements.similarityScore = document.getElementById("agentSimilarityScore");
+	        agentElements.maxResults = document.getElementById("agentMaxResults");
+	        agentElements.minSize = document.getElementById("agentMinSize");
+	        agentElements.simplifyEps = document.getElementById("agentSimplifyEps");
+	        agentElements.exemplars = document.getElementById("agentExemplars");
+	        agentElements.exemplarPoolMode = document.getElementById("agentExemplarPoolMode");
+	        agentElements.exemplarPoolValue = document.getElementById("agentExemplarPoolValue");
+	        agentElements.clusterExemplars = document.getElementById("agentClusterExemplars");
+	        agentElements.clipGuard = document.getElementById("agentClipGuard");
+	        agentElements.clipHeadSelect = document.getElementById("agentClipHeadSelect");
+	        agentElements.clipHeadMinProb = document.getElementById("agentClipHeadMinProb");
+	        agentElements.clipHeadMargin = document.getElementById("agentClipHeadMargin");
+	        agentElements.useNegExemplars = document.getElementById("agentUseNegExemplars");
+	        agentElements.maxNegExemplars = document.getElementById("agentMaxNegExemplars");
+	        agentElements.negStrength = document.getElementById("agentNegStrength");
+	        agentElements.classesInput = document.getElementById("agentClasses");
+	        agentElements.extraPrompts = document.getElementById("agentExtraPrompts");
+	        agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
+	        agentElements.promptReasoning = document.getElementById("agentPromptReasoning");
+	        agentElements.promptMaxTokens = document.getElementById("agentPromptMaxTokens");
+	        agentElements.cacheSize = document.getElementById("agentCacheSize");
+	        agentElements.purgeCacheBtn = document.getElementById("agentPurgeCacheBtn");
         agentElements.testMode = document.getElementById("agentTestMode");
         agentElements.trainLimit = document.getElementById("agentTrainLimit");
         agentElements.valLimit = document.getElementById("agentValLimit");
@@ -12140,16 +12519,29 @@ return {
         agentElements.recipeDownload = document.getElementById("agentRecipeDownload");
         agentElements.recipeApply = document.getElementById("agentRecipeApply");
         agentElements.recipeImageId = document.getElementById("agentRecipeImageId");
+        agentElements.recipeOverrideToggle = document.getElementById("agentRecipeOverrideToggle");
+        agentElements.recipeOverrideSelect = document.getElementById("agentRecipeOverrideSelect");
         agentElements.recipeImport = document.getElementById("agentRecipeImport");
         agentElements.recipeFile = document.getElementById("agentRecipeFile");
         agentElements.recipeDetails = document.getElementById("agentRecipeDetails");
         agentElements.logs = document.getElementById("agentLogs");
         agentElements.progressFill = document.getElementById("agentProgressFill");
-        if (agentElements.logs) agentElements.logs.innerHTML = "";
-        if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
-        if (agentElements.clusterExemplars) agentElements.clusterExemplars.checked = true;
-        if (agentElements.clipGuard) agentElements.clipGuard.checked = true;
-        stopAgentPoll();
+	        agentElements.progressText = document.getElementById("agentProgressText");
+	        if (agentElements.logs) agentElements.logs.innerHTML = "";
+	        if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
+	        if (agentElements.clusterExemplars) agentElements.clusterExemplars.checked = true;
+	        if (agentElements.clipGuard) agentElements.clipGuard.checked = true;
+	        if (agentElements.clipGuard) agentElements.clipGuard.addEventListener("change", syncAgentClipHeadControls);
+	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
+	        syncAgentClipHeadControls();
+	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
+	        if (agentElements.recipeOverrideToggle) {
+	            agentElements.recipeOverrideToggle.addEventListener("change", syncRecipeOverrideState);
+	        }
+	        if (agentElements.recipeOverrideSelect) {
+	            agentElements.recipeOverrideSelect.addEventListener("change", syncRecipeOverrideState);
+	        }
+	        stopAgentPoll();
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
         }
@@ -12158,9 +12550,14 @@ return {
                 updateAgentDatasetSummary();
                 agentState.loadedRecipe = null;
                 agentState.recipeClassOverride = null;
+                if (agentElements.recipeOverrideToggle) {
+                    agentElements.recipeOverrideToggle.checked = false;
+                }
+                populateAgentOverrideOptions([], []);
+                syncRecipeOverrideState();
                 renderAgentRecipeDetails(null);
                 fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
-                prefillClassHints();
+                prefillExtraPrompts();
                 refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
             });
         }
@@ -12193,11 +12590,11 @@ return {
         }
         loadAgentDatasets().catch((err) => console.error("Agent dataset load failed", err));
         fetchAgentRecipes().catch((err) => console.error("Agent recipe init failed", err));
-        prefillClassHints();
+        prefillExtraPrompts();
     }
 
-    function prefillClassHints() {
-        if (!agentElements.classHints) return;
+    function prefillExtraPrompts() {
+        if (!agentElements.extraPrompts) return;
         const datasetId = agentElements.datasetSelect?.value;
         if (!datasetId) return;
         fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(datasetId)}/classes`)
@@ -12207,19 +12604,73 @@ return {
             })
             .then((data) => {
                 const names = Array.isArray(data?.classes) ? data.classes : [];
+                const ids = Array.isArray(data?.class_ids) ? data.class_ids : names.map((_, idx) => idx + 1);
+                agentState.datasetClasses = { names, ids };
                 const template = {};
                 if (names.length) {
                     names.forEach((name) => {
-                        template[String(name)] = "add hint";
+                        template[String(name)] = [];
                     });
                 }
-                agentElements.classHints.value = JSON.stringify(template, null, 2);
-                agentElements.classHints.removeAttribute("readonly");
+                agentElements.extraPrompts.value = JSON.stringify(template, null, 2);
+                agentElements.extraPrompts.removeAttribute("readonly");
+                populateAgentOverrideOptions(names, ids);
             })
             .catch((err) => {
-                console.warn("Failed to prefill class hints", err);
-                agentElements.classHints.value = "{}";
+                console.warn("Failed to prefill extra prompts", err);
+                agentElements.extraPrompts.value = "{}";
+                agentState.datasetClasses = { names: [], ids: [] };
+                populateAgentOverrideOptions([], []);
             });
+    }
+
+    function populateAgentOverrideOptions(names = [], ids = []) {
+        if (!agentElements.recipeOverrideSelect || !agentElements.recipeOverrideToggle) return;
+        agentElements.recipeOverrideSelect.innerHTML = "";
+        if (!names.length) {
+            agentElements.recipeOverrideSelect.disabled = true;
+            agentElements.recipeOverrideToggle.disabled = true;
+            agentElements.recipeOverrideToggle.checked = false;
+            agentState.recipeClassOverride = null;
+            return;
+        }
+        agentElements.recipeOverrideToggle.disabled = false;
+        const normIds = Array.isArray(ids)
+            ? ids.map((v, idx) => {
+                  const parsed = parseInt(v, 10);
+                  return Number.isNaN(parsed) ? idx + 1 : parsed;
+              })
+            : [];
+        names.forEach((name, idx) => {
+            const opt = document.createElement("option");
+            const cid = Number.isFinite(normIds[idx]) ? normIds[idx] : idx + 1;
+            opt.value = cid.toString();
+            opt.textContent = name;
+            agentElements.recipeOverrideSelect.appendChild(opt);
+        });
+        agentElements.recipeOverrideSelect.disabled = !agentElements.recipeOverrideToggle?.checked;
+        syncRecipeOverrideState();
+    }
+
+    function syncRecipeOverrideState() {
+        if (!agentElements.recipeOverrideToggle || !agentElements.recipeOverrideSelect) return;
+        const enabled = agentElements.recipeOverrideToggle.checked;
+        agentElements.recipeOverrideSelect.disabled = !enabled || !agentElements.recipeOverrideSelect.options.length;
+        if (!enabled) {
+            agentState.recipeClassOverride = null;
+            return;
+        }
+        const val = parseInt(agentElements.recipeOverrideSelect.value, 10);
+        if (Number.isInteger(val)) {
+            const names = agentState.datasetClasses.names || [];
+            const ids = (agentState.datasetClasses.ids || []).map((v, idx) => {
+                const parsed = parseInt(v, 10);
+                return Number.isNaN(parsed) ? idx + 1 : parsed;
+            });
+            const idx = ids.findIndex((x) => x === val);
+            const name = idx >= 0 ? names[idx] : names[val - 1] || null;
+            agentState.recipeClassOverride = { class_id: val, class_name: name };
+        }
     }
 
     document.addEventListener("DOMContentLoaded", () => {
@@ -15540,7 +15991,7 @@ return {
 
         try {
           // 1) Start the server-side job
-          let resp = await fetch("http://localhost:8000/crop_zip_init", { method: "POST" });
+          let resp = await fetch(`${API_ROOT}/crop_zip_init`, { method: "POST" });
           if (!resp.ok) {
             throw new Error("crop_zip_init failed: " + resp.status);
           }
@@ -15612,7 +16063,7 @@ return {
             // Debug log
             console.log("Sending:", JSON.stringify(body, null, 2));
 
-            resp = await fetch(`http://localhost:8000/crop_zip_chunk?jobId=${jobId}`, {
+            resp = await fetch(`${API_ROOT}/crop_zip_chunk?jobId=${jobId}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(body)
@@ -15628,7 +16079,7 @@ return {
 
           // 4) Finalize
           progressModal.update("Finalizing crop_zip_finalize...");
-          resp = await fetch(`http://localhost:8000/crop_zip_finalize?jobId=${jobId}`);
+          resp = await fetch(`${API_ROOT}/crop_zip_finalize?jobId=${jobId}`);
           if (!resp.ok) {
             throw new Error("crop_zip_finalize failed: " + resp.status);
           }
@@ -15738,9 +16189,15 @@ return {
             placeholder.value = "";
             placeholder.textContent = "Select recipe…";
             sam3RecipeElements.presetSelect.appendChild(placeholder);
+            const seen = new Set();
             (Array.isArray(data) ? data : []).forEach((p) => {
+                const id = p?.id;
+                if (!id || seen.has(id)) {
+                    return;
+                }
+                seen.add(id);
                 const opt = document.createElement("option");
-                opt.value = p.id || p._path || "";
+                opt.value = id;
                 const cls = p.class_name ? ` • ${p.class_name}` : "";
                 opt.textContent = `${p.label || p.id || opt.value}${cls}`;
                 sam3RecipeElements.presetSelect.appendChild(opt);
@@ -15753,17 +16210,41 @@ return {
 
     async function saveSam3RecipePreset() {
         const recipe = sam3RecipeState.recipe;
-        if (!recipe || !recipe.steps || !recipe.steps.length) {
+        const hasContent =
+            recipe &&
+            ((Array.isArray(recipe.steps) && recipe.steps.length > 0) ||
+                (Array.isArray(recipe.text_prompts) && recipe.text_prompts.length > 0) ||
+                (Array.isArray(recipe.positives) && recipe.positives.length > 0));
+        if (!hasContent) {
             setSam3RecipeStatus("Load a recipe first, then save.", "warn");
             return;
         }
+        const datasetId = recipe.dataset_id;
+        if (!datasetId) {
+            setSam3RecipeStatus("This recipe is missing a dataset id, so it cannot be saved as a backend preset yet.", "warn");
+            return;
+        }
         try {
+            const recipePayload =
+                recipe.raw && typeof recipe.raw === "object"
+                    ? recipe.raw
+                    : {
+                          params: recipe.params || {},
+                          recipe: {
+                              mode: recipe.mode || null,
+                              text_prompts: recipe.text_prompts || [],
+                              positives: recipe.positives || [],
+                              steps: recipe.steps || [],
+                              negatives: recipe.negatives || [],
+                              summary: recipe.summary,
+                          },
+                      };
             const payload = {
                 label: sam3RecipeElements.presetNameInput?.value || recipe.label || "",
                 class_name: recipe.class_name,
                 class_id: recipe.class_id,
-                recipe: { steps: recipe.steps, summary: recipe.summary },
-                dataset_id: null,
+                recipe: recipePayload,
+                dataset_id: datasetId,
             };
             const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
                 method: "POST",
@@ -15795,34 +16276,43 @@ return {
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
             const data = await resp.json();
-            const parsed = {
-                label: data.label || data.id || (data.recipe && (data.recipe.label || data.recipe.id)) || "",
-                class_name: data.class_name || (data.recipe && data.recipe.class_name),
-                class_id: data.class_id ?? (data.recipe && data.recipe.class_id),
-                steps: Array.isArray(data.recipe?.steps)
-                    ? data.recipe.steps
-                    : Array.isArray(data.steps)
-                        ? data.steps
-                              .map((s) => ({
-                                  prompt: typeof s.prompt === "string" ? s.prompt.trim() : "",
-                                  threshold: typeof s.threshold === "number" ? s.threshold : null,
-                              }))
-                          .filter((s) => s.prompt && s.threshold !== null)
-                    : [],
-            };
-            if (!parsed.steps.length) throw new Error("Preset has no steps.");
-            // Validate class exists in label map.
+            const parsed = normalizeAgentRecipePayload(data);
+            const hasContent =
+                parsed &&
+                ((Array.isArray(parsed.steps) && parsed.steps.length > 0) ||
+                    (Array.isArray(parsed.text_prompts) && parsed.text_prompts.length > 0) ||
+                    (Array.isArray(parsed.positives) && parsed.positives.length > 0));
+            if (!hasContent) {
+                throw new Error("Preset has no content.");
+            }
             const classNames = orderedClassNames();
             const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
-            const target = parsed.class_name || (typeof parsed.class_id === "number" ? classNames[parsed.class_id] : null);
-            if (!target || !lowerToName.has(target.toLowerCase())) {
-                throw new Error(`Class not in label map: ${parsed.class_name || parsed.class_id || ""}`);
+            const targetName = (parsed.class_name || "").trim();
+            if (targetName) {
+                const found = lowerToName.get(targetName.toLowerCase());
+                if (found) {
+                    parsed.class_name = found;
+                } else {
+                    setSam3RecipeStatus(
+                        `Loaded recipe ${parsed.label}. Note: class ${targetName} not in label map; use output class override to apply.`,
+                        "warn"
+                    );
+                }
             }
-            parsed.class_name = lowerToName.get(target.toLowerCase());
             sam3RecipeState.recipe = parsed;
             if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
             if (sam3RecipeElements.presetNameInput) sam3RecipeElements.presetNameInput.value = parsed.label || parsed.class_name;
-            setSam3RecipeStatus(`Loaded preset for ${parsed.class_name} (${parsed.steps.length} steps).`, "success");
+            if (!sam3RecipeElements.status?.textContent) {
+                const parts = [];
+                if (parsed.mode) parts.push(parsed.mode);
+                const promptCount = Array.isArray(parsed.text_prompts) ? parsed.text_prompts.length : 0;
+                const posCount = Array.isArray(parsed.positives) ? parsed.positives.length : 0;
+                const stepCount = Array.isArray(parsed.steps) ? parsed.steps.length : 0;
+                parts.push(`${promptCount} prompts`);
+                parts.push(`${posCount} crops`);
+                if (stepCount) parts.push(`${stepCount} steps`);
+                setSam3RecipeStatus(`Loaded recipe ${parsed.label} (${parts.join(", ")}).`, "success");
+            }
         } catch (err) {
             console.error("Load recipe preset failed", err);
             setSam3RecipeStatus(err.message || "Load failed.", "error");

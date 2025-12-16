@@ -1278,6 +1278,7 @@ const sam3TrainState = {
         negStrength: null,
         classesInput: null,
         extraPrompts: null,
+        extraPromptsStatus: null,
         qwenMaxPrompts: null,
         promptReasoning: null,
         promptMaxTokens: null,
@@ -12091,7 +12092,65 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-	    function parseAgentPayload() {
+    function parseAgentExtraPrompts(rawText) {
+        const extraRaw = (rawText || "").trim();
+        if (!extraRaw) return { data: null, mode: "empty" };
+
+        const normalize = (parsed) => {
+            if (!parsed || typeof parsed !== "object") return null;
+            const cleaned = {};
+            Object.entries(parsed).forEach(([key, val]) => {
+                if (!key || typeof key !== "string") return;
+                const name = key.trim();
+                if (!name) return;
+                if (Array.isArray(val)) {
+                    const items = val
+                        .filter((v) => typeof v === "string")
+                        .map((v) => v.trim())
+                        .filter(Boolean);
+                    if (items.length) cleaned[name] = items;
+                } else if (typeof val === "string") {
+                    const items = val
+                        .split(/[,\n]+/)
+                        .map((v) => v.trim())
+                        .filter(Boolean);
+                    if (items.length) cleaned[name] = items;
+                }
+            });
+            return Object.keys(cleaned).length ? cleaned : null;
+        };
+
+        try {
+            const parsed = JSON.parse(extraRaw);
+            const cleaned = normalize(parsed);
+            return cleaned ? { data: cleaned, mode: "json" } : { data: null, mode: "empty" };
+        } catch (_err) {
+            // Lenient fallback: accept `"class": [a, b, c]` (items may be unquoted).
+            const cleaned = {};
+            const rx = /["']([^"']+)["']\s*:\s*\[([^\]]*)\]/g;
+            let match;
+            while ((match = rx.exec(extraRaw)) !== null) {
+                const key = (match[1] || "").trim();
+                const inner = (match[2] || "").trim();
+                if (!key) continue;
+                if (!inner) continue;
+                const items = inner
+                    .split(",")
+                    .map((v) => v.trim())
+                    .map((v) => {
+                        if ((v.startsWith("\"") && v.endsWith("\"")) || (v.startsWith("'") && v.endsWith("'"))) {
+                            return v.slice(1, -1).trim();
+                        }
+                        return v;
+                    })
+                    .filter(Boolean);
+                if (items.length) cleaned[key] = items;
+            }
+            return Object.keys(cleaned).length ? { data: cleaned, mode: "loose" } : { data: null, mode: "invalid" };
+        }
+    }
+
+		    function parseAgentPayload() {
 	        const datasetId = agentElements.datasetSelect?.value;
 	        if (!datasetId) {
 	            setAgentStatus("Select a dataset.", "warn");
@@ -12168,48 +12227,35 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 
 	        const classesRaw = agentElements.classesInput?.value || "";
-	        const classes =
-	            classesRaw
-	                .split(/[,\\s]+/)
-                .map((p) => parseInt(p.trim(), 10))
-                .filter((v) => Number.isInteger(v)) || [];
-        const extraRaw = agentElements.extraPrompts?.value || "";
-	        let extraPromptsByClass = null;
-	        if (extraRaw.trim()) {
-	            try {
-	                const parsed = JSON.parse(extraRaw);
-	                if (parsed && typeof parsed === "object") {
-	                    const cleaned = {};
-	                    Object.entries(parsed).forEach(([key, val]) => {
-	                        if (!key || typeof key !== "string") return;
-	                        const name = key.trim();
-	                        if (!name) return;
-	                        if (Array.isArray(val)) {
-	                            const items = val
-	                                .filter((v) => typeof v === "string")
-	                                .map((v) => v.trim())
-	                                .filter(Boolean);
-	                            if (items.length) cleaned[name] = items;
-	                        } else if (typeof val === "string") {
-	                            const items = val
-	                                .split(/[,\\n]+/)
-	                                .map((v) => v.trim())
-	                                .filter(Boolean);
-	                            if (items.length) cleaned[name] = items;
-	                        }
-	                    });
-	                    if (Object.keys(cleaned).length) {
-	                        extraPromptsByClass = cleaned;
-	                    }
-	                }
-	            } catch (err) {
-	                console.warn("Invalid extra prompts JSON", err);
-	            }
-	        }
+		        const classes =
+		            classesRaw
+		                .split(/[,\\s]+/)
+	                .map((p) => parseInt(p.trim(), 10))
+	                .filter((v) => Number.isInteger(v)) || [];
+		        let extraPromptsByClass = null;
+		        const extraParse = parseAgentExtraPrompts(agentElements.extraPrompts?.value || "");
+		        if (extraParse.data) extraPromptsByClass = extraParse.data;
+		        if (agentElements.extraPromptsStatus) {
+		            const classCount = extraPromptsByClass ? Object.keys(extraPromptsByClass).length : 0;
+		            if (extraParse.mode === "empty") {
+		                agentElements.extraPromptsStatus.textContent = "";
+		                agentElements.extraPromptsStatus.style.color = "";
+		            } else if (extraParse.mode === "json") {
+		                agentElements.extraPromptsStatus.textContent = `Extra prompts loaded for ${classCount} class(es).`;
+		                agentElements.extraPromptsStatus.style.color = "";
+		            } else if (extraParse.mode === "loose") {
+		                agentElements.extraPromptsStatus.textContent =
+		                    `Extra prompts parsed (lenient mode) for ${classCount} class(es). Tip: use JSON quotes for clarity.`;
+		                agentElements.extraPromptsStatus.style.color = "#b45309";
+		            } else {
+		                agentElements.extraPromptsStatus.textContent = "Extra prompts format invalid; ignored.";
+		                agentElements.extraPromptsStatus.style.color = "#b91c1c";
+		            }
+		        }
 
-	        const testMode = !!(agentElements.testMode && agentElements.testMode.checked);
-	        const testTrainLimitRaw = readNumberInput(agentElements.trainLimit, { integer: true });
-	        const testValLimitRaw = readNumberInput(agentElements.valLimit, { integer: true });
+		        const testMode = !!(agentElements.testMode && agentElements.testMode.checked);
+		        const testTrainLimitRaw = readNumberInput(agentElements.trainLimit, { integer: true });
+		        const testValLimitRaw = readNumberInput(agentElements.valLimit, { integer: true });
 
 	        return {
 	            dataset_id: datasetId,
@@ -12573,13 +12619,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.clipHeadMinProb = document.getElementById("agentClipHeadMinProb");
 	        agentElements.clipHeadMargin = document.getElementById("agentClipHeadMargin");
 	        agentElements.useNegExemplars = document.getElementById("agentUseNegExemplars");
-	        agentElements.maxNegExemplars = document.getElementById("agentMaxNegExemplars");
-	        agentElements.negStrength = document.getElementById("agentNegStrength");
-	        agentElements.classesInput = document.getElementById("agentClasses");
-	        agentElements.extraPrompts = document.getElementById("agentExtraPrompts");
-	        agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
-	        agentElements.promptReasoning = document.getElementById("agentPromptReasoning");
-	        agentElements.promptMaxTokens = document.getElementById("agentPromptMaxTokens");
+		        agentElements.maxNegExemplars = document.getElementById("agentMaxNegExemplars");
+		        agentElements.negStrength = document.getElementById("agentNegStrength");
+		        agentElements.classesInput = document.getElementById("agentClasses");
+		        agentElements.extraPrompts = document.getElementById("agentExtraPrompts");
+		        agentElements.extraPromptsStatus = document.getElementById("agentExtraPromptsParseStatus");
+		        agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
+		        agentElements.promptReasoning = document.getElementById("agentPromptReasoning");
+		        agentElements.promptMaxTokens = document.getElementById("agentPromptMaxTokens");
 	        agentElements.cacheSize = document.getElementById("agentCacheSize");
 	        agentElements.purgeCacheBtn = document.getElementById("agentPurgeCacheBtn");
         agentElements.testMode = document.getElementById("agentTestMode");

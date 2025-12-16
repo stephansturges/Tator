@@ -1058,11 +1058,12 @@
                                 <input type="number" id="agentValLimit" min="1" value="10" />
                             </div>
 	                        </div>
-	                        <div class="training-field">
-	                            <label for="agentExtraPrompts">Extra prompts (optional)</label>
-	                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Example: {&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], &quot;person&quot;: [&quot;human&quot;, &quot;pedestrian&quot;]}"></textarea>
-	                            <div class="training-help">Optional extra words/phrases to try for each class. They are appended to GPT-OSS suggestions (no hint injection).</div>
-	                        </div>
+		                        <div class="training-field">
+		                            <label for="agentExtraPrompts">Extra prompts (optional)</label>
+		                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Example: {&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], &quot;person&quot;: [&quot;human&quot;, &quot;pedestrian&quot;]}"></textarea>
+		                            <div class="training-help">Optional extra words/phrases to try for each class. They are appended to GPT-OSS suggestions (no hint injection).</div>
+		                            <div class="training-help" id="agentExtraPromptsParseStatus" aria-live="polite"></div>
+		                        </div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="agentRunBtn">Run SAM3 Recipe Mining</button>
                             <button type="button" class="training-button secondary" id="agentRefreshBtn">Refresh latest</button>

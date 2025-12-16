@@ -1141,6 +1141,43 @@ hr {
     align-items: center;
 }
 
+/* Uniform form alignment */
+.training-field input,
+.training-field select,
+.training-field textarea,
+.training-field-double input,
+.training-field-double select,
+.training-field-double textarea,
+.training-advanced-grid input,
+.training-advanced-grid select,
+.training-advanced-grid textarea,
+.training-grid input,
+.training-grid select,
+.training-grid textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 36px;
+}
+
+.training-grid .training-actions {
+    grid-column: 1 / -1;
+}
+
+.training-grid .training-button,
+.training-grid .training-button.secondary,
+.training-grid .training-button.danger {
+    width: 100%;
+    text-align: center;
+}
+
+.training-actions {
+    display: flex;
+    justify-content: flex-start;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
 .training-help {
     font-size: 12px;
     color: #64748b;

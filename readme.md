@@ -1,4 +1,4 @@
-/!\ this thing is under active development and some stuff is borked basically all the time. Right now I'm fixing the SAM3 Agent Mining train / val split. /!\
+/!\ Under active development. The SAM3 “Agent Mining” recipe miner + recipe application pipeline is evolving; run small “test mode” jobs first and expect sharp edges. /!\
 
 # 🥔 Tator – Local CLIP + SAM Image Annotation Toolkit
 
@@ -36,6 +36,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 ## Key Features
 - **One-click assists** – auto class, SAM box/point refinements, and multi-point prompts with live progress indicators.
 - **SAM 1 & SAM 2** – switch backends at runtime, optionally preload images into SAM to minimise round-trips.
+- **SAM3 Agent Mining** – mine portable, multi-step SAM3 recipes (ZIP) that combine text prompting + CLIP filtering (positive/negative crops) and optional pretrained CLIP heads.
 - **Embedded CLIP trainer** – start training jobs from the UI, watch convergence metrics, and reuse cached embeddings across runs.
 - **Model switcher** – activate new CLIP + regression pairs without restarting the server; metadata keeps backbone/labelmap in sync.
 - **Predictor budget control** – dial the number of warm SAM predictors (1–3) and monitor their RAM usage so the UI can stay snappy on machines with more headroom.
@@ -259,6 +260,32 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 - Use **Test Connection** to ping `/sam_slots` on the target server and confirm it’s reachable before switching tabs.
 - Handy when you run the FastAPI backend on a remote GPU box and access it over SSH port forwarding.
 
+### Agent Mining Tab (SAM3 Recipe Mining)
+The **Agent Mining** tab mines **portable SAM3 “recipes”** for each class in a labeled dataset. A recipe is a **single ZIP** that includes:
+- `recipe.json` (parameters + per-class prompt/crop banks + summary metrics)
+- `crops/` (example cut-outs used for CLIP filtering)
+- optional `clip_head/` (a pretrained CLIP classifier head exported from the CLIP training tab)
+
+High-level flow (what it’s doing, in human terms):
+1. **Split the dataset** into train/val (random seed is exposed so results are repeatable).
+2. For each class, pick a **small, diverse set of example crops** from the train split.
+3. Build a **prompt bank** (class name + optional GPT‑OSS suggestions + optional user-provided extra prompts).
+4. Run SAM3 prompts on val images to produce lots of candidate boxes, then **filter** them:
+   - keep boxes that look like the positive crops (CLIP similarity),
+   - optionally suppress boxes that look like other classes (negative crops),
+   - optionally require the **pretrained CLIP head** to agree (and tune `Head min prob` per class on the val split).
+5. Score each class recipe on the val split (coverage/precision/FPs) and show results. Click **Save recipe** to persist the portable ZIP on disk.
+
+Using it:
+- Pick a converted dataset under **Datasets on disk**.
+- Set `Val %` and `Split seed` (default seed 42). Leave **Reuse split** on if you want stable comparisons across runs.
+- Configure crops/prompts/filters, then click **Start**. Watch the live log + progress bar.
+- Review per-class results and click **Save recipe** for the classes you want.
+
+Applying recipes:
+- **In Agent Mining tab:** select a saved recipe and apply it to a specific dataset image id (useful for debugging).
+- **In the labeling UI (SAM3/Recipes panel):** load a recipe ZIP and click **Apply recipe to image** to write detections into the current image. If the recipe’s class name doesn’t exist in the current labelmap, enable **Output class override** and pick the destination class.
+
 ## Command-Line Training
 The UI shares its engine with `tools/train_clip_regression_from_YOLO.py`:
 ```bash
@@ -285,6 +312,15 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
+
+## 2025-12-16 – Agent Mining Recipes (SAM3) + Pretrained CLIP Head
+- Added a full **Agent Mining** UI to mine per-class SAM3 recipes and manage saved recipes (list/import/export/delete).
+- Recipes are now **portable ZIPs** that bundle `recipe.json` + exemplar crops and optional CLIP head artifacts, so they can be copied to another machine without external paths.
+- New `/agent_mining/apply` + `/agent_mining/apply_image` endpoints run the full recipe pipeline (text seeds → CLIP filter → SAM3 visual expansion → CLIP/IoU dedupe) and return boxes/polygons.
+- Added **output class override** in the recipe apply UI so you can apply a recipe to any labelmap (with warnings for mismatches).
+- Added **Pretrained CLIP head** option (exported from CLIP training artifacts) for additional filtering; mining tunes the head `min_prob` **per class** on the validation split without re-running CLIP multiple times.
+- Improved Agent Mining **logging + progress reporting**, plus a **cache size** view and **purge cache** button to reclaim disk.
+- Hardened recipe portability: sanitize crop paths, embed crops under `crops/`, and validate recipe schema on load/import.
 
 
 ## 2025-11-10 – Qwen Assist & Backend Controls

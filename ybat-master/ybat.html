@@ -982,46 +982,46 @@
 			                                    <option value="count">Fixed count</option>
 			                                </select>
 			                            </div>
-		                            <div class="training-field training-field--inline">
-		                                <label for="agentClusterExemplars" title="Try to pick different-looking examples (sizes/angles) instead of many near-identical ones. Recommended on.">Diversify crops</label>
-		                                <input type="checkbox" id="agentClusterExemplars" checked title="Try to pick different-looking examples (sizes/angles) instead of many near-identical ones. Recommended on." />
-		                            </div>
-		                            <div class="training-field training-field--inline">
-		                                <label for="agentClipGuard" title="Use image similarity (CLIP) to keep boxes that look like your example crops, and optionally suppress boxes that look like negatives. Recommended on.">Use CLIP filter</label>
-		                                <input type="checkbox" id="agentClipGuard" checked title="Use image similarity (CLIP) to keep boxes that look like your example crops, and optionally suppress boxes that look like negatives. Recommended on." />
-		                            </div>
-		                        </div>
-		                        <div class="training-grid">
+			                            <div class="training-field training-field--inline">
+			                                <label for="agentClusterExemplars">Diversify crops<span class="help-icon" title="Crop-bank mode only.&#10;Try to pick different-looking example crops (sizes/angles) instead of many near-identical ones.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+			                                <input type="checkbox" id="agentClusterExemplars" checked />
+			                            </div>
+			                            <div class="training-field training-field--inline">
+			                                <label for="agentClipGuard">Use CLIP filter<span class="help-icon" title="Crop-bank mode only.&#10;Use CLIP image similarity to keep detections that look like your saved example crops, and (optionally) suppress detections that look like negatives.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+			                                <input type="checkbox" id="agentClipGuard" checked />
+			                            </div>
+			                        </div>
+			                        <div class="training-grid">
 				                            <div>
-				                                <label for="agentClipHeadSelect" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections. The head is embedded into saved recipe zips (portable).">Pretrained CLIP head (optional)</label>
+				                                <label for="agentClipHeadSelect">Pretrained CLIP head (optional)<span class="help-icon" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections.&#10;The head is embedded into saved recipe zips (portable).&#10;When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.">?</span></label>
 					                                <select id="agentClipHeadSelect">
 					                                    <option value="">(none)</option>
 					                                </select>
 					                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.</div>
 					                            </div>
+				                            <div>
+				                                <label for="agentClipHeadMinProb">Head min prob<span class="help-icon" title="CLIP head mode only.&#10;Minimum probability required for the target class.&#10;Higher = fewer detections, cleaner results; lower = more detections (more false positives).">?</span></label>
+				                                <input type="number" id="agentClipHeadMinProb" step="0.05" min="0" max="1" value="0.5" />
+				                            </div>
 			                            <div>
-			                                <label for="agentClipHeadMinProb" title="Minimum probability required for the target class when using the pretrained CLIP head. Higher = fewer boxes, cleaner results.">Head min prob</label>
-			                                <input type="number" id="agentClipHeadMinProb" step="0.05" min="0" max="1" value="0.5" />
+			                                <label for="agentClipHeadMargin">Head margin<span class="help-icon" title="CLIP head mode only.&#10;Require the target class probability to beat the best other class by this margin.&#10;0 disables the margin check.&#10;Higher can reduce confusion between similar classes.">?</span></label>
+			                                <input type="number" id="agentClipHeadMargin" step="0.05" min="0" max="1" value="0.0" />
 			                            </div>
-		                            <div>
-		                                <label for="agentClipHeadMargin" title="Require the target class probability to beat the best other class by this margin. 0 disables the margin check.">Head margin</label>
-		                                <input type="number" id="agentClipHeadMargin" step="0.05" min="0" max="1" value="0.0" />
-		                            </div>
-		                        </div>
-		                        <div class="training-grid">
-		                            <div class="training-field training-field--inline">
-		                                <label for="agentUseNegExemplars" title="Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes.">Use negative crops</label>
-		                                <input type="checkbox" id="agentUseNegExemplars" checked title="Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes." />
-		                            </div>
+			                        </div>
+			                        <div class="training-grid">
+			                            <div class="training-field training-field--inline">
+			                                <label for="agentUseNegExemplars">Use negative crops<span class="help-icon" title="Crop-bank mode only.&#10;Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+			                                <input type="checkbox" id="agentUseNegExemplars" checked />
+			                            </div>
+				                            <div>
+				                                <label for="agentMaxNegExemplars">Max negatives/class<span class="help-icon" title="Crop-bank mode only.&#10;How many negative example crops we collect from other classes.&#10;Negatives suppress detections that look like another class.&#10;More negatives can reduce false positives but costs time and increases recipe zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
+				                            </div>
 			                            <div>
-			                                <label for="agentMaxNegExemplars">Max negatives/class<span class="help-icon" title="Crop-bank mode only.&#10;How many negative example crops we collect from other classes.&#10;Negatives suppress detections that look like another class.&#10;More negatives can reduce false positives but costs time and increases recipe zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-			                                <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
+			                                <label for="agentNegStrength">Negative filter strength<span class="help-icon" title="Crop-bank mode only.&#10;How strongly negative crops suppress detections.&#10;0 disables negatives.&#10;Higher = more suppression (fewer false positives; can also remove true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+			                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" />
 			                            </div>
-		                            <div>
-		                                <label for="agentNegStrength" title="How strongly negative examples suppress detections. Set to 0 to disable negatives.">Negative filter strength</label>
-		                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" title="How strongly negative examples suppress detections. Higher = more suppression; 0 disables negatives." />
-		                            </div>
-		                        </div>
+			                        </div>
 	                        <div class="two-col-grid">
 	                            <div>
 	                                <label for="agentClasses" title="Optional: restrict mining to specific class IDs. Leave blank to mine all classes.">Class IDs (optional)</label>

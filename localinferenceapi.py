@@ -5028,16 +5028,30 @@ def _dedupe_qwen_detections_iou(
 
 def _ensure_agent_clip_backbone_for_device(
     device_str: str,
+    *,
+    model_name_override: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[Any], threading.Lock, str]:
     """
     Return (model, preprocess, lock, normalized_device_str) for encoding crops on a specific device.
     Reuses the global CLIP model for cuda:0/cuda when available; otherwise loads a per-device backbone.
     """
-    model_name = clip_model_name or DEFAULT_CLIP_MODEL
+    model_name = str(model_name_override).strip() if model_name_override is not None and str(model_name_override).strip() else None
+    if not model_name:
+        model_name = clip_model_name or DEFAULT_CLIP_MODEL
     normalized_device = str(device_str or "").strip() or str(device)
-    # Reuse the global backbone for GPU0 when possible to avoid duplicate VRAM usage.
-    if normalized_device in {"cuda", "cuda:0"} and clip_model is not None and clip_preprocess is not None:
-        return clip_model, clip_preprocess, clip_lock, "cuda"
+    global_device = str(device)
+    global_model_name = clip_model_name or DEFAULT_CLIP_MODEL
+    # Reuse the global backbone when possible to avoid duplicate VRAM usage.
+    if (
+        clip_model is not None
+        and clip_preprocess is not None
+        and global_model_name == model_name
+        and (
+            normalized_device == global_device
+            or (global_device in {"cuda", "cuda:0"} and normalized_device in {"cuda", "cuda:0"})
+        )
+    ):
+        return clip_model, clip_preprocess, clip_lock, global_device
     key = (model_name, normalized_device)
     with _agent_clip_backbones_lock:
         cached = _agent_clip_backbones.get(key)
@@ -5070,50 +5084,77 @@ def _clip_encode_pil_batch(
     crops: Sequence[Image.Image],
     *,
     device_override: Optional[str] = None,
+    clip_model_override: Optional[str] = None,
 ) -> Optional[np.ndarray]:
     """Encode a batch of PIL crops with raw CLIP, returning (N, D) float32 normalized embeddings."""
     if not crops:
         return None
-    if device_override is None:
-        model, preprocess = _ensure_clip_backbone_for_mining()
-        lock = clip_lock
-        target_device = str(device)
-    else:
-        model, preprocess, lock, target_device = _ensure_agent_clip_backbone_for_device(str(device_override))
-    if model is None or preprocess is None:
-        return None
-    try:
-        batch_size = 64
-        try:
-            raw = os.environ.get("AGENT_CLIP_BATCH_SIZE")
-            if raw is not None and str(raw).strip():
-                batch_size = max(1, int(raw))
-        except Exception:
-            batch_size = 64
-        batch_size = max(1, min(int(batch_size), 512))
+    preferred = str(device_override or "").strip() if device_override is not None else ""
+    # Attempt device chain:
+    # 1) requested override (if any)
+    # 2) global CLIP device (usually cuda:0) when different
+    # 3) CPU fallback
+    attempt_devices: List[str] = []
+    if preferred:
+        attempt_devices.append(preferred)
+    global_device = str(device)
+    if global_device and global_device not in attempt_devices:
+        attempt_devices.append(global_device)
+    if "cpu" not in attempt_devices:
+        attempt_devices.append("cpu")
 
-        chunks: List[torch.Tensor] = []
-        with lock:
-            try:
-                target_dtype = next(model.parameters()).dtype
-            except Exception:
-                target_dtype = torch.float32
-            for start in range(0, len(crops), batch_size):
-                batch = crops[start : start + batch_size]
-                inp = torch.stack([preprocess(c) for c in batch], dim=0).to(target_device)
-                if inp.dtype != target_dtype:
-                    inp = inp.to(dtype=target_dtype)
-                with torch.no_grad():
-                    feats = model.encode_image(inp)
-                chunks.append(feats.to(dtype=torch.float32, device="cpu"))
-        if not chunks:
-            return None
-        feats_all = torch.cat(chunks, dim=0)
-        feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
-        return feats_all.cpu().numpy()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("CLIP batch encode failed on %s: %s", target_device, exc)
-        return None
+    batch_size = 64
+    try:
+        raw = os.environ.get("AGENT_CLIP_BATCH_SIZE")
+        if raw is not None and str(raw).strip():
+            batch_size = max(1, int(raw))
+    except Exception:
+        batch_size = 64
+    batch_size = max(1, min(int(batch_size), 512))
+
+    last_error: Optional[BaseException] = None
+    for dev in attempt_devices:
+        model, preprocess, lock, target_device = _ensure_agent_clip_backbone_for_device(
+            str(dev),
+            model_name_override=clip_model_override,
+        )
+        if model is None or preprocess is None:
+            continue
+        try:
+            chunks: List[torch.Tensor] = []
+            with lock:
+                try:
+                    target_dtype = next(model.parameters()).dtype
+                except Exception:
+                    target_dtype = torch.float32
+                for start in range(0, len(crops), batch_size):
+                    batch = crops[start : start + batch_size]
+                    inp = torch.stack([preprocess(c) for c in batch], dim=0).to(target_device)
+                    if inp.dtype != target_dtype:
+                        inp = inp.to(dtype=target_dtype)
+                    with torch.no_grad():
+                        feats = model.encode_image(inp)
+                    chunks.append(feats.to(dtype=torch.float32, device="cpu"))
+            if not chunks:
+                continue
+            feats_all = torch.cat(chunks, dim=0)
+            feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
+            return feats_all.cpu().numpy()
+        except torch.cuda.OutOfMemoryError as exc:
+            last_error = exc
+            if torch.cuda.is_available() and str(target_device).startswith("cuda"):
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        logger.debug("CLIP batch encode failed (fallbacks exhausted): %s", last_error)
+    return None
 
 
 def _resolve_agent_clip_classifier_path(path_str: Optional[str]) -> Optional[Path]:
@@ -5814,7 +5855,16 @@ def _apply_agent_recipe_to_image(
         seed_boxes_xywh.append((float(x1), float(y1), float(x2 - x1), float(y2 - y1)))
         seed_keep_refs.append(det)
     need_seed_feats = bool(seed_crops) and (use_clip_guard or clip_head_active)
-    feats = _clip_encode_pil_batch(seed_crops) if need_seed_feats else None
+    clip_model_override: Optional[str] = None
+    if isinstance(clip_head, dict):
+        raw_clip_model = clip_head.get("clip_model")
+        if isinstance(raw_clip_model, str) and raw_clip_model.strip():
+            clip_model_override = raw_clip_model.strip()
+    feats = (
+        _clip_encode_pil_batch(seed_crops, clip_model_override=clip_model_override)
+        if need_seed_feats
+        else None
+    )
     # IMPORTANT: max_visual_seeds should NOT cap how many detections we keep.
     # We keep all filtered seed detections, and use max_visual_seeds only to bound visual expansion/refinement.
     kept_seed_idx_all: List[int] = []
@@ -5927,7 +5977,9 @@ def _apply_agent_recipe_to_image(
                 continue
             det_crops.append(crop)
             det_refs.append(det)
-        det_feats = _clip_encode_pil_batch(det_crops) if det_crops else None
+        det_feats = (
+            _clip_encode_pil_batch(det_crops, clip_model_override=clip_model_override) if det_crops else None
+        )
         if det_feats is None or det_feats.size == 0:
             filtered_final = combined
             _add_warning("clip_unavailable")
@@ -6038,6 +6090,11 @@ def _infer_sam3_greedy_recipe_on_image(
     use_clip = (ex_mat is not None and isinstance(ex_mat, np.ndarray) and ex_mat.size > 0) or (
         isinstance(clip_head, dict) and clip_head_target_index is not None
     )
+    clip_model_override: Optional[str] = None
+    if isinstance(clip_head, dict):
+        raw_clip_model = clip_head.get("clip_model")
+        if isinstance(raw_clip_model, str) and raw_clip_model.strip():
+            clip_model_override = raw_clip_model.strip()
 
     def _clip_score(feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         pos = np.zeros((feats.shape[0],), dtype=np.float32)
@@ -6122,7 +6179,11 @@ def _infer_sam3_greedy_recipe_on_image(
     seed_scores_for_diverse: Optional[np.ndarray] = None
 
     if use_clip and seed_crops:
-        seed_feats = _clip_encode_pil_batch(seed_crops, device_override=clip_device_override)
+        seed_feats = _clip_encode_pil_batch(
+            seed_crops,
+            device_override=clip_device_override,
+            clip_model_override=clip_model_override,
+        )
         if seed_feats is not None and seed_feats.size:
             had_seed_feats = True
             keep_mask = np.ones((seed_feats.shape[0],), dtype=bool)
@@ -6237,7 +6298,15 @@ def _infer_sam3_greedy_recipe_on_image(
             except Exception:
                 continue
             det_refs.append(det)
-        feats2 = _clip_encode_pil_batch(det_crops, device_override=clip_device_override) if det_crops else None
+        feats2 = (
+            _clip_encode_pil_batch(
+                det_crops,
+                device_override=clip_device_override,
+                clip_model_override=clip_model_override,
+            )
+            if det_crops
+            else None
+        )
         if feats2 is not None and feats2.size:
             keep_mask2 = np.ones((feats2.shape[0],), dtype=bool)
             if ex_mat is not None:
@@ -6306,6 +6375,7 @@ def _evaluate_sam3_greedy_recipe(
         # keep per-detection head probabilities, then apply different thresholds during scoring.
         fixed_margin = float(clip_head_margin)
         sweep_min_probs = [
+            0.0,
             0.1,
             0.2,
             0.3,
@@ -6631,6 +6701,18 @@ class _Sam3GreedyEvalWorker:
             except Exception:
                 return {}
 
+            clip_device_override: Optional[str] = None
+            try:
+                raw_clip_dev = os.environ.get("AGENT_MINING_CLIP_DEVICE")
+            except Exception:
+                raw_clip_dev = None
+            if raw_clip_dev is not None and str(raw_clip_dev).strip():
+                mode = str(raw_clip_dev).strip().lower()
+                if mode in {"worker", "per_worker", "per-device", "per_device"}:
+                    clip_device_override = str(self.device)
+                else:
+                    clip_device_override = str(raw_clip_dev).strip()
+
             for entry in class_entries:
                 if cancel_event is not None and cancel_event.is_set():
                     break
@@ -6707,7 +6789,7 @@ class _Sam3GreedyEvalWorker:
                         clip_head_min_prob=clip_head_min_prob,
                         clip_head_margin=clip_head_margin,
                         state=state,
-                        clip_device_override=str(self.device),
+                        clip_device_override=clip_device_override,
                     )
                 except torch.cuda.OutOfMemoryError:
                     if log_fn:
@@ -6723,6 +6805,10 @@ class _Sam3GreedyEvalWorker:
                 gt_xyxy = [_xywh_to_xyxy(b) for b in gt_boxes]
 
                 rows: List[Tuple[float, float, float, Optional[int]]] = []
+                debug_base_dets = 0
+                debug_with_prob = 0
+                debug_prob_min: Optional[float] = None
+                debug_prob_max: Optional[float] = None
                 if dets:
                     for det in dets:
                         bbox = det.bbox or []
@@ -6742,6 +6828,13 @@ class _Sam3GreedyEvalWorker:
                         prob = float(det.clip_head_prob) if det.clip_head_prob is not None else 0.0
                         margin = float(det.clip_head_margin) if det.clip_head_margin is not None else 0.0
                         rows.append((prob, margin, float(best_iou), best_idx))
+                        debug_base_dets += 1
+                        if det.clip_head_prob is not None:
+                            debug_with_prob += 1
+                            if debug_prob_min is None or prob < debug_prob_min:
+                                debug_prob_min = float(prob)
+                            if debug_prob_max is None or prob > debug_prob_max:
+                                debug_prob_max = float(prob)
 
                 if head_active:
                     by_prob: Dict[float, Dict[str, int]] = {}
@@ -6767,7 +6860,16 @@ class _Sam3GreedyEvalWorker:
                         if any_det:
                             counts["det_images"] = 1
                         by_prob[float(min_prob)] = counts
-                    out[cid_int] = {"head_active": True, "by_prob": by_prob}
+                    out[cid_int] = {
+                        "head_active": True,
+                        "by_prob": by_prob,
+                        "debug": {
+                            "base_dets": int(debug_base_dets),
+                            "with_prob": int(debug_with_prob),
+                            "prob_min": float(debug_prob_min) if debug_prob_min is not None else None,
+                            "prob_max": float(debug_prob_max) if debug_prob_max is not None else None,
+                        },
+                    }
                 else:
                     counts = _counts_init()
                     used: set[int] = set()
@@ -6847,6 +6949,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
 
     # Head threshold sweep list (applied only when clip_head is active for a class).
     head_sweep_min_probs = [
+        0.0,
         0.1,
         0.2,
         0.3,
@@ -6877,6 +6980,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
 
     # Precompute total GTs per class (for recall denominator).
     total_gt_by_class: Dict[int, int] = {}
+    class_name_by_id: Dict[int, str] = {}
     for entry in class_entries:
         cid = entry.get("id")
         if cid is None:
@@ -6885,6 +6989,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
             cid_int = int(cid)
         except Exception:
             continue
+        class_name_by_id[cid_int] = str(entry.get("name") or f"class_{cid_int}")
         total_gt = 0
         for img_id in val_ids:
             total_gt += len((gt_by_image_cat.get(int(img_id)) or {}).get(cid_int) or [])
@@ -6906,6 +7011,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
                 "head_active": True,
                 "by_prob": {p: _counts_init() for p in head_sweep_min_probs},
                 "total_gt": total_gt,
+                "debug": {"base_dets": 0, "with_prob": 0, "prob_min": None, "prob_max": None},
             }
         else:
             agg[cid_int] = {"head_active": False, "counts": _counts_init(), "total_gt": total_gt}
@@ -6927,9 +7033,16 @@ def _evaluate_sam3_greedy_recipes_image_first(
                         per_dev_txt = f"; up to {int(per_dev)} worker(s) per device"
                 except Exception:
                     per_dev_txt = ""
+                clip_dev_cfg = ""
+                try:
+                    raw = os.environ.get("AGENT_MINING_CLIP_DEVICE")
+                    if raw is not None and str(raw).strip():
+                        clip_dev_cfg = f"; clip_device={str(raw).strip()}"
+                except Exception:
+                    clip_dev_cfg = ""
                 log_fn(
                     f"Starting global image-first sweep (sam3_greedy): {total_images} val images, "
-                    f"{len(class_entries)} classes on {len(workers)} worker(s): {labels}{per_dev_txt}{extra}"
+                    f"{len(class_entries)} classes on {len(workers)} worker(s): {labels}{per_dev_txt}{clip_dev_cfg}{extra}"
                 )
             except Exception:
                 pass
@@ -6969,6 +7082,33 @@ def _evaluate_sam3_greedy_recipes_image_first(
                                     dst_counts[k] = int(dst_counts.get(k, 0)) + int(counts.get(k, 0))
                                 except Exception:
                                     continue
+                        src_debug = data.get("debug") if isinstance(data, dict) else None
+                        dst_debug = dst.get("debug") if isinstance(dst, dict) else None
+                        if isinstance(src_debug, dict) and isinstance(dst_debug, dict):
+                            try:
+                                dst_debug["base_dets"] = int(dst_debug.get("base_dets") or 0) + int(src_debug.get("base_dets") or 0)
+                            except Exception:
+                                pass
+                            try:
+                                dst_debug["with_prob"] = int(dst_debug.get("with_prob") or 0) + int(src_debug.get("with_prob") or 0)
+                            except Exception:
+                                pass
+                            src_min = src_debug.get("prob_min")
+                            src_max = src_debug.get("prob_max")
+                            try:
+                                if src_min is not None:
+                                    src_min_f = float(src_min)
+                                    cur = dst_debug.get("prob_min")
+                                    dst_debug["prob_min"] = src_min_f if cur is None else float(min(float(cur), src_min_f))
+                            except Exception:
+                                pass
+                            try:
+                                if src_max is not None:
+                                    src_max_f = float(src_max)
+                                    cur = dst_debug.get("prob_max")
+                                    dst_debug["prob_max"] = src_max_f if cur is None else float(max(float(cur), src_max_f))
+                            except Exception:
+                                pass
                     else:
                         counts = data.get("counts") or {}
                         dst_counts = dst.get("counts")
@@ -7103,6 +7243,36 @@ def _evaluate_sam3_greedy_recipes_image_first(
                     "clip_head_min_prob": float(payload.clip_head_min_prob),
                     "clip_head_margin": float(payload.clip_head_margin),
                 }
+            if log_fn and total_gt and isinstance(best_summary, dict):
+                try:
+                    if int(best_summary.get("matches") or 0) == 0:
+                        name = class_name_by_id.get(cid_int, f"class_{cid_int}")
+                        debug = data.get("debug") if isinstance(data, dict) else None
+                        base_dets = int(debug.get("base_dets") or 0) if isinstance(debug, dict) else 0
+                        with_prob = int(debug.get("with_prob") or 0) if isinstance(debug, dict) else 0
+                        prob_min = debug.get("prob_min") if isinstance(debug, dict) else None
+                        prob_max = debug.get("prob_max") if isinstance(debug, dict) else None
+                        counts0 = by_prob.get(0.0) if isinstance(by_prob, dict) else None
+                        preds0 = int(counts0.get("preds") or 0) if isinstance(counts0, dict) else 0
+                        fps0 = int(counts0.get("fps") or 0) if isinstance(counts0, dict) else 0
+                        if preds0 <= 0:
+                            log_fn(f"Debug head sweep {name}: 0 detections on val split (gt={total_gt}).")
+                        elif with_prob <= 0:
+                            log_fn(
+                                f"Debug head sweep {name}: dets@p>=0.0 preds={preds0} matches=0 fps={fps0}; missing head probs (CLIP encode/proba failed)."
+                            )
+                        else:
+                            rng_txt = ""
+                            try:
+                                if prob_min is not None and prob_max is not None:
+                                    rng_txt = f" prob_range={float(prob_min):.3f}..{float(prob_max):.3f}"
+                            except Exception:
+                                rng_txt = ""
+                            log_fn(
+                                f"Debug head sweep {name}: dets@p>=0.0 preds={preds0} matches=0 fps={fps0}; head_probs={with_prob}/{base_dets}{rng_txt}."
+                            )
+                except Exception:
+                    pass
             summaries[cid_int] = best_summary
         else:
             counts = data.get("counts") or {}

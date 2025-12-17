@@ -665,7 +665,9 @@ def _ensure_sam3_text_runtime():
             detail = f"sam3_text_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}"
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         try:
-            device_str = "cuda" if device.type == "cuda" else "cpu"
+            # Preserve explicit CUDA indices (e.g. "cuda:1") so the processor's internal tensors
+            # and transforms land on the same device as the model.
+            device_str = str(device) if device.type == "cuda" else "cpu"
             # Force segmentation head on for text prompting so pred_masks and related keys exist.
             enable_seg = True
             if active_sam3_checkpoint:
@@ -682,7 +684,7 @@ def _ensure_sam3_text_runtime():
                     enable_segmentation=enable_seg,
                     bpe_path=str(SAM3_BPE_PATH),
                 ).to(device)
-            processor = Sam3ImageProcessor(model)
+            processor = Sam3ImageProcessor(model, device=device_str)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
         sam3_text_model = model
@@ -6650,6 +6652,8 @@ class _Sam3GreedyEvalWorker:
         self.device = device
         self.model, self.processor = _build_sam3_text_processor_for_device(device)
         self.lock = threading.Lock()
+        self._logged_set_image_failure = False
+        self._logged_infer_failures = 0
 
     def close(self) -> None:
         try:
@@ -6698,7 +6702,13 @@ class _Sam3GreedyEvalWorker:
         with self.lock:
             try:
                 state = self.processor.set_image(pil_img)
-            except Exception:
+            except Exception as exc:
+                if log_fn and not self._logged_set_image_failure:
+                    self._logged_set_image_failure = True
+                    try:
+                        log_fn(f"SAM3 worker {self.device}: set_image failed for {image_id}: {exc}")
+                    except Exception:
+                        pass
                 return {}
 
             clip_device_override: Optional[str] = None
@@ -6798,7 +6808,13 @@ class _Sam3GreedyEvalWorker:
                         except Exception:
                             pass
                     raise
-                except Exception:
+                except Exception as exc:
+                    if log_fn and self._logged_infer_failures < 3:
+                        self._logged_infer_failures += 1
+                        try:
+                            log_fn(f"SAM3 worker {self.device}: inference failed for class {cid_int} on {image_id}: {exc}")
+                        except Exception:
+                            pass
                     dets = []
 
                 gt_boxes = gt_for_image.get(cid_int) or []
@@ -8056,7 +8072,7 @@ def _build_sam3_text_processor_for_device(device: torch.device) -> Tuple[Any, An
         )
         if device:
             model = model.to(device)
-        processor = Sam3ImageProcessor(model)
+        processor = Sam3ImageProcessor(model, device=device_str)
         return model, processor
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"sam3_text_load_failed:{exc}") from exc

@@ -291,6 +291,11 @@ This section is intentionally exhaustive; treat it as a checklist for the refact
 - [ ] `/sam3/train/jobs` and config builder:
   - places using `cat_id = idx + 1` must be replaced with schema mapping
   - prompt variants mapping must support name/id/index
+- [ ] `sam3_local/local_yolo_ft.yaml` (SAM3 config template used by the API):
+  - confirm the COCO loader interprets `category_id` in the intended id space (schema id)
+  - ensure any balancing/sampling logic does not assume contiguous ids
+- [ ] `sam3_local/balanced_sampler.py`:
+  - ensure any class-frequency logic operates on schema ids and does not rely on label order
 
 **Segmentation builder**
 - [ ] `_plan_segmentation_build` + `_start_segmentation_build_job`:
@@ -381,4 +386,3 @@ If we want the biggest safety win with the least disruption:
 2) Make COCO conversion strictly schema-driven.
 3) Make CLIP head export include explicit mapping and use it in mining.
 4) Add UI debug panel for schema mismatches.
-

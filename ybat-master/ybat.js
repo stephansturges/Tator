@@ -1301,6 +1301,7 @@ const sam3TrainState = {
 	        clipHeadAutoTune: null,
 	        clipHeadTargetPrecision: null,
         clipHeadTargetPrecisionValue: null,
+        clipHeadAllowLowPrecision: null,
 	        useNegExemplars: null,
         maxNegExemplars: null,
         negStrength: null,
@@ -12722,6 +12723,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
         if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.disabled = !hasHead;
         if (agentElements.clipHeadTargetPrecision) agentElements.clipHeadTargetPrecision.disabled = !hasHead || !autoTune;
+        if (agentElements.clipHeadAllowLowPrecision) agentElements.clipHeadAllowLowPrecision.disabled = !hasHead || !autoTune;
         if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !hasHead || autoTune;
         if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !hasHead || autoTune;
 
@@ -13244,6 +13246,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.clipHeadAutoTune = document.getElementById("agentClipHeadAutoTune");
 	        agentElements.clipHeadTargetPrecision = document.getElementById("agentClipHeadTargetPrecision");
         agentElements.clipHeadTargetPrecisionValue = document.getElementById("agentClipHeadTargetPrecisionValue");
+        agentElements.clipHeadAllowLowPrecision = document.getElementById("agentClipHeadAllowLowPrecision");
 	        agentElements.clipHeadMinProb = document.getElementById("agentClipHeadMinProb");
 	        agentElements.clipHeadMargin = document.getElementById("agentClipHeadMargin");
 	        agentElements.useNegExemplars = document.getElementById("agentUseNegExemplars");
@@ -13286,10 +13289,24 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const val = agentElements.clipHeadTargetPrecision ? parseFloat(agentElements.clipHeadTargetPrecision.value) : NaN;
             agentElements.clipHeadTargetPrecisionValue.textContent = Number.isFinite(val) ? val.toFixed(2) : "";
         };
+        const updatePrecisionTargetRange = () => {
+            if (!agentElements.clipHeadTargetPrecision) return;
+            const allowLow = !!(agentElements.clipHeadAllowLowPrecision && agentElements.clipHeadAllowLowPrecision.checked);
+            const min = allowLow ? 0.1 : 0.5;
+            agentElements.clipHeadTargetPrecision.min = String(min);
+            const current = parseFloat(agentElements.clipHeadTargetPrecision.value);
+            if (Number.isFinite(current) && current < min) {
+                agentElements.clipHeadTargetPrecision.value = String(min);
+            }
+            syncPrecisionLabel();
+        };
         if (agentElements.clipHeadTargetPrecision) {
             agentElements.clipHeadTargetPrecision.addEventListener("input", syncPrecisionLabel);
         }
-        syncPrecisionLabel();
+        if (agentElements.clipHeadAllowLowPrecision) {
+            agentElements.clipHeadAllowLowPrecision.addEventListener("change", updatePrecisionTargetRange);
+        }
+        updatePrecisionTargetRange();
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
 	        const syncBeamUi = () => {

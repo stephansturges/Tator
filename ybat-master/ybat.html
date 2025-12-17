@@ -207,42 +207,42 @@
 		                                        <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
 		                                        <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
 
-		                                        <div class="training-help" style="margin-top: 8px;">
-		                                            <strong>Recipe cascade:</strong> chain multiple saved recipes (each step can override its output class + dedupe group). Apply runs all steps, then de-dupes results.
-		                                        </div>
+			                                        <div class="training-help" style="margin-top: 8px;">
+			                                            <strong>Recipe cascade:</strong> run multiple saved recipes in order. Each step can re-label its outputs and choose whether it participates in cross-class de-dupe.
+			                                        </div>
 
 		                                        <div id="sam3CascadeSteps"></div>
-		                                        <button type="button" id="sam3CascadeAddStep" class="training-button secondary">+ Add recipe step</button>
+			                                        <button type="button" id="sam3CascadeAddStep" class="training-button secondary" title="Add another recipe to the cascade (you can reorder steps).">+ Add recipe step</button>
 
 		                                        <div class="training-grid" style="margin-top: 10px;">
 		                                            <div>
-		                                                <label for="sam3CascadePerClassIou">Per-class dedupe IoU</label>
-		                                                <input type="number" id="sam3CascadePerClassIou" step="0.05" min="0" max="1" value="0.5" />
-		                                            </div>
-		                                            <div>
-		                                                <label title="When enabled, run an additional IoU de-dupe across classes within each step’s dedupe group. Use different group names (e.g. person vs bike) to avoid suppressing valid overlaps."><input type="checkbox" id="sam3CascadeCrossDedupeToggle" /> Cross-class dedupe</label>
-		                                                <select id="sam3CascadeCrossScope">
-		                                                    <option value="groups" selected>Within dedupe groups</option>
-		                                                    <option value="global">Across all participating steps</option>
-		                                                </select>
-		                                            </div>
-		                                            <div>
-		                                                <label for="sam3CascadeCrossIou">Cross-class IoU</label>
-		                                                <input type="number" id="sam3CascadeCrossIou" step="0.05" min="0" max="1" value="0.5" />
-		                                            </div>
-		                                            <div>
-		                                                <label for="sam3CascadeConfidence">Confidence (dedupe)</label>
-		                                                <select id="sam3CascadeConfidence">
-		                                                    <option value="sam_score" selected>SAM score</option>
-		                                                    <option value="clip_head_prob">CLIP head prob</option>
-		                                                    <option value="clip_head_margin">CLIP head margin</option>
-		                                                </select>
-		                                            </div>
-		                                            <div>
-		                                                <label for="sam3CascadeClipHeadSource">CLIP head source recipe</label>
-		                                                <select id="sam3CascadeClipHeadSource"></select>
-		                                            </div>
-		                                        </div>
+			                                                <label for="sam3CascadePerClassIou" title="Removes near-duplicate overlaps within the same output class. Higher = more aggressive.">Per-class de-dupe IoU</label>
+			                                                <input type="number" id="sam3CascadePerClassIou" step="0.05" min="0" max="1" value="0.5" title="Overlap threshold (IoU). 0 disables this de-dupe; 0.5 is a good default." />
+			                                            </div>
+			                                            <div>
+			                                                <label title="Also remove duplicates across different classes (e.g. car vs truck). Use different dedupe group names (e.g. person vs bike) to avoid removing valid overlaps."><input type="checkbox" id="sam3CascadeCrossDedupeToggle" /> Cross-class de-dupe</label>
+			                                                <select id="sam3CascadeCrossScope" title="Choose whether cross-class de-dupe only happens within the same dedupe group, or across all participating steps.">
+			                                                    <option value="groups" selected>Within dedupe groups</option>
+			                                                    <option value="global">Across all participating steps</option>
+			                                                </select>
+			                                            </div>
+			                                            <div>
+			                                                <label for="sam3CascadeCrossIou" title="How much two detections must overlap to be considered the same object across different classes.">Cross-class IoU</label>
+			                                                <input type="number" id="sam3CascadeCrossIou" step="0.05" min="0" max="1" value="0.5" title="Overlap threshold (IoU) for cross-class de-dupe. Higher = more aggressive suppression." />
+			                                            </div>
+			                                            <div>
+			                                                <label for="sam3CascadeConfidence" title="How we pick the 'winner' when two detections overlap.">Confidence (de-dupe)</label>
+			                                                <select id="sam3CascadeConfidence">
+			                                                    <option value="sam_score" selected>SAM score</option>
+			                                                    <option value="clip_head_prob">CLIP head prob</option>
+			                                                    <option value="clip_head_margin">CLIP head margin</option>
+			                                                </select>
+			                                            </div>
+			                                            <div>
+			                                                <label for="sam3CascadeClipHeadSource" title="Only used when Confidence is set to a CLIP head option. Select which saved recipe provides the embedded CLIP head.">CLIP head source recipe</label>
+			                                                <select id="sam3CascadeClipHeadSource"></select>
+			                                            </div>
+			                                        </div>
 
 		                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr; margin-top: 10px;">
 		                                            <div>
@@ -255,15 +255,15 @@
 		                                            </div>
 		                                        </div>
 		                                        <div class="training-actions">
-		                                            <button type="button" id="sam3CascadePresetRefresh" class="training-button secondary">Refresh cascades</button>
-		                                            <button type="button" id="sam3CascadePresetSave" class="training-button secondary">Save cascade preset</button>
-		                                            <button type="button" id="sam3CascadePresetLoad" class="training-button secondary">Load preset</button>
-		                                            <button type="button" id="sam3CascadePresetDelete" class="training-button danger">Delete preset</button>
-		                                            <button type="button" id="sam3CascadePresetExport" class="training-button secondary">Download preset (zip)</button>
-		                                            <label for="sam3CascadeFile" class="training-button secondary" title="Import a portable cascade zip. It bundles cascade.json + all referenced recipe zips.">Import cascade (zip)</label>
-		                                            <input type="file" id="sam3CascadeFile" accept=".zip" class="file-input-hidden" />
-		                                            <button type="button" id="sam3CascadeApplyButton" class="training-button secondary">Apply cascade to image</button>
-		                                        </div>
+			                                            <button type="button" id="sam3CascadePresetRefresh" class="training-button secondary" title="Reload the list of saved cascades from the backend.">Refresh cascades</button>
+			                                            <button type="button" id="sam3CascadePresetSave" class="training-button secondary" title="Save the current cascade settings as a reusable preset.">Save cascade preset</button>
+			                                            <button type="button" id="sam3CascadePresetLoad" class="training-button secondary" title="Load the selected preset into the editor below.">Load preset</button>
+			                                            <button type="button" id="sam3CascadePresetDelete" class="training-button danger" title="Delete the selected preset from the backend.">Delete preset</button>
+			                                            <button type="button" id="sam3CascadePresetExport" class="training-button secondary" title="Download a portable zip that includes the cascade and all referenced recipes.">Download preset (zip)</button>
+			                                            <label for="sam3CascadeFile" class="training-button secondary" title="Import a portable cascade zip. It bundles cascade.json + all referenced recipe zips.">Import cascade (zip)</label>
+			                                            <input type="file" id="sam3CascadeFile" accept=".zip" class="file-input-hidden" />
+			                                            <button type="button" id="sam3CascadeApplyButton" class="training-button secondary" title="Run every enabled step on the current image and add the final detections.">Apply cascade to image</button>
+			                                        </div>
 		                                        <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
 		                                    </div>
 		                                </section>

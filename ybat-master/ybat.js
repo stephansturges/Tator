@@ -9426,11 +9426,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	    }
 
-	    function renderSam3CascadeSteps() {
-	        const root = sam3RecipeElements.cascadeSteps;
-	        if (!root) return;
-	        ensureAtLeastOneCascadeStep();
-	        root.innerHTML = "";
+		    function renderSam3CascadeSteps() {
+		        const root = sam3RecipeElements.cascadeSteps;
+		        if (!root) return;
+		        ensureAtLeastOneCascadeStep();
+		        root.innerHTML = "";
 
 	        const recipes = Array.isArray(sam3CascadeState.recipePresets) ? sam3CascadeState.recipePresets : [];
 	        const recipeOptions = recipes.map((r) => ({
@@ -9462,16 +9462,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            headerActions.style.gap = "8px";
 	            headerActions.style.alignItems = "center";
 
-	            const enabledLabel = document.createElement("label");
-	            enabledLabel.style.display = "inline-flex";
-	            enabledLabel.style.alignItems = "center";
-	            enabledLabel.style.gap = "6px";
-	            const enabledToggle = document.createElement("input");
-	            enabledToggle.type = "checkbox";
-	            enabledToggle.checked = Boolean(step.enabled);
-	            enabledToggle.addEventListener("change", () => {
-	                step.enabled = enabledToggle.checked;
-	                refreshSam3CascadeControls();
+		            const enabledLabel = document.createElement("label");
+		            enabledLabel.style.display = "inline-flex";
+		            enabledLabel.style.alignItems = "center";
+		            enabledLabel.style.gap = "6px";
+		            enabledLabel.title = "Turn this step on/off without deleting it.";
+		            const enabledToggle = document.createElement("input");
+		            enabledToggle.type = "checkbox";
+		            enabledToggle.checked = Boolean(step.enabled);
+		            enabledToggle.addEventListener("change", () => {
+		                step.enabled = enabledToggle.checked;
+		                refreshSam3CascadeControls();
 	            });
 	            enabledLabel.appendChild(enabledToggle);
 	            enabledLabel.appendChild(document.createTextNode("Enabled"));
@@ -9492,11 +9493,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            downBtn.disabled = index === sam3CascadeState.steps.length - 1;
 	            downBtn.addEventListener("click", () => moveSam3CascadeStep(step.uid, 1));
 
-	            const removeBtn = document.createElement("button");
-	            removeBtn.type = "button";
-	            removeBtn.className = "training-button danger";
-	            removeBtn.textContent = "Remove";
-	            removeBtn.addEventListener("click", () => removeSam3CascadeStep(step.uid));
+		            const removeBtn = document.createElement("button");
+		            removeBtn.type = "button";
+		            removeBtn.className = "training-button danger";
+		            removeBtn.textContent = "Remove";
+		            removeBtn.title = "Remove this step from the cascade.";
+		            removeBtn.addEventListener("click", () => removeSam3CascadeStep(step.uid));
 
 	            headerActions.appendChild(enabledLabel);
 	            headerActions.appendChild(upBtn);
@@ -9511,61 +9513,70 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            grid.style.marginTop = "8px";
 
 	            const recipeWrap = document.createElement("div");
-	            const recipeLabel = document.createElement("label");
-	            recipeLabel.textContent = "Recipe";
-	            const recipeSelect = document.createElement("select");
-	            populateSelectOptions(recipeSelect, recipeOptions, step.recipe_id || "", recipes.length ? "Select recipe…" : "No recipes loaded");
-	            recipeSelect.disabled = recipes.length === 0;
-	            recipeSelect.addEventListener("change", () => {
-	                step.recipe_id = recipeSelect.value || null;
-	                refreshSam3CascadeControls();
+		            const recipeLabel = document.createElement("label");
+		            recipeLabel.textContent = "Recipe";
+		            recipeLabel.title = "Choose which saved recipe runs in this step.";
+		            const recipeSelect = document.createElement("select");
+		            recipeSelect.title = "Pick a recipe. You can chain multiple recipes and de-dupe the results.";
+		            populateSelectOptions(recipeSelect, recipeOptions, step.recipe_id || "", recipes.length ? "Select recipe…" : "No recipes loaded");
+		            recipeSelect.disabled = recipes.length === 0;
+		            recipeSelect.addEventListener("change", () => {
+		                step.recipe_id = recipeSelect.value || null;
+		                refreshSam3CascadeControls();
 	            });
 	            recipeWrap.appendChild(recipeLabel);
 	            recipeWrap.appendChild(recipeSelect);
 
-	            const groupWrap = document.createElement("div");
-	            const groupLabel = document.createElement("label");
-	            groupLabel.textContent = "Dedupe group";
-	            const groupInput = document.createElement("input");
-	            groupInput.type = "text";
-	            groupInput.placeholder = "e.g. vehicles";
-	            groupInput.value = step.dedupe_group || "";
-	            groupInput.addEventListener("input", () => {
-	                step.dedupe_group = groupInput.value;
-	            });
+		            const groupWrap = document.createElement("div");
+		            const groupLabel = document.createElement("label");
+		            groupLabel.textContent = "Dedupe group";
+		            groupLabel.title =
+		                "Used for cross-class de-dupe: overlapping detections in the same group can suppress each other (e.g. car/truck/bus = vehicles).";
+		            const groupInput = document.createElement("input");
+		            groupInput.type = "text";
+		            groupInput.placeholder = "e.g. vehicles";
+		            groupInput.title =
+		                "Optional. Only affects cross-class de-dupe. Use different groups to prevent suppressing valid overlaps (e.g. person vs bike).";
+		            groupInput.value = step.dedupe_group || "";
+		            groupInput.addEventListener("input", () => {
+		                step.dedupe_group = groupInput.value;
+		            });
 	            groupWrap.appendChild(groupLabel);
 	            groupWrap.appendChild(groupInput);
 
 	            const crossWrap = document.createElement("div");
-	            const crossLabel = document.createElement("label");
-	            crossLabel.style.display = "inline-flex";
-	            crossLabel.style.alignItems = "center";
-	            crossLabel.style.gap = "6px";
-	            crossLabel.title = "When cross-class dedupe is enabled, only steps that participate can suppress each other within a group.";
-	            const crossToggle = document.createElement("input");
-	            crossToggle.type = "checkbox";
-	            crossToggle.checked = step.participate_cross_class_dedupe !== false;
-	            crossToggle.addEventListener("change", () => {
-	                step.participate_cross_class_dedupe = crossToggle.checked;
+		            const crossLabel = document.createElement("label");
+		            crossLabel.style.display = "inline-flex";
+		            crossLabel.style.alignItems = "center";
+		            crossLabel.style.gap = "6px";
+		            crossLabel.title =
+		                "If cross-class de-dupe is enabled, steps that participate can suppress overlaps within the same group. Turn this off for classes that should overlap (e.g. person on bike).";
+		            const crossToggle = document.createElement("input");
+		            crossToggle.type = "checkbox";
+		            crossToggle.checked = step.participate_cross_class_dedupe !== false;
+		            crossToggle.addEventListener("change", () => {
+		                step.participate_cross_class_dedupe = crossToggle.checked;
 	            });
 	            crossLabel.appendChild(crossToggle);
 	            crossLabel.appendChild(document.createTextNode("Participate in cross-class dedupe"));
 	            crossWrap.appendChild(crossLabel);
 
 	            const overrideWrap = document.createElement("div");
-	            const overrideLabel = document.createElement("label");
-	            overrideLabel.style.display = "inline-flex";
-	            overrideLabel.style.alignItems = "center";
-	            overrideLabel.style.gap = "6px";
-	            overrideLabel.title = "Assign detections to a different class than the recipe’s default.";
-	            const overrideToggle = document.createElement("input");
-	            overrideToggle.type = "checkbox";
-	            overrideToggle.checked = Boolean(step.override_enabled);
-	            const overrideSelect = document.createElement("select");
-	            populateSelectOptions(
-	                overrideSelect,
-	                classOptions,
-	                step.override_class_name || "",
+		            const overrideLabel = document.createElement("label");
+		            overrideLabel.style.display = "inline-flex";
+		            overrideLabel.style.alignItems = "center";
+		            overrideLabel.style.gap = "6px";
+		            overrideLabel.title =
+		                "Relabel outputs from this step. This does not change what the recipe detects; it only changes which class the detections are assigned to.";
+		            const overrideToggle = document.createElement("input");
+		            overrideToggle.type = "checkbox";
+		            overrideToggle.checked = Boolean(step.override_enabled);
+		            const overrideSelect = document.createElement("select");
+		            overrideSelect.title = "Pick the class to assign detections to when override is enabled.";
+		            populateSelectOptions(
+		                overrideSelect,
+		                classOptions,
+		                step.override_class_name || "",
 	                classOptions.length ? "Select class…" : "Load classes first",
 	            );
 	            overrideSelect.disabled = !overrideToggle.checked || classOptions.length === 0;

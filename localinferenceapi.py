@@ -14324,8 +14324,15 @@ class AgentApplyImageChainRequest(BaseModel):
         steps = values.get("steps") or []
         if not isinstance(steps, list) or not steps:
             raise ValueError("steps_required")
-        enabled = [s for s in steps if isinstance(s, dict) and s.get("enabled", True)]
-        if not enabled:
+        enabled_steps: List[Any] = []
+        for step in steps:
+            if isinstance(step, dict):
+                if step.get("enabled", True):
+                    enabled_steps.append(step)
+                continue
+            if bool(getattr(step, "enabled", True)):
+                enabled_steps.append(step)
+        if not enabled_steps:
             raise ValueError("steps_required")
         return values
 
@@ -14515,7 +14522,13 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
         per_class_iou = float(payload.dedupe.per_class_iou)
         by_class: Dict[str, List[QwenDetection]] = {}
         for det in all_dets:
-            key = str(det.class_id) if det.class_id is not None else str(det.class_name or "")
+            class_name_key = str(det.class_name or "").strip()
+            if class_name_key:
+                key = f"name:{class_name_key}"
+            elif det.class_id is not None:
+                key = f"id:{int(det.class_id)}"
+            else:
+                key = "unknown"
             by_class.setdefault(key, []).append(det)
         deduped: List[QwenDetection] = []
         for group in by_class.values():

@@ -5954,6 +5954,8 @@ def _apply_agent_recipe_to_image(
     max_results: int,
     class_id: Optional[int],
     class_name: Optional[str],
+    clip_head_min_prob_override: Optional[float] = None,
+    clip_head_margin_override: Optional[float] = None,
     warnings: Optional[List[str]] = None,
 ) -> List[QwenDetection]:
     """
@@ -6202,6 +6204,23 @@ def _apply_agent_recipe_to_image(
             neg_mat = None
 
     clip_head_active = bool(isinstance(clip_head, dict) and clip_head_target_index is not None)
+    if clip_head_active:
+        if clip_head_min_prob_override is not None:
+            try:
+                extra_min = float(clip_head_min_prob_override)
+                extra_min = max(0.0, min(1.0, extra_min))
+                clip_head_min_prob = max(float(clip_head_min_prob), extra_min)
+            except Exception:
+                pass
+        if clip_head_margin_override is not None:
+            try:
+                extra_margin = float(clip_head_margin_override)
+                extra_margin = max(0.0, min(1.0, extra_margin))
+                clip_head_margin = max(float(clip_head_margin), extra_margin)
+            except Exception:
+                pass
+    elif clip_head_min_prob_override is not None or clip_head_margin_override is not None:
+        _add_warning("clip_head_override_ignored")
     if use_clip_guard and ex_mat is None:
         _add_warning("clip_missing_exemplars")
         use_clip_guard = False
@@ -6432,9 +6451,23 @@ def _apply_agent_recipe_to_image(
             if clip_head_active and clip_head_target_index is not None:
                 proba = _clip_head_predict_proba(det_feats, clip_head) if isinstance(clip_head, dict) else None
                 if proba is not None:
+                    t_idx = int(clip_head_target_index)
+                    try:
+                        p_target = proba[:, t_idx]
+                        if proba.shape[1] > 1:
+                            masked = proba.copy()
+                            masked[:, t_idx] = -1.0
+                            p_other = np.max(masked, axis=1)
+                        else:
+                            p_other = np.zeros_like(p_target)
+                        for det_obj, p_t, p_o in zip(det_refs, p_target.tolist(), p_other.tolist()):
+                            det_obj.clip_head_prob = float(p_t)
+                            det_obj.clip_head_margin = float(p_t - p_o)
+                    except Exception:
+                        pass
                     head_keep = _clip_head_keep_mask(
                         proba,
-                        target_index=int(clip_head_target_index),
+                        target_index=t_idx,
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
                     )
@@ -14202,6 +14235,24 @@ class AgentApplyImageRequest(BaseModel):
     max_results: int = Field(1000, ge=1, le=5000)
     override_class_id: Optional[int] = Field(None, ge=0)
     override_class_name: Optional[str] = None
+    clip_head_min_prob_override: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional extra CLIP-head probability threshold applied in addition to the recipe's baked-in head thresholds. "
+            "Effective min_prob is max(recipe_min_prob, clip_head_min_prob_override)."
+        ),
+    )
+    clip_head_margin_override: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional extra CLIP-head margin threshold applied in addition to the recipe's baked-in head thresholds. "
+            "Effective margin is max(recipe_margin, clip_head_margin_override)."
+        ),
+    )
 
     @root_validator(skip_on_failure=True)
     def _ensure_agent_apply_image_payload(cls, values):  # noqa: N805
@@ -14220,6 +14271,24 @@ class AgentApplyChainStep(BaseModel):
     override_class_name: Optional[str] = None
     dedupe_group: Optional[str] = None
     participate_cross_class_dedupe: bool = True
+    clip_head_min_prob_override: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional extra CLIP-head probability threshold applied in addition to the recipe's baked-in head thresholds. "
+            "Effective min_prob is max(recipe_min_prob, clip_head_min_prob_override)."
+        ),
+    )
+    clip_head_margin_override: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional extra CLIP-head margin threshold applied in addition to the recipe's baked-in head thresholds. "
+            "Effective margin is max(recipe_margin, clip_head_margin_override)."
+        ),
+    )
 
     @root_validator(skip_on_failure=True)
     def _ensure_chain_step(cls, values):  # noqa: N805
@@ -14314,6 +14383,8 @@ def agent_mining_apply_image(payload: AgentApplyImageRequest):
             max_results=payload.max_results,
             class_id=class_id_int,
             class_name=str(class_name_val) if class_name_val is not None else None,
+            clip_head_min_prob_override=payload.clip_head_min_prob_override,
+            clip_head_margin_override=payload.clip_head_margin_override,
             warnings=warnings,
         )
     finally:
@@ -14381,6 +14452,8 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
                 max_results=payload.max_results,
                 class_id=class_id_int,
                 class_name=class_name_str,
+                clip_head_min_prob_override=step.clip_head_min_prob_override,
+                clip_head_margin_override=step.clip_head_margin_override,
                 warnings=warnings,
             )
             group_val = (step.dedupe_group or "").strip() or "default"
@@ -14779,6 +14852,8 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
                         "override_class_name": raw.get("override_class_name"),
                         "dedupe_group": raw.get("dedupe_group"),
                         "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
+                        "clip_head_min_prob_override": raw.get("clip_head_min_prob_override"),
+                        "clip_head_margin_override": raw.get("clip_head_margin_override"),
                     }
                 )
 

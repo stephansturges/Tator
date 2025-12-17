@@ -1661,7 +1661,7 @@
                         environment variables (e.g. <code>CLIP_TRAIN_UPLOAD_QUOTA_BYTES</code>,
                         <code>DATASET_ZIP_MAX_BYTES</code>, <code>AGENT_RECIPE_MAX_BYTES</code>,
                         <code>AGENT_MINING_CACHE_MAX_BYTES</code>, <code>MAX_RESPONSE_DETECTIONS</code>,
-                        <code>SAM_PRELOAD_MAX_BYTES</code>, <code>FS_DIALOG_ENABLED</code>/<code>FS_DIALOG_ALLOW_REMOTE</code>).
+                        <code>SAM_PRELOAD_MAX_BYTES</code>).
                         If the backend is configured with lower limits, uploads over those caps will be rejected.
                     </p>
                     <ul class="settings-help">
@@ -1672,7 +1672,6 @@
                         <li>Agent recipe zips: ~2GB total; crops capped (~1000 pngs / ~512MB total).</li>
                         <li>Responses: max ~5000 detections / 2000 masks; SAM preload cache ~2GB.</li>
                         <li>Agent mining cache: ~80GB default; TTL off by default (set <code>AGENT_MINING_CACHE_TTL_HOURS</code> to enable purge).</li>
-                        <li>FS directory picker: controlled by <code>FS_DIALOG_ENABLED</code> (default on, localhost-only unless <code>FS_DIALOG_ALLOW_REMOTE</code> is true).</li>
                     </ul>
                 </div>
             </div>

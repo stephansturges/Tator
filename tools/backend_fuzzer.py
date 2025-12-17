@@ -414,16 +414,6 @@ def run_tests(
                 ),
             )
         )
-        tests.append(
-            (
-                "sam_bbox_auto_class (sam1)",
-                lambda: _http_post_json(
-                    f"{base_url}/sam_bbox_auto_class",
-                    {"bbox_left": 8, "bbox_top": 8, "bbox_width": 32, "bbox_height": 32, "image_base64": img_b64, "sam_variant": "sam1", "image_name": image_name},
-                    timeout=request_timeout,
-                ),
-            )
-        )
     for name, fn in tests:
         status, body, err = fn()
         ok = status is not None and 200 <= status < 300

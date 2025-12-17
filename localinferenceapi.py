@@ -163,7 +163,6 @@ CLIP_DATASET_CHUNK_MAX_BYTES = _env_int("CLIP_DATASET_CHUNK_MAX_BYTES", 10 * 102
 CLIP_DATASET_UPLOAD_QUOTA_BYTES = _env_int("CLIP_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 QWEN_DATASET_CHUNK_MAX_BYTES = _env_int("QWEN_DATASET_CHUNK_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 QWEN_DATASET_UPLOAD_QUOTA_BYTES = _env_int("QWEN_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
-QWEN_DATASET_ZIP_MAX_BYTES = _env_int("QWEN_DATASET_ZIP_MAX_BYTES", 100 * 1024 * 1024 * 1024)
 ASSET_MAX_BYTES = _env_int("ASSET_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 ASSET_UPLOAD_QUOTA_BYTES = _env_int("ASSET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 CLASSIFIER_ALLOWED_EXTS = {".pkl", ".joblib"}
@@ -184,8 +183,6 @@ AGENT_CASCADE_MAX_JSON_BYTES = _env_int("AGENT_CASCADE_MAX_JSON_BYTES", 10 * 102
 AGENT_CASCADE_MAX_BYTES = _env_int("AGENT_CASCADE_MAX_BYTES", 8 * 1024 * 1024 * 1024)
 CLIP_TRAIN_UPLOAD_MAX_BYTES = _env_int("CLIP_TRAIN_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 CLIP_TRAIN_UPLOAD_QUOTA_BYTES = _env_int("CLIP_TRAIN_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
-FS_DIALOG_ENABLED = _env_bool("FS_DIALOG_ENABLED", True)
-FS_DIALOG_ALLOW_REMOTE = _env_bool("FS_DIALOG_ALLOW_REMOTE", False)
 
 QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen2.5-VL-3B-Instruct")
 QWEN_MIN_PIXELS = _env_int("QWEN_MIN_PIXELS", 256 * 28 * 28)
@@ -2745,15 +2742,6 @@ class YoloBboxOutput(BaseModel):
     simplify_epsilon: Optional[float] = None
 
 
-class YoloBboxClassOutput(BaseModel):
-    class_id: int
-    bbox: List[float]
-    uuid: Optional[str] = None
-    image_token: Optional[str] = None
-    mask: Optional[Dict[str, Any]] = None
-    simplify_epsilon: Optional[float] = None
-
-
 class Sam3TextPrompt(BaseModel):
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
@@ -3241,8 +3229,6 @@ UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
 PROMPT_HELPER_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
-PROMPT_RECIPE_PRESET_ROOT = UPLOAD_ROOT / "prompt_recipe_presets"
-PROMPT_RECIPE_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
@@ -4851,7 +4837,7 @@ def _load_agent_recipe(recipe_id: str) -> Dict[str, Any]:
         if zip_path.exists():
             data["_zip"] = str(zip_path)
         # Inline a small number of crop previews if present on disk (kept small so
-        # /agent_mining/apply payloads don't explode when the UI forwards recipes).
+        # /agent_mining/apply_image payloads don't explode when the UI forwards recipes).
         recipe_block = data.get("recipe") or {}
         recipe_dir = (AGENT_MINING_RECIPES_ROOT / recipe_id).resolve()
         if not _path_is_within_root(recipe_dir, AGENT_MINING_RECIPES_ROOT.resolve()):
@@ -10997,63 +10983,6 @@ def _save_prompt_helper_preset(label: str, dataset_id: str, prompts_by_class: Di
     return payload
 
 
-def _list_prompt_recipe_presets() -> List[Dict[str, Any]]:
-    presets: List[Dict[str, Any]] = []
-    for path in PROMPT_RECIPE_PRESET_ROOT.glob("*.json"):
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            presets.append(data)
-        except Exception:
-            continue
-    presets.sort(key=lambda p: p.get("created_at", 0), reverse=True)
-    return presets
-
-
-def _load_prompt_recipe_preset(preset_id: str) -> Dict[str, Any]:
-    path = (PROMPT_RECIPE_PRESET_ROOT / f"{preset_id}.json").resolve()
-    if not str(path).startswith(str(PROMPT_RECIPE_PRESET_ROOT.resolve())) or not path.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_recipe_preset_not_found")
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"prompt_recipe_preset_load_failed:{exc}"
-        ) from exc
-
-
-def _save_prompt_recipe_preset(
-    label: str,
-    class_name: str,
-    class_id: Optional[int],
-    steps: List[Dict[str, Any]],
-    dataset_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    if not steps:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_recipe_preset_empty_steps")
-    preset_id = f"prset_{uuid.uuid4().hex[:8]}"
-    created_at = time.time()
-    payload = {
-        "id": preset_id,
-        "label": label or preset_id,
-        "class_name": class_name,
-        "class_id": class_id,
-        "steps": [{"prompt": s.get("prompt"), "threshold": s.get("threshold")} for s in steps],
-        "dataset_id": dataset_id,
-        "created_at": created_at,
-    }
-    path = (PROMPT_RECIPE_PRESET_ROOT / f"{preset_id}.json").resolve()
-    if not str(path).startswith(str(PROMPT_RECIPE_PRESET_ROOT.resolve())):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_recipe_preset_path_invalid")
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-    return payload
-
-
-    # (Legacy single-split loader removed; combined loader above)
-
-
 def _sample_images_for_category(cat_id: int, img_ids: List[int], sample_size: int, seed: int) -> List[int]:
     if not img_ids:
         return []
@@ -14166,118 +14095,6 @@ def agent_mining_cache_purge():
     return {"status": "ok", "deleted_bytes": deleted, "deleted_files": deleted_files}
 
 
-class AgentApplyRequest(BaseModel):
-    dataset_id: str
-    image_id: int
-    recipe: Dict[str, Any]
-    mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
-    min_size: int = Field(0, ge=0, le=10_000)
-    simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
-    max_results: int = Field(1000, ge=1, le=5000)
-    override_class_id: Optional[int] = Field(None, ge=0)
-    override_class_name: Optional[str] = None
-
-
-@app.post("/agent_mining/apply", response_model=Sam3TextPromptResponse)
-def agent_mining_apply(payload: AgentApplyRequest):
-    dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
-    coco, _, images = _load_coco_index(dataset_root)
-    categories = coco.get("categories") or []
-    labelmap_hash, _ = _compute_labelmap_hash(categories)
-    warnings: List[str] = []
-    recipe_meta = payload.recipe or {}
-    recipe_labelmap_hash = recipe_meta.get("labelmap_hash")
-    if recipe_labelmap_hash and recipe_labelmap_hash != labelmap_hash:
-        warnings.append("labelmap_mismatch")
-    recipe_signature = recipe_meta.get("dataset_signature")
-    dataset_signature = _compute_dataset_signature(payload.dataset_id, dataset_root, images, categories)
-    if recipe_signature and recipe_signature != dataset_signature:
-        warnings.append("dataset_mismatch")
-    target_class_id = recipe_meta.get("class_id")
-    target_class_name = recipe_meta.get("class_name")
-    class_id_int: Optional[int] = None
-    override_class_id = payload.override_class_id
-    override_class_name = payload.override_class_name
-    if override_class_id is not None or override_class_name:
-        # Explicit override takes precedence over the stored recipe class.
-        if override_class_id is not None:
-            present = any(int(cat.get("id", idx)) == override_class_id for idx, cat in enumerate(categories))
-            if not present:
-                raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_override_class_missing")
-            class_id_int = override_class_id
-        elif override_class_name:
-            target_lower = str(override_class_name).lower()
-            for idx, cat in enumerate(categories):
-                try:
-                    cid = int(cat.get("id", idx))
-                except Exception:
-                    cid = idx
-                if str(cat.get("name", "")).lower() == target_lower:
-                    class_id_int = cid
-                    break
-            if class_id_int is None:
-                raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_override_class_missing")
-        warnings.append("class_override_used")
-    else:
-        if target_class_id is not None:
-            try:
-                class_id_int = int(target_class_id)
-            except Exception:
-                class_id_int = None
-        name_match_id: Optional[int] = None
-        if target_class_name:
-            target_lower = str(target_class_name).lower()
-            for idx, cat in enumerate(categories):
-                try:
-                    cid = int(cat.get("id", idx))
-                except Exception:
-                    cid = idx
-                if str(cat.get("name", "")).lower() == target_lower:
-                    name_match_id = cid
-                    break
-        # Prefer ID match; if missing but name matches, use name match and add warning.
-        if class_id_int is not None:
-            present = any(int(cat.get("id", idx)) == class_id_int for idx, cat in enumerate(categories))
-            if not present and name_match_id is not None:
-                warnings.append("class_id_remapped_by_name")
-                class_id_int = name_match_id
-            elif not present:
-                raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_class_missing")
-        elif name_match_id is not None:
-            class_id_int = name_match_id
-        else:
-            raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_class_missing")
-    class_name_resolved: Optional[str] = None
-    if class_id_int is not None:
-        for idx, cat in enumerate(categories):
-            try:
-                cid = int(cat.get("id", idx))
-            except Exception:
-                cid = idx
-            if cid == class_id_int:
-                class_name_resolved = str(cat.get("name", class_name_resolved or target_class_name or ""))
-                break
-    if not class_name_resolved and target_class_name:
-        class_name_resolved = str(target_class_name)
-    img = images.get(payload.image_id)
-    if not img:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_image_not_found")
-    dets = _apply_agent_recipe_to_image(
-        payload.recipe,
-        image=img,
-        dataset_id=payload.dataset_id,
-        images=images,
-        mask_threshold=payload.mask_threshold,
-        min_size=payload.min_size,
-        simplify_epsilon=payload.simplify_epsilon,
-        max_results=payload.max_results,
-        class_id=class_id_int,
-        class_name=class_name_resolved,
-        warnings=warnings,
-    )
-    return Sam3TextPromptResponse(detections=dets, warnings=warnings, image_token=None)
-
-
 class AgentApplyImageRequest(BaseModel):
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
@@ -14981,44 +14798,6 @@ def start_prompt_helper_search(payload: PromptHelperSearchRequest):
 def start_prompt_helper_recipe(payload: PromptRecipeRequest):
     job = _start_prompt_recipe_job(payload)
     return _serialize_prompt_helper_job(job)
-
-
-@app.get("/sam3/recipe_presets")
-def list_prompt_recipe_presets():
-    return _list_prompt_recipe_presets()
-
-
-@app.get("/sam3/recipe_presets/{preset_id}")
-def load_prompt_recipe_preset(preset_id: str):
-    return _load_prompt_recipe_preset(preset_id)
-
-
-class PromptRecipePresetSave(BaseModel):
-    label: Optional[str] = None
-    class_name: str
-    class_id: Optional[int] = None
-    dataset_id: Optional[str] = None
-    steps: List[Dict[str, Any]]
-
-
-@app.post("/sam3/recipe_presets")
-def save_prompt_recipe_preset(payload: PromptRecipePresetSave):
-    class_name = (payload.class_name or "").strip()
-    if not class_name:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_recipe_preset_class_missing")
-    cleaned_steps: List[Dict[str, Any]] = []
-    for step in payload.steps:
-        prompt = (step.get("prompt") or "").strip()
-        thr = step.get("threshold")
-        try:
-            thr_val = float(thr)
-        except Exception:
-            continue
-        if not prompt or thr_val < 0.0 or thr_val > 1.0:
-            continue
-        cleaned_steps.append({"prompt": prompt, "threshold": thr_val})
-    return _save_prompt_recipe_preset(payload.label or "", class_name, payload.class_id, cleaned_steps, payload.dataset_id)
-
 
 @app.get("/sam3/prompt_helper/presets")
 def list_prompt_helper_presets():
@@ -16299,62 +16078,6 @@ def _get_sam3_job(job_id: str) -> Sam3TrainingJob:
         return job
 
 
-@app.post("/qwen/train/dataset/upload")
-async def upload_qwen_dataset(file: UploadFile = File(...), run_name: Optional[str] = Form(None)):
-    if not file.filename:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_file_required")
-    dataset_token = run_name or f"dataset_{uuid.uuid4().hex}"
-    safe_token = re.sub(r"[^A-Za-z0-9._-]", "_", dataset_token)
-    dest_dir = QWEN_DATASET_ROOT / safe_token
-    if dest_dir.exists():
-        shutil.rmtree(dest_dir, ignore_errors=True)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = dest_dir / "payload.zip"
-    try:
-        await _write_upload_file(
-            file,
-            zip_path,
-            max_bytes=QWEN_DATASET_ZIP_MAX_BYTES,
-            quota_root=dest_dir,
-            quota_limit=QWEN_DATASET_ZIP_MAX_BYTES,
-            allow_overwrite=True,
-        )
-        with zipfile.ZipFile(zip_path) as archive:
-            _safe_extract_zip(
-                archive,
-                dest_dir,
-                max_bytes_per_file=QWEN_DATASET_ZIP_MAX_BYTES,
-                total_quota_bytes=QWEN_DATASET_ZIP_MAX_BYTES,
-            )
-    except zipfile.BadZipFile as exc:
-        shutil.rmtree(dest_dir, ignore_errors=True)
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dataset_invalid_zip:{exc}") from exc
-    except HTTPException:
-        shutil.rmtree(dest_dir, ignore_errors=True)
-        raise
-    except Exception as exc:  # noqa: BLE001
-        shutil.rmtree(dest_dir, ignore_errors=True)
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dataset_extract_failed:{exc}") from exc
-    finally:
-        try:
-            zip_path.unlink()
-        except Exception:
-            pass
-    for split in ("train", "val"):
-        annotations = dest_dir / split / "annotations.jsonl"
-        if not annotations.exists():
-            shutil.rmtree(dest_dir, ignore_errors=True)
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dataset_missing_annotations:{split}")
-    # Backfill minimal metadata so downstream listings have type information.
-    metadata = _load_qwen_dataset_metadata(dest_dir) or {}
-    metadata.setdefault("id", safe_token)
-    metadata.setdefault("label", safe_token)
-    metadata.setdefault("created_at", time.time())
-    metadata.setdefault("type", "bbox")
-    _persist_qwen_dataset_metadata(dest_dir, metadata)
-    return {"dataset_root": str(dest_dir), "run_name": safe_token}
-
-
 async def _save_upload_file(
     upload: UploadFile,
     root: Path,
@@ -16505,73 +16228,6 @@ def _current_active_payload() -> Dict[str, Any]:
         "clip_error": clip_last_error,
         "labelmap_entries": list(active_label_list),
     }
-
-
-def _select_directory_with_os(initial: Optional[str]) -> Optional[str]:
-    if sys.platform == "darwin":
-        return _select_directory_macos(initial)
-    if sys.platform.startswith("linux"):
-        return _select_directory_linux(initial)
-    if os.name == "nt":
-        return _select_directory_windows(initial)
-    return None
-
-
-def _select_directory_macos(initial: Optional[str]) -> Optional[str]:
-    default = initial or os.path.expanduser("~")
-    default_path = Path(default)
-    if not default_path.exists():
-        default_path = Path.home()
-    default_str = str(default_path).replace('"', '\\"')
-    script = "\n".join([
-        f'set startingFolder to POSIX file "{default_str}"',
-        'set chosenFolder to choose folder with prompt "Select folder" default location startingFolder',
-        'POSIX path of chosenFolder',
-    ])
-    try:
-        result = subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-    path = result.stdout.strip()
-    return path or None
-
-
-def _select_directory_linux(initial: Optional[str]) -> Optional[str]:
-    default = initial or os.path.expanduser("~")
-    candidates = [
-        ["zenity", "--file-selection", "--directory", "--title", "Select folder", "--filename", f"{default.rstrip('/')}/"],
-        ["kdialog", "--getexistingdirectory", default],
-    ]
-    for cmd in candidates:
-        try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            path = result.stdout.strip()
-            if path:
-                return path
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-    return None
-
-
-def _select_directory_windows(initial: Optional[str]) -> Optional[str]:
-    ps_script = (
-        "$initial = '{initial}'.Trim();"
-        "if (-not (Test-Path $initial)) { $initial = [Environment]::GetFolderPath('Desktop') }"
-        "$app = New-Object -ComObject Shell.Application;"
-        "$folder = $app.BrowseForFolder(0, 'Select folder', 0, $initial);"
-        "if ($folder) { $folder.Self.Path }"
-    ).format(initial=(initial or "").replace("'", "''"))
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-    path = result.stdout.strip()
-    return path or None
 
 def mask_to_bounding_box(mask: np.ndarray) -> tuple[int,int,int,int]:
     rows = np.any(mask, axis=1)
@@ -16849,17 +16505,6 @@ async def upload_labelmap(file: UploadFile = File(...)):
         quota_bytes=ASSET_UPLOAD_QUOTA_BYTES,
     )
     return {"path": saved_path}
-
-
-@app.get("/fs/select_directory")
-def select_directory(request: Request, initial: str = "."):
-    if not FS_DIALOG_ENABLED:
-        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="fs_dialog_disabled")
-    client_host = request.client.host if request and request.client else None
-    if not FS_DIALOG_ALLOW_REMOTE and client_host not in {None, "127.0.0.1", "::1", "localhost"}:
-        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="fs_dialog_remote_not_allowed")
-    selected = _select_directory_with_os(initial or ".")
-    return {"path": selected}
 
 
 def _validate_job_exists(job_id: str) -> ClipTrainingJob:
@@ -17691,17 +17336,6 @@ def list_sam3_available_models(
         )
     return models
 
-
-@app.get("/sam3/models/status")
-def sam3_model_status():
-    return {
-        "checkpoint": active_sam3_checkpoint,
-        "active": active_sam3_metadata,
-        "enable_segmentation": active_sam3_enable_segmentation,
-        "loaded_text": sam3_text_model is not None,
-    }
-
-
 @app.post("/sam3/models/activate")
 def activate_sam3_model(payload: Sam3ModelActivateRequest):
     global active_sam3_checkpoint, active_sam3_model_id, active_sam3_metadata, active_sam3_enable_segmentation
@@ -18049,32 +17683,6 @@ def update_predictor_settings(payload: PredictorSettingsUpdate):
     return _predictor_settings_payload()
 
 
-@app.post("/predict_crop", response_model=PredictResponse)
-def predict_crop(file: UploadFile = File(...),
-                 x: int = Form(...),
-                 y: int = Form(...),
-                 w: int = Form(...),
-                 h: int = Form(...)):
-
-    if not clip_initialized:
-        # Return the error message in the "prediction"
-        return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None) # messy ... returning the error message int as str. Crap logic needs cleanup
-
-    _validate_upload_size(file, max_bytes=BASE64_IMAGE_MAX_BYTES)
-    image_bytes = file.file.read(BASE64_IMAGE_MAX_BYTES + 1)
-    if len(image_bytes) > BASE64_IMAGE_MAX_BYTES:
-        raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="upload_too_large")
-    pil_img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    cropped = pil_img.crop((x, y, x+w, y+h))
-    inp = clip_preprocess(cropped).unsqueeze(0).to(device)
-    with torch.no_grad():
-        feats = clip_model.encode_image(inp)
-    feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-    pred_cls = clf.predict(feats_np)[0]
-    return PredictResponse(prediction=pred_cls, uuid=None)
-
-
 @app.get("/qwen/status")
 def qwen_status():
     dependency_error = str(QWEN_IMPORT_ERROR) if QWEN_IMPORT_ERROR else None
@@ -18099,23 +17707,6 @@ def qwen_status():
         "active_model": active_qwen_model_id,
         "active_metadata": active_qwen_metadata,
     }
-
-
-@app.get("/qwen/config", response_model=QwenPromptConfig)
-def qwen_get_config():
-    return _get_qwen_prompt_config()
-
-
-@app.post("/qwen/config", response_model=QwenPromptConfig)
-def qwen_update_config(payload: QwenPromptConfig):
-    _set_qwen_prompt_config(payload)
-    return _get_qwen_prompt_config()
-
-
-@app.post("/qwen/config/reset", response_model=QwenPromptConfig)
-def qwen_reset_config():
-    _set_qwen_prompt_config(DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True))
-    return _get_qwen_prompt_config()
 
 
 @app.post("/qwen/infer", response_model=QwenInferenceResponse)
@@ -18694,76 +18285,6 @@ def sam_bbox(prompt: BboxPrompt):
         )
     return YoloBboxOutput(
         class_id="0",
-        bbox=yolo_box,
-        uuid=prompt.uuid,
-        image_token=token,
-        mask=encode_binary_mask(mask_arr),
-        simplify_epsilon=None,
-    )
-
-
-@app.post("/sam_bbox_auto_class", response_model=YoloBboxClassOutput)
-def sam_bbox_auto_class(prompt: BboxPrompt):
-    if not clip_initialized:
-        return YoloBboxClassOutput(class_id=ERROR_MESSAGE, bbox=[], uuid=None)
-
-    class_map = {"unknown": 0}
-
-    pil_img, np_img, token = resolve_image_payload(
-        prompt.image_base64,
-        getattr(prompt, "image_token", None),
-        getattr(prompt, "sam_variant", None),
-    )
-
-    full_h, full_w = pil_img.height, pil_img.width
-    left = max(0, prompt.bbox_left)
-    top = max(0, prompt.bbox_top)
-    right = min(full_w, left + prompt.bbox_width)
-    bottom = min(full_h, top + prompt.bbox_height)
-    if right <= left or bottom <= top:
-        return YoloBboxClassOutput(
-            class_id=class_map.get("unknown", 0),
-            bbox=[0, 0, 0, 0],
-            uuid=prompt.uuid,
-            image_token=token,
-        )
-    sub_box = np.array([left, top, right, bottom], dtype=np.float32)
-    variant = _default_variant(getattr(prompt, "sam_variant", None))
-    masks, _, _ = _predict_with_cache(
-        np_img,
-        token,
-        variant,
-        image_name=getattr(prompt, "image_name", None),
-        box=sub_box,
-        multimask_output=False,
-    )
-    mask_arr = np.asarray(masks[0])
-    if mask_arr.dtype != np.uint8:
-        mask_arr = (mask_arr > 0).astype(np.uint8)
-    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask_arr)
-    yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
-    gx_min_i = max(0, int(x_min))
-    gy_min_i = max(0, int(y_min))
-    gx_max_i = min(full_w, int(x_max))
-    gy_max_i = min(full_h, int(y_max))
-    if gx_max_i <= gx_min_i or gy_max_i <= gy_min_i:
-        return YoloBboxClassOutput(
-            class_id=class_map.get("unknown", 0),
-            bbox=yolo_box,
-            uuid=prompt.uuid,
-            image_token=token,
-        )
-    subarr = np_img[gy_min_i:gy_max_i, gx_min_i:gx_max_i, :]
-    final_pil = Image.fromarray(subarr)
-    inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
-    with torch.no_grad():
-        feats = clip_model.encode_image(inp)
-    feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-    pred_label = clf.predict(feats_np)[0]
-    class_id = class_map.get(pred_label, 0)
-    return YoloBboxClassOutput(
-        class_id=class_id,
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,

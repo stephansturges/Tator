@@ -200,39 +200,74 @@
                                     </div>
 	                                    <label for="sam3ClassSelect">Assign detections to class</label>
 	                                    <select id="sam3ClassSelect"></select>
-	                                    <div class="sam3-text-buttons">
-	                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
-	                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
-	                                        <label for="sam3RecipeFile" class="training-button secondary" title="Load a portable recipe zip (from Agent Mining or another machine). It contains a JSON recipe + example crops.">Load recipe (zip)</label>
-	                                        <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
-	                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr;">
-	                                            <div>
-	                                                <label for="sam3RecipePresetSelect" title="Saved recipes on the backend. Use Refresh if you just mined/imported a recipe.">Recipe presets</label>
-	                                                <select id="sam3RecipePresetSelect" title="Saved recipes on the backend. Use Refresh if you just mined/imported a recipe."></select>
-	                                            </div>
-	                                            <div>
-	                                                <label for="sam3RecipePresetName" title="Optional friendly name when saving the currently loaded recipe into your preset list.">Save preset as</label>
-	                                                <input type="text" id="sam3RecipePresetName" placeholder="Optional label" />
-	                                            </div>
-	                                        </div>
-	                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr;">
-	                                            <label title="Assign detections to a different class than the recipe’s default (useful when applying a recipe to a dataset with different class names)."><input type="checkbox" id="sam3RecipeOverrideToggle" /> Override output class</label>
-	                                            <select id="sam3RecipeOverrideSelect" disabled></select>
-	                                        </div>
-	                                        <div class="training-actions">
-	                                            <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh</button>
-	                                            <button type="button" id="sam3RecipePresetSave" class="training-button secondary">Save recipe preset</button>
-	                                            <button type="button" id="sam3RecipePresetLoad" class="training-button secondary">Load preset</button>
-	                                            <button type="button" id="sam3RecipePresetDelete" class="training-button danger">Delete preset</button>
-	                                            <button type="button" id="sam3RecipeApplyButton" class="training-button secondary">Apply recipe to image</button>
-	                                        </div>
-	                                        <div class="training-help">
-	                                            Recipes are saved “find this object” strategies from the <strong>SAM3 Recipe Mining</strong> tab. Load a recipe zip or pick a preset, then click “Apply recipe to image” to add boxes/polygons to the current image.
-	                                        </div>
-	                                        <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
-	                                    </div>
-	                                </section>
-                            </section>
+		                                    <div class="sam3-text-buttons">
+		                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
+		                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
+		                                        <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). It contains a JSON recipe + example crops.">Import recipe (zip)</label>
+		                                        <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
+		                                        <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
+
+		                                        <div class="training-help" style="margin-top: 8px;">
+		                                            <strong>Recipe cascade:</strong> chain multiple saved recipes (each step can override its output class + dedupe group). Apply runs all steps, then de-dupes results.
+		                                        </div>
+
+		                                        <div id="sam3CascadeSteps"></div>
+		                                        <button type="button" id="sam3CascadeAddStep" class="training-button secondary">+ Add recipe step</button>
+
+		                                        <div class="training-grid" style="margin-top: 10px;">
+		                                            <div>
+		                                                <label for="sam3CascadePerClassIou">Per-class dedupe IoU</label>
+		                                                <input type="number" id="sam3CascadePerClassIou" step="0.05" min="0" max="1" value="0.5" />
+		                                            </div>
+		                                            <div>
+		                                                <label title="When enabled, run an additional IoU de-dupe across classes within each step’s dedupe group. Use different group names (e.g. person vs bike) to avoid suppressing valid overlaps."><input type="checkbox" id="sam3CascadeCrossDedupeToggle" /> Cross-class dedupe</label>
+		                                                <select id="sam3CascadeCrossScope">
+		                                                    <option value="groups" selected>Within dedupe groups</option>
+		                                                    <option value="global">Across all participating steps</option>
+		                                                </select>
+		                                            </div>
+		                                            <div>
+		                                                <label for="sam3CascadeCrossIou">Cross-class IoU</label>
+		                                                <input type="number" id="sam3CascadeCrossIou" step="0.05" min="0" max="1" value="0.5" />
+		                                            </div>
+		                                            <div>
+		                                                <label for="sam3CascadeConfidence">Confidence (dedupe)</label>
+		                                                <select id="sam3CascadeConfidence">
+		                                                    <option value="sam_score" selected>SAM score</option>
+		                                                    <option value="clip_head_prob">CLIP head prob</option>
+		                                                    <option value="clip_head_margin">CLIP head margin</option>
+		                                                </select>
+		                                            </div>
+		                                            <div>
+		                                                <label for="sam3CascadeClipHeadSource">CLIP head source recipe</label>
+		                                                <select id="sam3CascadeClipHeadSource"></select>
+		                                            </div>
+		                                        </div>
+
+		                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr; margin-top: 10px;">
+		                                            <div>
+		                                                <label for="sam3CascadePresetSelect" title="Saved cascades on the backend. Use Refresh if you just saved/imported one.">Cascade presets</label>
+		                                                <select id="sam3CascadePresetSelect" title="Saved cascades on the backend. Use Refresh if you just saved/imported one."></select>
+		                                            </div>
+		                                            <div>
+		                                                <label for="sam3CascadePresetName" title="Optional friendly name when saving the current cascade into your preset list.">Save cascade as</label>
+		                                                <input type="text" id="sam3CascadePresetName" placeholder="Optional label" />
+		                                            </div>
+		                                        </div>
+		                                        <div class="training-actions">
+		                                            <button type="button" id="sam3CascadePresetRefresh" class="training-button secondary">Refresh cascades</button>
+		                                            <button type="button" id="sam3CascadePresetSave" class="training-button secondary">Save cascade preset</button>
+		                                            <button type="button" id="sam3CascadePresetLoad" class="training-button secondary">Load preset</button>
+		                                            <button type="button" id="sam3CascadePresetDelete" class="training-button danger">Delete preset</button>
+		                                            <button type="button" id="sam3CascadePresetExport" class="training-button secondary">Download preset (zip)</button>
+		                                            <label for="sam3CascadeFile" class="training-button secondary" title="Import a portable cascade zip. It bundles cascade.json + all referenced recipe zips.">Import cascade (zip)</label>
+		                                            <input type="file" id="sam3CascadeFile" accept=".zip" class="file-input-hidden" />
+		                                            <button type="button" id="sam3CascadeApplyButton" class="training-button secondary">Apply cascade to image</button>
+		                                        </div>
+		                                        <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
+		                                    </div>
+		                                </section>
+	                            </section>
                             <br />
                             <hr />
                             <label for="bboxes">Bboxes:</label>

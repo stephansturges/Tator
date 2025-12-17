@@ -180,6 +180,8 @@ AGENT_RECIPE_MAX_CROP_BYTES = _env_int("AGENT_RECIPE_MAX_CROP_BYTES", 512 * 1024
 AGENT_RECIPE_MAX_CLIP_HEAD_BYTES = _env_int("AGENT_RECIPE_MAX_CLIP_HEAD_BYTES", 256 * 1024 * 1024)
 AGENT_RECIPE_MAX_JSON_BYTES = _env_int("AGENT_RECIPE_MAX_JSON_BYTES", 10 * 1024 * 1024)
 AGENT_RECIPE_MAX_BYTES = _env_int("AGENT_RECIPE_MAX_BYTES", 2 * 1024 * 1024 * 1024)
+AGENT_CASCADE_MAX_JSON_BYTES = _env_int("AGENT_CASCADE_MAX_JSON_BYTES", 10 * 1024 * 1024)
+AGENT_CASCADE_MAX_BYTES = _env_int("AGENT_CASCADE_MAX_BYTES", 8 * 1024 * 1024 * 1024)
 CLIP_TRAIN_UPLOAD_MAX_BYTES = _env_int("CLIP_TRAIN_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 CLIP_TRAIN_UPLOAD_QUOTA_BYTES = _env_int("CLIP_TRAIN_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 FS_DIALOG_ENABLED = _env_bool("FS_DIALOG_ENABLED", True)
@@ -3318,6 +3320,8 @@ AGENT_MINING_DET_CACHE_ROOT = AGENT_MINING_ROOT / "detections"
 AGENT_MINING_DET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 AGENT_MINING_RECIPES_ROOT = AGENT_MINING_ROOT / "recipes"
 AGENT_MINING_RECIPES_ROOT.mkdir(parents=True, exist_ok=True)
+AGENT_MINING_CASCADES_ROOT = AGENT_MINING_ROOT / "cascades"
+AGENT_MINING_CASCADES_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _purge_dataset_artifacts(dataset_id: str) -> None:
@@ -4909,6 +4913,27 @@ def _load_agent_recipe(recipe_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_load_failed:{exc}") from exc
 
 
+def _load_agent_recipe_json_only(recipe_id: str) -> Dict[str, Any]:
+    """Load an agent recipe payload without inlining crop_base64 blobs (suitable for inference/export)."""
+    path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.json").resolve()
+    if not _path_is_within_root(path, AGENT_MINING_RECIPES_ROOT.resolve()) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        data["_path"] = str(path)
+        zip_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve()
+        if zip_path.exists():
+            data["_zip"] = str(zip_path)
+        return data
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_load_failed:{exc}") from exc
+
+
 def _delete_agent_recipe(recipe_id: str) -> None:
     json_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.json").resolve()
     zip_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve()
@@ -5000,6 +5025,273 @@ def _ensure_recipe_zip(recipe: Dict[str, Any]) -> Path:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_export_failed:{exc}") from exc
     return zip_path
+
+
+def _validate_agent_cascade_structure(cascade_obj: Dict[str, Any]) -> None:
+    if not isinstance(cascade_obj, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+    steps = cascade_obj.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+    for step in steps:
+        if not isinstance(step, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        recipe_id = step.get("recipe_id")
+        if not isinstance(recipe_id, str) or not recipe_id.strip():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+    dedupe = cascade_obj.get("dedupe")
+    if dedupe is not None and not isinstance(dedupe, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+
+
+def _persist_agent_cascade(
+    label: str,
+    cascade: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(cascade, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+    cleaned_label = str(label or "").strip() or "recipe_cascade"
+    steps_raw = cascade.get("steps")
+    if not isinstance(steps_raw, list) or not steps_raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="steps_required")
+    dedupe_raw = cascade.get("dedupe") if isinstance(cascade.get("dedupe"), dict) else {}
+
+    steps: List[Dict[str, Any]] = []
+    recipe_ids: List[str] = []
+    seen = set()
+    for raw in steps_raw:
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        recipe_id = raw.get("recipe_id")
+        if not recipe_id and isinstance(raw.get("recipe"), dict):
+            recipe_id = raw["recipe"].get("id")
+        if not isinstance(recipe_id, str) or not recipe_id.strip():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        recipe_id = recipe_id.strip()
+        # Ensure referenced recipe exists.
+        _load_agent_recipe_json_only(recipe_id)
+        if recipe_id not in seen:
+            seen.add(recipe_id)
+            recipe_ids.append(recipe_id)
+        steps.append(
+            {
+                "enabled": bool(raw.get("enabled", True)),
+                "recipe_id": recipe_id,
+                "override_class_id": raw.get("override_class_id"),
+                "override_class_name": raw.get("override_class_name"),
+                "dedupe_group": raw.get("dedupe_group"),
+                "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
+            }
+        )
+    if not any(s.get("enabled", True) for s in steps):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="steps_required")
+
+    cascade_id = f"ac_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "id": cascade_id,
+        "label": cleaned_label,
+        "created_at": time.time(),
+        "version": 1,
+        "steps": steps,
+        "dedupe": dedupe_raw,
+        "recipe_ids": recipe_ids,
+    }
+    json_path = (AGENT_MINING_CASCADES_ROOT / f"{cascade_id}.json").resolve()
+    if not _path_is_within_root(json_path, AGENT_MINING_CASCADES_ROOT.resolve()):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    try:
+        with json_path.open("w", encoding="utf-8") as fp:
+            json.dump(payload, fp, ensure_ascii=False, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_save_failed:{exc}") from exc
+    payload["_path"] = str(json_path)
+    return payload
+
+
+def _load_agent_cascade(cascade_id: str) -> Dict[str, Any]:
+    json_path = (AGENT_MINING_CASCADES_ROOT / f"{cascade_id}.json").resolve()
+    if not _path_is_within_root(json_path, AGENT_MINING_CASCADES_ROOT.resolve()) or not json_path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
+    try:
+        with json_path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        _validate_agent_cascade_structure(data)
+        data["_path"] = str(json_path)
+        zip_path = (AGENT_MINING_CASCADES_ROOT / f"{cascade_id}.zip").resolve()
+        if zip_path.exists():
+            data["_zip"] = str(zip_path)
+        return data
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_load_failed:{exc}") from exc
+
+
+def _delete_agent_cascade(cascade_id: str) -> None:
+    json_path = (AGENT_MINING_CASCADES_ROOT / f"{cascade_id}.json").resolve()
+    zip_path = (AGENT_MINING_CASCADES_ROOT / f"{cascade_id}.zip").resolve()
+    if not _path_is_within_root(json_path, AGENT_MINING_CASCADES_ROOT.resolve()):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    removed_any = False
+    for path in (json_path, zip_path):
+        if path.exists():
+            try:
+                path.unlink()
+                removed_any = True
+            except Exception:
+                pass
+    if not removed_any:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
+
+
+def _list_agent_cascades() -> List[Dict[str, Any]]:
+    cascades: List[Dict[str, Any]] = []
+    for path in AGENT_MINING_CASCADES_ROOT.glob("*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if not isinstance(data, dict):
+                continue
+            if not data.get("id"):
+                continue
+            _validate_agent_cascade_structure(data)
+            data["_path"] = str(path)
+            zip_path = (AGENT_MINING_CASCADES_ROOT / f"{data.get('id','')}.zip").resolve()
+            if zip_path.exists():
+                data["_zip"] = str(zip_path)
+            cascades.append(data)
+        except Exception:
+            continue
+    cascades.sort(key=lambda c: c.get("created_at", 0), reverse=True)
+    return cascades
+
+
+def _ensure_cascade_zip(cascade: Dict[str, Any]) -> Path:
+    cascade_id = cascade.get("id")
+    if not cascade_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_missing_id")
+    zip_path = (AGENT_MINING_CASCADES_ROOT / f"{cascade_id}.zip").resolve()
+    if zip_path.exists():
+        return zip_path
+    if not _path_is_within_root(zip_path, AGENT_MINING_CASCADES_ROOT.resolve()):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+
+    def _strip_internal(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {k: _strip_internal(v) for k, v in obj.items() if not (isinstance(k, str) and k.startswith("_"))}
+        if isinstance(obj, list):
+            return [_strip_internal(v) for v in obj]
+        return obj
+
+    clean_cascade = _strip_internal(json.loads(json.dumps(cascade)))
+    recipe_ids: List[str] = []
+    for step in clean_cascade.get("steps") or []:
+        if isinstance(step, dict) and isinstance(step.get("recipe_id"), str):
+            recipe_ids.append(step["recipe_id"])
+    dedupe = clean_cascade.get("dedupe") if isinstance(clean_cascade.get("dedupe"), dict) else {}
+    if isinstance(dedupe.get("clip_head_recipe_id"), str) and dedupe.get("clip_head_recipe_id"):
+        recipe_ids.append(str(dedupe.get("clip_head_recipe_id")))
+    # Preserve order, drop duplicates.
+    seen = set()
+    recipe_ids_unique: List[str] = []
+    for rid in recipe_ids:
+        if rid in seen:
+            continue
+        seen.add(rid)
+        recipe_ids_unique.append(rid)
+
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("cascade.json", json.dumps(clean_cascade, ensure_ascii=False, indent=2))
+            for rid in recipe_ids_unique:
+                recipe = _load_agent_recipe_json_only(rid)
+                recipe_zip = _ensure_recipe_zip(recipe)
+                try:
+                    zf.write(recipe_zip, arcname=f"recipes/{rid}.zip")
+                except Exception:
+                    continue
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_export_failed:{exc}") from exc
+    return zip_path
+
+
+def _import_agent_recipe_zip_bytes(zip_bytes: bytes) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Import a portable agent recipe zip from bytes; returns (source_recipe_id, persisted_recipe)."""
+    if not zip_bytes:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_zip_only")
+    bio = BytesIO(zip_bytes)
+    if not zipfile.is_zipfile(bio):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_zip_only")
+    data: Dict[str, Any] = {}
+    crops: Dict[str, bytes] = {}
+    clip_head_files: Dict[str, bytes] = {}
+    with zipfile.ZipFile(bio) as zf:
+        names = zf.namelist()
+        json_name = None
+        for name in names:
+            if name.lower().endswith(".json"):
+                json_name = name
+                break
+        if not json_name:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
+        json_info = zf.getinfo(json_name)
+        if json_info.file_size > AGENT_RECIPE_MAX_JSON_BYTES:
+            raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_json_too_large")
+        json_path = Path(json_name)
+        if json_path.is_absolute() or ".." in json_path.parts:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
+        with zf.open(json_name) as jf:
+            data = json.load(jf)
+
+        total_bytes = 0
+        crop_count = 0
+        clip_head_bytes = 0
+        for name in names:
+            info = zf.getinfo(name)
+            arc_path = Path(name)
+            if arc_path.is_dir():
+                continue
+            if arc_path.is_absolute() or ".." in arc_path.parts:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
+            if len(arc_path.parts) < 2 or arc_path.parts[0] != "crops":
+                if len(arc_path.parts) == 2 and arc_path.parts[0] == "clip_head" and arc_path.name in {"head.npz", "meta.json"}:
+                    clip_head_bytes += info.file_size
+                    if clip_head_bytes > AGENT_RECIPE_MAX_CLIP_HEAD_BYTES:
+                        raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_clip_head_too_large")
+                    clip_head_files[f"clip_head/{arc_path.name}"] = zf.read(name)
+                continue
+            if arc_path.suffix.lower() != ".png":
+                continue
+            crop_count += 1
+            total_bytes += info.file_size
+            if crop_count > AGENT_RECIPE_MAX_CROPS or total_bytes > AGENT_RECIPE_MAX_CROP_BYTES:
+                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_crops_too_large")
+            crops[f"crops/{arc_path.name}"] = zf.read(name)
+
+    dataset_id = data.get("dataset_id") or data.get("recipe", {}).get("dataset_id") or ""
+    label = data.get("label") or data.get("recipe", {}).get("label") or "imported_recipe"
+    class_id = data.get("class_id")
+    class_name = data.get("class_name")
+    recipe_body = data.get("recipe") or {}
+    meta_overrides = {
+        "dataset_signature": data.get("dataset_signature"),
+        "labelmap_hash": data.get("labelmap_hash"),
+        "labelmap": data.get("labelmap"),
+    }
+    persisted = _persist_agent_recipe(
+        dataset_id,
+        class_id,
+        class_name,
+        label,
+        recipe_body,
+        crop_overrides=crops,
+        clip_head_overrides=clip_head_files,
+        meta_overrides=meta_overrides,
+    )
+    source_id = data.get("id") if isinstance(data.get("id"), str) else None
+    return source_id, persisted
 
 
 def _bbox_to_xyxy_pixels(
@@ -5526,6 +5818,82 @@ def _find_clip_head_target_index(classes: Sequence[str], class_name: Optional[st
         if _normalize_class_name_for_match(c) == target:
             return int(idx)
     return None
+
+
+def _score_detections_with_clip_head(
+    dets: Sequence[QwenDetection],
+    *,
+    pil_img: Image.Image,
+    clip_head: Dict[str, Any],
+    score_mode: Literal["clip_head_prob", "clip_head_margin"],
+) -> Optional[Dict[int, float]]:
+    """
+    Compute CLIP-head-based scores for a list of detections.
+
+    Returns a dict mapping id(det)->score, and also populates det.clip_head_prob/margin where available.
+    """
+    if not dets:
+        return {}
+    if not isinstance(clip_head, dict):
+        return None
+    classes = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
+    if not classes:
+        return None
+    clip_model_override: Optional[str] = None
+    try:
+        raw = clip_head.get("clip_model")
+        if isinstance(raw, str) and raw.strip():
+            clip_model_override = raw.strip()
+    except Exception:
+        clip_model_override = None
+
+    crops: List[Image.Image] = []
+    det_refs: List[QwenDetection] = []
+    for det in dets:
+        bbox_xyxy = _bbox_to_xyxy_pixels(det.bbox or [], pil_img.width, pil_img.height)
+        if bbox_xyxy is None:
+            continue
+        x1, y1, x2, y2 = bbox_xyxy
+        if x2 <= x1 or y2 <= y1:
+            continue
+        try:
+            crops.append(pil_img.crop((x1, y1, x2, y2)))
+        except Exception:
+            continue
+        det_refs.append(det)
+    if not det_refs:
+        return {}
+
+    feats = _clip_encode_pil_batch(crops, clip_model_override=clip_model_override)
+    if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
+        return None
+    proba = _clip_head_predict_proba(feats, clip_head)
+    if proba is None:
+        return None
+
+    scores: Dict[int, float] = {}
+    for det, row in zip(det_refs, proba):
+        label = det.class_name or det.qwen_label
+        t_idx = _find_clip_head_target_index(classes, label)
+        if t_idx is None or t_idx < 0 or t_idx >= row.shape[0]:
+            continue
+        try:
+            p_t = float(row[int(t_idx)])
+        except Exception:
+            continue
+        p_other = 0.0
+        try:
+            if row.shape[0] > 1:
+                other = np.asarray(row, dtype=np.float32).copy()
+                other[int(t_idx)] = -1.0
+                p_other = float(np.max(other))
+        except Exception:
+            p_other = 0.0
+        det.clip_head_prob = p_t
+        det.clip_head_margin = float(p_t - p_other)
+        score = p_t if score_mode == "clip_head_prob" else float(p_t - p_other)
+        scores[id(det)] = float(score)
+    return scores
 
 
 def _select_diverse_indices(
@@ -13910,6 +14278,58 @@ class AgentApplyImageRequest(BaseModel):
         return values
 
 
+class AgentApplyChainStep(BaseModel):
+    enabled: bool = True
+    recipe_id: Optional[str] = None
+    recipe: Optional[Dict[str, Any]] = None
+    override_class_id: Optional[int] = Field(None, ge=0)
+    override_class_name: Optional[str] = None
+    dedupe_group: Optional[str] = None
+    participate_cross_class_dedupe: bool = True
+
+    @root_validator(skip_on_failure=True)
+    def _ensure_chain_step(cls, values):  # noqa: N805
+        recipe_id = values.get("recipe_id")
+        recipe_obj = values.get("recipe")
+        if not recipe_id and not (isinstance(recipe_obj, dict) and recipe_obj):
+            raise ValueError("recipe_required")
+        return values
+
+
+class AgentCascadeDedupeConfig(BaseModel):
+    per_class_iou: float = Field(0.5, ge=0.0, le=1.0)
+    cross_class_enabled: bool = False
+    cross_class_iou: float = Field(0.5, ge=0.0, le=1.0)
+    cross_class_scope: Literal["groups", "global"] = "groups"
+    confidence: Literal["sam_score", "clip_head_prob", "clip_head_margin"] = "sam_score"
+    clip_head_recipe_id: Optional[str] = None
+
+
+class AgentApplyImageChainRequest(BaseModel):
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
+    image_name: Optional[str] = None
+    sam_variant: Optional[str] = None
+    steps: List[AgentApplyChainStep]
+    dedupe: AgentCascadeDedupeConfig = Field(default_factory=AgentCascadeDedupeConfig)
+    mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    min_size: int = Field(0, ge=0, le=10_000)
+    simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
+    max_results: int = Field(1000, ge=1, le=5000)
+
+    @root_validator(skip_on_failure=True)
+    def _ensure_agent_apply_chain_payload(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_payload_missing")
+        steps = values.get("steps") or []
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("steps_required")
+        enabled = [s for s in steps if isinstance(s, dict) and s.get("enabled", True)]
+        if not enabled:
+            raise ValueError("steps_required")
+        return values
+
+
 @app.post("/agent_mining/apply_image", response_model=Sam3TextPromptResponse)
 def agent_mining_apply_image(payload: AgentApplyImageRequest):
     variant = _default_variant(payload.sam_variant or "sam3")
@@ -13960,12 +14380,197 @@ def agent_mining_apply_image(payload: AgentApplyImageRequest):
     return Sam3TextPromptResponse(detections=dets, warnings=warnings, image_token=token)
 
 
+@app.post("/agent_mining/apply_image_chain", response_model=Sam3TextPromptResponse)
+def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
+    variant = _default_variant(payload.sam_variant or "sam3")
+    if variant != "sam3":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_apply_requires_sam3")
+    pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
+    warnings: List[str] = []
+
+    enabled_steps = [s for s in payload.steps if s.enabled]
+    if not enabled_steps:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="steps_required")
+
+    staging_dir = Path(tempfile.mkdtemp(prefix="agent_apply_chain_"))
+    try:
+        img_path = staging_dir / "image.png"
+        try:
+            pil_img.save(img_path, format="PNG")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_apply_image_encode_failed:{exc}") from exc
+
+        all_dets: List[QwenDetection] = []
+        det_meta: Dict[int, Dict[str, Any]] = {}
+
+        for idx, step in enumerate(enabled_steps):
+            recipe_obj: Optional[Dict[str, Any]] = None
+            if isinstance(step.recipe, dict) and step.recipe:
+                recipe_obj = step.recipe
+            elif step.recipe_id:
+                recipe_obj = _load_agent_recipe_json_only(step.recipe_id)
+            if not isinstance(recipe_obj, dict) or not recipe_obj:
+                continue
+
+            class_id_val = recipe_obj.get("class_id")
+            class_name_val = recipe_obj.get("class_name")
+            if step.override_class_id is not None or step.override_class_name:
+                warnings.append("class_override_used")
+                if step.override_class_id is not None:
+                    class_id_val = step.override_class_id
+                if step.override_class_name:
+                    class_name_val = step.override_class_name
+
+            class_id_int: Optional[int] = None
+            if class_id_val is not None:
+                try:
+                    class_id_int = int(class_id_val)
+                except Exception:
+                    class_id_int = None
+            class_name_str = str(class_name_val) if class_name_val is not None else None
+
+            dets = _apply_agent_recipe_to_image(
+                recipe_obj,
+                image={"path": str(img_path)},
+                dataset_id="image_payload",
+                images={},
+                mask_threshold=payload.mask_threshold,
+                min_size=payload.min_size,
+                simplify_epsilon=payload.simplify_epsilon,
+                max_results=payload.max_results,
+                class_id=class_id_int,
+                class_name=class_name_str,
+                warnings=warnings,
+            )
+            group_val = (step.dedupe_group or "").strip() or "default"
+            cross_val = bool(step.participate_cross_class_dedupe)
+            for det in dets:
+                det_meta[id(det)] = {
+                    "step_index": idx,
+                    "dedupe_group": group_val,
+                    "cross_class": cross_val,
+                }
+            all_dets.extend(dets)
+
+        if not all_dets:
+            return Sam3TextPromptResponse(detections=[], warnings=warnings, image_token=token)
+
+        original_scores: Dict[int, Optional[float]] = {}
+        confidence_mode = payload.dedupe.confidence
+        if confidence_mode in {"clip_head_prob", "clip_head_margin"}:
+            head_recipe_id = (payload.dedupe.clip_head_recipe_id or "").strip() or None
+            if head_recipe_id is None:
+                for step in enabled_steps:
+                    rid = None
+                    if step.recipe_id:
+                        rid = step.recipe_id
+                    elif isinstance(step.recipe, dict):
+                        rid = step.recipe.get("id")
+                    if not rid:
+                        continue
+                    candidate = (AGENT_MINING_RECIPES_ROOT / str(rid) / "clip_head" / "head.npz").resolve()
+                    if _path_is_within_root(candidate, AGENT_MINING_RECIPES_ROOT.resolve()) and candidate.exists():
+                        head_recipe_id = str(rid)
+                        break
+
+            clip_head: Optional[Dict[str, Any]] = None
+            if head_recipe_id:
+                try:
+                    head_recipe = _load_agent_recipe_json_only(head_recipe_id)
+                except HTTPException:
+                    head_recipe = None
+                fallback_meta: Optional[Dict[str, Any]] = None
+                if isinstance(head_recipe, dict):
+                    recipe_block = head_recipe.get("recipe")
+                    if isinstance(recipe_block, dict) and isinstance(recipe_block.get("clip_head"), dict):
+                        fallback_meta = recipe_block.get("clip_head")
+                    elif isinstance(head_recipe.get("clip_head"), dict):
+                        fallback_meta = head_recipe.get("clip_head")
+                recipe_root = (AGENT_MINING_RECIPES_ROOT / str(head_recipe_id)).resolve()
+                if _path_is_within_root(recipe_root, AGENT_MINING_RECIPES_ROOT.resolve()):
+                    clip_head = _load_clip_head_artifacts(recipe_dir=recipe_root, fallback_meta=fallback_meta)
+
+            clip_scores = (
+                _score_detections_with_clip_head(
+                    all_dets,
+                    pil_img=pil_img,
+                    clip_head=clip_head,
+                    score_mode=confidence_mode,  # type: ignore[arg-type]
+                )
+                if clip_head
+                else None
+            )
+            if clip_scores is None:
+                warnings.append("clip_head_unavailable")
+            else:
+                if all_dets and not clip_scores:
+                    warnings.append("clip_head_no_scores")
+                for det in all_dets:
+                    det_id = id(det)
+                    original_scores[det_id] = det.score
+                    if det_id in clip_scores:
+                        det.score = float(clip_scores[det_id])
+
+        # Always dedupe within each output class first.
+        per_class_iou = float(payload.dedupe.per_class_iou)
+        by_class: Dict[str, List[QwenDetection]] = {}
+        for det in all_dets:
+            key = str(det.class_id) if det.class_id is not None else str(det.class_name or "")
+            by_class.setdefault(key, []).append(det)
+        deduped: List[QwenDetection] = []
+        for group in by_class.values():
+            deduped.extend(
+                _dedupe_qwen_detections_iou(group, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=per_class_iou)
+            )
+        final = deduped
+
+        # Optional cross-class dedupe across steps (grouped or global).
+        if payload.dedupe.cross_class_enabled:
+            cross_iou = float(payload.dedupe.cross_class_iou)
+            scope = payload.dedupe.cross_class_scope
+            group_map: Dict[str, List[QwenDetection]] = {}
+            for det in final:
+                meta = det_meta.get(id(det)) or {}
+                if not meta.get("cross_class", True):
+                    continue
+                group_key = "global" if scope == "global" else str(meta.get("dedupe_group") or "default")
+                group_map.setdefault(group_key, []).append(det)
+
+            kept_ids: set[int] = set()
+            for group in group_map.values():
+                kept = _dedupe_qwen_detections_iou(group, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=cross_iou)
+                kept_ids.update(id(d) for d in kept)
+
+            if group_map:
+                final = [
+                    det
+                    for det in final
+                    if (id(det) in kept_ids) or not (det_meta.get(id(det)) or {}).get("cross_class", True)
+                ]
+
+        if original_scores:
+            for det in all_dets:
+                det_id = id(det)
+                if det_id in original_scores:
+                    det.score = original_scores[det_id]
+
+        return Sam3TextPromptResponse(detections=final, warnings=warnings, image_token=token)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 class AgentRecipeExportRequest(BaseModel):
     dataset_id: str
     class_id: Optional[int] = None
     class_name: Optional[str] = None
     label: str = Field(..., min_length=1, max_length=128)
     recipe: Dict[str, Any]
+
+
+class AgentCascadeSaveRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=128)
+    steps: List[AgentApplyChainStep]
+    dedupe: AgentCascadeDedupeConfig = Field(default_factory=AgentCascadeDedupeConfig)
 
 
 @app.post("/agent_mining/recipes", response_model=Dict[str, Any])
@@ -14099,6 +14704,149 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
 def agent_mining_delete_recipe(recipe_id: str):
     _delete_agent_recipe(recipe_id)
     return {"id": recipe_id, "deleted": True}
+
+
+@app.post("/agent_mining/cascades", response_model=Dict[str, Any])
+def agent_mining_save_cascade(payload: AgentCascadeSaveRequest):
+    cascade_payload = {
+        "steps": [s.dict() for s in payload.steps],
+        "dedupe": payload.dedupe.dict(),
+    }
+    return _persist_agent_cascade(payload.label, cascade_payload)
+
+
+@app.get("/agent_mining/cascades", response_model=List[Dict[str, Any]])
+def agent_mining_list_cascades():
+    return _list_agent_cascades()
+
+
+@app.get("/agent_mining/cascades/{cascade_id}", response_model=Dict[str, Any])
+def agent_mining_get_cascade(cascade_id: str):
+    return _load_agent_cascade(cascade_id)
+
+
+@app.delete("/agent_mining/cascades/{cascade_id}")
+def agent_mining_delete_cascade(cascade_id: str):
+    _delete_agent_cascade(cascade_id)
+    return {"id": cascade_id, "deleted": True}
+
+
+@app.get("/agent_mining/cascades/{cascade_id}/export")
+def agent_mining_export_cascade(cascade_id: str):
+    cascade = _load_agent_cascade(cascade_id)
+    zip_path = _ensure_cascade_zip(cascade)
+    filename = f"{cascade_id}.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    try:
+        stream = zip_path.open("rb")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_export_failed:{exc}") from exc
+    return StreamingResponse(stream, media_type="application/zip", headers=headers)
+
+
+@app.post("/agent_mining/cascades/import", response_model=Dict[str, Any])
+async def agent_mining_import_cascade(file: UploadFile = File(...)):
+    staging_dir = Path(tempfile.mkdtemp(prefix="agent_cascade_import_", dir=str(AGENT_MINING_CASCADES_ROOT)))
+    zip_path = staging_dir / "payload.zip"
+    try:
+        await _write_upload_file(
+            file,
+            zip_path,
+            max_bytes=AGENT_CASCADE_MAX_BYTES,
+            quota_root=staging_dir,
+            quota_limit=AGENT_CASCADE_MAX_BYTES,
+            allow_overwrite=True,
+        )
+        if not zipfile.is_zipfile(zip_path):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_zip_only")
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            cascade_name = None
+            for name in names:
+                if Path(name).name.lower() == "cascade.json":
+                    cascade_name = name
+                    break
+            if not cascade_name:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_no_json")
+            info = zf.getinfo(cascade_name)
+            if info.file_size > AGENT_CASCADE_MAX_JSON_BYTES:
+                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_cascade_import_json_too_large")
+            cascade_path = Path(cascade_name)
+            if cascade_path.is_absolute() or ".." in cascade_path.parts:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+            with zf.open(cascade_name) as jf:
+                cascade_data = json.load(jf)
+            if not isinstance(cascade_data, dict):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+
+            recipe_zip_names: List[str] = []
+            for name in names:
+                arc_path = Path(name)
+                if arc_path.is_dir():
+                    continue
+                if arc_path.is_absolute() or ".." in arc_path.parts:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                if len(arc_path.parts) >= 2 and arc_path.parts[0] == "recipes" and arc_path.suffix.lower() == ".zip":
+                    recipe_zip_names.append(name)
+
+            id_map: Dict[str, str] = {}
+            for name in recipe_zip_names:
+                src_id = None
+                try:
+                    arc_path = Path(name)
+                    src_id = arc_path.stem
+                except Exception:
+                    src_id = None
+                old_id, persisted = _import_agent_recipe_zip_bytes(zf.read(name))
+                new_id = persisted.get("id")
+                if isinstance(new_id, str) and new_id:
+                    if old_id:
+                        id_map[str(old_id)] = str(new_id)
+                    if src_id:
+                        id_map[str(src_id)] = str(new_id)
+
+            label = cascade_data.get("label") or "imported_cascade"
+            steps_raw = cascade_data.get("steps")
+            if not isinstance(steps_raw, list) or not steps_raw:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+            dedupe_raw = cascade_data.get("dedupe") if isinstance(cascade_data.get("dedupe"), dict) else {}
+
+            steps_out: List[Dict[str, Any]] = []
+            for raw in steps_raw:
+                if not isinstance(raw, dict):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+                rid = raw.get("recipe_id")
+                if not rid and isinstance(raw.get("recipe"), dict):
+                    rid = raw["recipe"].get("id")
+                if not isinstance(rid, str) or not rid.strip():
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+                rid = rid.strip()
+                mapped = id_map.get(rid)
+                if not mapped:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_missing_recipe")
+                steps_out.append(
+                    {
+                        "enabled": bool(raw.get("enabled", True)),
+                        "recipe_id": mapped,
+                        "override_class_id": raw.get("override_class_id"),
+                        "override_class_name": raw.get("override_class_name"),
+                        "dedupe_group": raw.get("dedupe_group"),
+                        "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
+                    }
+                )
+
+            if isinstance(dedupe_raw.get("clip_head_recipe_id"), str) and dedupe_raw.get("clip_head_recipe_id"):
+                mapped_head = id_map.get(str(dedupe_raw.get("clip_head_recipe_id")))
+                if mapped_head:
+                    dedupe_raw["clip_head_recipe_id"] = mapped_head
+
+            return _persist_agent_cascade(str(label), {"steps": steps_out, "dedupe": dedupe_raw})
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_cascade_import_failed:{exc}") from exc
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 @app.post("/sam3/prompt_helper/suggest")

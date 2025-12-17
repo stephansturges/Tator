@@ -930,19 +930,33 @@
     };
     const sam3RecipeElements = {
         fileInput: null,
-        applyButton: null,
         status: null,
-        presetSelect: null,
-        presetNameInput: null,
-        presetSaveButton: null,
-        presetLoadButton: null,
-        presetRefreshButton: null,
-        presetDeleteButton: null,
-        overrideToggle: null,
-        overrideSelect: null,
+        recipeRefreshButton: null,
+        cascadeSteps: null,
+        cascadeAddStepButton: null,
+        perClassIouInput: null,
+        crossDedupeToggle: null,
+        crossScopeSelect: null,
+        crossIouInput: null,
+        confidenceSelect: null,
+        clipHeadSourceSelect: null,
+        cascadePresetSelect: null,
+        cascadePresetNameInput: null,
+        cascadePresetRefreshButton: null,
+        cascadePresetSaveButton: null,
+        cascadePresetLoadButton: null,
+        cascadePresetDeleteButton: null,
+        cascadePresetExportButton: null,
+        cascadeFileInput: null,
+        cascadeApplyButton: null,
     };
     const sam3RecipeState = {
         recipe: null,
+    };
+    const sam3CascadeState = {
+        steps: [],
+        recipePresets: [],
+        cascadePresets: [],
     };
     const DEFAULT_QWEN_METADATA = {
         id: "default",
@@ -9166,16 +9180,25 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.similarityThresholdInput = document.getElementById("sam3SimilarityThreshold");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
         sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
-        sam3RecipeElements.applyButton = document.getElementById("sam3RecipeApplyButton");
         sam3RecipeElements.status = document.getElementById("sam3RecipeStatus");
-        sam3RecipeElements.presetSelect = document.getElementById("sam3RecipePresetSelect");
-        sam3RecipeElements.presetNameInput = document.getElementById("sam3RecipePresetName");
-        sam3RecipeElements.presetSaveButton = document.getElementById("sam3RecipePresetSave");
-        sam3RecipeElements.presetLoadButton = document.getElementById("sam3RecipePresetLoad");
-        sam3RecipeElements.presetRefreshButton = document.getElementById("sam3RecipePresetRefresh");
-        sam3RecipeElements.presetDeleteButton = document.getElementById("sam3RecipePresetDelete");
-        sam3RecipeElements.overrideToggle = document.getElementById("sam3RecipeOverrideToggle");
-        sam3RecipeElements.overrideSelect = document.getElementById("sam3RecipeOverrideSelect");
+        sam3RecipeElements.recipeRefreshButton = document.getElementById("sam3RecipePresetRefresh");
+        sam3RecipeElements.cascadeSteps = document.getElementById("sam3CascadeSteps");
+        sam3RecipeElements.cascadeAddStepButton = document.getElementById("sam3CascadeAddStep");
+        sam3RecipeElements.perClassIouInput = document.getElementById("sam3CascadePerClassIou");
+        sam3RecipeElements.crossDedupeToggle = document.getElementById("sam3CascadeCrossDedupeToggle");
+        sam3RecipeElements.crossScopeSelect = document.getElementById("sam3CascadeCrossScope");
+        sam3RecipeElements.crossIouInput = document.getElementById("sam3CascadeCrossIou");
+        sam3RecipeElements.confidenceSelect = document.getElementById("sam3CascadeConfidence");
+        sam3RecipeElements.clipHeadSourceSelect = document.getElementById("sam3CascadeClipHeadSource");
+        sam3RecipeElements.cascadePresetSelect = document.getElementById("sam3CascadePresetSelect");
+        sam3RecipeElements.cascadePresetNameInput = document.getElementById("sam3CascadePresetName");
+        sam3RecipeElements.cascadePresetRefreshButton = document.getElementById("sam3CascadePresetRefresh");
+        sam3RecipeElements.cascadePresetSaveButton = document.getElementById("sam3CascadePresetSave");
+        sam3RecipeElements.cascadePresetLoadButton = document.getElementById("sam3CascadePresetLoad");
+        sam3RecipeElements.cascadePresetDeleteButton = document.getElementById("sam3CascadePresetDelete");
+        sam3RecipeElements.cascadePresetExportButton = document.getElementById("sam3CascadePresetExport");
+        sam3RecipeElements.cascadeFileInput = document.getElementById("sam3CascadeFile");
+        sam3RecipeElements.cascadeApplyButton = document.getElementById("sam3CascadeApplyButton");
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest({ auto: false }));
         }
@@ -9188,35 +9211,63 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3RecipeElements.fileInput) {
             sam3RecipeElements.fileInput.addEventListener("change", handleSam3RecipeFile);
         }
-        if (sam3RecipeElements.applyButton) {
-            sam3RecipeElements.applyButton.addEventListener("click", runSam3RecipeOnImage);
-            sam3RecipeElements.applyButton.disabled = true;
-        }
-        if (sam3RecipeElements.presetSaveButton) {
-            sam3RecipeElements.presetSaveButton.addEventListener("click", saveSam3RecipePreset);
-        }
-        if (sam3RecipeElements.presetLoadButton) {
-            sam3RecipeElements.presetLoadButton.addEventListener("click", loadSam3RecipePreset);
-        }
-        if (sam3RecipeElements.presetRefreshButton) {
-            sam3RecipeElements.presetRefreshButton.addEventListener("click", () => {
-                loadSam3RecipePresets().catch((err) => console.error("Refresh recipe presets failed", err));
+        if (sam3RecipeElements.recipeRefreshButton) {
+            sam3RecipeElements.recipeRefreshButton.addEventListener("click", () => {
+                loadSam3RecipePresets().catch((err) => console.error("Refresh recipes failed", err));
             });
         }
-        if (sam3RecipeElements.presetDeleteButton) {
-            sam3RecipeElements.presetDeleteButton.addEventListener("click", deleteSam3RecipePreset);
-        }
-        if (sam3RecipeElements.overrideToggle) {
-            sam3RecipeElements.overrideToggle.addEventListener("change", () => {
-                if (sam3RecipeElements.overrideSelect) {
-                    sam3RecipeElements.overrideSelect.disabled = !sam3RecipeElements.overrideToggle.checked;
-                }
+        if (sam3RecipeElements.cascadeAddStepButton) {
+            sam3RecipeElements.cascadeAddStepButton.addEventListener("click", () => {
+                addSam3CascadeStep();
             });
+        }
+        if (sam3RecipeElements.cascadePresetRefreshButton) {
+            sam3RecipeElements.cascadePresetRefreshButton.addEventListener("click", () => {
+                loadSam3CascadePresets().catch((err) => console.error("Refresh cascades failed", err));
+            });
+        }
+        if (sam3RecipeElements.cascadePresetSaveButton) {
+            sam3RecipeElements.cascadePresetSaveButton.addEventListener("click", saveSam3CascadePreset);
+        }
+        if (sam3RecipeElements.cascadePresetLoadButton) {
+            sam3RecipeElements.cascadePresetLoadButton.addEventListener("click", loadSam3CascadePreset);
+        }
+        if (sam3RecipeElements.cascadePresetDeleteButton) {
+            sam3RecipeElements.cascadePresetDeleteButton.addEventListener("click", deleteSam3CascadePreset);
+        }
+        if (sam3RecipeElements.cascadePresetExportButton) {
+            sam3RecipeElements.cascadePresetExportButton.addEventListener("click", exportSam3CascadePreset);
+        }
+        if (sam3RecipeElements.cascadePresetSelect) {
+            sam3RecipeElements.cascadePresetSelect.addEventListener("change", refreshSam3CascadeControls);
+        }
+        if (sam3RecipeElements.cascadeFileInput) {
+            sam3RecipeElements.cascadeFileInput.addEventListener("change", handleSam3CascadeFile);
+        }
+        if (sam3RecipeElements.cascadeApplyButton) {
+            sam3RecipeElements.cascadeApplyButton.addEventListener("click", runSam3CascadeOnImage);
+        }
+        for (const el of [
+            sam3RecipeElements.perClassIouInput,
+            sam3RecipeElements.crossDedupeToggle,
+            sam3RecipeElements.crossScopeSelect,
+            sam3RecipeElements.crossIouInput,
+            sam3RecipeElements.confidenceSelect,
+            sam3RecipeElements.clipHeadSourceSelect,
+        ]) {
+            if (el) {
+                el.addEventListener("change", refreshSam3CascadeControls);
+            }
         }
         updateSam3ClassOptions({ resetOverride: true });
-        updateSam3RecipeOverrideOptions({ resetOverride: true });
         updateSam3TextButtons();
-        loadSam3RecipePresets().catch((err) => console.error("Load recipe presets failed", err));
+        if (!Array.isArray(sam3CascadeState.steps) || sam3CascadeState.steps.length === 0) {
+            sam3CascadeState.steps = [createSam3CascadeStep({})];
+        }
+        renderSam3CascadeSteps();
+        refreshSam3CascadeControls();
+        loadSam3RecipePresets().catch((err) => console.error("Load recipes failed", err));
+        loadSam3CascadePresets().catch((err) => console.error("Load cascades failed", err));
     }
 
     function setSam3TextStatus(message, variant = "info") {
@@ -9234,15 +9285,775 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    function setSam3RecipeStatus(message, variant = "info") {
-        const statusEl = sam3RecipeElements.status;
-        if (!statusEl) return;
-        statusEl.textContent = message || "";
-        statusEl.classList.remove("warn", "error", "success");
-        if (variant === "warn" || variant === "error" || variant === "success") {
-            statusEl.classList.add(variant);
-        }
-    }
+	    function setSam3RecipeStatus(message, variant = "info") {
+	        const statusEl = sam3RecipeElements.status;
+	        if (!statusEl) return;
+	        statusEl.textContent = message || "";
+	        statusEl.classList.remove("warn", "error", "success");
+	        if (variant === "warn" || variant === "error" || variant === "success") {
+	            statusEl.classList.add(variant);
+	        }
+	    }
+
+	    function createSam3CascadeStep({ recipeId = null } = {}) {
+	        return {
+	            uid: generateUUID(),
+	            enabled: true,
+	            recipe_id: recipeId || null,
+	            dedupe_group: "",
+	            participate_cross_class_dedupe: true,
+	            override_enabled: false,
+	            override_class_name: null,
+	        };
+	    }
+
+	    function ensureAtLeastOneCascadeStep() {
+	        if (!Array.isArray(sam3CascadeState.steps)) {
+	            sam3CascadeState.steps = [];
+	        }
+	        if (sam3CascadeState.steps.length === 0) {
+	            sam3CascadeState.steps.push(createSam3CascadeStep({}));
+	        }
+	    }
+
+	    function addSam3CascadeStep({ recipeId = null } = {}) {
+	        ensureAtLeastOneCascadeStep();
+	        let chosen = recipeId;
+	        if (!chosen && Array.isArray(sam3CascadeState.recipePresets) && sam3CascadeState.recipePresets.length) {
+	            chosen = sam3CascadeState.recipePresets[0].id;
+	        }
+	        sam3CascadeState.steps.push(createSam3CascadeStep({ recipeId: chosen }));
+	        renderSam3CascadeSteps();
+	        refreshSam3CascadeControls();
+	    }
+
+	    function removeSam3CascadeStep(uid) {
+	        if (!Array.isArray(sam3CascadeState.steps)) {
+	            return;
+	        }
+	        sam3CascadeState.steps = sam3CascadeState.steps.filter((s) => s && s.uid !== uid);
+	        ensureAtLeastOneCascadeStep();
+	        renderSam3CascadeSteps();
+	        refreshSam3CascadeControls();
+	    }
+
+	    function moveSam3CascadeStep(uid, direction) {
+	        if (!Array.isArray(sam3CascadeState.steps) || sam3CascadeState.steps.length < 2) {
+	            return;
+	        }
+	        const idx = sam3CascadeState.steps.findIndex((s) => s && s.uid === uid);
+	        if (idx < 0) return;
+	        const next = idx + direction;
+	        if (next < 0 || next >= sam3CascadeState.steps.length) return;
+	        const copy = [...sam3CascadeState.steps];
+	        const tmp = copy[idx];
+	        copy[idx] = copy[next];
+	        copy[next] = tmp;
+	        sam3CascadeState.steps = copy;
+	        renderSam3CascadeSteps();
+	        refreshSam3CascadeControls();
+	    }
+
+	    function recipeHasClipHeadConfig(recipe) {
+	        const raw = recipe?.raw;
+	        if (!raw || typeof raw !== "object") {
+	            return false;
+	        }
+	        if (raw.clip_head && typeof raw.clip_head === "object") {
+	            return true;
+	        }
+	        if (raw.recipe && typeof raw.recipe === "object" && raw.recipe.clip_head && typeof raw.recipe.clip_head === "object") {
+	            return true;
+	        }
+	        return false;
+	    }
+
+	    function refreshSam3CascadeClipHeadSourceOptions({ preserveSelection = false } = {}) {
+	        const select = sam3RecipeElements.clipHeadSourceSelect;
+	        if (!select) return;
+	        const previous = preserveSelection ? select.value : "";
+	        select.innerHTML = "";
+	        const autoOpt = document.createElement("option");
+	        autoOpt.value = "";
+	        autoOpt.textContent = "Auto (first recipe with head)";
+	        select.appendChild(autoOpt);
+	        (Array.isArray(sam3CascadeState.recipePresets) ? sam3CascadeState.recipePresets : []).forEach((r) => {
+	            if (!r?.id) return;
+	            const opt = document.createElement("option");
+	            opt.value = r.id;
+	            const cls = r.class_name ? ` • ${r.class_name}` : "";
+	            const head = recipeHasClipHeadConfig(r) ? " • head" : "";
+	            opt.textContent = `${r.label || r.id}${cls}${head}`;
+	            select.appendChild(opt);
+	        });
+	        if (preserveSelection) {
+	            const values = Array.from(select.options).map((o) => o.value);
+	            if (values.includes(previous)) {
+	                select.value = previous;
+	            }
+	        }
+	    }
+
+	    function findClassNameById(id) {
+	        if (typeof id !== "number" || !Number.isFinite(id)) {
+	            return null;
+	        }
+	        for (const [name, cid] of Object.entries(classes || {})) {
+	            if (cid === id) {
+	                return name;
+	            }
+	        }
+	        return null;
+	    }
+
+	    function populateSelectOptions(select, options, value, placeholder) {
+	        if (!select) return;
+	        select.innerHTML = "";
+	        if (placeholder) {
+	            const opt = document.createElement("option");
+	            opt.value = "";
+	            opt.textContent = placeholder;
+	            select.appendChild(opt);
+	        }
+	        (options || []).forEach((entry) => {
+	            const opt = document.createElement("option");
+	            opt.value = entry.value;
+	            opt.textContent = entry.label;
+	            select.appendChild(opt);
+	        });
+	        if (typeof value === "string") {
+	            select.value = value;
+	        }
+	    }
+
+	    function renderSam3CascadeSteps() {
+	        const root = sam3RecipeElements.cascadeSteps;
+	        if (!root) return;
+	        ensureAtLeastOneCascadeStep();
+	        root.innerHTML = "";
+
+	        const recipes = Array.isArray(sam3CascadeState.recipePresets) ? sam3CascadeState.recipePresets : [];
+	        const recipeOptions = recipes.map((r) => ({
+	            value: r.id,
+	            label: `${r.label || r.id}${r.class_name ? ` • ${r.class_name}` : ""}`,
+	        }));
+	        const classNames = orderedClassNames();
+	        const classOptions = classNames.map((n) => ({ value: n, label: n }));
+
+	        sam3CascadeState.steps.forEach((step, index) => {
+	            if (!step) return;
+	            const card = document.createElement("div");
+	            card.className = "training-subsection";
+	            card.style.marginTop = index === 0 ? "10px" : "12px";
+
+	            const headerRow = document.createElement("div");
+	            headerRow.style.display = "flex";
+	            headerRow.style.alignItems = "center";
+	            headerRow.style.justifyContent = "space-between";
+	            headerRow.style.gap = "10px";
+
+	            const title = document.createElement("div");
+	            title.className = "training-subsection__title";
+	            title.textContent = `Step ${index + 1}`;
+
+	            const headerActions = document.createElement("div");
+	            headerActions.style.display = "flex";
+	            headerActions.style.flexWrap = "wrap";
+	            headerActions.style.gap = "8px";
+	            headerActions.style.alignItems = "center";
+
+	            const enabledLabel = document.createElement("label");
+	            enabledLabel.style.display = "inline-flex";
+	            enabledLabel.style.alignItems = "center";
+	            enabledLabel.style.gap = "6px";
+	            const enabledToggle = document.createElement("input");
+	            enabledToggle.type = "checkbox";
+	            enabledToggle.checked = Boolean(step.enabled);
+	            enabledToggle.addEventListener("change", () => {
+	                step.enabled = enabledToggle.checked;
+	                refreshSam3CascadeControls();
+	            });
+	            enabledLabel.appendChild(enabledToggle);
+	            enabledLabel.appendChild(document.createTextNode("Enabled"));
+
+	            const upBtn = document.createElement("button");
+	            upBtn.type = "button";
+	            upBtn.className = "training-button secondary";
+	            upBtn.textContent = "↑";
+	            upBtn.title = "Move step up";
+	            upBtn.disabled = index === 0;
+	            upBtn.addEventListener("click", () => moveSam3CascadeStep(step.uid, -1));
+
+	            const downBtn = document.createElement("button");
+	            downBtn.type = "button";
+	            downBtn.className = "training-button secondary";
+	            downBtn.textContent = "↓";
+	            downBtn.title = "Move step down";
+	            downBtn.disabled = index === sam3CascadeState.steps.length - 1;
+	            downBtn.addEventListener("click", () => moveSam3CascadeStep(step.uid, 1));
+
+	            const removeBtn = document.createElement("button");
+	            removeBtn.type = "button";
+	            removeBtn.className = "training-button danger";
+	            removeBtn.textContent = "Remove";
+	            removeBtn.addEventListener("click", () => removeSam3CascadeStep(step.uid));
+
+	            headerActions.appendChild(enabledLabel);
+	            headerActions.appendChild(upBtn);
+	            headerActions.appendChild(downBtn);
+	            headerActions.appendChild(removeBtn);
+	            headerRow.appendChild(title);
+	            headerRow.appendChild(headerActions);
+	            card.appendChild(headerRow);
+
+	            const grid = document.createElement("div");
+	            grid.className = "training-grid agent-recipe-controls";
+	            grid.style.marginTop = "8px";
+
+	            const recipeWrap = document.createElement("div");
+	            const recipeLabel = document.createElement("label");
+	            recipeLabel.textContent = "Recipe";
+	            const recipeSelect = document.createElement("select");
+	            populateSelectOptions(recipeSelect, recipeOptions, step.recipe_id || "", recipes.length ? "Select recipe…" : "No recipes loaded");
+	            recipeSelect.disabled = recipes.length === 0;
+	            recipeSelect.addEventListener("change", () => {
+	                step.recipe_id = recipeSelect.value || null;
+	                refreshSam3CascadeControls();
+	            });
+	            recipeWrap.appendChild(recipeLabel);
+	            recipeWrap.appendChild(recipeSelect);
+
+	            const groupWrap = document.createElement("div");
+	            const groupLabel = document.createElement("label");
+	            groupLabel.textContent = "Dedupe group";
+	            const groupInput = document.createElement("input");
+	            groupInput.type = "text";
+	            groupInput.placeholder = "e.g. vehicles";
+	            groupInput.value = step.dedupe_group || "";
+	            groupInput.addEventListener("input", () => {
+	                step.dedupe_group = groupInput.value;
+	            });
+	            groupWrap.appendChild(groupLabel);
+	            groupWrap.appendChild(groupInput);
+
+	            const crossWrap = document.createElement("div");
+	            const crossLabel = document.createElement("label");
+	            crossLabel.style.display = "inline-flex";
+	            crossLabel.style.alignItems = "center";
+	            crossLabel.style.gap = "6px";
+	            crossLabel.title = "When cross-class dedupe is enabled, only steps that participate can suppress each other within a group.";
+	            const crossToggle = document.createElement("input");
+	            crossToggle.type = "checkbox";
+	            crossToggle.checked = step.participate_cross_class_dedupe !== false;
+	            crossToggle.addEventListener("change", () => {
+	                step.participate_cross_class_dedupe = crossToggle.checked;
+	            });
+	            crossLabel.appendChild(crossToggle);
+	            crossLabel.appendChild(document.createTextNode("Participate in cross-class dedupe"));
+	            crossWrap.appendChild(crossLabel);
+
+	            const overrideWrap = document.createElement("div");
+	            const overrideLabel = document.createElement("label");
+	            overrideLabel.style.display = "inline-flex";
+	            overrideLabel.style.alignItems = "center";
+	            overrideLabel.style.gap = "6px";
+	            overrideLabel.title = "Assign detections to a different class than the recipe’s default.";
+	            const overrideToggle = document.createElement("input");
+	            overrideToggle.type = "checkbox";
+	            overrideToggle.checked = Boolean(step.override_enabled);
+	            const overrideSelect = document.createElement("select");
+	            populateSelectOptions(
+	                overrideSelect,
+	                classOptions,
+	                step.override_class_name || "",
+	                classOptions.length ? "Select class…" : "Load classes first",
+	            );
+	            overrideSelect.disabled = !overrideToggle.checked || classOptions.length === 0;
+	            overrideToggle.addEventListener("change", () => {
+	                step.override_enabled = overrideToggle.checked;
+	                if (!step.override_enabled) {
+	                    step.override_class_name = null;
+	                } else if (!step.override_class_name) {
+	                    step.override_class_name = overrideSelect.value || (classOptions[0] ? classOptions[0].value : null);
+	                    if (step.override_class_name) {
+	                        overrideSelect.value = step.override_class_name;
+	                    }
+	                }
+	                overrideSelect.disabled = !step.override_enabled || classOptions.length === 0;
+	            });
+	            overrideSelect.addEventListener("change", () => {
+	                step.override_class_name = overrideSelect.value || null;
+	            });
+	            overrideLabel.appendChild(overrideToggle);
+	            overrideLabel.appendChild(document.createTextNode("Override output class"));
+	            overrideWrap.appendChild(overrideLabel);
+	            overrideWrap.appendChild(overrideSelect);
+
+	            grid.appendChild(recipeWrap);
+	            grid.appendChild(groupWrap);
+	            grid.appendChild(crossWrap);
+	            grid.appendChild(overrideWrap);
+	            card.appendChild(grid);
+
+	            root.appendChild(card);
+	        });
+	    }
+
+	    function clamp01(val, fallback) {
+	        const n = Number(val);
+	        if (!Number.isFinite(n)) {
+	            return fallback;
+	        }
+	        return Math.min(1, Math.max(0, n));
+	    }
+
+	    function getSam3CascadeDedupeConfig() {
+	        const perClassIou = clamp01(sam3RecipeElements.perClassIouInput?.value, 0.5);
+	        const crossEnabled = Boolean(sam3RecipeElements.crossDedupeToggle?.checked);
+	        const crossIou = clamp01(sam3RecipeElements.crossIouInput?.value, 0.5);
+	        const scopeRaw = sam3RecipeElements.crossScopeSelect?.value;
+	        const crossScope = scopeRaw === "global" ? "global" : "groups";
+	        const confRaw = sam3RecipeElements.confidenceSelect?.value;
+	        const confidence =
+	            confRaw === "clip_head_prob" || confRaw === "clip_head_margin" || confRaw === "sam_score" ? confRaw : "sam_score";
+	        let clipHeadRecipeId = sam3RecipeElements.clipHeadSourceSelect?.value || null;
+	        if (confidence === "sam_score") {
+	            clipHeadRecipeId = null;
+	        }
+	        return {
+	            per_class_iou: perClassIou,
+	            cross_class_enabled: crossEnabled,
+	            cross_class_iou: crossIou,
+	            cross_class_scope: crossScope,
+	            confidence,
+	            clip_head_recipe_id: clipHeadRecipeId || null,
+	        };
+	    }
+
+	    function applySam3CascadeDedupeConfig(cfg) {
+	        if (!cfg || typeof cfg !== "object") {
+	            return;
+	        }
+	        if (sam3RecipeElements.perClassIouInput) {
+	            sam3RecipeElements.perClassIouInput.value = String(clamp01(cfg.per_class_iou, 0.5));
+	        }
+	        if (sam3RecipeElements.crossDedupeToggle) {
+	            sam3RecipeElements.crossDedupeToggle.checked = Boolean(cfg.cross_class_enabled);
+	        }
+	        if (sam3RecipeElements.crossIouInput) {
+	            sam3RecipeElements.crossIouInput.value = String(clamp01(cfg.cross_class_iou, 0.5));
+	        }
+	        if (sam3RecipeElements.crossScopeSelect) {
+	            sam3RecipeElements.crossScopeSelect.value = cfg.cross_class_scope === "global" ? "global" : "groups";
+	        }
+	        if (sam3RecipeElements.confidenceSelect) {
+	            const val = cfg.confidence;
+	            sam3RecipeElements.confidenceSelect.value =
+	                val === "clip_head_prob" || val === "clip_head_margin" || val === "sam_score" ? val : "sam_score";
+	        }
+	        refreshSam3CascadeClipHeadSourceOptions({ preserveSelection: true });
+	        if (sam3RecipeElements.clipHeadSourceSelect) {
+	            sam3RecipeElements.clipHeadSourceSelect.value = cfg.clip_head_recipe_id || "";
+	        }
+	        refreshSam3CascadeControls();
+	    }
+
+	    function refreshSam3CascadeControls() {
+	        const crossEnabled = Boolean(sam3RecipeElements.crossDedupeToggle?.checked);
+	        if (sam3RecipeElements.crossScopeSelect) sam3RecipeElements.crossScopeSelect.disabled = !crossEnabled;
+	        if (sam3RecipeElements.crossIouInput) sam3RecipeElements.crossIouInput.disabled = !crossEnabled;
+	        const conf = sam3RecipeElements.confidenceSelect?.value || "sam_score";
+	        const wantsHead = conf === "clip_head_prob" || conf === "clip_head_margin";
+	        if (sam3RecipeElements.clipHeadSourceSelect) {
+	            sam3RecipeElements.clipHeadSourceSelect.disabled = !wantsHead;
+	        }
+
+	        const enabledSteps = (Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []).filter((s) => s && s.enabled);
+	        const hasRunnable = enabledSteps.some((s) => s.recipe_id);
+	        if (sam3RecipeElements.cascadeApplyButton) {
+	            sam3RecipeElements.cascadeApplyButton.disabled = !hasRunnable;
+	        }
+	        if (sam3RecipeElements.cascadePresetSaveButton) {
+	            sam3RecipeElements.cascadePresetSaveButton.disabled = !hasRunnable;
+	        }
+	        if (sam3RecipeElements.cascadePresetExportButton) {
+	            sam3RecipeElements.cascadePresetExportButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value;
+	        }
+	        if (sam3RecipeElements.cascadePresetLoadButton) {
+	            sam3RecipeElements.cascadePresetLoadButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value;
+	        }
+	        if (sam3RecipeElements.cascadePresetDeleteButton) {
+	            sam3RecipeElements.cascadePresetDeleteButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value;
+	        }
+	    }
+
+	    function applyCascadePayloadToUi(cascade) {
+	        const stepsRaw = cascade?.steps;
+	        const dedupeRaw = cascade?.dedupe;
+	        if (Array.isArray(stepsRaw) && stepsRaw.length) {
+	            sam3CascadeState.steps = stepsRaw.map((raw) => {
+	                const step = createSam3CascadeStep({ recipeId: raw.recipe_id || null });
+	                step.enabled = raw.enabled !== false;
+	                step.dedupe_group = raw.dedupe_group || "";
+	                step.participate_cross_class_dedupe = raw.participate_cross_class_dedupe !== false;
+	                const overrideName = raw.override_class_name || findClassNameById(raw.override_class_id);
+	                if (overrideName) {
+	                    step.override_enabled = true;
+	                    step.override_class_name = overrideName;
+	                } else {
+	                    step.override_enabled = false;
+	                    step.override_class_name = null;
+	                }
+	                return step;
+	            });
+	        } else {
+	            sam3CascadeState.steps = [createSam3CascadeStep({})];
+	        }
+	        applySam3CascadeDedupeConfig(dedupeRaw || {});
+	        renderSam3CascadeSteps();
+	        refreshSam3CascadeControls();
+	        if (sam3RecipeElements.cascadePresetNameInput) {
+	            sam3RecipeElements.cascadePresetNameInput.value = cascade?.label || "";
+	        }
+	    }
+
+	    async function loadSam3CascadePresets({ preserveSelection = true } = {}) {
+	        if (!sam3RecipeElements.cascadePresetSelect) return;
+	        try {
+	            const previous = preserveSelection ? sam3RecipeElements.cascadePresetSelect.value : "";
+	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades`);
+	            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+	            const data = await resp.json();
+	            sam3CascadeState.cascadePresets = Array.isArray(data) ? data : [];
+	            const select = sam3RecipeElements.cascadePresetSelect;
+	            select.innerHTML = "";
+	            const placeholder = document.createElement("option");
+	            placeholder.value = "";
+	            placeholder.textContent = "Select cascade…";
+	            select.appendChild(placeholder);
+	            const seen = new Set();
+	            sam3CascadeState.cascadePresets.forEach((c) => {
+	                const id = c?.id;
+	                if (!id || seen.has(id)) return;
+	                seen.add(id);
+	                const opt = document.createElement("option");
+	                opt.value = id;
+	                opt.textContent = c.label || id;
+	                select.appendChild(opt);
+	            });
+	            if (preserveSelection && previous) {
+	                const values = Array.from(select.options).map((o) => o.value);
+	                if (values.includes(previous)) {
+	                    select.value = previous;
+	                }
+	            }
+	            refreshSam3CascadeControls();
+	        } catch (err) {
+	            console.error("Load cascade presets failed", err);
+	            setSam3RecipeStatus("Failed to load cascade presets.", "warn");
+	        }
+	    }
+
+	    async function saveSam3CascadePreset() {
+	        const rawLabel = sam3RecipeElements.cascadePresetNameInput?.value || "";
+	        const label = rawLabel.trim() || "recipe_cascade";
+	        const classNames = orderedClassNames();
+	        const stepsPayload = [];
+	        for (const step of Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []) {
+	            if (!step) continue;
+	            const rid = step.recipe_id;
+	            if (!rid) {
+	                if (step.enabled) {
+	                    setSam3RecipeStatus("Select a recipe for every enabled step before saving.", "warn");
+	                    return;
+	                }
+	                continue;
+	            }
+	            let overrideName = null;
+	            let overrideId = null;
+	            if (step.override_enabled) {
+	                overrideName = step.override_class_name || null;
+	                if (!overrideName || !classNames.includes(overrideName)) {
+	                    setSam3RecipeStatus("Select a valid output class override for each enabled step.", "warn");
+	                    return;
+	                }
+	                overrideId = typeof classes[overrideName] !== "undefined" ? classes[overrideName] : null;
+	            }
+	            stepsPayload.push({
+	                enabled: step.enabled !== false,
+	                recipe_id: rid,
+	                override_class_id: overrideId,
+	                override_class_name: overrideName,
+	                dedupe_group: step.dedupe_group || "",
+	                participate_cross_class_dedupe: step.participate_cross_class_dedupe !== false,
+	            });
+	        }
+	        if (!stepsPayload.some((s) => s.enabled)) {
+	            setSam3RecipeStatus("Enable at least one step before saving.", "warn");
+	            return;
+	        }
+	        const dedupe = getSam3CascadeDedupeConfig();
+	        try {
+	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades`, {
+	                method: "POST",
+	                headers: { "Content-Type": "application/json" },
+	                body: JSON.stringify({ label, steps: stepsPayload, dedupe }),
+	            });
+	            if (!resp.ok) {
+	                const detail = await resp.text();
+	                throw new Error(detail || `HTTP ${resp.status}`);
+	            }
+	            const saved = await resp.json();
+	            await loadSam3CascadePresets({ preserveSelection: false });
+	            if (sam3RecipeElements.cascadePresetSelect && saved?.id) {
+	                sam3RecipeElements.cascadePresetSelect.value = saved.id;
+	            }
+	            setSam3RecipeStatus(`Saved cascade preset ${saved?.label || saved?.id || ""}.`, "success");
+	            refreshSam3CascadeControls();
+	        } catch (err) {
+	            console.error("Save cascade preset failed", err);
+	            setSam3RecipeStatus(err.message || "Save failed.", "error");
+	        }
+	    }
+
+	    async function loadSam3CascadePreset() {
+	        const cascadeId = sam3RecipeElements.cascadePresetSelect?.value;
+	        if (!cascadeId) {
+	            setSam3RecipeStatus("Choose a cascade preset to load.", "warn");
+	            return;
+	        }
+	        try {
+	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades/${encodeURIComponent(cascadeId)}`);
+	            if (!resp.ok) {
+	                const detail = await resp.text();
+	                throw new Error(detail || `HTTP ${resp.status}`);
+	            }
+	            const data = await resp.json();
+	            applyCascadePayloadToUi(data);
+	            setSam3RecipeStatus(`Loaded cascade ${data?.label || data?.id || cascadeId}.`, "success");
+	        } catch (err) {
+	            console.error("Load cascade preset failed", err);
+	            setSam3RecipeStatus(err.message || "Load failed.", "error");
+	        }
+	    }
+
+	    async function deleteSam3CascadePreset() {
+	        const cascadeId = sam3RecipeElements.cascadePresetSelect?.value;
+	        if (!cascadeId) {
+	            setSam3RecipeStatus("Choose a cascade preset to delete.", "warn");
+	            return;
+	        }
+	        if (typeof window !== "undefined" && !window.confirm("Delete this cascade? This cannot be undone.")) {
+	            return;
+	        }
+	        try {
+	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades/${encodeURIComponent(cascadeId)}`, {
+	                method: "DELETE",
+	            });
+	            if (!resp.ok) {
+	                const detail = await resp.text();
+	                throw new Error(detail || `HTTP ${resp.status}`);
+	            }
+	            await loadSam3CascadePresets({ preserveSelection: false });
+	            if (sam3RecipeElements.cascadePresetSelect) sam3RecipeElements.cascadePresetSelect.value = "";
+	            setSam3RecipeStatus("Deleted cascade preset.", "success");
+	            refreshSam3CascadeControls();
+	        } catch (err) {
+	            console.error("Delete cascade preset failed", err);
+	            setSam3RecipeStatus(err.message || "Delete failed.", "error");
+	        }
+	    }
+
+	    async function exportSam3CascadePreset() {
+	        const cascadeId = sam3RecipeElements.cascadePresetSelect?.value;
+	        if (!cascadeId) {
+	            setSam3RecipeStatus("Choose a cascade preset to download.", "warn");
+	            return;
+	        }
+	        try {
+	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades/${encodeURIComponent(cascadeId)}/export`);
+	            if (!resp.ok) {
+	                const detail = await resp.text();
+	                throw new Error(detail || `HTTP ${resp.status}`);
+	            }
+	            const blob = await resp.blob();
+	            saveAs(blob, `${cascadeId}.zip`);
+	            setSam3RecipeStatus("Downloaded cascade zip.", "success");
+	        } catch (err) {
+	            console.error("Export cascade failed", err);
+	            setSam3RecipeStatus(err.message || "Download failed.", "error");
+	        }
+	    }
+
+	    async function handleSam3CascadeFile(event) {
+	        const file = event.target?.files?.[0];
+	        if (!file) {
+	            return;
+	        }
+	        try {
+	            if (!file.name.toLowerCase().endsWith(".zip")) {
+	                throw new Error("zip_only");
+	            }
+	            const formData = new FormData();
+	            formData.append("file", file);
+	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades/import`, {
+	                method: "POST",
+	                body: formData,
+	            });
+	            if (!resp.ok) {
+	                const detail = await resp.text();
+	                throw new Error(detail || `HTTP ${resp.status}`);
+	            }
+	            const data = await resp.json();
+	            await loadSam3RecipePresets();
+	            await loadSam3CascadePresets({ preserveSelection: false });
+	            if (sam3RecipeElements.cascadePresetSelect && data?.id) {
+	                sam3RecipeElements.cascadePresetSelect.value = data.id;
+	            }
+	            applyCascadePayloadToUi(data);
+	            setSam3RecipeStatus(`Imported cascade ${data?.label || data?.id || ""}.`, "success");
+	        } catch (err) {
+	            console.error("Cascade import failed", err);
+	            const msg = err?.message === "zip_only" ? "Cascades must be loaded from a .zip file." : "Invalid cascade file (use zip).";
+	            setSam3RecipeStatus(msg, "error");
+	        } finally {
+	            if (sam3RecipeElements.cascadeFileInput) sam3RecipeElements.cascadeFileInput.value = "";
+	        }
+	    }
+
+	    async function runSam3CascadeOnImage() {
+	        if (!currentImage) {
+	            setSam3RecipeStatus("Open an image first.", "warn");
+	            return;
+	        }
+	        const classNames = orderedClassNames();
+	        const enabledSteps = (Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []).filter((s) => s && s.enabled);
+	        const stepsPayload = [];
+	        for (const step of enabledSteps) {
+	            if (!step.recipe_id) {
+	                continue;
+	            }
+	            let overrideName = null;
+	            let overrideId = null;
+	            if (step.override_enabled) {
+	                overrideName = step.override_class_name || null;
+	                if (!overrideName || !classNames.includes(overrideName)) {
+	                    setSam3RecipeStatus("Select a valid output class override for each enabled step.", "warn");
+	                    return;
+	                }
+	                overrideId = typeof classes[overrideName] !== "undefined" ? classes[overrideName] : null;
+	            }
+	            stepsPayload.push({
+	                enabled: true,
+	                recipe_id: step.recipe_id,
+	                override_class_id: overrideId,
+	                override_class_name: overrideName,
+	                dedupe_group: step.dedupe_group || "",
+	                participate_cross_class_dedupe: step.participate_cross_class_dedupe !== false,
+	            });
+	        }
+	        if (!stepsPayload.length) {
+	            setSam3RecipeStatus("Add at least one enabled step with a recipe before applying.", "warn");
+	            return;
+	        }
+	        const dedupe = getSam3CascadeDedupeConfig();
+	        setSam3RecipeStatus(`Running cascade on ${currentImage.name}…`, "info");
+	        try {
+	            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
+	            if (Number.isNaN(maskThreshold)) {
+	                maskThreshold = 0.5;
+	            }
+	            maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
+	            const minSize = Math.max(0, getMinMaskArea());
+	            const simplifyEps = Math.max(0, getSimplifyEpsilon());
+	            let maxResults = parseInt(sam3TextElements.maxResultsInput?.value || "100", 10);
+	            if (!Number.isFinite(maxResults) || maxResults <= 0) {
+	                maxResults = 100;
+	            }
+	            maxResults = Math.min(Math.max(maxResults, 1), 5000);
+
+	            const imageNameForRequest = currentImage.name;
+	            const variantForRequest = "sam3";
+	            const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
+	            let imagePayload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+	            imagePayload.sam_variant = variantForRequest;
+	            let resp = await fetch(`${API_ROOT}/agent_mining/apply_image_chain`, {
+	                method: "POST",
+	                headers: { "Content-Type": "application/json" },
+	                body: JSON.stringify({
+	                    ...imagePayload,
+	                    steps: stepsPayload,
+	                    dedupe,
+	                    mask_threshold: maskThreshold,
+	                    min_size: minSize,
+	                    simplify_epsilon: simplifyEps,
+	                    max_results: maxResults,
+	                }),
+	            });
+	            if (resp.status === 428) {
+	                imagePayload = await buildSamImagePayload({
+	                    forceBase64: true,
+	                    variantOverride: variantForRequest,
+	                    preferredToken: preloadToken,
+	                });
+	                imagePayload.sam_variant = variantForRequest;
+	                resp = await fetch(`${API_ROOT}/agent_mining/apply_image_chain`, {
+	                    method: "POST",
+	                    headers: { "Content-Type": "application/json" },
+	                    body: JSON.stringify({
+	                        ...imagePayload,
+	                        steps: stepsPayload,
+	                        dedupe,
+	                        mask_threshold: maskThreshold,
+	                        min_size: minSize,
+	                        simplify_epsilon: simplifyEps,
+	                        max_results: maxResults,
+	                    }),
+	                });
+	            }
+	            if (!resp.ok) {
+	                const detail = await resp.text();
+	                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+	            }
+	            const result = await resp.json();
+	            if (currentImage && result?.image_token) {
+	                rememberSamToken(currentImage.name, variantForRequest, result.image_token);
+	            }
+	            const detections = Array.isArray(result?.detections) ? result.detections : [];
+	            const warnList = Array.isArray(result?.warnings) ? result.warnings : [];
+	            const byClass = new Map();
+	            const missingClasses = new Set();
+	            detections.forEach((det) => {
+	                const cls = det?.class_name || det?.qwen_label || "";
+	                if (!cls) return;
+	                if (!classNames.includes(cls)) {
+	                    missingClasses.add(cls);
+	                    return;
+	                }
+	                if (!byClass.has(cls)) byClass.set(cls, []);
+	                byClass.get(cls).push(det);
+	            });
+	            let added = 0;
+	            byClass.forEach((list, cls) => {
+	                added += applySegAwareDetections(list, cls, "Recipe cascade");
+	            });
+	            const warnText = warnList.length ? ` Warnings: ${warnList.join(", ")}` : "";
+	            const missingText = missingClasses.size ? ` Missing classes: ${Array.from(missingClasses).join(", ")}` : "";
+	            if (added > 0) {
+	                setSam3RecipeStatus(
+	                    `Cascade applied: added ${added} ${datasetType === "seg" ? "polygons" : "boxes"}.${warnText}${missingText}`,
+	                    warnList.length || missingClasses.size ? "warn" : "success",
+	                );
+	            } else {
+	                setSam3RecipeStatus(`Cascade applied: no detections.${warnText}${missingText}`, "warn");
+	            }
+	        } catch (err) {
+	            console.error("Cascade apply failed", err);
+	            setSam3RecipeStatus(`Cascade failed: ${err.message || err}`, "error");
+	        } finally {
+	            refreshSam3CascadeControls();
+	        }
+	    }
 
     function parseRecipeJson(text) {
         try {
@@ -9323,72 +10134,71 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         };
     }
 
-    async function handleSam3RecipeFile(event) {
-        const file = event.target?.files?.[0];
-        if (!file) {
-            return;
-        }
-        try {
-            if (!file.name.toLowerCase().endsWith(".zip")) {
-                throw new Error("zip_only");
-            }
-            const formData = new FormData();
-            formData.append("file", file);
-            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
-                method: "POST",
-                body: formData,
-            });
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.json();
-            const recipe = normalizeAgentRecipePayload(data);
-            const hasContent =
-                recipe &&
-                ((Array.isArray(recipe.steps) && recipe.steps.length > 0) ||
-                    (Array.isArray(recipe.text_prompts) && recipe.text_prompts.length > 0) ||
-                    (Array.isArray(recipe.positives) && recipe.positives.length > 0));
-            if (!hasContent) {
-                throw new Error("no_steps");
-            }
-            const classNames = orderedClassNames();
-            const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
-            const targetName = (recipe.class_name || "").trim();
-            if (targetName) {
-                const found = lowerToName.get(targetName.toLowerCase());
-                if (found) {
-                    recipe.class_name = found;
-                } else {
-                    setSam3RecipeStatus(
-                        `Loaded recipe ${recipe.label}. Note: class ${targetName} not in label map; use output class override to apply.`,
-                        "warn"
-                    );
-                }
-            }
-            sam3RecipeState.recipe = recipe;
-            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
-            if (sam3RecipeElements.presetNameInput) {
-                sam3RecipeElements.presetNameInput.value = recipe.label || recipe.class_name;
-            }
-            if (!sam3RecipeElements.status?.textContent) {
-                const parts = [];
-                if (recipe.mode) parts.push(recipe.mode);
-                const promptCount = Array.isArray(recipe.text_prompts) ? recipe.text_prompts.length : 0;
-                const posCount = Array.isArray(recipe.positives) ? recipe.positives.length : 0;
-                const stepCount = Array.isArray(recipe.steps) ? recipe.steps.length : 0;
-                parts.push(`${promptCount} prompts`);
-                parts.push(`${posCount} crops`);
-                if (stepCount) parts.push(`${stepCount} steps`);
-                setSam3RecipeStatus(`Loaded recipe ${recipe.label} (${parts.join(", ")}).`, "success");
-            }
-        } catch (err) {
-            console.error("Failed to load recipe", err);
-            const msg = err?.message === "zip_only" ? "Recipes must be loaded from a .zip file." : "Invalid recipe file (use zip).";
-            setSam3RecipeStatus(msg, "error");
-            sam3RecipeState.recipe = null;
-            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
-        } finally {
-            if (sam3RecipeElements.fileInput) sam3RecipeElements.fileInput.value = "";
-        }
-    }
+	    async function handleSam3RecipeFile(event) {
+	        const file = event.target?.files?.[0];
+	        if (!file) {
+	            return;
+	        }
+	        try {
+	            if (!file.name.toLowerCase().endsWith(".zip")) {
+	                throw new Error("zip_only");
+	            }
+	            const formData = new FormData();
+	            formData.append("file", file);
+	            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
+	                method: "POST",
+	                body: formData,
+	            });
+	            if (!resp.ok) throw new Error(await resp.text());
+	            const data = await resp.json();
+	            const recipe = normalizeAgentRecipePayload(data);
+	            const hasContent =
+	                recipe &&
+	                ((Array.isArray(recipe.steps) && recipe.steps.length > 0) ||
+	                    (Array.isArray(recipe.text_prompts) && recipe.text_prompts.length > 0) ||
+	                    (Array.isArray(recipe.positives) && recipe.positives.length > 0));
+	            if (!hasContent) {
+	                throw new Error("no_steps");
+	            }
+	            const classNames = orderedClassNames();
+	            const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
+	            const targetName = (recipe.class_name || "").trim();
+	            if (targetName) {
+	                const found = lowerToName.get(targetName.toLowerCase());
+	                if (found) {
+	                    recipe.class_name = found;
+	                } else {
+	                    setSam3RecipeStatus(
+	                        `Imported recipe ${recipe.label}. Note: class ${targetName} not in label map; use per-step output override.`,
+	                        "warn",
+	                    );
+	                }
+	            }
+	            sam3RecipeState.recipe = recipe;
+	            if (recipe.id) {
+	                addSam3CascadeStep({ recipeId: recipe.id });
+	            }
+	            await loadSam3RecipePresets();
+	            refreshSam3CascadeControls();
+	            const parts = [];
+	            if (recipe.mode) parts.push(recipe.mode);
+	            const promptCount = Array.isArray(recipe.text_prompts) ? recipe.text_prompts.length : 0;
+	            const posCount = Array.isArray(recipe.positives) ? recipe.positives.length : 0;
+	            const stepCount = Array.isArray(recipe.steps) ? recipe.steps.length : 0;
+	            parts.push(`${promptCount} prompts`);
+	            parts.push(`${posCount} crops`);
+	            if (stepCount) parts.push(`${stepCount} steps`);
+	            const stepSuffix = recipe.id ? " Added as a cascade step." : "";
+	            setSam3RecipeStatus(`Imported recipe ${recipe.label} (${parts.join(", ")}).${stepSuffix}`, "success");
+	        } catch (err) {
+	            console.error("Failed to load recipe", err);
+	            const msg = err?.message === "zip_only" ? "Recipes must be loaded from a .zip file." : "Invalid recipe file (use zip).";
+	            setSam3RecipeStatus(msg, "error");
+	            sam3RecipeState.recipe = null;
+	        } finally {
+	            if (sam3RecipeElements.fileInput) sam3RecipeElements.fileInput.value = "";
+	        }
+	    }
 
     async function runSam3RecipeOnImage() {
         const recipe = sam3RecipeState.recipe;
@@ -9644,7 +10454,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (resetOverride && classNames.length) {
             sam3TextElements.classSelect.value = targetValue;
         }
-        updateSam3RecipeOverrideOptions({ resetOverride, preserveSelection: true });
+        renderSam3CascadeSteps();
     }
 
     function updateSam3RecipeOverrideOptions({ resetOverride = false, preserveSelection = true } = {}) {
@@ -16085,29 +16895,24 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function loadSam3RecipePresets() {
-        if (!sam3RecipeElements.presetSelect) return;
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/recipes`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
-            sam3RecipeElements.presetSelect.innerHTML = "";
-            const placeholder = document.createElement("option");
-            placeholder.value = "";
-            placeholder.textContent = "Select recipe…";
-            sam3RecipeElements.presetSelect.appendChild(placeholder);
-            const seen = new Set();
-            (Array.isArray(data) ? data : []).forEach((p) => {
-                const id = p?.id;
-                if (!id || seen.has(id)) {
-                    return;
-                }
-                seen.add(id);
-                const opt = document.createElement("option");
-                opt.value = id;
-                const cls = p.class_name ? ` • ${p.class_name}` : "";
-                opt.textContent = `${p.label || p.id || opt.value}${cls}`;
-                sam3RecipeElements.presetSelect.appendChild(opt);
-            });
+            const normalized = (Array.isArray(data) ? data : [])
+                .map((entry) => normalizeAgentRecipePayload(entry))
+                .filter((entry) => entry && entry.id);
+            sam3CascadeState.recipePresets = normalized;
+            if (Array.isArray(sam3CascadeState.steps) && sam3CascadeState.steps.length && normalized.length) {
+                sam3CascadeState.steps.forEach((step) => {
+                    if (!step.recipe_id) {
+                        step.recipe_id = normalized[0].id;
+                    }
+                });
+            }
+            refreshSam3CascadeClipHeadSourceOptions({ preserveSelection: true });
+            renderSam3CascadeSteps();
+            refreshSam3CascadeControls();
         } catch (err) {
             console.error("Load recipe presets failed", err);
             setSam3RecipeStatus("Failed to load recipe presets.", "warn");

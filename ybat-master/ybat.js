@@ -9611,6 +9611,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	    }
 
 	    function clamp01(val, fallback) {
+	        if (val === "" || val === null || typeof val === "undefined") {
+	            return fallback;
+	        }
 	        const n = Number(val);
 	        if (!Number.isFinite(n)) {
 	            return fallback;

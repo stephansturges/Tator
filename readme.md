@@ -288,7 +288,7 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 - Guidance text explains backbone auto-detection when a `.meta.pkl` file accompanies the classifier.
 
 ### Train Qwen Tab
-- Converts whatever images + YOLO boxes you loaded in the labeling tab into JSONL + image bundles automatically. The browser shuffles the set, builds an 80/20 train/val split, and streams a zip to `/qwen/train/dataset/upload`—no manual dataset paths required.
+- Converts whatever images + YOLO boxes you loaded in the labeling tab into JSONL + image bundles automatically. The browser shuffles the set, builds an 80/20 train/val split, and streams the dataset via `/qwen/dataset/init` → `/qwen/dataset/chunk` → `/qwen/dataset/finalize`—no manual dataset paths required.
 - Describe the imagery ("warehouse CCTV", "aerial rooftops", etc.), pick the base Hugging Face repo, and provide a single system prompt covering both bbox/point outputs. A “prompt noise” field (default 0.05) randomly drops a small percentage of characters so the adapters see slightly perturbed instructions every epoch.
 - At training time each conversation randomly alternates between bbox vs. point outputs **and** between “all classes”, “single class”, and “subset of classes” instructions, so the adapters learn both broad sweeps and class-specific prompts without bloating the dataset on disk.
 - Choose LoRA or QLoRA, tweak batch size/epochs/LR/adapter ranks, and hit **Start Training**. The backend unpacks the dataset under `uploads/qwen_runs/datasets/<run_name>`, launches the Lightning trainer, and streams progress/logs/checkpoints back to the UI.
@@ -406,7 +406,7 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 ## 2025-12-16 – Agent Mining Recipes (SAM3) + Pretrained CLIP Head
 - Added a full **Agent Mining** UI to mine per-class SAM3 recipes and manage saved recipes (list/import/export/delete).
 - Recipes are now **portable ZIPs** that bundle `recipe.json` + exemplar crops and optional CLIP head artifacts, so they can be copied to another machine without external paths.
-- New `/agent_mining/apply` + `/agent_mining/apply_image` endpoints run the full recipe pipeline (text seeds → CLIP filter → SAM3 visual expansion → CLIP/IoU dedupe) and return boxes/polygons.
+- New `/agent_mining/apply_image` (and `/agent_mining/apply_image_chain` for cascades) endpoints run the full recipe pipeline (text seeds → CLIP filter → SAM3 visual expansion → CLIP/IoU dedupe) and return boxes/polygons.
 - Added **output class override** in the recipe apply UI so you can apply a recipe to any labelmap (with warnings for mismatches).
 - Added **Pretrained CLIP head** option (exported from CLIP training artifacts) for additional filtering; mining tunes the head `min_prob` **per class** on the validation split without re-running CLIP multiple times.
 - Improved Agent Mining **logging + progress reporting**, plus a **cache size** view and **purge cache** button to reclaim disk.

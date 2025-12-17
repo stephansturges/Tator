@@ -1077,8 +1077,13 @@
 					                                <input type="checkbox" id="agentClipHeadAutoTune" checked />
 					                            </div>
 					                            <div>
-					                                <label for="agentClipHeadTargetPrecision">Target precision<span class="help-icon" title="CLIP head auto-tune only.&#10;Precision = fraction of kept detections that match ground-truth on the validation split.&#10;Higher = fewer false positives (cleaner), but can miss objects.&#10;Try 0.90–0.98 for clean recipes.&#10;This controls the per-class thresholds that get baked into the saved recipe ZIP.">?</span></label>
-					                                <input type="number" id="agentClipHeadTargetPrecision" step="0.02" min="0" max="1" value="0.9" />
+					                                <label for="agentClipHeadTargetPrecision">Recipe cleanliness (precision target)<span class="help-icon" title="CLIP head auto-tune only.&#10;&#10;What “precision” means here:&#10;- Precision = matches / (matches + false positives) on the validation split.&#10;- A detection is a “match” if it overlaps an unmatched ground-truth box for that class with IoU ≥ the job’s IoU threshold.&#10;- Detections that match no ground-truth box count as false positives.&#10;- Extra detections on the same object are counted as “Duplicates” (shown separately).&#10;&#10;How to tune:&#10;- Move toward “Cleaner” to reduce false positives (but you may miss objects).&#10;- Typical clean recipes: 0.90–0.98.&#10;&#10;This sets the per-class CLIP thresholds that get baked into the saved recipe ZIP.">?</span></label>
+					                                <div class="training-help" style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
+					                                    <span style="white-space: nowrap;" title="Lower target precision = more detections, but noisier (more false positives).">More detections (noisier)</span>
+					                                    <input type="range" id="agentClipHeadTargetPrecision" min="0.5" max="0.99" step="0.01" value="0.9" style="flex: 1;" />
+					                                    <span id="agentClipHeadTargetPrecisionValue" style="min-width: 3.5em; text-align: right;">0.90</span>
+					                                    <span style="white-space: nowrap;" title="Higher target precision = cleaner results (fewer false positives), but can miss objects.">Cleaner (fewer false positives)</span>
+					                                </div>
 					                            </div>
 				                        </div>
 				                        <div class="training-grid">

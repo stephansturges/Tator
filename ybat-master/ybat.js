@@ -1300,6 +1300,7 @@ const sam3TrainState = {
 	        clipHeadMargin: null,
 	        clipHeadAutoTune: null,
 	        clipHeadTargetPrecision: null,
+        clipHeadTargetPrecisionValue: null,
 	        useNegExemplars: null,
         maxNegExemplars: null,
         negStrength: null,
@@ -13242,6 +13243,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.clipHeadSelect = document.getElementById("agentClipHeadSelect");
 	        agentElements.clipHeadAutoTune = document.getElementById("agentClipHeadAutoTune");
 	        agentElements.clipHeadTargetPrecision = document.getElementById("agentClipHeadTargetPrecision");
+        agentElements.clipHeadTargetPrecisionValue = document.getElementById("agentClipHeadTargetPrecisionValue");
 	        agentElements.clipHeadMinProb = document.getElementById("agentClipHeadMinProb");
 	        agentElements.clipHeadMargin = document.getElementById("agentClipHeadMargin");
 	        agentElements.useNegExemplars = document.getElementById("agentUseNegExemplars");
@@ -13279,6 +13281,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipGuard) agentElements.clipGuard.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
+        const syncPrecisionLabel = () => {
+            if (!agentElements.clipHeadTargetPrecisionValue) return;
+            const val = agentElements.clipHeadTargetPrecision ? parseFloat(agentElements.clipHeadTargetPrecision.value) : NaN;
+            agentElements.clipHeadTargetPrecisionValue.textContent = Number.isFinite(val) ? val.toFixed(2) : "";
+        };
+        if (agentElements.clipHeadTargetPrecision) {
+            agentElements.clipHeadTargetPrecision.addEventListener("input", syncPrecisionLabel);
+        }
+        syncPrecisionLabel();
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
 	        const syncBeamUi = () => {

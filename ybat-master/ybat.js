@@ -42,6 +42,72 @@
         return color.replace(/(\d?\.?\d+)\)$/, `${alpha})`);
     }
 
+    function dedupeStringList(list) {
+        const out = [];
+        const seen = new Set();
+        for (const raw of Array.isArray(list) ? list : []) {
+            const val = String(raw || "").trim();
+            if (!val || seen.has(val)) {
+                continue;
+            }
+            seen.add(val);
+            out.push(val);
+        }
+        return out;
+    }
+
+    function fallbackWarningLabel(code) {
+        const key = String(code || "").trim();
+        if (!key) {
+            return "";
+        }
+        const label = key
+            .replace(/[^a-z0-9]+/gi, " ")
+            .trim()
+            .replace(/\s+/g, " ")
+            .replace(/\bclip\b/gi, "CLIP")
+            .replace(/\bsam3\b/gi, "SAM3")
+            .replace(/\bfps?\b/gi, "FP");
+        if (!label) {
+            return key;
+        }
+        return `${label.slice(0, 1).toUpperCase()}${label.slice(1)}`;
+    }
+
+    function formatAgentWarningsForUi(warnList) {
+        const messagesByCode = {
+            no_results: "No detections found.",
+            class_override_used: "Output class override was applied.",
+            clip_unavailable: "CLIP filter couldn’t run (model unavailable), so detections weren’t CLIP-filtered.",
+            clip_embedding_empty: "CLIP embeddings were empty, so CLIP filtering was skipped.",
+            clip_missing_exemplars: "This recipe has no exemplar crops, so exemplar-based CLIP filtering was skipped.",
+            missing_crop_exemplar: "Some exemplar crops referenced by the recipe are missing.",
+            missing_crop_negative: "Some negative exemplar crops referenced by the recipe are missing.",
+            clip_fp_filtered: "CLIP filtering removed some detections (reduced false positives).",
+            clip_filtered_all: "CLIP filtering removed all detections.",
+            clip_head_class_missing: "The recipe’s CLIP head doesn’t contain this output class name, so head-based filtering was skipped.",
+            clip_head_override_ignored: "Extra CLIP head thresholds were ignored because this recipe has no embedded CLIP head.",
+            clip_head_unavailable: "CLIP head scoring wasn’t available, so dedupe used SAM score instead.",
+            clip_head_no_scores: "CLIP head scoring produced no scores, so dedupe used SAM score instead.",
+            detections_pruned: "Some detections were dropped to fit the result limit.",
+            masks_pruned: "Some masks were dropped to fit the result limit.",
+            negatives_empty: "No negative exemplars were available.",
+            clip_selection_fallback_random: "CLIP exemplar selection failed, so random exemplars were used instead.",
+            extra_clip_missing_class: "Extra CLIP filtering couldn’t run because the output class name is missing.",
+            extra_clip_classifier_unavailable: "Extra CLIP model couldn’t be loaded, so extra filtering was skipped.",
+            extra_clip_class_missing: "Extra CLIP model doesn’t contain this output class name, so extra filtering was skipped.",
+            extra_clip_unavailable: "Extra CLIP filtering couldn’t run, so extra filtering was skipped.",
+            extra_clip_filtered: "Extra CLIP filtering removed some detections.",
+            extra_clip_filtered_all: "Extra CLIP filtering removed all detections.",
+        };
+        const codes = dedupeStringList(warnList);
+        const messages = codes.map((code) => messagesByCode[code] || fallbackWarningLabel(code) || String(code));
+        return {
+            codes,
+            message: messages.filter(Boolean).join(" • "),
+        };
+    }
+
     let clipProgressFill = null;
     let clipProgressTimer = null;
     let clipProgressToken = 0;
@@ -9934,13 +10000,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        } finally {
 	            if (sam3RecipeElements.cascadeFileInput) sam3RecipeElements.cascadeFileInput.value = "";
 	        }
-	    }
+		    }
 
-	    async function runSam3CascadeOnImage() {
-	        if (!currentImage) {
-	            setSam3RecipeStatus("Open an image first.", "warn");
-	            return;
-	        }
+		    async function runSam3CascadeOnImage() {
+		        if (sam3RecipeElements.status) {
+		            sam3RecipeElements.status.title = "";
+		        }
+		        if (!currentImage) {
+		            setSam3RecipeStatus("Open an image first.", "warn");
+		            return;
+		        }
 	        const classNames = orderedClassNames();
 	        const enabledSteps = (Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []).filter((s) => s && s.enabled);
 	        const missingIndex = (Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []).findIndex(
@@ -10054,13 +10123,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            const result = await resp.json();
 	            if (currentImage && result?.image_token) {
 	                rememberSamToken(currentImage.name, variantForRequest, result.image_token);
-	            }
-	            const detections = Array.isArray(result?.detections) ? result.detections : [];
-	            const warnList = Array.isArray(result?.warnings) ? result.warnings : [];
-	            const byClass = new Map();
-	            const missingClasses = new Set();
-	            detections.forEach((det) => {
-	                const cls = det?.class_name || det?.qwen_label || "";
+		            }
+		            const detections = Array.isArray(result?.detections) ? result.detections : [];
+		            const warnList = Array.isArray(result?.warnings) ? result.warnings : [];
+		            const warnDetails = formatAgentWarningsForUi(warnList);
+		            const byClass = new Map();
+		            const missingClasses = new Set();
+		            detections.forEach((det) => {
+		                const cls = det?.class_name || det?.qwen_label || "";
 	                if (!cls) return;
 	                if (!classNames.includes(cls)) {
 	                    missingClasses.add(cls);
@@ -10069,16 +10139,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                if (!byClass.has(cls)) byClass.set(cls, []);
 	                byClass.get(cls).push(det);
 	            });
-	            let added = 0;
-	            byClass.forEach((list, cls) => {
-	                added += applySegAwareDetections(list, cls, "Recipe cascade");
-	            });
-	            const warnText = warnList.length ? ` Warnings: ${warnList.join(", ")}` : "";
-	            const missingText = missingClasses.size ? ` Missing classes: ${Array.from(missingClasses).join(", ")}` : "";
-	            if (added > 0) {
-	                setSam3RecipeStatus(
-	                    `Cascade applied: added ${added} ${datasetType === "seg" ? "polygons" : "boxes"}.${warnText}${missingText}`,
-	                    warnList.length || missingClasses.size ? "warn" : "success",
+		            let added = 0;
+		            byClass.forEach((list, cls) => {
+		                added += applySegAwareDetections(list, cls, "Recipe cascade");
+		            });
+		            const warnText = warnDetails.message ? ` Warnings: ${warnDetails.message}` : "";
+		            const missingText = missingClasses.size ? ` Missing classes: ${Array.from(missingClasses).join(", ")}` : "";
+		            if (sam3RecipeElements.status) {
+		                sam3RecipeElements.status.title = warnDetails.codes.length ? warnDetails.codes.join("\n") : "";
+		            }
+		            if (added > 0) {
+		                setSam3RecipeStatus(
+		                    `Cascade applied: added ${added} ${datasetType === "seg" ? "polygons" : "boxes"}.${warnText}${missingText}`,
+		                    warnList.length || missingClasses.size ? "warn" : "success",
 	                );
 	            } else {
 	                setSam3RecipeStatus(`Cascade applied: no detections.${warnText}${missingText}`, "warn");
@@ -10251,6 +10324,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSam3RecipeStatus("Open an image first.", "warn");
             return;
         }
+        if (sam3RecipeElements.status) {
+            sam3RecipeElements.status.title = "";
+        }
         const classNames = orderedClassNames();
         const overrideEnabled = Boolean(sam3RecipeElements.overrideToggle?.checked);
         let outputClassName = null;
@@ -10340,8 +10416,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
             const detections = Array.isArray(result?.detections) ? result.detections : [];
             const warnList = Array.isArray(result?.warnings) ? result.warnings : [];
+            const warnDetails = formatAgentWarningsForUi(warnList);
             const added = applySegAwareDetections(detections, outputClassName, "Agent recipe");
-            const warnText = warnList.length ? ` Warnings: ${warnList.join(", ")}` : "";
+            const warnText = warnDetails.message ? ` Warnings: ${warnDetails.message}` : "";
+            if (sam3RecipeElements.status) {
+                sam3RecipeElements.status.title = warnDetails.codes.length ? warnDetails.codes.join("\n") : "";
+            }
             if (added > 0) {
                 setSam3RecipeStatus(`Recipe applied: added ${added} ${datasetType === "seg" ? "polygons" : "boxes"} to ${outputClassName}.${warnText}`, warnList.length ? "warn" : "success");
             } else {

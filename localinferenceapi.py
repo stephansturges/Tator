@@ -5579,12 +5579,28 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
         except Exception:
             clip_model_used = None
             solver_used = None
+    if not solver_used:
+        try:
+            raw_solver = getattr(clf_obj, "solver", None)
+            if raw_solver is not None and str(raw_solver).strip():
+                solver_used = str(raw_solver).strip()
+        except Exception:
+            solver_used = None
+    multi_class_used = None
+    try:
+        raw_multi = getattr(clf_obj, "multi_class", None)
+        if raw_multi is not None and str(raw_multi).strip():
+            multi_class_used = str(raw_multi).strip()
+    except Exception:
+        multi_class_used = None
 
     n_classes = len(classes)
     proba_mode: str
     if n_classes == 2 and coef.shape[0] == 1:
         proba_mode = "binary"
-    elif solver_used and str(solver_used).strip().lower() == "liblinear":
+    elif (solver_used and str(solver_used).strip().lower() == "liblinear") or (
+        multi_class_used and str(multi_class_used).strip().lower() == "ovr"
+    ):
         proba_mode = "ovr"
     else:
         proba_mode = "softmax"

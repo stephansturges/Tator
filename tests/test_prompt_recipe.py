@@ -1,12 +1,16 @@
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from localinferenceapi import _build_prompt_recipe, _sample_images_for_category
+import joblib
+import numpy as np
+
+from localinferenceapi import _build_prompt_recipe, _load_clip_head_from_classifier, _sample_images_for_category
 
 
 def test_sample_images_for_category_is_deterministic():
@@ -95,3 +99,19 @@ def test_build_prompt_recipe_uses_early_stop_and_counts_fps():
     # Coverage map should include pos/neg labeling.
     kinds = {entry["image_id"]: entry["type"] for entry in coverage_by_image}
     assert kinds == {1: "pos", 2: "pos", 3: "neg"}
+
+
+def test_load_clip_head_from_classifier_falls_back_to_multi_class_mode(tmp_path):
+    # When meta.pkl is missing, we should still infer ovr vs softmax correctly.
+    dummy = SimpleNamespace(
+        classes_=["light_vehicle", "person", "building"],
+        coef_=np.zeros((3, 4), dtype=np.float32),
+        intercept_=np.zeros((3,), dtype=np.float32),
+        solver="lbfgs",
+        multi_class="ovr",
+    )
+    path = tmp_path / "head.pkl"
+    joblib.dump(dummy, path)
+    head = _load_clip_head_from_classifier(path)
+    assert head is not None
+    assert head["proba_mode"] == "ovr"

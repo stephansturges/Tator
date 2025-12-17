@@ -15340,24 +15340,6 @@ def _load_qwen_labelmap(dataset_root: Path) -> List[str]:
     return sorted(labels)
 
 
-def _load_labelmap_file(path: Path) -> List[str]:
-    if not path.exists():
-        return []
-    lower = path.name.lower()
-    try:
-        if lower.endswith(".pkl"):
-            obj = joblib.load(path)
-            if isinstance(obj, list):
-                return [str(x) for x in obj]
-            raise ValueError("labelmap_pickle_not_list")
-        with path.open("r", encoding="utf-8") as handle:
-            classes = [ln.strip() for ln in handle if ln.strip()]
-        return classes
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to load labelmap from %s: %s", path, exc)
-        return []
-
-
 def _discover_yolo_labelmap(dataset_root: Path) -> List[str]:
     for name in ("labelmap.txt", "classes.txt", "labels.txt"):
         candidate = dataset_root / name
@@ -15448,30 +15430,96 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     dataset_type = (existing_meta or {}).get("type", "bbox")
     dataset_label = (existing_meta or {}).get("label", dataset_root.name)
     dataset_source = (existing_meta or {}).get("source", "yolo")
+    def _coco_has_invalid_image_refs(path: Path) -> bool:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return True
+        if not isinstance(data, dict):
+            return True
+        images = data.get("images")
+        anns = data.get("annotations")
+        if not isinstance(images, list) or not isinstance(anns, list):
+            return True
+        image_ids = set()
+        for img in images:
+            if not isinstance(img, dict):
+                continue
+            try:
+                image_ids.add(int(img.get("id")))
+            except Exception:
+                continue
+        for ann in anns:
+            if not isinstance(ann, dict):
+                continue
+            try:
+                img_id = int(ann.get("image_id"))
+            except Exception:
+                continue
+            if img_id not in image_ids:
+                return True
+        return False
+
+    def _coco_missing_segmentation(path: Path) -> bool:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            return True
+        if not isinstance(data, dict):
+            return True
+        anns = data.get("annotations")
+        if not isinstance(anns, list):
+            return True
+        for ann in anns:
+            if not isinstance(ann, dict):
+                continue
+            seg = ann.get("segmentation")
+            if seg is not None and seg != []:
+                return False
+        return True
+
     if (
         existing_meta
         and existing_meta.get("signature") == signature
         and existing_meta.get("coco_train_json")
         and existing_meta.get("coco_val_json")
     ):
-        # Backfill missing COCO info if this dataset was converted before we added it.
-        _ensure_coco_info_fields(Path(existing_meta["coco_train_json"]), dataset_root.name, categories)
-        _ensure_coco_info_fields(Path(existing_meta["coco_val_json"]), dataset_root.name, categories)
-        return existing_meta
+        coco_train_path = Path(existing_meta["coco_train_json"])
+        coco_val_path = Path(existing_meta["coco_val_json"])
+        rebuild = _coco_has_invalid_image_refs(coco_train_path) or _coco_has_invalid_image_refs(coco_val_path)
+        if dataset_type == "seg":
+            rebuild = rebuild or _coco_missing_segmentation(coco_train_path) or _coco_missing_segmentation(coco_val_path)
+        if not rebuild:
+            # Backfill missing COCO info if this dataset was converted before we added it.
+            _ensure_coco_info_fields(coco_train_path, dataset_root.name, categories)
+            _ensure_coco_info_fields(coco_val_path, dataset_root.name, categories)
+            return existing_meta
+
+    # Rebuild/conversion path: infer bbox vs seg directly from labels.
+    dataset_type = "bbox"
 
     image_id_counter = 1
     annotation_id = 1
-    images_lookup: Dict[str, int] = {}
-    image_sizes: Dict[str, Tuple[int, int]] = {}
     image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
     def _image_path_for_label(labels_dir: Path, images_dir: Path, label_file: Path) -> Optional[Path]:
         stem = label_file.stem
+        try:
+            rel_label = label_file.relative_to(labels_dir)
+        except Exception:
+            rel_label = Path(label_file.name)
+        # Prefer mirrored subdirectory structure when present.
+        for ext in image_exts:
+            candidate = images_dir / rel_label.with_suffix(ext)
+            if candidate.exists():
+                return candidate
         for ext in image_exts:
             candidate = images_dir / f"{stem}{ext}"
             if candidate.exists():
                 return candidate
-        for candidate in images_dir.glob(f"{stem}.*"):
+        for candidate in images_dir.rglob(f"{stem}.*"):
             if candidate.suffix.lower() in image_exts:
                 return candidate
         return None
@@ -15480,6 +15528,67 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
         nonlocal image_id_counter, annotation_id, dataset_type
         images: List[Dict[str, Any]] = []
         annotations: List[Dict[str, Any]] = []
+        images_lookup: Dict[str, int] = {}
+        image_sizes: Dict[str, Tuple[int, int]] = {}
+
+        def _clamp01(val: float) -> float:
+            return max(0.0, min(1.0, val))
+
+        def _bbox_xyxy_from_cxcywh(cx: float, cy: float, w: float, h: float) -> Optional[Tuple[float, float, float, float]]:
+            if w <= 0 or h <= 0:
+                return None
+            x1 = cx - w / 2.0
+            y1 = cy - h / 2.0
+            x2 = cx + w / 2.0
+            y2 = cy + h / 2.0
+            x1 = _clamp01(x1)
+            y1 = _clamp01(y1)
+            x2 = _clamp01(x2)
+            y2 = _clamp01(y2)
+            if x2 <= x1 or y2 <= y1:
+                return None
+            return (x1, y1, x2, y2)
+
+        def _bbox_xyxy_from_polygon(coords: List[float]) -> Optional[Tuple[float, float, float, float]]:
+            if len(coords) < 6 or len(coords) % 2 != 0:
+                return None
+            xs = coords[0::2]
+            ys = coords[1::2]
+            if not xs or not ys:
+                return None
+            min_x = _clamp01(min(xs))
+            max_x = _clamp01(max(xs))
+            min_y = _clamp01(min(ys))
+            max_y = _clamp01(max(ys))
+            if max_x <= min_x or max_y <= min_y:
+                return None
+            return (min_x, min_y, max_x, max_y)
+
+        def _bbox_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+            inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+            inter_area = inter_w * inter_h
+            if inter_area <= 0:
+                return 0.0
+            area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+            area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+            denom = area_a + area_b - inter_area
+            return inter_area / denom if denom > 0 else 0.0
+
+        def _polygon_to_coco_segmentation(coords: List[float], width: int, height: int) -> Optional[List[List[float]]]:
+            if len(coords) < 6 or len(coords) % 2 != 0:
+                return None
+            out: List[float] = []
+            for idx in range(0, len(coords), 2):
+                x = _clamp01(coords[idx]) * width
+                y = _clamp01(coords[idx + 1]) * height
+                out.extend([x, y])
+            if len(out) < 6:
+                return None
+            return [out]
+
         for label_file in sorted(split_labels.rglob("*.txt")):
             image_path = _image_path_for_label(split_labels, split_images, label_file)
             if image_path is None:
@@ -15518,36 +15627,77 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
                     continue
                 try:
                     class_idx = int(float(parts[0]))
-                    cx = float(parts[1])
-                    cy = float(parts[2])
-                    w = float(parts[3])
-                    h = float(parts[4])
                 except (TypeError, ValueError):
                     continue
                 if class_idx < 0 or class_idx >= len(labelmap):
                     continue
                 if width is None or height is None:
                     continue
-                # YOLO-seg polygons append x/y pairs after the box fields; treat presence as segmentation type.
-                if len(parts) > 5:
-                    dataset_type = "seg"
-                abs_w = w * width
-                abs_h = h * height
-                x1 = cx * width - abs_w / 2.0
-                y1 = cy * height - abs_h / 2.0
+                raw_vals = []
+                for token in parts[1:]:
+                    try:
+                        raw_vals.append(float(token))
+                    except (TypeError, ValueError):
+                        raw_vals = []
+                        break
+                if not raw_vals:
+                    continue
+                bbox_xyxy: Optional[Tuple[float, float, float, float]] = None
+                segmentation: Optional[List[List[float]]] = None
+                if len(raw_vals) == 4:
+                    cx, cy, w, h = raw_vals
+                    bbox_xyxy = _bbox_xyxy_from_cxcywh(cx, cy, w, h)
+                else:
+                    # Support YOLO-seg polygon-only format (YOLOv8) and bbox+polygon format.
+                    poly_only = raw_vals if len(raw_vals) >= 6 and len(raw_vals) % 2 == 0 else None
+                    bbox_plus_poly = None
+                    if len(raw_vals) > 4 and (len(raw_vals) - 4) >= 6 and (len(raw_vals) - 4) % 2 == 0:
+                        bbox_plus_poly = (raw_vals[:4], raw_vals[4:])
+                    chosen_poly = None
+                    if poly_only is not None and bbox_plus_poly is not None:
+                        bbox_fields, poly_fields = bbox_plus_poly
+                        bbox_from_fields = _bbox_xyxy_from_cxcywh(*bbox_fields)
+                        bbox_from_poly = _bbox_xyxy_from_polygon(poly_fields)
+                        if bbox_from_fields is not None and bbox_from_poly is not None and _bbox_iou(bbox_from_fields, bbox_from_poly) >= 0.9:
+                            chosen_poly = poly_fields
+                            bbox_xyxy = bbox_from_poly
+                        else:
+                            chosen_poly = poly_only
+                            bbox_xyxy = _bbox_xyxy_from_polygon(poly_only)
+                    elif bbox_plus_poly is not None:
+                        _, poly_fields = bbox_plus_poly
+                        chosen_poly = poly_fields
+                        bbox_xyxy = _bbox_xyxy_from_polygon(poly_fields)
+                    elif poly_only is not None:
+                        chosen_poly = poly_only
+                        bbox_xyxy = _bbox_xyxy_from_polygon(poly_only)
+                    else:
+                        # Unknown extra fields; treat first four as bbox and ignore remainder.
+                        bbox_xyxy = _bbox_xyxy_from_cxcywh(*raw_vals[:4])
+                    if chosen_poly is not None and bbox_xyxy is not None:
+                        segmentation = _polygon_to_coco_segmentation(chosen_poly, int(width), int(height))
+                        dataset_type = "seg"
+
+                if bbox_xyxy is None:
+                    continue
+                x1_n, y1_n, x2_n, y2_n = bbox_xyxy
+                x1 = x1_n * width
+                y1 = y1_n * height
+                abs_w = (x2_n - x1_n) * width
+                abs_h = (y2_n - y1_n) * height
                 if abs_w <= 0 or abs_h <= 0:
                     continue
-                area = abs_w * abs_h
-                annotations.append(
-                    {
-                        "id": annotation_id,
-                        "image_id": image_id,
-                        "category_id": class_idx + 1,
-                        "bbox": [x1, y1, abs_w, abs_h],
-                        "area": area,
-                        "iscrowd": 0,
-                    }
-                )
+                ann = {
+                    "id": annotation_id,
+                    "image_id": image_id,
+                    "category_id": class_idx + 1,
+                    "bbox": [x1, y1, abs_w, abs_h],
+                    "area": abs_w * abs_h,
+                    "iscrowd": 0,
+                }
+                if segmentation is not None:
+                    ann["segmentation"] = segmentation
+                annotations.append(ann)
                 annotation_id += 1
         output_path = dataset_root / split_name / "_annotations.coco.json"
         try:
@@ -16637,18 +16787,25 @@ def _cleanup_job(job: ClipTrainingJob) -> None:
         shutil.rmtree(job.temp_dir, ignore_errors=True)
 
 
-def _load_labelmap_file(path: Optional[str]) -> List[str]:
-    if not path:
+def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = False) -> List[str]:
+    if path is None:
         return []
-    lower = path.lower()
+    if isinstance(path, Path):
+        path_str = str(path)
+        lower = path.name.lower()
+    else:
+        path_str = str(path)
+        lower = Path(path_str).name.lower()
+    if not path_str.strip():
+        return []
     try:
         if lower.endswith(".pkl"):
-            data = joblib.load(path)
+            data = joblib.load(path_str)
             if isinstance(data, list):
                 return [str(item) for item in data]
             raise ValueError("labelmap_pickle_invalid")
         entries: List[str] = []
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path_str, "r", encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.strip()
                 if stripped:
@@ -16657,9 +16814,14 @@ def _load_labelmap_file(path: Optional[str]) -> List[str]:
             raise ValueError("labelmap_empty")
         return entries
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found") from exc
+        if strict:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found") from exc
+        return []
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"labelmap_load_failed:{exc}") from exc
+        if strict:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"labelmap_load_failed:{exc}") from exc
+        logger.warning("Failed to load labelmap from %s: %s", path_str, exc)
+        return []
 
 
 def _current_active_payload() -> Dict[str, Any]:
@@ -18004,7 +18166,7 @@ def set_active_model(payload: ActiveModelRequest):
         if not str(Path(labelmap_path_abs).resolve()).startswith(str(allowed_label_root)):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_not_allowed")
         _validate_upload_extension(labelmap_path_abs, LABELMAP_ALLOWED_EXTS, "labelmap_extension_not_allowed")
-        labelmap_entries = _load_labelmap_file(labelmap_path_abs)
+        labelmap_entries = _load_labelmap_file(labelmap_path_abs, strict=True)
     elif not labelmap_provided and active_labelmap_path:
         labelmap_path_abs = active_labelmap_path
         labelmap_entries = list(active_label_list)

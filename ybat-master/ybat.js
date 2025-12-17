@@ -11640,8 +11640,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	        const frag = document.createDocumentFragment();
 	        result.classes.forEach((cls) => {
-	            const card = document.createElement("div");
+	            const card = document.createElement("details");
 	            card.className = "training-card";
+	            card.open = false;
+	            const summaryEl = document.createElement("summary");
 	            const body = document.createElement("div");
 	            body.className = "training-card__body";
 	            const recipe = cls.recipe || {};
@@ -11664,15 +11666,21 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            const precPct = Number.isFinite(precision) ? (precision * 100).toFixed(1) : "0.0";
 	            const detPct = Number.isFinite(detRate) ? (detRate * 100).toFixed(1) : "0.0";
 	            const modeLabel = recipe.mode || (steps.length ? "legacy" : "sam3_greedy");
+	            const displayName = escapeHtml(cls.name || cls.id);
+	            const showIdSuffix = !!(cls.name && cls.id !== undefined && cls.id !== null && String(cls.id).length);
 
-	            body.innerHTML = `
-	                <div class="training-history-row">
-	                    <div class="training-history-title" style="font-size: 20px; font-weight: 700;">${escapeHtml(cls.name || cls.id)}</div>
-	                    <span class="badge">${escapeHtml(modeLabel)}</span>
+	            summaryEl.innerHTML = `
+	                <div class="training-card__title">
+	                    ${displayName}${showIdSuffix ? ` <span class="training-help" style="font-weight: 400;">(id ${escapeHtml(cls.id)})</span>` : ""}
+	                    <span class="badge" style="margin-left: 8px;">${escapeHtml(modeLabel)}</span>
 	                </div>
-	                <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
-	                <div><strong>Coverage:</strong> ${matched}/${totalGt} (${covPct}%) • Precision: ${precPct}% • FPs: ${fps} • Duplicates: ${duplicates} • Det rate: ${detPct}%</div>
+	                <div class="training-help" style="font-weight: 400;">
+	                    Coverage: ${matched}/${totalGt} (${covPct}%) • Precision: ${precPct}% • FPs: ${fps} • Duplicates: ${duplicates} • Det rate: ${detPct}%
+	                </div>
 	            `;
+	            card.appendChild(summaryEl);
+
+	            body.innerHTML = `<div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>`;
 
 	            const configBits = [];
 	            if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
@@ -11707,12 +11715,37 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            }
 
 	            if (prompts.length) {
-	                const list = document.createElement("div");
-	                list.className = "training-help";
-	                const preview = prompts.slice(0, 16).join(", ");
-	                const extra = prompts.length > 16 ? ` (+${prompts.length - 16} more)` : "";
-	                list.textContent = `Text prompts: ${preview}${extra}`;
-	                body.appendChild(list);
+	                const block = document.createElement("div");
+	                block.className = "training-subsection";
+	                const title = document.createElement("div");
+	                title.className = "training-subsection__title";
+	                title.textContent = `Selected text prompts (${prompts.length})`;
+	                block.appendChild(title);
+
+	                const table = document.createElement("table");
+	                table.className = "training-table";
+	                table.innerHTML = `
+	                    <thead>
+	                        <tr><th>#</th><th>Type</th><th>Prompt</th></tr>
+	                    </thead>
+	                `;
+	                const tbody = document.createElement("tbody");
+	                prompts.forEach((prompt, idx) => {
+	                    const row = document.createElement("tr");
+	                    const colIdx = document.createElement("td");
+	                    colIdx.textContent = String(idx + 1);
+	                    const colType = document.createElement("td");
+	                    colType.textContent = "text";
+	                    const colPrompt = document.createElement("td");
+	                    colPrompt.textContent = String(prompt);
+	                    row.appendChild(colIdx);
+	                    row.appendChild(colType);
+	                    row.appendChild(colPrompt);
+	                    tbody.appendChild(row);
+	                });
+	                table.appendChild(tbody);
+	                block.appendChild(table);
+	                body.appendChild(block);
 	            }
 
 	            if (steps.length) {
@@ -11795,13 +11828,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     setAgentStatus(`Save failed: ${err.message || err}`, "error");
                 }
             });
-            foot.appendChild(saveBtn);
-            body.appendChild(foot);
-            card.appendChild(body);
-            frag.appendChild(card);
-        });
-        agentElements.results.appendChild(frag);
-    }
+	            foot.appendChild(saveBtn);
+	            body.appendChild(foot);
+	            card.appendChild(body);
+	            frag.appendChild(card);
+	        });
+	        agentElements.results.appendChild(frag);
+	    }
 
 	    function renderAgentLogs(job) {
 	        if (!agentElements.logs) return;

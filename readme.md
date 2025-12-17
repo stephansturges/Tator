@@ -49,8 +49,59 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - `app/`, `localinferenceapi.py` – FastAPI app, SAM/CLIP orchestration, training endpoints.
 - `ybat-master/` – browser UI (`ybat.html`, CSS/JS, assets).
 - `tools/` – reusable training helpers and CLI scripts.
-- `uploads/`, `crops/`, `corrected_labels/` – runtime artifacts, embedding cache, and exported crops (ignored by git).
-- `AGENTS.md` – contributor handbook and project conventions.
+- `sam3/` – optional upstream SAM3 checkout (needed for SAM3 training; inference can use downloaded checkpoints).
+- `tests/` – unit tests.
+- `uploads/` – runtime artifacts (CLIP embedding cache, Agent Mining jobs/recipes/cascades, Qwen runs, exports).
+
+## How Tator Works (Architecture + Code Paths)
+
+### High-level architecture
+```text
+┌───────────────────────────────────────────────────────────────────────────┐
+│ Browser UI (ybat-master/ybat.html + ybat.js)                               │
+│  - Label Images: manual boxes + assists (CLIP, SAM, SAM3 text)             │
+│  - Train CLIP: dataset upload + logistic-regression head training          │
+│  - Agent Mining: recipe search (mining) + save/export/import recipes       │
+│  - Recipe cascades: chain recipes + de-dupe controls + save/export/import  │
+│  - Qwen: (optional) train/activate/infer                                  │
+└───────────────────────────────┬───────────────────────────────────────────┘
+                                │ HTTP/JSON (API_ROOT)
+                                ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│ FastAPI backend (app/ + localinferenceapi.py)                              │
+│  - Model runtime: CLIP, SAM1/2/3, (optional) Qwen                          │
+│  - Training jobs: CLIP, Qwen, SAM3                                         │
+│  - Agent Mining: jobs/results + apply single recipe + apply recipe cascade │
+│  - Portability: recipe/cascade ZIP export + import                         │
+└───────────────────────────────┬───────────────────────────────────────────┘
+                                │ reads/writes
+                                ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│ On-disk state (uploads/)                                                  │
+│  - clip_embeddings/   cached CLIP features used by training + mining       │
+│  - agent_mining/      jobs/, cache/, recipes/, cascades/                   │
+│  - qwen_runs/         datasets/, checkpoints/, metadata.json               │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+### Codebase map (where to look)
+```text
+Tator/
+├─ app/                  FastAPI app object (uvicorn imports this)
+├─ localinferenceapi.py  Backend endpoints + orchestration (CLIP/SAM/Qwen/Agent Mining)
+├─ ybat-master/          Frontend UI (static HTML/JS/CSS)
+├─ tools/                CLI helpers (e.g., CLIP training script)
+├─ tests/                Unit tests for key flows
+└─ uploads/              Runtime artifacts + caches (git-ignored)
+```
+
+### Major code paths (end-to-end)
+- **CLIP (recommended first)**: `Train CLIP` tab → `/clip/train` job → activate via `/clip/active_model` → used by Auto Class, CLIP verification, and as an optional **pretrained CLIP head** for Agent Mining / cascade scoring.
+- **SAM assists (Label Images tab)**: UI actions → SAM endpoints (SAM1/2/3 depending on `SAM_VARIANT`) → detections written into the current image session.
+- **SAM3 text prompt**: `SAM3 Text Prompt` panel → SAM3 processor runtime → returns boxes/polygons via the same `QwenDetection` response model used elsewhere.
+- **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → `/agent_mining/results/latest` (per-class summaries + best recipe steps) → save as portable ZIP via `/agent_mining/recipes`.
+- **Apply one recipe**: UI → `/agent_mining/apply_image` → `_apply_agent_recipe_to_image()` (text seeds → CLIP filtering → SAM3 expansion → optional CLIP-head gate → IoU de-dupe) → detections returned to UI.
+- **Apply a recipe cascade**: UI → `/agent_mining/apply_image_chain` → run multiple recipes → per-class de-dupe → optional cross-class de-dupe (by group or global) with optional CLIP-head-based confidence → detections returned to UI.
 
 ## Prerequisites
 - Python 3.10 or newer (3.11+ recommended).
@@ -119,7 +170,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
    - Load classes via **Load Classes…** with `my_label_list.txt`.
    - Import existing YOLO boxes via **Import Bboxes…** — you can point it at a folder of `.txt` files or drop a `.zip` containing them.
    - Enable **SAM Mode** and/or **Auto Class** and start annotating.
-7. **Training loop:** use the Train CLIP tab to train on the same `images/` + `labels/` folders, then activate the resulting `.pkl` via the CLIP Model tab.
+7. **Train CLIP (recommended first):** use the **Train CLIP** tab to train on the same `images/` + `labels/` folders, then activate the resulting `.pkl` via the **CLIP Model** tab. This is the foundation for Auto Class, fast verification, and the best results when searching/mining recipes. It can run quickly on CPU/MPS too (e.g. on an M1 MacBook) and works the same whether your backend is local or on a remote GPU host.
 
 ### Optional: Setting up SAM3
 SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):
@@ -266,6 +317,13 @@ The **Agent Mining** tab mines **portable SAM3 “recipes”** for each class in
 - `crops/` (example cut-outs used for CLIP filtering)
 - optional `clip_head/` (a pretrained CLIP classifier head exported from the CLIP training tab)
 
+*(Screenshot coming: Agent Mining tab overview + per-class recipe details.)*
+
+#### Recommended workflow (best results)
+1. **Train CLIP first** on the dataset (Train CLIP tab). This gives you fast Auto Class while labeling and unlocks the most reliable “recipe search” because CLIP embeddings + (optional) pretrained CLIP heads become dataset-specific.
+2. **Mine recipes** in Agent Mining using a small validation percentage first (smoke test), then scale up once the logs/results look sane.
+3. **Apply + iterate** on a few representative images, then save/export the recipes you want to reuse elsewhere.
+
 High-level flow (what it’s doing, in human terms):
 1. **Split the dataset** into train/val (random seed is exposed so results are repeatable).
 2. For each class, pick a **small, diverse set of example crops** from the train split.
@@ -282,9 +340,35 @@ Using it:
 - Configure crops/prompts/filters, then click **Start**. Watch the live log + progress bar.
 - Review per-class results and click **Save recipe** for the classes you want.
 
-Applying recipes:
-- **In Agent Mining tab:** select a saved recipe and apply it to a specific dataset image id (useful for debugging).
-- **In the labeling UI (SAM3/Recipes panel):** load a recipe ZIP and click **Apply recipe to image** to write detections into the current image. If the recipe’s class name doesn’t exist in the current labelmap, enable **Output class override** and pick the destination class.
+Notes:
+- IDs shown during mining are **dataset category ids** (COCO `category_id` when the dataset is COCO-format) and may not match your labelmap index/order.
+- The pretrained CLIP head is matched to classes by **name**, not by “index in a list”, to avoid ordering mismatches.
+
+#### Apply a single recipe
+- **Agent Mining tab (debugging):** select a saved recipe and apply it to a specific dataset image id to sanity-check what the recipe is doing.
+- **Label Images tab → SAM3/Recipes panel:** import a recipe ZIP and click **Apply recipe to image** to write detections into the current image. If the recipe class doesn’t exist in the current labelmap, enable **Output class override** and pick the destination class.
+
+#### Chain recipes with a cascade (Label Images tab)
+Recipe cascades let you run multiple saved recipes in order and then clean up overlaps in a final de-dupe pass.
+
+1. In **Label Images** → **SAM3/Recipes**, click **+ Add recipe step** to build a list of steps (reorder as needed).
+2. Per step, choose the recipe and (optionally) set:
+   - **Output class override** (re-label outputs to a different class)
+   - **Dedupe group** (group steps that should de-dupe against each other)
+   - **Participate in cross-class de-dupe** (turn off for cases like person-on-bike where overlap is expected)
+3. Configure de-dupe:
+   - **Per-class de-dupe IoU**: removes duplicates within the same output class.
+   - **Cross-class de-dupe** (optional): removes duplicates across different classes, either **within dedupe groups** or **globally**.
+   - **Confidence (de-dupe)**: choose how “winner” detections are picked (SAM score, or CLIP-head-based confidence).
+   - **CLIP head source recipe**: when using a CLIP-head confidence mode, pick which saved recipe provides the embedded head.
+4. Click **Apply cascade to image** to write the final merged detections into the current image.
+
+*(Screenshot coming: cascade editor + de-dupe settings.)*
+
+#### Save / reuse cascades
+- Use **Save cascade preset** to persist the cascade configuration on the backend.
+- Use **Download preset (zip)** to export a portable zip that bundles `cascade.json` plus all referenced recipe zips.
+- Use **Import cascade (zip)** to bring the whole bundle onto another machine/backend.
 
 ## Command-Line Training
 The UI shares its engine with `tools/train_clip_regression_from_YOLO.py`:
@@ -302,7 +386,7 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 ## Development & Testing
 - Run unit tests: `pytest`
 - Static checks: `ruff check .`, `black --check .`, `mypy .`
-- See `AGENTS.md` for coding conventions, PR expectations, and manual verification steps.
+- Project notes live in `SESSION.md` and `LABEL_SCHEMA_REFACTOR_BRIEF.md`.
 
 ## Troubleshooting
 - **Torch install errors** – install the wheel that matches your platform (`pip install torch==<version>+cu118 ...`).
@@ -312,6 +396,12 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
+
+## 2025-12-17 – Recipe Cascades + CLIP Head Robustness
+- Added **recipe cascades** in the Label Images tab: chain multiple recipes, optionally re-label outputs per step, and merge results with configurable per-class + cross-class IoU de-dupe.
+- Added **dedupe groups** + per-step opt-out for cross-class de-dupe (useful when overlap is expected, e.g. person-on-bike).
+- Added **cascade presets** with backend save/load plus portable ZIP export/import (bundle includes cascade + all referenced recipes).
+- Improved CLIP-head reliability + debugging: infer head proba mode when metadata is missing, warn when a recipe class can’t be found in the head, and clarify class-id vs labelmap-index vs head-class-index in the UI.
 
 ## 2025-12-16 – Agent Mining Recipes (SAM3) + Pretrained CLIP Head
 - Added a full **Agent Mining** UI to mine per-class SAM3 recipes and manage saved recipes (list/import/export/delete).

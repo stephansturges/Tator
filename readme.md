@@ -331,13 +331,14 @@ High-level flow (what it’s doing, in human terms):
 4. Run SAM3 prompts on val images to produce lots of candidate boxes, then **filter** them:
    - keep boxes that look like the positive crops (CLIP similarity),
    - optionally suppress boxes that look like other classes (negative crops),
-   - optionally require the **pretrained CLIP head** to agree (and tune `Head min prob` per class on the val split).
+   - optionally require the **pretrained CLIP head** to agree (and auto-tune per-class head thresholds to hit a target precision on the val split).
 5. Score each class recipe on the val split (coverage/precision/FPs) and show results. Click **Save recipe** to persist the portable ZIP on disk.
 
 Using it:
 - Pick a converted dataset under **Datasets on disk**.
 - Set `Val %` and `Split seed` (default seed 42). Leave **Reuse split** on if you want stable comparisons across runs.
 - Configure crops/prompts/filters, then click **Start**. Watch the live log + progress bar.
+- If you select a **Pretrained CLIP head**: leave **Auto-tune thresholds** on and set **Target precision** (e.g. 0.90–0.98). Higher = cleaner (fewer false positives) but lower recall.
 - Review per-class results and click **Save recipe** for the classes you want.
 
 Notes:
@@ -402,13 +403,14 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 - Added **dedupe groups** + per-step opt-out for cross-class de-dupe (useful when overlap is expected, e.g. person-on-bike).
 - Added **cascade presets** with backend save/load plus portable ZIP export/import (bundle includes cascade + all referenced recipes).
 - Improved CLIP-head reliability + debugging: infer head proba mode when metadata is missing, warn when a recipe class can’t be found in the head, and clarify class-id vs labelmap-index vs head-class-index in the UI.
+- Agent Mining: CLIP head threshold tuning is now **precision-first**, with a simple **Target precision** control and per-class auto-tuning of `min_prob` + margin.
 
 ## 2025-12-16 – Agent Mining Recipes (SAM3) + Pretrained CLIP Head
 - Added a full **Agent Mining** UI to mine per-class SAM3 recipes and manage saved recipes (list/import/export/delete).
 - Recipes are now **portable ZIPs** that bundle `recipe.json` + exemplar crops and optional CLIP head artifacts, so they can be copied to another machine without external paths.
 - New `/agent_mining/apply_image` (and `/agent_mining/apply_image_chain` for cascades) endpoints run the full recipe pipeline (text seeds → CLIP filter → SAM3 visual expansion → CLIP/IoU dedupe) and return boxes/polygons.
 - Added **output class override** in the recipe apply UI so you can apply a recipe to any labelmap (with warnings for mismatches).
-- Added **Pretrained CLIP head** option (exported from CLIP training artifacts) for additional filtering; mining tunes the head `min_prob` **per class** on the validation split without re-running CLIP multiple times.
+- Added **Pretrained CLIP head** option (exported from CLIP training artifacts) for additional filtering; mining can auto-tune per-class head thresholds on the validation split (without re-running SAM3 multiple times).
 - Improved Agent Mining **logging + progress reporting**, plus a **cache size** view and **purge cache** button to reclaim disk.
 - Hardened recipe portability: sanitize crop paths, embed crops under `crops/`, and validate recipe schema on load/import.
 

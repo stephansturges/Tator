@@ -9556,12 +9556,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            crossToggle.checked = step.participate_cross_class_dedupe !== false;
 		            crossToggle.addEventListener("change", () => {
 		                step.participate_cross_class_dedupe = crossToggle.checked;
-	            });
-	            crossLabel.appendChild(crossToggle);
-	            crossLabel.appendChild(document.createTextNode("Participate in cross-class dedupe"));
-	            crossWrap.appendChild(crossLabel);
+		            });
+		            crossLabel.appendChild(crossToggle);
+		            crossLabel.appendChild(document.createTextNode("Allow cross-class de-dupe"));
+		            crossWrap.appendChild(crossLabel);
 
-	            const overrideWrap = document.createElement("div");
+		            const overrideWrap = document.createElement("div");
 		            const overrideLabel = document.createElement("label");
 		            overrideLabel.style.display = "inline-flex";
 		            overrideLabel.style.alignItems = "center";
@@ -9680,9 +9680,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 
 	        const enabledSteps = (Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []).filter((s) => s && s.enabled);
-	        const hasRunnable = enabledSteps.some((s) => s.recipe_id);
+	        const hasAnyEnabled = enabledSteps.length > 0;
+	        const missingRecipe = enabledSteps.some((s) => !s.recipe_id);
+	        const hasRunnable = hasAnyEnabled && !missingRecipe;
 	        if (sam3RecipeElements.cascadeApplyButton) {
-	            sam3RecipeElements.cascadeApplyButton.disabled = !hasRunnable;
+	            sam3RecipeElements.cascadeApplyButton.disabled = !hasRunnable || !currentImage;
 	        }
 	        if (sam3RecipeElements.cascadePresetSaveButton) {
 	            sam3RecipeElements.cascadePresetSaveButton.disabled = !hasRunnable;
@@ -9770,12 +9772,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const label = rawLabel.trim() || "recipe_cascade";
 	        const classNames = orderedClassNames();
 	        const stepsPayload = [];
-	        for (const step of Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []) {
+	        const stepList = Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : [];
+	        for (let idx = 0; idx < stepList.length; idx += 1) {
+	            const step = stepList[idx];
 	            if (!step) continue;
 	            const rid = step.recipe_id;
 	            if (!rid) {
 	                if (step.enabled) {
-	                    setSam3RecipeStatus("Select a recipe for every enabled step before saving.", "warn");
+	                    setSam3RecipeStatus(`Select a recipe for step ${idx + 1} (or disable it) before saving.`, "warn");
 	                    return;
 	                }
 	                continue;
@@ -9939,11 +9943,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	        const classNames = orderedClassNames();
 	        const enabledSteps = (Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []).filter((s) => s && s.enabled);
+	        const missingIndex = (Array.isArray(sam3CascadeState.steps) ? sam3CascadeState.steps : []).findIndex(
+	            (s) => s && s.enabled && !s.recipe_id,
+	        );
+	        if (missingIndex >= 0) {
+	            setSam3RecipeStatus(`Select a recipe for step ${missingIndex + 1} (or disable it) before applying.`, "warn");
+	            return;
+	        }
 	        const stepsPayload = [];
 	        for (const step of enabledSteps) {
-	            if (!step.recipe_id) {
-	                continue;
-	            }
 	            let overrideName = null;
 	            let overrideId = null;
 	            if (step.override_enabled) {
@@ -15832,6 +15840,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         images = {};
         bboxes = {};
         currentImage = null;
+        if (typeof refreshSam3CascadeControls === "function") {
+            refreshSam3CascadeControls();
+        }
         samPreloadLastKey = null;
         cancelSamPreload();
         samTokenCache.clear();
@@ -15906,6 +15917,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     prepareSamForCurrentImage({ messagePrefix }).catch((err) => {
                         console.debug("prepareSamForCurrentImage failed", err);
                     });
+                    if (typeof refreshSam3CascadeControls === "function") {
+                        refreshSam3CascadeControls();
+                    }
                 };
                 imageObject.src = dataUrl;
             };
@@ -15937,6 +15951,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             prepareSamForCurrentImage({ messagePrefix, immediate: true }).catch((err) => {
                 console.debug("prepareSamForCurrentImage failed", err);
             });
+            if (typeof refreshSam3CascadeControls === "function") {
+                refreshSam3CascadeControls();
+            }
         }
         if (currentBbox !== null) {
             currentBbox.bbox.marked = false;

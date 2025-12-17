@@ -93,6 +93,52 @@ body {
     color: #e2e8f0;
 }
 
+.class-scroll-indicator {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    z-index: 55;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateX(-50%) translateY(calc(-50% + 8px));
+    transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.class-scroll-indicator.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(-50%);
+}
+
+.class-scroll-indicator__bubble {
+    background: rgba(15, 23, 42, 0.92);
+    color: #f8fafc;
+    border-radius: 12px;
+    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.35);
+    text-align: center;
+    min-width: 180px;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.class-scroll-indicator__bubble--current {
+    font-size: 14px;
+    font-weight: 750;
+    padding: 10px 14px;
+}
+
+.class-scroll-indicator__bubble--adjacent {
+    font-size: 12px;
+    font-weight: 600;
+    opacity: 0.78;
+    padding: 8px 12px;
+}
+
 .modal {
     position: fixed;
     inset: 0;
@@ -1377,6 +1423,10 @@ details.training-card > summary::marker {
 
 .training-field--inline input[type="checkbox"] {
     margin: 0;
+}
+
+#tabLabeling .container .left .training-field--inline input[type="checkbox"] {
+    margin-right: 20px;
 }
 
 .training-field label > input[type="checkbox"],

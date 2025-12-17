@@ -672,6 +672,81 @@
         return taskQueueState.element;
     }
 
+    function ensureClassScrollIndicatorElement() {
+        if (!classScrollIndicatorState.element) {
+            classScrollIndicatorState.element = document.getElementById("classScrollIndicator");
+        }
+        return classScrollIndicatorState.element;
+    }
+
+    function hideClassScrollIndicator() {
+        const el = ensureClassScrollIndicatorElement();
+        if (!el) {
+            return;
+        }
+        if (classScrollIndicatorState.timerId) {
+            clearTimeout(classScrollIndicatorState.timerId);
+            classScrollIndicatorState.timerId = null;
+        }
+        el.classList.remove("visible");
+    }
+
+    function showClassScrollIndicator({ previousClass, currentClassName, nextClass }, { duration = 900 } = {}) {
+        const el = ensureClassScrollIndicatorElement();
+        if (!el) {
+            return;
+        }
+        const currentLabel = String(currentClassName || "").trim();
+        if (!currentLabel) {
+            return;
+        }
+        const prevLabel = String(previousClass || currentLabel).trim() || currentLabel;
+        const nextLabel = String(nextClass || currentLabel).trim() || currentLabel;
+        el.innerHTML = [
+            `<div class="class-scroll-indicator__bubble class-scroll-indicator__bubble--adjacent" title="Previous class">${escapeHtml(prevLabel)}</div>`,
+            `<div class="class-scroll-indicator__bubble class-scroll-indicator__bubble--current" title="Current class">${escapeHtml(currentLabel)}</div>`,
+            `<div class="class-scroll-indicator__bubble class-scroll-indicator__bubble--adjacent" title="Next class">${escapeHtml(nextLabel)}</div>`,
+        ].join("");
+        el.classList.add("visible");
+        if (classScrollIndicatorState.timerId) {
+            clearTimeout(classScrollIndicatorState.timerId);
+        }
+        const timeoutMs = typeof duration === "number" && Number.isFinite(duration) ? duration : 900;
+        classScrollIndicatorState.timerId = window.setTimeout(() => {
+            classScrollIndicatorState.timerId = null;
+            hideClassScrollIndicator();
+        }, Math.max(250, timeoutMs));
+    }
+
+    function getClassListOptionName(option) {
+        if (!option) {
+            return null;
+        }
+        return option.text || option.textContent || option.innerHTML || null;
+    }
+
+    function showClassScrollIndicatorForList(classListEl, currentIndex) {
+        if (!classListEl || !classListEl.options || !classListEl.options.length) {
+            return;
+        }
+        const total = classListEl.options.length;
+        const idx = typeof currentIndex === "number" && Number.isFinite(currentIndex) ? currentIndex : classListEl.selectedIndex;
+        const safeIndex = Math.min(Math.max(0, idx), total - 1);
+        const currentName = getClassListOptionName(classListEl.options[safeIndex]);
+        if (!currentName) {
+            return;
+        }
+        if (total === 1) {
+            showClassScrollIndicator({ previousClass: currentName, currentClassName: currentName, nextClass: currentName });
+            return;
+        }
+        const prevIndex = (safeIndex - 1 + total) % total;
+        const nextIndex = (safeIndex + 1) % total;
+        const prevName = getClassListOptionName(classListEl.options[prevIndex]) || currentName;
+        const nextName = getClassListOptionName(classListEl.options[nextIndex]) || currentName;
+        showClassScrollIndicator({ previousClass: prevName, currentClassName: currentName, nextClass: nextName });
+    }
+
     function enqueueTask({ kind, imageName, detail }) {
         const container = ensureTaskQueueElement();
         if (!container) {
@@ -717,29 +792,51 @@
         renderTaskQueue();
     }
 
-    function renderTaskQueue() {
-        const container = ensureTaskQueueElement();
-        if (!container) {
-            return;
-        }
-        if (!taskQueueState.items.length) {
-            container.innerHTML = "";
-            container.classList.remove("visible");
-            return;
-        }
-        const summary = new Map();
-        taskQueueState.items.forEach((item) => {
-            const group = item.group || item.kind || "misc";
-            summary.set(group, (summary.get(group) || 0) + 1);
-        });
-        const fragments = Array.from(summary.entries()).map(([group, count]) => {
-            const label = (TASK_GROUP_LABELS[group] || group).toLowerCase();
-            const noun = count === 1 ? "task" : "tasks";
-            return `<div class="task-queue__entry"><span class="task-queue__label">${count} ${label} ${noun} pending</span></div>`;
-        });
-        container.innerHTML = fragments.join("");
-        container.classList.add("visible");
-    }
+	    function renderTaskQueue() {
+	        const container = ensureTaskQueueElement();
+	        if (!container) {
+	            return;
+	        }
+	        if (!taskQueueState.items.length) {
+	            container.innerHTML = "";
+	            container.classList.remove("visible");
+	            return;
+	        }
+	        const summary = new Map();
+	        taskQueueState.items.forEach((item) => {
+	            const group = item.group || item.kind || "misc";
+	            const meta = summary.get(group) || { count: 0, recipeSteps: 0 };
+	            meta.count += 1;
+	            if (group === "recipe-cascade") {
+	                let steps = 0;
+	                const raw = item.detail;
+	                if (typeof raw === "number" && Number.isFinite(raw)) {
+	                    steps = Math.trunc(raw);
+	                } else if (typeof raw === "string" && raw.trim()) {
+	                    const parsed = parseInt(raw, 10);
+	                    steps = Number.isFinite(parsed) ? parsed : 0;
+	                } else if (raw && typeof raw === "object") {
+	                    const parsed = parseInt(raw.steps ?? raw.step_count ?? raw.stepCount ?? "0", 10);
+	                    steps = Number.isFinite(parsed) ? parsed : 0;
+	                }
+	                if (steps > 0) {
+	                    meta.recipeSteps += steps;
+	                }
+	            }
+	            summary.set(group, meta);
+	        });
+	        const fragments = Array.from(summary.entries()).map(([group, meta]) => {
+	            const label = (TASK_GROUP_LABELS[group] || group).toLowerCase();
+	            const noun = meta.count === 1 ? "task" : "tasks";
+	            const extra =
+	                group === "recipe-cascade" && meta.recipeSteps
+	                    ? ` • ${meta.recipeSteps} recipe step${meta.recipeSteps === 1 ? "" : "s"}`
+	                    : "";
+	            return `<div class="task-queue__entry"><span class="task-queue__label">${meta.count} ${label} ${noun} pending${extra}</span></div>`;
+	        });
+	        container.innerHTML = fragments.join("");
+	        container.classList.add("visible");
+	    }
 
     function shortenName(name) {
         if (!name) {
@@ -892,25 +989,33 @@
         items: [],
         counter: 0,
     };
-    const TASK_GROUP_MAP = {
-        "sam-bbox": "bbox",
-        "sam-bbox-auto": "bbox",
-        "sam-point": "bbox",
-        "sam-point-auto": "bbox",
-        "sam-multipoint": "bbox",
-        "sam-multipoint-auto": "bbox",
-        "sam-batch": "bbox",
-        "sam-preload": "preload",
-        "sam-activate": "preload",
-        sam: "bbox",
-        "clip-auto": "clip",
+    const classScrollIndicatorState = {
+        element: null,
+        timerId: null,
     };
+	    const TASK_GROUP_MAP = {
+	        "sam-bbox": "bbox",
+	        "sam-bbox-auto": "bbox",
+	        "sam-point": "bbox",
+	        "sam-point-auto": "bbox",
+	        "sam-multipoint": "bbox",
+	        "sam-multipoint-auto": "bbox",
+	        "sam-batch": "bbox",
+	        "sam-preload": "preload",
+	        "sam-activate": "preload",
+	        sam: "bbox",
+	        "clip-auto": "clip",
+	        "recipe-apply": "recipe",
+	        "recipe-cascade": "recipe-cascade",
+	    };
 
-    const TASK_GROUP_LABELS = {
-        preload: "SAM preloads",
-        bbox: "bbox adjustments",
-        clip: "CLIP tasks",
-    };
+	    const TASK_GROUP_LABELS = {
+	        preload: "SAM preloads",
+	        bbox: "bbox adjustments",
+	        clip: "CLIP tasks",
+	        recipe: "recipe",
+	        "recipe-cascade": "recipe cascade",
+	    };
 
     const tabElements = {
         labelingButton: null,
@@ -10057,14 +10162,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                        : null,
 		            });
 		        }
-	        if (!stepsPayload.length) {
-	            setSam3RecipeStatus("Add at least one enabled step with a recipe before applying.", "warn");
-	            return;
-	        }
-	        const dedupe = getSam3CascadeDedupeConfig();
-	        setSam3RecipeStatus(`Running cascade on ${currentImage.name}…`, "info");
-	        try {
-	            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
+		        if (!stepsPayload.length) {
+		            setSam3RecipeStatus("Add at least one enabled step with a recipe before applying.", "warn");
+		            return;
+		        }
+		        const dedupe = getSam3CascadeDedupeConfig();
+		        const cascadeTaskId = enqueueTask({
+		            kind: "recipe-cascade",
+		            imageName: currentImage.name,
+		            detail: { steps: stepsPayload.length },
+		        });
+		        setSam3RecipeStatus(`Running cascade on ${currentImage.name}…`, "info");
+		        try {
+		            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
 	            if (Number.isNaN(maskThreshold)) {
 	                maskThreshold = 0.5;
 	            }
@@ -10156,13 +10266,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            } else {
 	                setSam3RecipeStatus(`Cascade applied: no detections.${warnText}${missingText}`, "warn");
 	            }
-	        } catch (err) {
-	            console.error("Cascade apply failed", err);
-	            setSam3RecipeStatus(`Cascade failed: ${err.message || err}`, "error");
-	        } finally {
-	            refreshSam3CascadeControls();
-	        }
-	    }
+		        } catch (err) {
+		            console.error("Cascade apply failed", err);
+		            setSam3RecipeStatus(`Cascade failed: ${err.message || err}`, "error");
+		        } finally {
+		            completeTask(cascadeTaskId);
+		            refreshSam3CascadeControls();
+		        }
+		    }
 
     function parseRecipeJson(text) {
         try {
@@ -10338,10 +10449,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 return;
             }
             outputClassId = typeof classes[outputClassName] !== "undefined" ? classes[outputClassName] : null;
-        } else {
-            const target = (recipe.class_name || "").trim();
-            if (!target) {
-                setSam3RecipeStatus("Recipe is missing a target class; enable output class override.", "error");
+	        } else {
+	            const target = (recipe.class_name || "").trim();
+	            if (!target) {
+	                setSam3RecipeStatus("Recipe is missing a target class; enable output class override.", "error");
                 return;
             }
             const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
@@ -10350,13 +10461,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 setSam3RecipeStatus(`Class ${target} not in current label map. Enable output class override.`, "error");
                 return;
             }
-            outputClassName = found;
-            outputClassId = typeof classes[outputClassName] !== "undefined" ? classes[outputClassName] : null;
-        }
-        if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
-        setSam3RecipeStatus(`Running recipe on ${currentImage.name}…`, "info");
-        try {
-            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || String(recipe.params?.mask_threshold ?? "0.5"));
+	            outputClassName = found;
+	            outputClassId = typeof classes[outputClassName] !== "undefined" ? classes[outputClassName] : null;
+	        }
+	        if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
+	        const recipeTaskId = enqueueTask({ kind: "recipe-apply", imageName: currentImage.name, detail: outputClassName });
+	        setSam3RecipeStatus(`Running recipe on ${currentImage.name}…`, "info");
+	        try {
+	            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || String(recipe.params?.mask_threshold ?? "0.5"));
             if (Number.isNaN(maskThreshold)) {
                 maskThreshold = 0.5;
             }
@@ -10427,13 +10539,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             } else {
                 setSam3RecipeStatus(`Recipe applied: no detections.${warnText}`, warnList.length ? "warn" : "warn");
             }
-        } catch (err) {
-            console.error("Recipe apply failed", err);
-            setSam3RecipeStatus(`Recipe failed: ${err.message || err}`, "error");
-        } finally {
-            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
-        }
-    }
+	        } catch (err) {
+	            console.error("Recipe apply failed", err);
+	            setSam3RecipeStatus(`Recipe failed: ${err.message || err}`, "error");
+	        } finally {
+	            completeTask(recipeTaskId);
+	            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
+	        }
+	    }
 
     function refreshSam3SimilarityVisibility() {
         const row = sam3TextElements.similarityRow;
@@ -16783,6 +16896,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     classList.options[classListIndex].selected = true;
                     classList.selectedIndex = classListIndex;
                     setCurrentClass();
+                    showClassScrollIndicatorForList(classList, classListIndex);
                 }
                 event.preventDefault();
             }
@@ -16797,6 +16911,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     classList.options[classListIndex].selected = true;
                     classList.selectedIndex = classListIndex;
                     setCurrentClass();
+                    showClassScrollIndicatorForList(classList, classListIndex);
                 }
                 event.preventDefault();
             }

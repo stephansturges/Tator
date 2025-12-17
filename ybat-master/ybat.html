@@ -40,10 +40,10 @@
                 <button type="button" class="modal__btn" id="batchTweakCancel">No</button>
             </div>
         </div>
-    </div>
-    <div id="trainingPackagingModal" class="modal" aria-hidden="true">
-        <div class="modal__backdrop" data-modal-dismiss="trainingPackaging"></div>
-        <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="trainingPackagingTitle">
+	    </div>
+	    <div id="trainingPackagingModal" class="modal" aria-hidden="true">
+	        <div class="modal__backdrop" data-modal-dismiss="trainingPackaging"></div>
+	        <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="trainingPackagingTitle">
             <div class="modal__title" id="trainingPackagingTitle">Packaging dataset…</div>
             <p class="training-packaging__stats" id="trainingPackagingStats">Estimating selection…</p>
             <div class="training-packaging-progress">
@@ -56,12 +56,13 @@
             <div class="modal__actions">
                 <button type="button" class="modal__btn" id="trainingPackagingDismiss">Hide</button>
             </div>
-        </div>
-    </div>
-    <div id="taskQueue" class="task-queue" aria-live="polite" aria-atomic="true"></div>
-    <div class="tab-shell">
-        <div class="tab-bar" role="tablist">
-            <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
+	        </div>
+	    </div>
+	    <div id="taskQueue" class="task-queue" aria-live="polite" aria-atomic="true"></div>
+	    <div id="classScrollIndicator" class="class-scroll-indicator" aria-live="polite" aria-atomic="true"></div>
+	    <div class="tab-shell">
+	        <div class="tab-bar" role="tablist">
+	            <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>

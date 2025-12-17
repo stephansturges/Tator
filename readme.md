@@ -357,6 +357,7 @@ Recipe cascades let you run multiple saved recipes in order and then clean up ov
    - **Output class override** (re-label outputs to a different class)
    - **Dedupe group** (group steps that should de-dupe against each other)
    - **Participate in cross-class de-dupe** (turn off for cases like person-on-bike where overlap is expected)
+   - **Extra CLIP min prob / Extra CLIP margin** (optional): add an extra CLIP-head confidence check for that step when applying the cascade. This is cumulative with the recipe’s baked-in CLIP thresholds (effective = `max(recipe, extra)`), and only applies to recipes that include an embedded pretrained CLIP head.
 3. Configure de-dupe:
    - **Per-class de-dupe IoU**: removes duplicates within the same output class.
    - **Cross-class de-dupe** (optional): removes duplicates across different classes, either **within dedupe groups** or **globally**.
@@ -402,6 +403,7 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 - Added **recipe cascades** in the Label Images tab: chain multiple recipes, optionally re-label outputs per step, and merge results with configurable per-class + cross-class IoU de-dupe.
 - Added **dedupe groups** + per-step opt-out for cross-class de-dupe (useful when overlap is expected, e.g. person-on-bike).
 - Added **cascade presets** with backend save/load plus portable ZIP export/import (bundle includes cascade + all referenced recipes).
+- Added **per-step CLIP head threshold overrides** when applying cascades (cumulative with baked-in recipe thresholds) so you can tighten filtering at inference time without re-mining.
 - Improved CLIP-head reliability + debugging: infer head proba mode when metadata is missing, warn when a recipe class can’t be found in the head, and clarify class-id vs labelmap-index vs head-class-index in the UI.
 - Agent Mining: CLIP head threshold tuning is now **precision-first**, with a simple **Target precision** control and per-class auto-tuning of `min_prob` + margin.
 

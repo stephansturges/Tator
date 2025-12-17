@@ -12443,9 +12443,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 	            const configBits = [];
 	            if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
-	                configBits.push(`CLIP on (sim ≥ ${params.similarity_score ?? 0.25})`);
+	                configBits.push(`CLIP filter on (sim ≥ ${params.similarity_score ?? 0.25})`);
 	            } else {
-	                configBits.push("CLIP off");
+	                configBits.push("CLIP filter off");
 	            }
 	            if (params.use_negative_exemplars || recipe.use_negative_exemplars) {
 	                configBits.push(`negatives=${negatives.length || 0} (λ ${params.negative_strength ?? 0})`);

@@ -376,6 +376,10 @@ body {
     overflow-y: auto;
 }
 
+.tab-panel[data-tab-panel="datasets"] {
+    overflow-y: auto;
+}
+
 form {
     height: 100%
 }
@@ -926,6 +930,20 @@ hr {
     max-width: 1600px;
     margin: 0 auto;
     align-items: flex-start;
+}
+
+.training-wrapper.dataset-wrapper {
+    flex-direction: column;
+}
+
+#tabDatasets .two-col-grid {
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 24px;
+    width: 100%;
+}
+
+#tabDatasets .two-col-grid > .training-card {
+    min-width: 0;
 }
 
 .training-card {

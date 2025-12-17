@@ -5067,6 +5067,11 @@ def _persist_agent_cascade(
                 "override_class_name": raw.get("override_class_name"),
                 "dedupe_group": raw.get("dedupe_group"),
                 "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
+                "clip_head_min_prob_override": raw.get("clip_head_min_prob_override"),
+                "clip_head_margin_override": raw.get("clip_head_margin_override"),
+                "extra_clip_classifier_path": raw.get("extra_clip_classifier_path"),
+                "extra_clip_min_prob": raw.get("extra_clip_min_prob"),
+                "extra_clip_margin": raw.get("extra_clip_margin"),
             }
         )
     if not any(s.get("enabled", True) for s in steps):
@@ -5173,9 +5178,29 @@ def _ensure_cascade_zip(cascade: Dict[str, Any]) -> Path:
 
     clean_cascade = _strip_internal(json.loads(json.dumps(cascade)))
     recipe_ids: List[str] = []
+    classifier_refs: List[str] = []
+    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
     for step in clean_cascade.get("steps") or []:
-        if isinstance(step, dict) and isinstance(step.get("recipe_id"), str):
+        if not isinstance(step, dict):
+            continue
+        if isinstance(step.get("recipe_id"), str):
             recipe_ids.append(step["recipe_id"])
+        if isinstance(step.get("extra_clip_classifier_path"), str) and step.get("extra_clip_classifier_path").strip():
+            raw_path = str(step.get("extra_clip_classifier_path")).strip()
+            # Cascade zips should carry classifier paths as rel_path under uploads/classifiers for portability.
+            try:
+                resolved = _resolve_agent_clip_classifier_path(raw_path)
+            except Exception:
+                resolved = None
+            if resolved and _path_is_within_root(resolved.resolve(), classifiers_root):
+                try:
+                    rel = str(resolved.resolve().relative_to(classifiers_root))
+                except Exception:
+                    rel = raw_path
+                step["extra_clip_classifier_path"] = rel
+                classifier_refs.append(rel)
+            else:
+                classifier_refs.append(raw_path)
     dedupe = clean_cascade.get("dedupe") if isinstance(clean_cascade.get("dedupe"), dict) else {}
     if isinstance(dedupe.get("clip_head_recipe_id"), str) and dedupe.get("clip_head_recipe_id"):
         recipe_ids.append(str(dedupe.get("clip_head_recipe_id")))
@@ -5188,6 +5213,14 @@ def _ensure_cascade_zip(cascade: Dict[str, Any]) -> Path:
         seen.add(rid)
         recipe_ids_unique.append(rid)
 
+    seen_cls = set()
+    classifier_refs_unique: List[str] = []
+    for ref in classifier_refs:
+        if ref in seen_cls:
+            continue
+        seen_cls.add(ref)
+        classifier_refs_unique.append(ref)
+
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("cascade.json", json.dumps(clean_cascade, ensure_ascii=False, indent=2))
@@ -5198,6 +5231,34 @@ def _ensure_cascade_zip(cascade: Dict[str, Any]) -> Path:
                     zf.write(recipe_zip, arcname=f"recipes/{rid}.zip")
                 except Exception:
                     continue
+            for rel in classifier_refs_unique:
+                try:
+                    resolved = _resolve_agent_clip_classifier_path(rel)
+                except Exception:
+                    resolved = None
+                if not resolved:
+                    continue
+                try:
+                    rel_norm = str(resolved.resolve().relative_to(classifiers_root))
+                except Exception:
+                    rel_norm = str(Path(str(rel)).as_posix())
+                try:
+                    zf.write(resolved, arcname=f"classifiers/{Path(rel_norm).as_posix()}")
+                except Exception:
+                    continue
+                try:
+                    meta_path = Path(os.path.splitext(str(resolved))[0] + ".meta.pkl").resolve()
+                except Exception:
+                    meta_path = None
+                if meta_path and meta_path.exists() and meta_path.is_file() and _path_is_within_root(meta_path, classifiers_root):
+                    try:
+                        rel_meta = str(meta_path.relative_to(classifiers_root))
+                    except Exception:
+                        rel_meta = f"{Path(rel_norm).as_posix()}.meta.pkl"
+                    try:
+                        zf.write(meta_path, arcname=f"classifiers/{Path(rel_meta).as_posix()}")
+                    except Exception:
+                        pass
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_export_failed:{exc}") from exc
     return zip_path
@@ -5956,6 +6017,9 @@ def _apply_agent_recipe_to_image(
     class_name: Optional[str],
     clip_head_min_prob_override: Optional[float] = None,
     clip_head_margin_override: Optional[float] = None,
+    extra_clip_classifier_path: Optional[str] = None,
+    extra_clip_min_prob: Optional[float] = None,
+    extra_clip_margin: Optional[float] = None,
     warnings: Optional[List[str]] = None,
 ) -> List[QwenDetection]:
     """
@@ -6490,6 +6554,90 @@ def _apply_agent_recipe_to_image(
             det.class_name = class_name
         if det.qwen_label is None and class_name:
             det.qwen_label = class_name
+
+    # Optional extra CLIP classifier filter (post-recipe), useful when a recipe is crop-bank-only.
+    if extra_clip_classifier_path:
+        target_name = str(class_name or "").strip() or str(recipe_target_class_name or "").strip()
+        if not target_name:
+            _add_warning("extra_clip_missing_class")
+        else:
+            try:
+                classifier_path = _resolve_agent_clip_classifier_path(extra_clip_classifier_path)
+                extra_head = _load_clip_head_from_classifier(classifier_path) if classifier_path else None
+            except Exception:
+                classifier_path = None
+                extra_head = None
+            if not classifier_path or not isinstance(extra_head, dict):
+                _add_warning("extra_clip_classifier_unavailable")
+            else:
+                extra_classes = extra_head.get("classes") if isinstance(extra_head.get("classes"), list) else []
+                extra_t_idx = _find_clip_head_target_index(extra_classes, target_name)
+                if extra_t_idx is None:
+                    _add_warning("extra_clip_class_missing")
+                else:
+                    extra_min = 0.5
+                    if extra_clip_min_prob is not None:
+                        try:
+                            extra_min = float(extra_clip_min_prob)
+                        except Exception:
+                            extra_min = 0.5
+                    extra_min = max(0.0, min(1.0, extra_min))
+                    extra_mar = 0.0
+                    if extra_clip_margin is not None:
+                        try:
+                            extra_mar = float(extra_clip_margin)
+                        except Exception:
+                            extra_mar = 0.0
+                    extra_mar = max(0.0, min(1.0, extra_mar))
+
+                    det_crops: List[Image.Image] = []
+                    det_refs: List[QwenDetection] = []
+                    for det in final:
+                        bbox_xyxy = _bbox_to_xyxy_pixels(det.bbox or [], pil_img.width, pil_img.height)
+                        if bbox_xyxy is None:
+                            continue
+                        x1, y1, x2, y2 = bbox_xyxy
+                        if x2 <= x1 or y2 <= y1:
+                            continue
+                        try:
+                            det_crops.append(pil_img.crop((x1, y1, x2, y2)))
+                        except Exception:
+                            continue
+                        det_refs.append(det)
+
+                    clip_model_override: Optional[str] = None
+                    try:
+                        raw_clip_model = extra_head.get("clip_model")
+                        if isinstance(raw_clip_model, str) and raw_clip_model.strip():
+                            clip_model_override = raw_clip_model.strip()
+                    except Exception:
+                        clip_model_override = None
+                    det_feats = (
+                        _clip_encode_pil_batch(det_crops, clip_model_override=clip_model_override) if det_crops else None
+                    )
+                    if det_feats is None or det_feats.size == 0:
+                        _add_warning("extra_clip_unavailable")
+                    else:
+                        proba = _clip_head_predict_proba(det_feats, extra_head)
+                        keep = (
+                            _clip_head_keep_mask(
+                                proba,
+                                target_index=int(extra_t_idx),
+                                min_prob=float(extra_min),
+                                margin=float(extra_mar),
+                            )
+                            if proba is not None
+                            else None
+                        )
+                        if keep is None:
+                            _add_warning("extra_clip_unavailable")
+                        else:
+                            kept = [d for d, ok in zip(det_refs, keep.tolist()) if ok]
+                            if len(kept) < len(det_refs):
+                                _add_warning("extra_clip_filtered")
+                            if det_refs and not kept:
+                                _add_warning("extra_clip_filtered_all")
+                            final = kept
     return _prune_detections_for_response(final, warnings=warnings)
 
 
@@ -14253,6 +14401,31 @@ class AgentApplyImageRequest(BaseModel):
             "Effective margin is max(recipe_margin, clip_head_margin_override)."
         ),
     )
+    extra_clip_classifier_path: Optional[str] = Field(
+        None,
+        description=(
+            "Optional extra CLIP classifier head (trained via the CLIP tab) to apply after the recipe runs. "
+            "Useful for adding a classifier-based filter to crop-bank recipes."
+        ),
+    )
+    extra_clip_min_prob: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum probability for the step output class when using extra_clip_classifier_path. "
+            "This filter is applied in addition to any CLIP filtering already baked into the recipe."
+        ),
+    )
+    extra_clip_margin: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional margin for the step output class when using extra_clip_classifier_path "
+            "(p(target) - max(p(other)) must be >= margin)."
+        ),
+    )
 
     @root_validator(skip_on_failure=True)
     def _ensure_agent_apply_image_payload(cls, values):  # noqa: N805
@@ -14287,6 +14460,31 @@ class AgentApplyChainStep(BaseModel):
         description=(
             "Optional extra CLIP-head margin threshold applied in addition to the recipe's baked-in head thresholds. "
             "Effective margin is max(recipe_margin, clip_head_margin_override)."
+        ),
+    )
+    extra_clip_classifier_path: Optional[str] = Field(
+        None,
+        description=(
+            "Optional extra CLIP classifier head (trained via the CLIP tab) to apply after the recipe runs. "
+            "Useful for adding a classifier-based filter to crop-bank recipes."
+        ),
+    )
+    extra_clip_min_prob: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum probability for the step output class when using extra_clip_classifier_path. "
+            "This filter is applied in addition to any CLIP filtering already baked into the recipe."
+        ),
+    )
+    extra_clip_margin: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional margin for the step output class when using extra_clip_classifier_path "
+            "(p(target) - max(p(other)) must be >= margin)."
         ),
     )
 
@@ -14385,6 +14583,9 @@ def agent_mining_apply_image(payload: AgentApplyImageRequest):
             class_name=str(class_name_val) if class_name_val is not None else None,
             clip_head_min_prob_override=payload.clip_head_min_prob_override,
             clip_head_margin_override=payload.clip_head_margin_override,
+            extra_clip_classifier_path=payload.extra_clip_classifier_path,
+            extra_clip_min_prob=payload.extra_clip_min_prob,
+            extra_clip_margin=payload.extra_clip_margin,
             warnings=warnings,
         )
     finally:
@@ -14454,6 +14655,9 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
                 class_name=class_name_str,
                 clip_head_min_prob_override=step.clip_head_min_prob_override,
                 clip_head_margin_override=step.clip_head_margin_override,
+                extra_clip_classifier_path=step.extra_clip_classifier_path,
+                extra_clip_min_prob=step.extra_clip_min_prob,
+                extra_clip_margin=step.extra_clip_margin,
                 warnings=warnings,
             )
             group_val = (step.dedupe_group or "").strip() or "default"
@@ -14800,6 +15004,7 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
 
             recipe_zip_names: List[str] = []
+            classifier_file_names: List[str] = []
             for name in names:
                 arc_path = Path(name)
                 if arc_path.is_dir():
@@ -14808,6 +15013,38 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
                     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
                 if len(arc_path.parts) >= 2 and arc_path.parts[0] == "recipes" and arc_path.suffix.lower() == ".zip":
                     recipe_zip_names.append(name)
+                if len(arc_path.parts) >= 2 and arc_path.parts[0] == "classifiers":
+                    if arc_path.name.endswith(".meta.pkl") or arc_path.suffix.lower() in CLASSIFIER_ALLOWED_EXTS:
+                        classifier_file_names.append(name)
+
+            classifier_map: Dict[str, str] = {}
+            if classifier_file_names:
+                allowed_root = (UPLOAD_ROOT / "classifiers").resolve()
+                import_tag = f"cascade_{uuid.uuid4().hex[:8]}"
+                import_root = (allowed_root / "imports" / import_tag).resolve()
+                if not _path_is_within_root(import_root, allowed_root):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                import_root.mkdir(parents=True, exist_ok=True)
+                for name in classifier_file_names:
+                    arc_path = Path(name)
+                    rel_inside = Path(*arc_path.parts[1:])
+                    # Keep the directory structure from the zip under imports/<tag>/...
+                    dest_path = (import_root / rel_inside).resolve()
+                    if not _path_is_within_root(dest_path, allowed_root):
+                        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        blob = zf.read(name)
+                    except Exception:
+                        continue
+                    try:
+                        dest_path.write_bytes(blob)
+                    except Exception:
+                        continue
+                    if not arc_path.name.endswith(".meta.pkl") and arc_path.suffix.lower() in CLASSIFIER_ALLOWED_EXTS:
+                        orig_rel = str(rel_inside.as_posix())
+                        new_rel = str((Path("imports") / import_tag / rel_inside).as_posix())
+                        classifier_map[orig_rel] = new_rel
 
             id_map: Dict[str, str] = {}
             for name in recipe_zip_names:
@@ -14844,6 +15081,17 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
                 mapped = id_map.get(rid)
                 if not mapped:
                     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_missing_recipe")
+                extra_classifier_ref = None
+                if isinstance(raw.get("extra_clip_classifier_path"), str) and raw.get("extra_clip_classifier_path").strip():
+                    extra_classifier_ref = str(raw.get("extra_clip_classifier_path")).strip()
+                    if classifier_map:
+                        mapped_classifier = classifier_map.get(extra_classifier_ref)
+                        if not mapped_classifier:
+                            raise HTTPException(
+                                status_code=HTTP_400_BAD_REQUEST,
+                                detail="agent_cascade_import_missing_classifier",
+                            )
+                        extra_classifier_ref = mapped_classifier
                 steps_out.append(
                     {
                         "enabled": bool(raw.get("enabled", True)),
@@ -14854,6 +15102,9 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
                         "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
                         "clip_head_min_prob_override": raw.get("clip_head_min_prob_override"),
                         "clip_head_margin_override": raw.get("clip_head_margin_override"),
+                        "extra_clip_classifier_path": extra_classifier_ref,
+                        "extra_clip_min_prob": raw.get("extra_clip_min_prob"),
+                        "extra_clip_margin": raw.get("extra_clip_margin"),
                     }
                 )
 

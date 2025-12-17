@@ -23,12 +23,6 @@
         );
     }
 
-    function setAgentStatus(text, tone = "info") {
-        if (!agentElements.status) return;
-        agentElements.status.textContent = text || "";
-        agentElements.status.className = `training-message ${tone}`;
-    }
-
     // 1) Define a palette of 100 colors spread around the hue wheel
     //    (First ~20 are roughly 0°, 18°, 36°, ..., 342°, then continuing).
     const colorPalette = [];
@@ -3285,218 +3279,53 @@ function setPromptHelperMessage(text, tone = "info") {
     promptHelperElements.message.className = `training-message ${tone}`;
 }
 
-    function setPromptSearchMessage(text, tone = "info") {
-        if (!promptSearchElements.message) return;
-        promptSearchElements.message.textContent = text || "";
-        promptSearchElements.message.className = `training-message ${tone}`;
-    }
+function setPromptSearchMessage(text, tone = "info") {
+    if (!promptSearchElements.message) return;
+    promptSearchElements.message.textContent = text || "";
+    promptSearchElements.message.className = `training-message ${tone}`;
+}
 
-    function setPromptRecipeMessage(text, tone = "info") {
-        if (!promptRecipeElements.message) return;
-        promptRecipeElements.message.textContent = text || "";
-        promptRecipeElements.message.className = `training-message ${tone}`;
-    }
+function setPromptRecipeMessage(text, tone = "info") {
+    if (!promptRecipeElements.message) return;
+    promptRecipeElements.message.textContent = text || "";
+    promptRecipeElements.message.className = `training-message ${tone}`;
+}
 
-    function setAgentResultsMessage(text, tone = "info") {
-        if (!agentElements.results) return;
-        const msg = document.createElement("div");
-        msg.className = `training-message ${tone}`;
-        msg.textContent = text;
-        agentElements.results.innerHTML = "";
-        agentElements.results.appendChild(msg);
-    }
+function readThresholdList(inputEl, fallback = 0.2) {
+    if (!inputEl) return [fallback];
+    const raw = inputEl.value || "";
+    const parts = raw
+        .split(/[,\s]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((s) => parseFloat(s))
+        .filter((v) => !Number.isNaN(v) && v >= 0 && v <= 1);
+    if (!parts.length) return [fallback];
+    const seen = new Set();
+    const cleaned = [];
+    parts.forEach((v) => {
+        const key = v.toFixed(4);
+        if (seen.has(key)) return;
+        seen.add(key);
+        cleaned.push(v);
+    });
+    return cleaned;
+}
 
-    function renderAgentResults(result) {
-        if (!agentElements.results) return;
-        agentElements.results.innerHTML = "";
-        if (!result || !Array.isArray(result.classes)) {
-            const empty = document.createElement("div");
-            empty.className = "training-message warn";
-            empty.textContent = "No agent mining results yet.";
-            agentElements.results.appendChild(empty);
-            return;
-        }
-        const frag = document.createDocumentFragment();
-        result.classes.forEach((cls) => {
-            const card = document.createElement("div");
-            card.className = "training-card";
-            const body = document.createElement("div");
-            body.className = "training-card__body";
-            const recipe = cls.recipe || {};
-            const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
-            const summary = recipe.summary || {};
-            const covPct = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0.0";
-            const negs = Array.isArray(recipe.negatives) ? recipe.negatives : [];
-            const negCount = negs.length;
-            body.innerHTML = `
-                <div class="training-history-row">
-                    <div class="training-history-title" style="font-size: 20px; font-weight: 700;">${escapeHtml(cls.name || cls.id)}</div>
-                    <span class="badge">${steps.length} step${steps.length === 1 ? "" : "s"}</span>
-                </div>
-                <div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>
-                <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${covPct}%) • FPs: ${summary.fps || 0}</div>
-                <div class="training-help">Negatives used: ${negCount}${recipe.use_negative_exemplars ? "" : " (disabled)"}</div>
-            `;
-            if (steps.length) {
-                const table = document.createElement("table");
-                table.className = "training-table";
-                table.innerHTML = `
-                    <thead>
-                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Gain</th><th>FPs</th><th>Cov%</th></tr>
-                    </thead>
-                `;
-                const tbody = document.createElement("tbody");
-                steps.forEach((step, idx) => {
-                    const covAfter = Number.isFinite(step.coverage_after) ? (step.coverage_after * 100).toFixed(1) : "";
-                    const row = document.createElement("tr");
-                    const label =
-                        step.type === "visual" && step.exemplar
-                            ? `Exemplar img ${step.exemplar.image_id} bbox ${Array.isArray(step.exemplar.bbox) ? step.exemplar.bbox.join(",") : ""}`
-                            : step.prompt || "";
-                    row.innerHTML = `
-                        <td>${idx + 1}</td>
-                        <td>${step.type || "text"}</td>
-                        <td>${escapeHtml(label)}</td>
-                        <td>${(step.threshold ?? "").toString()}</td>
-                        <td>${step.gain ?? ""}</td>
-                        <td>${step.fps ?? ""}</td>
-                        <td>${covAfter}</td>
-                    `;
-                    tbody.appendChild(row);
-                });
-                table.appendChild(tbody);
-                body.appendChild(table);
-                const meta = cls.meta || {};
-                const recap = document.createElement("div");
-                recap.className = "training-help";
-                const promptsTried = meta.text_prompts ? `${meta.text_prompts} text prompt${meta.text_prompts === 1 ? "" : "s"}` : "text prompt(s)";
-                const exemplarsTried = meta.exemplars !== undefined ? `${meta.exemplars} exemplar${meta.exemplars === 1 ? "" : "s"}` : "exemplars";
-                const explanation = (cls.recipe && cls.recipe.explanation) || "";
-                if (explanation) {
-                    recap.textContent = explanation;
-                } else {
-                    const covered = summary.covered ?? 0;
-                    const total = summary.total_gt ?? 0;
-                    const fps = summary.fps ?? 0;
-                    recap.textContent = `Tried ${promptsTried} at ${meta.thresholds || 0} thresholds plus ${exemplarsTried} (candidates: ${
-                        meta.total_candidates || steps.length
-                    }). Kept ${steps.length} step${steps.length === 1 ? "" : "s"} covering ${covered}/${total} GT (FPs: ${fps}).`;
-                }
-                body.appendChild(recap);
-            } else {
-                const empty = document.createElement("div");
-                empty.className = "training-help";
-                empty.textContent = "No steps proposed for this class.";
-                body.appendChild(empty);
-            }
-            const foot = document.createElement("div");
-            foot.className = "training-actions";
-            const saveBtn = document.createElement("button");
-            saveBtn.type = "button";
-            saveBtn.className = "training-button secondary";
-            saveBtn.textContent = "Save recipe";
-            saveBtn.addEventListener("click", async () => {
-                if (!agentElements.datasetSelect) return;
-                const datasetId = agentElements.datasetSelect.value;
-                const label = prompt(`Recipe label for ${cls.name || cls.id}?`, `${cls.name || cls.id} recipe`);
-                if (!label) return;
-                try {
-                    const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            dataset_id: datasetId,
-                            class_id: cls.id,
-                            class_name: cls.name,
-                            label,
-                            recipe,
-                        }),
-                    });
-                    if (!resp.ok) throw new Error(await resp.text());
-                    setAgentStatus(`Saved recipe "${label}".`, "success");
-                } catch (err) {
-                    console.error("Save recipe failed", err);
-                    setAgentStatus(`Save failed: ${err.message || err}`, "error");
-                }
-            });
-            foot.appendChild(saveBtn);
-            body.appendChild(foot);
-            card.appendChild(body);
-            frag.appendChild(card);
-        });
-        agentElements.results.appendChild(frag);
-    }
-    function readThresholdList(inputEl, fallback = 0.2) {
-        if (!inputEl) return [fallback];
-        const raw = inputEl.value || "";
-        const parts = raw
-            .split(/[,\s]+/)
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((s) => parseFloat(s))
-            .filter((v) => !Number.isNaN(v) && v >= 0 && v <= 1);
-        if (!parts.length) return [fallback];
-        const seen = new Set();
-        const cleaned = [];
-        parts.forEach((v) => {
-            const key = v.toFixed(4);
-            if (seen.has(key)) return;
-            seen.add(key);
-            cleaned.push(v);
-        });
-        return cleaned;
-    }
+function setAgentStatus(text, tone = "info") {
+    if (!agentElements.status) return;
+    agentElements.status.textContent = text || "";
+    agentElements.status.className = `training-message ${tone}`;
+}
 
-    function parseCsvNumbers(raw, { clampMin = null, clampMax = null } = {}) {
-        const parts = String(raw || "")
-            .split(/[,\\s]+/)
-            .map((p) => p.trim())
-            .filter(Boolean);
-        const vals = [];
-        parts.forEach((p) => {
-            const num = parseFloat(p);
-            if (!Number.isNaN(num)) {
-                let v = num;
-                if (clampMin !== null) v = Math.max(clampMin, v);
-                if (clampMax !== null) v = Math.min(clampMax, v);
-                vals.push(v);
-            }
-        });
-        return vals;
-    }
-
-    function setAgentStatus(text, tone = "info") {
-        if (!agentElements.status) return;
-        agentElements.status.textContent = text || "";
-        agentElements.status.className = `training-message ${tone}`;
-    }
-
-    function setAgentResultsMessage(text, tone = "info") {
-        if (!agentElements.results) return;
-        const msg = document.createElement("div");
-        msg.className = `training-message ${tone}`;
-        msg.textContent = text;
-        agentElements.results.innerHTML = "";
-        agentElements.results.appendChild(msg);
-    }
-
-    function parseCsvNumbers(raw, { clampMin = null, clampMax = null } = {}) {
-        const parts = String(raw || "")
-            .split(/[,\\s]+/)
-            .map((p) => p.trim())
-            .filter(Boolean);
-        const vals = [];
-        parts.forEach((p) => {
-            const num = parseFloat(p);
-            if (!Number.isNaN(num)) {
-                let v = num;
-                if (clampMin !== null) v = Math.max(clampMin, v);
-                if (clampMax !== null) v = Math.min(clampMax, v);
-                vals.push(v);
-            }
-        });
-        return vals;
-    }
+function setAgentResultsMessage(text, tone = "info") {
+    if (!agentElements.results) return;
+    const msg = document.createElement("div");
+    msg.className = `training-message ${tone}`;
+    msg.textContent = text;
+    agentElements.results.innerHTML = "";
+    agentElements.results.appendChild(msg);
+}
 
 function updatePromptHelperDatasetSummary(entry) {
     if (!promptHelperElements.datasetSummary) return;
@@ -12655,37 +12484,37 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            const foot = document.createElement("div");
 	            foot.className = "training-actions";
 	            const saveBtn = document.createElement("button");
-            saveBtn.type = "button";
-            saveBtn.className = "training-button secondary";
-            saveBtn.textContent = "Save recipe";
-            saveBtn.addEventListener("click", async () => {
-                const datasetId = agentElements.datasetSelect?.value;
-                if (!datasetId) {
-                    setAgentStatus("Select a dataset before saving.", "warn");
-                    return;
-                }
-                const label = prompt(`Recipe label for ${cls.name || cls.id}?`, `${cls.name || cls.id} recipe`);
-                if (!label) return;
-                try {
-                    const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            dataset_id: datasetId,
-                            class_id: cls.id,
-                            class_name: cls.name,
-                            label,
-                            recipe,
-                        }),
-                    });
-                    if (!resp.ok) throw new Error(await resp.text());
-                    setAgentStatus(`Saved recipe "${label}".`, "success");
-                    fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
-                } catch (err) {
-                    console.error("Save recipe failed", err);
-                    setAgentStatus(`Save failed: ${err.message || err}`, "error");
-                }
-            });
+	            saveBtn.type = "button";
+	            saveBtn.className = "training-button secondary";
+	            saveBtn.textContent = "Save recipe";
+	            saveBtn.addEventListener("click", async () => {
+	                const datasetId = agentElements.datasetSelect?.value;
+	                if (!datasetId) {
+	                    setAgentStatus("Select a dataset before saving.", "warn");
+	                    return;
+	                }
+	                const label = prompt(`Recipe label for ${cls.name || cls.id}?`, `${cls.name || cls.id} recipe`);
+	                if (!label) return;
+	                try {
+	                    const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
+	                        method: "POST",
+	                        headers: { "Content-Type": "application/json" },
+	                        body: JSON.stringify({
+	                            dataset_id: datasetId,
+	                            class_id: cls.id,
+	                            class_name: cls.name,
+	                            label,
+	                            recipe,
+	                        }),
+	                    });
+	                    if (!resp.ok) throw new Error(await resp.text());
+	                    setAgentStatus(`Saved recipe "${label}".`, "success");
+	                    fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
+	                } catch (err) {
+	                    console.error("Save recipe failed", err);
+	                    setAgentStatus(`Save failed: ${err.message || err}`, "error");
+	                }
+	            });
 	            foot.appendChild(saveBtn);
 	            body.appendChild(foot);
 	            card.appendChild(body);

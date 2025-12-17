@@ -1066,28 +1066,28 @@
 			                        </div>
 				                        <div class="training-grid">
 					                            <div>
-					                                <label for="agentClipHeadSelect">Pretrained CLIP head (optional)<span class="help-icon" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections.&#10;The head is embedded into saved recipe zips (portable).&#10;When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.">?</span></label>
+					                                <label for="agentClipHeadSelect">Pretrained CLIP head (optional)<span class="help-icon" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections.&#10;The head (and its tuned thresholds) is embedded into saved recipe zips (portable).&#10;When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.&#10;Tip: you can also tighten CLIP thresholds later at inference time per cascade step (cumulative).">?</span></label>
 						                                <select id="agentClipHeadSelect">
 						                                    <option value="">(none)</option>
 						                                </select>
 						                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead. Recommended: keep auto-tune on and use a high target precision for clean recipes.</div>
 						                            </div>
 					                            <div class="training-field training-field--inline">
-					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the validation split so recipes are clean (few false positives).&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
+					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the validation split so recipes are clean (few false positives).&#10;These tuned thresholds are baked into the saved recipe ZIP and used whenever the recipe runs.&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
 					                                <input type="checkbox" id="agentClipHeadAutoTune" checked />
 					                            </div>
 					                            <div>
-					                                <label for="agentClipHeadTargetPrecision">Target precision<span class="help-icon" title="CLIP head auto-tune only.&#10;Precision = fraction of kept detections that match ground-truth on the validation split.&#10;Higher = fewer false positives (cleaner), but can miss objects.&#10;Try 0.90–0.98 for clean recipes.">?</span></label>
+					                                <label for="agentClipHeadTargetPrecision">Target precision<span class="help-icon" title="CLIP head auto-tune only.&#10;Precision = fraction of kept detections that match ground-truth on the validation split.&#10;Higher = fewer false positives (cleaner), but can miss objects.&#10;Try 0.90–0.98 for clean recipes.&#10;This controls the per-class thresholds that get baked into the saved recipe ZIP.">?</span></label>
 					                                <input type="number" id="agentClipHeadTargetPrecision" step="0.02" min="0" max="1" value="0.9" />
 					                            </div>
 				                        </div>
 				                        <div class="training-grid">
 					                            <div>
-					                                <label for="agentClipHeadMinProb">Manual head min prob<span class="help-icon" title="CLIP head manual mode only (auto-tune OFF).&#10;Minimum probability required for the target class.&#10;Higher = fewer detections, cleaner results; lower = more detections (more false positives).">?</span></label>
+					                                <label for="agentClipHeadMinProb">Manual head min prob<span class="help-icon" title="CLIP head manual mode only (auto-tune OFF).&#10;Minimum probability required for the target class.&#10;Higher = fewer detections, cleaner results; lower = more detections (more false positives).&#10;This value is baked into the saved recipe ZIP.">?</span></label>
 					                                <input type="number" id="agentClipHeadMinProb" step="0.05" min="0" max="1" value="0.5" />
 					                            </div>
 				                            <div>
-				                                <label for="agentClipHeadMargin">Manual head margin<span class="help-icon" title="CLIP head manual mode only (auto-tune OFF).&#10;Require the target class probability to beat the best other class by this margin.&#10;0 disables the margin check.&#10;Higher can reduce confusion between similar classes.">?</span></label>
+				                                <label for="agentClipHeadMargin">Manual head margin<span class="help-icon" title="CLIP head manual mode only (auto-tune OFF).&#10;Require the target class probability to beat the best other class by this margin.&#10;0 disables the margin check.&#10;Higher can reduce confusion between similar classes.&#10;This value is baked into the saved recipe ZIP.">?</span></label>
 				                                <input type="number" id="agentClipHeadMargin" step="0.05" min="0" max="1" value="0.0" />
 				                            </div>
 				                        </div>

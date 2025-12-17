@@ -9126,17 +9126,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	    }
 
-	    function createSam3CascadeStep({ recipeId = null } = {}) {
-	        return {
-	            uid: generateUUID(),
-	            enabled: true,
-	            recipe_id: recipeId || null,
-	            dedupe_group: "",
-	            participate_cross_class_dedupe: true,
-	            override_enabled: false,
-	            override_class_name: null,
-	        };
-	    }
+		    function createSam3CascadeStep({ recipeId = null } = {}) {
+		        return {
+		            uid: generateUUID(),
+		            enabled: true,
+		            recipe_id: recipeId || null,
+		            dedupe_group: "",
+		            participate_cross_class_dedupe: true,
+		            override_enabled: false,
+		            override_class_name: null,
+		            clip_head_min_prob_override: null,
+		            clip_head_margin_override: null,
+		        };
+		    }
 
 	    function ensureAtLeastOneCascadeStep() {
 	        if (!Array.isArray(sam3CascadeState.steps)) {
@@ -9427,19 +9429,72 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                step.override_class_name = overrideSelect.value || null;
 	            });
 	            overrideLabel.appendChild(overrideToggle);
-	            overrideLabel.appendChild(document.createTextNode("Override output class"));
-	            overrideWrap.appendChild(overrideLabel);
-	            overrideWrap.appendChild(overrideSelect);
+		            overrideLabel.appendChild(document.createTextNode("Override output class"));
+		            overrideWrap.appendChild(overrideLabel);
+		            overrideWrap.appendChild(overrideSelect);
 
-	            grid.appendChild(recipeWrap);
-	            grid.appendChild(groupWrap);
-	            grid.appendChild(crossWrap);
-	            grid.appendChild(overrideWrap);
-	            card.appendChild(grid);
+		            const clipMinWrap = document.createElement("div");
+		            const clipMinLabel = document.createElement("label");
+		            clipMinLabel.textContent = "Extra CLIP min prob";
+		            clipMinLabel.title =
+		                "Optional: apply an extra CLIP-head probability check for this step.\n" +
+		                "This is cumulative with the recipe's baked-in CLIP head thresholds.\n" +
+		                "Effective min prob = max(recipe min prob, this value).\n" +
+		                "Only applies to recipes that include an embedded pretrained CLIP head.";
+		            const clipMinInput = document.createElement("input");
+		            clipMinInput.type = "number";
+		            clipMinInput.step = "0.05";
+		            clipMinInput.min = "0";
+		            clipMinInput.max = "1";
+		            clipMinInput.placeholder = "(use recipe)";
+		            clipMinInput.title = clipMinLabel.title;
+		            clipMinInput.value =
+		                typeof step.clip_head_min_prob_override === "number" && Number.isFinite(step.clip_head_min_prob_override)
+		                    ? String(step.clip_head_min_prob_override)
+		                    : "";
+		            clipMinInput.addEventListener("input", () => {
+		                step.clip_head_min_prob_override = clamp01(clipMinInput.value, null);
+		            });
+		            clipMinWrap.appendChild(clipMinLabel);
+		            clipMinWrap.appendChild(clipMinInput);
 
-	            root.appendChild(card);
-	        });
-	    }
+		            const clipMarginWrap = document.createElement("div");
+		            const clipMarginLabel = document.createElement("label");
+		            clipMarginLabel.textContent = "Extra CLIP margin";
+		            clipMarginLabel.title =
+		                "Optional: apply an extra CLIP-head margin check for this step.\n" +
+		                "Margin means p(target) must beat the best other class by Δ.\n" +
+		                "This is cumulative with the recipe's baked-in CLIP head thresholds.\n" +
+		                "Effective margin = max(recipe margin, this value).\n" +
+		                "Only applies to recipes that include an embedded pretrained CLIP head.";
+		            const clipMarginInput = document.createElement("input");
+		            clipMarginInput.type = "number";
+		            clipMarginInput.step = "0.05";
+		            clipMarginInput.min = "0";
+		            clipMarginInput.max = "1";
+		            clipMarginInput.placeholder = "(use recipe)";
+		            clipMarginInput.title = clipMarginLabel.title;
+		            clipMarginInput.value =
+		                typeof step.clip_head_margin_override === "number" && Number.isFinite(step.clip_head_margin_override)
+		                    ? String(step.clip_head_margin_override)
+		                    : "";
+		            clipMarginInput.addEventListener("input", () => {
+		                step.clip_head_margin_override = clamp01(clipMarginInput.value, null);
+		            });
+		            clipMarginWrap.appendChild(clipMarginLabel);
+		            clipMarginWrap.appendChild(clipMarginInput);
+
+		            grid.appendChild(recipeWrap);
+		            grid.appendChild(groupWrap);
+		            grid.appendChild(crossWrap);
+		            grid.appendChild(overrideWrap);
+		            grid.appendChild(clipMinWrap);
+		            grid.appendChild(clipMarginWrap);
+		            card.appendChild(grid);
+
+		            root.appendChild(card);
+		        });
+		    }
 
 	    function clamp01(val, fallback) {
 	        if (val === "" || val === null || typeof val === "undefined") {
@@ -9538,16 +9593,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const stepsRaw = cascade?.steps;
 	        const dedupeRaw = cascade?.dedupe;
 	        if (Array.isArray(stepsRaw) && stepsRaw.length) {
-	            sam3CascadeState.steps = stepsRaw.map((raw) => {
-	                const step = createSam3CascadeStep({ recipeId: raw.recipe_id || null });
-	                step.enabled = raw.enabled !== false;
-	                step.dedupe_group = raw.dedupe_group || "";
-	                step.participate_cross_class_dedupe = raw.participate_cross_class_dedupe !== false;
-	                const overrideName = raw.override_class_name || findClassNameById(raw.override_class_id);
-	                if (overrideName) {
-	                    step.override_enabled = true;
-	                    step.override_class_name = overrideName;
-	                } else {
+		            sam3CascadeState.steps = stepsRaw.map((raw) => {
+		                const step = createSam3CascadeStep({ recipeId: raw.recipe_id || null });
+		                step.enabled = raw.enabled !== false;
+		                step.dedupe_group = raw.dedupe_group || "";
+		                step.participate_cross_class_dedupe = raw.participate_cross_class_dedupe !== false;
+		                step.clip_head_min_prob_override = clamp01(raw.clip_head_min_prob_override, null);
+		                step.clip_head_margin_override = clamp01(raw.clip_head_margin_override, null);
+		                const overrideName = raw.override_class_name || findClassNameById(raw.override_class_id);
+		                if (overrideName) {
+		                    step.override_enabled = true;
+		                    step.override_class_name = overrideName;
+		                } else {
 	                    step.override_enabled = false;
 	                    step.override_class_name = null;
 	                }
@@ -9628,15 +9685,23 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                }
 	                overrideId = typeof classes[overrideName] !== "undefined" ? classes[overrideName] : null;
 	            }
-	            stepsPayload.push({
-	                enabled: step.enabled !== false,
-	                recipe_id: rid,
-	                override_class_id: overrideId,
-	                override_class_name: overrideName,
-	                dedupe_group: step.dedupe_group || "",
-	                participate_cross_class_dedupe: step.participate_cross_class_dedupe !== false,
-	            });
-	        }
+		            stepsPayload.push({
+		                enabled: step.enabled !== false,
+		                recipe_id: rid,
+		                override_class_id: overrideId,
+		                override_class_name: overrideName,
+		                dedupe_group: step.dedupe_group || "",
+		                participate_cross_class_dedupe: step.participate_cross_class_dedupe !== false,
+		                clip_head_min_prob_override:
+		                    typeof step.clip_head_min_prob_override === "number" && Number.isFinite(step.clip_head_min_prob_override)
+		                        ? step.clip_head_min_prob_override
+		                        : null,
+		                clip_head_margin_override:
+		                    typeof step.clip_head_margin_override === "number" && Number.isFinite(step.clip_head_margin_override)
+		                        ? step.clip_head_margin_override
+		                        : null,
+		            });
+		        }
 	        if (!stepsPayload.some((s) => s.enabled)) {
 	            setSam3RecipeStatus("Enable at least one step before saving.", "warn");
 	            return;
@@ -9796,15 +9861,23 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                }
 	                overrideId = typeof classes[overrideName] !== "undefined" ? classes[overrideName] : null;
 	            }
-	            stepsPayload.push({
-	                enabled: true,
-	                recipe_id: step.recipe_id,
-	                override_class_id: overrideId,
-	                override_class_name: overrideName,
-	                dedupe_group: step.dedupe_group || "",
-	                participate_cross_class_dedupe: step.participate_cross_class_dedupe !== false,
-	            });
-	        }
+		            stepsPayload.push({
+		                enabled: true,
+		                recipe_id: step.recipe_id,
+		                override_class_id: overrideId,
+		                override_class_name: overrideName,
+		                dedupe_group: step.dedupe_group || "",
+		                participate_cross_class_dedupe: step.participate_cross_class_dedupe !== false,
+		                clip_head_min_prob_override:
+		                    typeof step.clip_head_min_prob_override === "number" && Number.isFinite(step.clip_head_min_prob_override)
+		                        ? step.clip_head_min_prob_override
+		                        : null,
+		                clip_head_margin_override:
+		                    typeof step.clip_head_margin_override === "number" && Number.isFinite(step.clip_head_margin_override)
+		                        ? step.clip_head_margin_override
+		                        : null,
+		            });
+		        }
 	        if (!stepsPayload.length) {
 	            setSam3RecipeStatus("Add at least one enabled step with a recipe before applying.", "warn");
 	            return;

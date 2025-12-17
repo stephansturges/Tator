@@ -951,6 +951,7 @@
         steps: [],
         recipePresets: [],
         cascadePresets: [],
+        clipClassifiers: [],
     };
     const DEFAULT_QWEN_METADATA = {
         id: "default",
@@ -9101,6 +9102,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         refreshSam3CascadeControls();
         loadSam3RecipePresets().catch((err) => console.error("Load recipes failed", err));
         loadSam3CascadePresets().catch((err) => console.error("Load cascades failed", err));
+        loadSam3ClipClassifiers().catch((err) => console.error("Load CLIP classifiers failed", err));
     }
 
     function setSam3TextStatus(message, variant = "info") {
@@ -9139,6 +9141,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            override_class_name: null,
 		            clip_head_min_prob_override: null,
 		            clip_head_margin_override: null,
+		            extra_clip_classifier_path: null,
+		            extra_clip_min_prob: 0.9,
+		            extra_clip_margin: 0.0,
 		        };
 		    }
 
@@ -9274,6 +9279,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }));
 	        const classNames = orderedClassNames();
 	        const classOptions = classNames.map((n) => ({ value: n, label: n }));
+        const clipClassifiers = Array.isArray(sam3CascadeState.clipClassifiers) ? sam3CascadeState.clipClassifiers : [];
+        const clipClassifierOptions = clipClassifiers
+            .filter((entry) => entry && entry.rel_path)
+            .map((entry) => {
+                const bits = [];
+                bits.push(entry.filename || entry.rel_path);
+                if (entry.n_classes) bits.push(`${entry.n_classes} classes`);
+                if (entry.clip_model) bits.push(entry.clip_model);
+                return { value: entry.rel_path, label: bits.join(" • ") };
+            });
 
 	        sam3CascadeState.steps.forEach((step, index) => {
 	            if (!step) return;
@@ -9486,12 +9501,84 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            clipMarginWrap.appendChild(clipMarginLabel);
 		            clipMarginWrap.appendChild(clipMarginInput);
 
+		            const extraClipModelWrap = document.createElement("div");
+		            const extraClipModelLabel = document.createElement("label");
+		            extraClipModelLabel.textContent = "Extra CLIP model";
+		            extraClipModelLabel.title =
+		                "Optional: apply an additional CLIP classifier filter after this recipe runs.\n" +
+		                "This is useful for crop-bank recipes (crops-only) that do not include an embedded CLIP head.\n" +
+		                "Detections must pass the recipe's own filters AND this extra classifier filter.\n" +
+		                "The classifier is matched to the step's output class by name.";
+		            const extraClipModelSelect = document.createElement("select");
+		            extraClipModelSelect.title = extraClipModelLabel.title;
+		            const clipPlaceholder = clipClassifierOptions.length ? "(none)" : "No CLIP classifiers found";
+		            populateSelectOptions(extraClipModelSelect, clipClassifierOptions, step.extra_clip_classifier_path || "", clipPlaceholder);
+		            extraClipModelSelect.disabled = clipClassifierOptions.length === 0;
+		            extraClipModelWrap.appendChild(extraClipModelLabel);
+		            extraClipModelWrap.appendChild(extraClipModelSelect);
+
+		            const extraClipThresholdWrap = document.createElement("div");
+		            const extraClipThresholdLabel = document.createElement("label");
+		            extraClipThresholdLabel.textContent = "Extra CLIP threshold";
+		            extraClipThresholdLabel.title =
+		                "Extra CLIP classifier filter threshold.\n" +
+		                "Higher = cleaner (fewer false positives), but can miss objects.\n" +
+		                "Only used when an Extra CLIP model is selected.";
+		            const extraClipThresholdRow = document.createElement("div");
+		            extraClipThresholdRow.style.display = "flex";
+		            extraClipThresholdRow.style.alignItems = "center";
+		            extraClipThresholdRow.style.gap = "8px";
+		            const extraClipThresholdLow = document.createElement("span");
+		            extraClipThresholdLow.className = "training-help";
+		            extraClipThresholdLow.style.whiteSpace = "nowrap";
+		            extraClipThresholdLow.textContent = "More (noisier)";
+		            const extraClipThresholdInput = document.createElement("input");
+		            extraClipThresholdInput.type = "range";
+		            extraClipThresholdInput.min = "0";
+		            extraClipThresholdInput.max = "1";
+		            extraClipThresholdInput.step = "0.01";
+		            extraClipThresholdInput.style.flex = "1";
+		            const initialExtraThr =
+		                typeof step.extra_clip_min_prob === "number" && Number.isFinite(step.extra_clip_min_prob) ? step.extra_clip_min_prob : 0.9;
+		            extraClipThresholdInput.value = String(Math.min(1, Math.max(0, initialExtraThr)));
+		            extraClipThresholdInput.disabled = !step.extra_clip_classifier_path;
+		            extraClipThresholdInput.title = extraClipThresholdLabel.title;
+		            const extraClipThresholdHigh = document.createElement("span");
+		            extraClipThresholdHigh.className = "training-help";
+		            extraClipThresholdHigh.style.whiteSpace = "nowrap";
+		            extraClipThresholdHigh.textContent = "Cleaner";
+		            extraClipThresholdRow.appendChild(extraClipThresholdLow);
+		            extraClipThresholdRow.appendChild(extraClipThresholdInput);
+		            extraClipThresholdRow.appendChild(extraClipThresholdHigh);
+		            const extraClipThresholdValue = document.createElement("div");
+		            extraClipThresholdValue.className = "training-help";
+		            const updateExtraThrLabel = () => {
+		                const val = parseFloat(extraClipThresholdInput.value);
+		                extraClipThresholdValue.textContent = Number.isFinite(val) ? `Threshold: ${val.toFixed(2)}` : "";
+		            };
+		            updateExtraThrLabel();
+		            extraClipThresholdInput.addEventListener("input", () => {
+		                const val = parseFloat(extraClipThresholdInput.value);
+		                step.extra_clip_min_prob = Number.isFinite(val) ? Math.min(1, Math.max(0, val)) : step.extra_clip_min_prob;
+		                updateExtraThrLabel();
+		            });
+		            extraClipModelSelect.addEventListener("change", () => {
+		                step.extra_clip_classifier_path = extraClipModelSelect.value || null;
+		                extraClipThresholdInput.disabled = !step.extra_clip_classifier_path;
+		                refreshSam3CascadeControls();
+		            });
+		            extraClipThresholdWrap.appendChild(extraClipThresholdLabel);
+		            extraClipThresholdWrap.appendChild(extraClipThresholdRow);
+		            extraClipThresholdWrap.appendChild(extraClipThresholdValue);
+
 		            grid.appendChild(recipeWrap);
 		            grid.appendChild(groupWrap);
 		            grid.appendChild(crossWrap);
 		            grid.appendChild(overrideWrap);
 		            grid.appendChild(clipMinWrap);
 		            grid.appendChild(clipMarginWrap);
+		            grid.appendChild(extraClipModelWrap);
+		            grid.appendChild(extraClipThresholdWrap);
 		            card.appendChild(grid);
 
 		            root.appendChild(card);
@@ -9602,6 +9689,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                step.participate_cross_class_dedupe = raw.participate_cross_class_dedupe !== false;
 		                step.clip_head_min_prob_override = clamp01(raw.clip_head_min_prob_override, null);
 		                step.clip_head_margin_override = clamp01(raw.clip_head_margin_override, null);
+		                step.extra_clip_classifier_path = raw.extra_clip_classifier_path || null;
+		                step.extra_clip_min_prob = clamp01(raw.extra_clip_min_prob, 0.9);
+		                step.extra_clip_margin = clamp01(raw.extra_clip_margin, 0.0);
 		                const overrideName = raw.override_class_name || findClassNameById(raw.override_class_id);
 		                if (overrideName) {
 		                    step.override_enabled = true;
@@ -9701,6 +9791,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                clip_head_margin_override:
 		                    typeof step.clip_head_margin_override === "number" && Number.isFinite(step.clip_head_margin_override)
 		                        ? step.clip_head_margin_override
+		                        : null,
+		                extra_clip_classifier_path: step.extra_clip_classifier_path || null,
+		                extra_clip_min_prob:
+		                    typeof step.extra_clip_min_prob === "number" && Number.isFinite(step.extra_clip_min_prob)
+		                        ? step.extra_clip_min_prob
+		                        : null,
+		                extra_clip_margin:
+		                    typeof step.extra_clip_margin === "number" && Number.isFinite(step.extra_clip_margin)
+		                        ? step.extra_clip_margin
 		                        : null,
 		            });
 		        }
@@ -9877,6 +9976,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                clip_head_margin_override:
 		                    typeof step.clip_head_margin_override === "number" && Number.isFinite(step.clip_head_margin_override)
 		                        ? step.clip_head_margin_override
+		                        : null,
+		                extra_clip_classifier_path: step.extra_clip_classifier_path || null,
+		                extra_clip_min_prob:
+		                    typeof step.extra_clip_min_prob === "number" && Number.isFinite(step.extra_clip_min_prob)
+		                        ? step.extra_clip_min_prob
+		                        : null,
+		                extra_clip_margin:
+		                    typeof step.extra_clip_margin === "number" && Number.isFinite(step.extra_clip_margin)
+		                        ? step.extra_clip_margin
 		                        : null,
 		            });
 		        }
@@ -16921,6 +17029,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         } catch (err) {
             console.error("Load recipe presets failed", err);
             setSam3RecipeStatus("Failed to load recipe presets.", "warn");
+        }
+    }
+
+    async function loadSam3ClipClassifiers() {
+        try {
+            const resp = await fetch(`${API_ROOT}/clip/classifiers`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            sam3CascadeState.clipClassifiers = Array.isArray(data) ? data : [];
+            renderSam3CascadeSteps();
+            refreshSam3CascadeControls();
+        } catch (err) {
+            console.warn("Load CLIP classifiers failed", err);
+            sam3CascadeState.clipClassifiers = [];
         }
     }
 

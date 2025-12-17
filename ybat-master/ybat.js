@@ -12439,7 +12439,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         console.log("Multi-point mode =>", multiPointMode, "samMultiPointAutoMode =>", samMultiPointAutoMode);
     }
 
-    function updateSamModeState(checked, options = {}) {
+	    function updateSamModeState(checked, options = {}) {
         const { preservePoints = false } = options;
         samMode = !!checked;
         if (samModeCheckbox) {
@@ -12460,14 +12460,37 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         refreshPolygonDetailVisibility();
         refreshSam3SimilarityVisibility();
-        console.log("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
-    }
+	        console.log("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
+	    }
 
-	    function renderAgentResults(result) {
-	        if (!agentElements.results) return;
-	        agentElements.results.innerHTML = "";
-	        if (!result || !Array.isArray(result.classes)) {
-	            setAgentResultsMessage("No agent mining results yet.", "warn");
+	    function normalizeClassNameForMatch(name) {
+	        return String(name || "")
+	            .trim()
+	            .toLowerCase()
+	            .replace(/[^a-z0-9]+/g, "");
+	    }
+
+	    function findClipHeadTargetIndex(classesList, className) {
+	        if (!Array.isArray(classesList) || !classesList.length) {
+	            return null;
+	        }
+	        const target = normalizeClassNameForMatch(className);
+	        if (!target) {
+	            return null;
+	        }
+	        for (let idx = 0; idx < classesList.length; idx += 1) {
+	            if (normalizeClassNameForMatch(classesList[idx]) === target) {
+	                return idx;
+	            }
+	        }
+	        return null;
+	    }
+
+		    function renderAgentResults(result) {
+		        if (!agentElements.results) return;
+		        agentElements.results.innerHTML = "";
+		        if (!result || !Array.isArray(result.classes)) {
+		            setAgentResultsMessage("No agent mining results yet.", "warn");
 	            return;
 	        }
 	        const frag = document.createDocumentFragment();
@@ -12496,18 +12519,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 	            const covPct = Number.isFinite(recall) ? (recall * 100).toFixed(1) : "0.0";
 	            const precPct = Number.isFinite(precision) ? (precision * 100).toFixed(1) : "0.0";
-	            const detPct = Number.isFinite(detRate) ? (detRate * 100).toFixed(1) : "0.0";
-	            const modeLabel = recipe.mode || (steps.length ? "legacy" : "sam3_greedy");
-	            const displayName = escapeHtml(cls.name || cls.id);
-	            const showIdSuffix = !!(cls.name && cls.id !== undefined && cls.id !== null && String(cls.id).length);
+		            const detPct = Number.isFinite(detRate) ? (detRate * 100).toFixed(1) : "0.0";
+		            const modeLabel = recipe.mode || (steps.length ? "legacy" : "sam3_greedy");
+		            const displayName = escapeHtml(cls.name || cls.id);
+		            const showIdSuffix = !!(cls.name && cls.id !== undefined && cls.id !== null && String(cls.id).length);
 
-	            summaryEl.innerHTML = `
-	                <div class="training-card__title">
-	                    ${displayName}${showIdSuffix ? ` <span class="training-help" style="font-weight: 400;">(id ${escapeHtml(cls.id)})</span>` : ""}
-	                    <span class="badge" style="margin-left: 8px;">${escapeHtml(modeLabel)}</span>
-	                </div>
-	                <div class="training-help" style="font-weight: 400;">
-	                    Coverage: ${matched}/${totalGt} (${covPct}%) • Precision: ${precPct}% • FPs: ${fps} • Duplicates: ${duplicates} • Det rate: ${detPct}%
+		            summaryEl.innerHTML = `
+		                <div class="training-card__title">
+		                    ${displayName}${showIdSuffix ? ` <span class="training-help" style="font-weight: 400;" title="Dataset category id (COCO category_id). This may differ from your labelmap index.">(cat id ${escapeHtml(cls.id)})</span>` : ""}
+		                    <span class="badge" style="margin-left: 8px;">${escapeHtml(modeLabel)}</span>
+		                </div>
+		                <div class="training-help" style="font-weight: 400;">
+		                    Coverage: ${matched}/${totalGt} (${covPct}%) • Precision: ${precPct}% • FPs: ${fps} • Duplicates: ${duplicates} • Det rate: ${detPct}%
 	                </div>
 	            `;
 	            card.appendChild(summaryEl);
@@ -12525,17 +12548,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            } else if (negatives.length) {
 	                configBits.push(`negatives=${negatives.length || 0} (disabled)`);
 	            }
-	            if (recipe.clip_head) {
-	                const head = recipe.clip_head || {};
-	                const nClasses = Array.isArray(head.classes) ? head.classes.length : null;
-	                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
-	                const margin = Number.isFinite(head.margin) ? head.margin : null;
-		                const parts = ["pretrained CLIP head"];
-	                if (nClasses) parts.push(`${nClasses} classes`);
-	                if (minProb !== null) parts.push(`p≥${minProb}`);
-	                if (margin !== null && margin > 0) parts.push(`Δ≥${margin}`);
-	                configBits.push(parts.join(" "));
-	            }
+		            if (recipe.clip_head) {
+		                const head = recipe.clip_head || {};
+		                const headClasses = Array.isArray(head.classes) ? head.classes : [];
+		                const nClasses = headClasses.length ? headClasses.length : null;
+		                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
+		                const margin = Number.isFinite(head.margin) ? head.margin : null;
+			                const parts = ["pretrained CLIP head"];
+		                const headIdx = findClipHeadTargetIndex(headClasses, cls.name || recipe.class_name || "");
+		                if (nClasses) parts.push(`${nClasses} classes`);
+		                if (headIdx !== null) parts.push(`head idx ${headIdx}`);
+		                if (minProb !== null) parts.push(`p≥${minProb}`);
+		                if (margin !== null && margin > 0) parts.push(`Δ≥${margin}`);
+		                configBits.push(parts.join(" "));
+		            }
 	            if (typeof params.seed_threshold === "number") configBits.push(`seed thr ${params.seed_threshold}`);
 	            if (typeof params.expand_threshold === "number") configBits.push(`expand thr ${params.expand_threshold}`);
 	            if (typeof params.max_visual_seeds === "number") configBits.push(`seeds ${params.max_visual_seeds}`);

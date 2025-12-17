@@ -6033,6 +6033,7 @@ def _apply_agent_recipe_to_image(
             clip_head_margin = 0.0
     clip_head: Optional[Dict[str, Any]] = None
     clip_head_target_index: Optional[int] = None
+    clip_head_missing_class = False
     if recipe_id:
         recipe_root = (AGENT_MINING_RECIPES_ROOT / str(recipe_id)).resolve()
         if _path_is_within_root(recipe_root, AGENT_MINING_RECIPES_ROOT.resolve()):
@@ -6051,6 +6052,8 @@ def _apply_agent_recipe_to_image(
                 pass
         classes_list = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
         clip_head_target_index = _find_clip_head_target_index(classes_list, recipe_target_class_name)
+        if clip_head_target_index is None and classes_list and recipe_target_class_name:
+            clip_head_missing_class = True
 
     def _recipe_param(key: str) -> Any:
         if key in params_combined:
@@ -6113,6 +6116,9 @@ def _apply_agent_recipe_to_image(
             return
         if code not in warnings:
             warnings.append(code)
+
+    if clip_head_missing_class:
+        _add_warning("clip_head_class_missing")
 
     def _crop_embed_key(prefix: str, crop_ref: Optional[str]) -> Optional[str]:
         if not crop_ref:
@@ -6913,16 +6919,16 @@ def _evaluate_sam3_greedy_recipe(
             per_image_rows[int(img_id)] = rows
             if log_fn and log_every > 0 and idx % log_every == 0:
                 try:
-                    log_fn(f"Processed {idx}/{len(image_ids)} val images for class {cat_id}")
+                    log_fn(f"Processed {idx}/{len(image_ids)} val images for class_id {cat_id}")
                 except Exception:
                     pass
 
         if log_fn and total_gt:
             try:
                 if observed_rows == 0:
-                    log_fn(f"CLIP head sweep: no base detections for class {cat_id} (gt={total_gt}).")
+                    log_fn(f"CLIP head sweep: no base detections for class_id {cat_id} (gt={total_gt}).")
                 elif observed_with_prob == 0:
-                    log_fn(f"CLIP head sweep: base dets={observed_rows} but no head probs for class {cat_id} (gt={total_gt}).")
+                    log_fn(f"CLIP head sweep: base dets={observed_rows} but no head probs for class_id {cat_id} (gt={total_gt}).")
             except Exception:
                 pass
 
@@ -6980,12 +6986,12 @@ def _evaluate_sam3_greedy_recipe(
                 if int(best_summary.get("preds") or 0) == 0 and observed_rows > 0:
                     if observed_prob_max is not None:
                         log_fn(
-                            f"CLIP head sweep: class {cat_id} prob_range={float(observed_prob_min or observed_prob_max):.3f}..{float(observed_prob_max):.3f} "
+                            f"CLIP head sweep: class_id {cat_id} prob_range={float(observed_prob_min or observed_prob_max):.3f}..{float(observed_prob_max):.3f} "
                             f"over {observed_rows} dets; tuned min_prob={float(best_summary.get('clip_head_min_prob') or 0.0):.3f}"
                         )
                     else:
                         log_fn(
-                            f"CLIP head sweep: class {cat_id} had {observed_rows} dets but no head probs; tuned min_prob={float(best_summary.get('clip_head_min_prob') or 0.0):.3f}"
+                            f"CLIP head sweep: class_id {cat_id} had {observed_rows} dets but no head probs; tuned min_prob={float(best_summary.get('clip_head_min_prob') or 0.0):.3f}"
                         )
             except Exception:
                 pass

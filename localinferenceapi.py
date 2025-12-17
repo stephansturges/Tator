@@ -91,24 +91,16 @@ GPT_OSS_MODEL_ID = os.environ.get("PROMPT_LLM_MODEL_ID", "openai/gpt-oss-20b")
 GPT_OSS_PIPELINE = None
 GPT_OSS_PIPELINE_ERROR: Optional[Exception] = None
 _GPT_OSS_PIPELINE_LOCK = threading.Lock()
-_HARMONY_ENCODING = tiktoken.get_encoding("o200k_harmony")
-_HARMONY_START = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|start|>", allowed_special="all")[0]])
-_HARMONY_END = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|end|>", allowed_special="all")[0]])
-_HARMONY_MESSAGE = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|message|>", allowed_special="all")[0]])
-_HARMONY_CHANNEL = _HARMONY_ENCODING.decode([_HARMONY_ENCODING.encode("<|channel|>", allowed_special="all")[0]])
-_HARMONY_RETURN_ID = _HARMONY_ENCODING.encode("<|return|>", allowed_special="all")[0]
-_HARMONY_CALL_ID = _HARMONY_ENCODING.encode("<|call|>", allowed_special="all")[0]
-_HARMONY_CONSTRAIN_ID = _HARMONY_ENCODING.encode("<|constrain|>", allowed_special="all")[0]
-_HARMONY_STOP_IDS = [_HARMONY_RETURN_ID, _HARMONY_CALL_ID]
-_HARMONY_SPECIAL_IDS = {
-    _HARMONY_ENCODING.encode("<|start|>", allowed_special="all")[0],
-    _HARMONY_ENCODING.encode("<|end|>", allowed_special="all")[0],
-    _HARMONY_ENCODING.encode("<|message|>", allowed_special="all")[0],
-    _HARMONY_ENCODING.encode("<|channel|>", allowed_special="all")[0],
-    _HARMONY_RETURN_ID,
-    _HARMONY_CALL_ID,
-    _HARMONY_CONSTRAIN_ID,
-}
+
+# GPT-OSS uses the "Harmony" chat format. These are literal marker strings used when formatting
+# prompts; token ids (for stopping) are resolved from the pipeline tokenizer at runtime.
+_HARMONY_START = "<|start|>"
+_HARMONY_END = "<|end|>"
+_HARMONY_MESSAGE = "<|message|>"
+_HARMONY_CHANNEL = "<|channel|>"
+_HARMONY_RETURN = "<|return|>"
+_HARMONY_CALL = "<|call|>"
+_HARMONY_CONSTRAIN = "<|constrain|>"
 
 BASE64_IMAGE_MAX_BYTES = int(os.environ.get("IMAGE_MAX_BYTES", str(15 * 1024 * 1024)))
 BASE64_IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "4096"))
@@ -655,6 +647,51 @@ def _build_backend_for_variant(variant: str):
     return _Sam1Backend()
 
 
+def _sam3_clear_device_pinned_caches(model: Any) -> None:
+    """
+    SAM3 upstream precomputes some internal caches on `cuda` (i.e. cuda:0) during module
+    construction to help torch.compile. Those caches are stored in plain Python containers and
+    are NOT moved by `model.to(cuda:N)`, which can break multi-GPU inference (device mismatch).
+
+    We don't rely on torch.compile in this server path, so it's safe to clear these caches after
+    moving the model to its target device.
+    """
+    if model is None:
+        return
+    try:
+        modules = model.modules()
+    except Exception:
+        return
+    for m in modules:
+        try:
+            cls_name = getattr(m, "__class__", type(m)).__name__
+            cls_mod = getattr(getattr(m, "__class__", type(m)), "__module__", "")
+        except Exception:
+            cls_name = ""
+            cls_mod = ""
+        # Position encoding cache: dict of tensors keyed by shape (upstream).
+        if cls_name == "PositionEmbeddingSine" or str(cls_mod).endswith("position_encoding"):
+            try:
+                cache = getattr(m, "cache", None)
+                if isinstance(cache, dict):
+                    cache.clear()
+            except Exception:
+                pass
+        # Decoder cache: precomputed coord cache tuple (upstream).
+        if hasattr(m, "compilable_cord_cache"):
+            try:
+                setattr(m, "compilable_cord_cache", None)
+            except Exception:
+                pass
+        if hasattr(m, "coord_cache"):
+            try:
+                cache = getattr(m, "coord_cache", None)
+                if isinstance(cache, dict):
+                    cache.clear()
+            except Exception:
+                pass
+
+
 def _ensure_sam3_text_runtime():
     global sam3_text_model, sam3_text_processor, sam3_text_device
     with sam3_text_lock:
@@ -684,6 +721,7 @@ def _ensure_sam3_text_runtime():
                     enable_segmentation=enable_seg,
                     bpe_path=str(SAM3_BPE_PATH),
                 ).to(device)
+            _sam3_clear_device_pinned_caches(model)
             processor = Sam3ImageProcessor(model, device=device_str)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
@@ -2452,17 +2490,42 @@ def _generate_prompt_text(
         stop_ids = None
         pad_id = None
         if tokenizer is not None:
-            stop_ids = list({tok for tok in _HARMONY_STOP_IDS if tok is not None})
-            try:
-                end_id = _HARMONY_ENCODING.encode("<|end|>", allowed_special="all")[0]
-                stop_ids.append(end_id)
-            except Exception:
-                pass
+            stop_ids = []
+            unk_id = getattr(tokenizer, "unk_token_id", None)
+
+            def _maybe_add_stop_token(token_str: str) -> None:
+                nonlocal stop_ids
+                if not token_str:
+                    return
+                # Prefer direct vocab lookup for special tokens.
+                try:
+                    tok_id = tokenizer.convert_tokens_to_ids(token_str)
+                except Exception:
+                    tok_id = None
+                try:
+                    if tok_id is not None and int(tok_id) >= 0:
+                        if unk_id is None or int(tok_id) != int(unk_id):
+                            stop_ids.append(int(tok_id))
+                            return
+                except Exception:
+                    pass
+                # Fallback: only accept tokenizer.encode if it maps to a single token id.
+                try:
+                    ids = tokenizer.encode(token_str, add_special_tokens=False)
+                    if isinstance(ids, list) and len(ids) == 1 and isinstance(ids[0], int):
+                        stop_ids.append(int(ids[0]))
+                except Exception:
+                    return
+
+            _maybe_add_stop_token(_HARMONY_RETURN)
+            _maybe_add_stop_token(_HARMONY_CALL)
+            _maybe_add_stop_token(_HARMONY_END)
             try:
                 if tokenizer.eos_token_id is not None:
-                    stop_ids.append(tokenizer.eos_token_id)
+                    stop_ids.append(int(tokenizer.eos_token_id))
             except Exception:
                 pass
+            stop_ids = sorted({int(s) for s in stop_ids if s is not None}) if stop_ids else None
             if tokenizer.pad_token_id is not None:
                 pad_id = tokenizer.pad_token_id
             elif tokenizer.eos_token_id is not None:
@@ -8072,6 +8135,7 @@ def _build_sam3_text_processor_for_device(device: torch.device) -> Tuple[Any, An
         )
         if device:
             model = model.to(device)
+        _sam3_clear_device_pinned_caches(model)
         processor = Sam3ImageProcessor(model, device=device_str)
         return model, processor
     except Exception as exc:  # noqa: BLE001

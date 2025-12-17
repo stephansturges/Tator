@@ -15867,9 +15867,14 @@ def _prepare_sam3_training_split(
             src_path = _find_image_source(file_name)
             if src_path is None:
                 continue
-            dst_path = split_root / split_name / "images" / Path(file_name)
+            rel_name = _normalise_relative_path(file_name)
+            if rel_name.is_absolute():
+                rel_name = Path(rel_name.name)
+            dst_path = split_root / split_name / rel_name
             _link_or_copy_file(src_path, dst_path)
-            images_out.append(info)
+            info_out = dict(info)
+            info_out["file_name"] = rel_name.as_posix()
+            images_out.append(info_out)
             anns_out.extend(ann_by_image.get(img_id, []))
         ann_path = split_root / split_name / "_annotations.coco.json"
         _write_coco_annotations(
@@ -16294,7 +16299,14 @@ def _save_sam3_config(cfg: OmegaConf, job_id: str) -> Tuple[str, Path]:
     return f"configs/generated/{config_file.name}", config_file
 
 
-def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: int) -> None:
+def _start_sam3_training_worker(
+    job: Sam3TrainingJob,
+    cfg: OmegaConf,
+    num_gpus: int,
+    *,
+    val_score_thresh: Optional[float] = None,
+    val_max_dets: Optional[int] = None,
+) -> None:
     def worker():
         proc: Optional[subprocess.Popen] = None
         tail_logs: deque[str] = deque(maxlen=50)
@@ -16321,6 +16333,16 @@ def _start_sam3_training_worker(job: Sam3TrainingJob, cfg: OmegaConf, num_gpus: 
             env.setdefault("NCCL_DEBUG", "INFO")
             # Enable runtime monkeypatches (loaded via sitecustomize.py) to keep vendor tree untouched.
             env.setdefault("SAM3_MONKEYPATCH", "1")
+            if val_score_thresh is not None:
+                try:
+                    env["SAM3_VAL_SCORE_THRESH"] = str(float(val_score_thresh))
+                except Exception:
+                    pass
+            if val_max_dets is not None:
+                try:
+                    env["SAM3_VAL_MAX_DETS"] = str(int(val_max_dets))
+                except Exception:
+                    pass
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(SAM3_VENDOR_ROOT),
@@ -17521,11 +17543,9 @@ def _build_sam3_config(
         try:
             cfg.trainer.meters.val.roboflow100.detection.dump_dir = f"{cfg.launcher.experiment_log_dir}/dumps/local"
             cfg.trainer.meters.val.roboflow100.detection.pred_file_evaluators[0].gt_path = cfg.paths.val_ann_file
-            # Apply val filtering/tuning
-            if payload.val_score_thresh is not None:
-                cfg.trainer.meters.val.roboflow100.detection.min_confidence = float(payload.val_score_thresh)
+            # Apply val tuning
             if payload.val_max_dets is not None:
-                cfg.trainer.meters.val.roboflow100.detection.max_dets = int(payload.val_max_dets)
+                cfg.trainer.meters.val.roboflow100.detection.maxdets = int(payload.val_max_dets)
         except Exception:
             pass
     # Prompt vocab overrides: allow multiple variants per class and optional randomization during training
@@ -17613,7 +17633,13 @@ def create_sam3_training_job(payload: Sam3TrainRequest):
             _sam3_job_log(job, msg)
         _sam3_job_log(job, "Job queued")
     logger.info("[sam3-train %s] dataset=%s gpus=%s", job_id[:8], payload.dataset_id, num_gpus)
-    _start_sam3_training_worker(job, cfg, num_gpus)
+    _start_sam3_training_worker(
+        job,
+        cfg,
+        num_gpus,
+        val_score_thresh=payload.val_score_thresh,
+        val_max_dets=payload.val_max_dets,
+    )
     return {"job_id": job_id}
 
 

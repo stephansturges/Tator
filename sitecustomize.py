@@ -176,41 +176,48 @@ def _patch_logging_smoothing() -> None:
         pass
 
     # Monkeypatch COCO writer to filter low-score detections and allow higher max dets.
-    SCORE_THRESH = float(os.environ.get("SAM3_VAL_SCORE_THRESH", "0.2"))
-    MAX_DETS = int(os.environ.get("SAM3_VAL_MAX_DETS", "1000"))
+    try:
+        SCORE_THRESH = float(os.environ.get("SAM3_VAL_SCORE_THRESH", "0.2"))
+    except Exception:
+        SCORE_THRESH = 0.2
+    try:
+        MAX_DETS = int(os.environ.get("SAM3_VAL_MAX_DETS", "1000"))
+    except Exception:
+        MAX_DETS = 1000
+    MAX_DETS = max(1, MAX_DETS)
 
     if not getattr(coco_writer, "_tator_patch", False):
         coco_writer._tator_patch = True
 
-        orig_gather = coco_writer.CocoWriter.gather_and_merge_predictions
+        orig_gather = getattr(getattr(coco_writer, "PredictionDumper", None), "gather_and_merge_predictions", None)
+        if orig_gather is not None:
+            def _gather_and_merge_predictions_filtered(self):
+                logging.info(
+                    "Prediction Dumper: Gathering predictions with score>=%.3f and maxdets=%s",
+                    SCORE_THRESH,
+                    MAX_DETS,
+                )
+                merged = orig_gather(self)
+                # Filter by score
+                filtered = [p for p in merged if p.get("score", 0) >= SCORE_THRESH]
+                if not filtered:
+                    return filtered
+                # Re-limit per image to MAX_DETS keeping top scores
+                preds_by_image = {}
+                for p in filtered:
+                    img_id = p.get("image_id")
+                    if img_id is None:
+                        continue
+                    preds_by_image.setdefault(img_id, []).append(p)
+                out = []
+                for img_id, plist in preds_by_image.items():
+                    plist.sort(key=lambda x: x.get("score", 0), reverse=True)
+                    out.extend(plist[:MAX_DETS])
+                return out
 
-        def _gather_and_merge_predictions_filtered(self):
-            logging.info(
-                "Prediction Dumper: Gathering predictions with score>=%.3f and maxdets=%s",
-                SCORE_THRESH,
-                MAX_DETS,
+            coco_writer.PredictionDumper.gather_and_merge_predictions = (
+                _gather_and_merge_predictions_filtered
             )
-            merged = orig_gather(self)
-            # Filter by score
-            filtered = [p for p in merged if p.get("score", 0) >= SCORE_THRESH]
-            if not filtered:
-                return filtered
-            # Re-limit per image to MAX_DETS keeping top scores
-            preds_by_image = {}
-            for p in filtered:
-                img_id = p.get("image_id")
-                if img_id is None:
-                    continue
-                preds_by_image.setdefault(img_id, []).append(p)
-            out = []
-            for img_id, plist in preds_by_image.items():
-                plist.sort(key=lambda x: x.get("score", 0), reverse=True)
-                out.extend(plist[:MAX_DETS])
-            return out
-
-        coco_writer.CocoWriter.gather_and_merge_predictions = (
-            _gather_and_merge_predictions_filtered
-        )
 
     # Monkeypatch COCOevalCustom to raise maxDets for recall metrics.
     if not getattr(coco_eval_offline, "_tator_patch", False):

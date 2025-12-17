@@ -1295,10 +1295,12 @@ const sam3TrainState = {
         exemplarPoolValue: null,
         clusterExemplars: null,
         clipGuard: null,
-        clipHeadSelect: null,
-        clipHeadMinProb: null,
-        clipHeadMargin: null,
-        useNegExemplars: null,
+	        clipHeadSelect: null,
+	        clipHeadMinProb: null,
+	        clipHeadMargin: null,
+	        clipHeadAutoTune: null,
+	        clipHeadTargetPrecision: null,
+	        useNegExemplars: null,
         maxNegExemplars: null,
         negStrength: null,
         classesInput: null,
@@ -12383,12 +12385,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                const nClasses = headClasses.length ? headClasses.length : null;
 	                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
 	                const margin = Number.isFinite(head.margin) ? head.margin : null;
+	                const autoTuned = !!head.auto_tuned;
+	                const targetPrecision = Number.isFinite(head.target_precision) ? head.target_precision : null;
 	                const parts = ["pretrained CLIP head"];
 	                const headIdx = findClipHeadTargetIndex(headClasses, cls.name || recipe.class_name || "");
 	                if (nClasses) parts.push(`${nClasses} classes`);
 	                if (headIdx !== null) parts.push(`head idx ${headIdx}`);
 	                if (minProb !== null) parts.push(`p≥${minProb}`);
 	                if (margin !== null && margin > 0) parts.push(`Δ≥${margin}`);
+	                if (autoTuned && targetPrecision !== null) parts.push(`tune prec≥${targetPrecision}`);
 	                configBits.push(parts.join(" "));
 	            }
 	            if (typeof params.seed_threshold === "number") configBits.push(`seed thr ${params.seed_threshold}`);
@@ -12639,9 +12644,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     function syncAgentClipHeadControls() {
         const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
+        const autoTune = !!(agentElements.clipHeadAutoTune && agentElements.clipHeadAutoTune.checked);
 
-        if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !hasHead;
-        if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !hasHead;
+        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.disabled = !hasHead;
+        if (agentElements.clipHeadTargetPrecision) agentElements.clipHeadTargetPrecision.disabled = !hasHead || !autoTune;
+        if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !hasHead || autoTune;
+        if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !hasHead || autoTune;
 
         const disableCropBank = hasHead;
         if (agentElements.exemplars) agentElements.exemplars.disabled = disableCropBank;
@@ -12814,6 +12822,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        let useClipGuard = !!(agentElements.clipGuard && agentElements.clipGuard.checked);
 	        const clipHeadPathRaw = agentElements.clipHeadSelect?.value || "";
 	        const clipHeadClassifierPath = clipHeadPathRaw ? clipHeadPathRaw : null;
+	        const clipHeadAutoTune = !!(agentElements.clipHeadAutoTune && agentElements.clipHeadAutoTune.checked);
+	        const clipHeadTargetPrecisionRaw = readNumberInput(agentElements.clipHeadTargetPrecision, { integer: false });
+	        const clipHeadTargetPrecision = Number.isFinite(clipHeadTargetPrecisionRaw)
+	            ? Math.max(0, Math.min(1, clipHeadTargetPrecisionRaw))
+	            : 0.9;
 	        const clipHeadMinProbRaw = readNumberInput(agentElements.clipHeadMinProb, { integer: false });
 	        const clipHeadMinProb = Number.isFinite(clipHeadMinProbRaw) ? Math.max(0, Math.min(1, clipHeadMinProbRaw)) : 0.5;
 	        const clipHeadMarginRaw = readNumberInput(agentElements.clipHeadMargin, { integer: false });
@@ -12884,12 +12897,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            prompt_llm_max_prompts: promptMaxPrompts,
 	            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
 	            prompt_max_new_tokens: promptMaxTokens,
-	            extra_prompts_by_class: extraPromptsByClass,
-	            clip_head_classifier_path: clipHeadClassifierPath,
-	            clip_head_min_prob: clipHeadMinProb,
-	            clip_head_margin: clipHeadMargin,
+		            extra_prompts_by_class: extraPromptsByClass,
+		            clip_head_classifier_path: clipHeadClassifierPath,
+		            clip_head_min_prob: clipHeadMinProb,
+		            clip_head_margin: clipHeadMargin,
+		            clip_head_auto_tune: clipHeadAutoTune,
+		            clip_head_target_precision: clipHeadTargetPrecision,
 
-		            positives_per_class: positivesPerClass,
+			            positives_per_class: positivesPerClass,
 		            exemplar_candidate_mode: exemplarPoolMode,
 		            exemplar_candidate_value: exemplarPoolValue,
 		            cluster_exemplars: clipHeadClassifierPath ? false : !!(agentElements.clusterExemplars && agentElements.clusterExemplars.checked),
@@ -13152,6 +13167,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.clusterExemplars = document.getElementById("agentClusterExemplars");
 	        agentElements.clipGuard = document.getElementById("agentClipGuard");
 	        agentElements.clipHeadSelect = document.getElementById("agentClipHeadSelect");
+	        agentElements.clipHeadAutoTune = document.getElementById("agentClipHeadAutoTune");
+	        agentElements.clipHeadTargetPrecision = document.getElementById("agentClipHeadTargetPrecision");
 	        agentElements.clipHeadMinProb = document.getElementById("agentClipHeadMinProb");
 	        agentElements.clipHeadMargin = document.getElementById("agentClipHeadMargin");
 	        agentElements.useNegExemplars = document.getElementById("agentUseNegExemplars");
@@ -13188,6 +13205,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipGuard) agentElements.clipGuard.checked = true;
 	        if (agentElements.clipGuard) agentElements.clipGuard.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
+	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
 	        const syncBeamUi = () => {

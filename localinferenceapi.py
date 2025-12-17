@@ -6787,6 +6787,67 @@ def _infer_sam3_greedy_recipe_on_image(
     return combined
 
 
+def _build_clip_head_sweep_grid(
+    payload: "AgentMiningRequest",
+    *,
+    base_min_prob: float,
+    base_margin: float,
+) -> Tuple[List[float], List[float], float]:
+    """Return (min_prob candidates, margin candidates, target_precision)."""
+    try:
+        base_min = float(base_min_prob)
+    except Exception:
+        base_min = 0.5
+    try:
+        base_mar = float(base_margin)
+    except Exception:
+        base_mar = 0.0
+    base_min = max(0.0, min(1.0, base_min))
+    base_mar = max(0.0, min(1.0, base_mar))
+    try:
+        target_precision = float(getattr(payload, "clip_head_target_precision", 0.9))
+    except Exception:
+        target_precision = 0.9
+    target_precision = max(0.0, min(1.0, target_precision))
+
+    auto_tune = True
+    try:
+        auto_tune = bool(getattr(payload, "clip_head_auto_tune", True))
+    except Exception:
+        auto_tune = True
+
+    if not auto_tune:
+        return [base_min], [base_mar], target_precision
+
+    min_probs = [round(i * 0.05, 3) for i in range(0, 20)]  # 0.00..0.95
+    min_probs.extend([0.975, 0.99])
+    min_probs.append(base_min)
+    min_probs = sorted({float(max(0.0, min(1.0, p))) for p in min_probs})
+
+    margins = [0.0, 0.05, 0.1, 0.2]
+    margins.append(base_mar)
+    margins = sorted({float(max(0.0, min(1.0, m))) for m in margins})
+    return min_probs, margins, target_precision
+
+
+def _score_head_tuning_candidate(
+    *,
+    matched: int,
+    fps: int,
+    precision: float,
+    min_prob: float,
+    margin: float,
+    target_precision: float,
+) -> Tuple[int, float, int, float, float, float]:
+    meets_target = bool(matched > 0 and precision >= float(target_precision))
+    if meets_target:
+        # Priority: reach target precision, then maximize matches (coverage), then minimize FPs.
+        # Tie-breaker: prefer the least-restrictive thresholds that still hit the target (more robust).
+        return (1, float(matched), -int(fps), float(precision), -float(min_prob), -float(margin))
+    # If nothing hits the target, pick the best precision we can get, then maximize matches.
+    return (0, float(precision), int(matched), -int(fps), -float(min_prob), -float(margin))
+
+
 def _evaluate_sam3_greedy_recipe(
     *,
     cat_id: int,
@@ -6814,26 +6875,11 @@ def _evaluate_sam3_greedy_recipe(
     if head_active:
         # Sweep head thresholds without re-running SAM3: run the greedy recipe once with no head thresholding,
         # keep per-detection head probabilities, then apply different thresholds during scoring.
-        fixed_margin = float(clip_head_margin)
-        sweep_min_probs = [
-            0.0,
-            0.1,
-            0.2,
-            0.3,
-            0.4,
-            0.5,
-            0.6,
-            0.7,
-            0.8,
-            0.9,
-        ]
-        try:
-            base_min = float(clip_head_min_prob)
-            if 0.0 <= base_min <= 1.0:
-                sweep_min_probs.append(base_min)
-        except Exception:
-            pass
-        sweep_min_probs = sorted({float(max(0.0, min(1.0, p))) for p in sweep_min_probs})
+        sweep_min_probs, sweep_margins, target_precision = _build_clip_head_sweep_grid(
+            payload,
+            base_min_prob=float(clip_head_min_prob),
+            base_margin=float(clip_head_margin),
+        )
 
         per_image_rows: Dict[int, List[Tuple[float, float, float, Optional[int]]]] = {}
         observed_prob_min: Optional[float] = None
@@ -6919,54 +6965,63 @@ def _evaluate_sam3_greedy_recipe(
                 pass
 
         best_summary: Optional[Dict[str, Any]] = None
-        best_key: Optional[Tuple[int, int, float, float]] = None
-        for min_prob in sweep_min_probs:
-            matched = 0
-            fps = 0
-            duplicates = 0
-            preds = 0
-            det_images = 0
-            for img_id in image_ids:
-                rows = per_image_rows.get(int(img_id)) or []
-                used: set[int] = set()
-                any_det = False
-                for prob, margin, best_iou, best_idx in rows:
-                    if prob < float(min_prob):
-                        continue
-                    if fixed_margin > 0.0 and margin < fixed_margin:
-                        continue
-                    any_det = True
-                    preds += 1
-                    if best_idx is not None and best_iou >= float(payload.iou_threshold):
-                        if best_idx in used:
-                            duplicates += 1
+        best_key: Optional[Tuple[int, float, int, float, float, float]] = None
+        for margin_thr in sweep_margins:
+            for min_prob in sweep_min_probs:
+                matched = 0
+                fps = 0
+                duplicates = 0
+                preds = 0
+                det_images = 0
+                for img_id in image_ids:
+                    rows = per_image_rows.get(int(img_id)) or []
+                    used: set[int] = set()
+                    any_det = False
+                    for prob, margin, best_iou, best_idx in rows:
+                        if prob < float(min_prob):
+                            continue
+                        if float(margin_thr) > 0.0 and margin < float(margin_thr):
+                            continue
+                        any_det = True
+                        preds += 1
+                        if best_idx is not None and best_iou >= float(payload.iou_threshold):
+                            if best_idx in used:
+                                duplicates += 1
+                            else:
+                                used.add(best_idx)
+                                matched += 1
                         else:
-                            used.add(best_idx)
-                            matched += 1
-                    else:
-                        fps += 1
-                if any_det:
-                    det_images += 1
-            recall = matched / total_gt if total_gt else 0.0
-            precision = matched / max(1, matched + fps)
-            det_rate = det_images / len(image_ids) if image_ids else 0.0
-            # Prefer higher coverage, then fewer FPs, then higher precision; finally prefer higher threshold.
-            key = (int(matched), -int(fps), float(precision), float(min_prob))
-            if best_key is None or key > best_key:
-                best_key = key
-                best_summary = {
-                    "gts": total_gt,
-                    "matches": matched,
-                    "fps": fps,
-                    "duplicates": duplicates,
-                    "preds": preds,
-                    "precision": precision,
-                    "recall": recall,
-                    "coverage_rate": recall,
-                    "det_rate": det_rate,
-                    "clip_head_min_prob": float(min_prob),
-                    "clip_head_margin": float(fixed_margin),
-                }
+                            fps += 1
+                    if any_det:
+                        det_images += 1
+                recall = matched / total_gt if total_gt else 0.0
+                precision = matched / max(1, matched + fps)
+                det_rate = det_images / len(image_ids) if image_ids else 0.0
+                key = _score_head_tuning_candidate(
+                    matched=int(matched),
+                    fps=int(fps),
+                    precision=float(precision),
+                    min_prob=float(min_prob),
+                    margin=float(margin_thr),
+                    target_precision=float(target_precision),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_summary = {
+                        "gts": total_gt,
+                        "matches": matched,
+                        "fps": fps,
+                        "duplicates": duplicates,
+                        "preds": preds,
+                        "precision": precision,
+                        "recall": recall,
+                        "coverage_rate": recall,
+                        "det_rate": det_rate,
+                        "clip_head_min_prob": float(min_prob),
+                        "clip_head_margin": float(margin_thr),
+                        "clip_head_target_precision": float(target_precision),
+                        "clip_head_meets_target_precision": bool(precision >= float(target_precision)),
+                    }
         if log_fn and total_gt and best_summary is not None:
             try:
                 if int(best_summary.get("preds") or 0) == 0 and observed_rows > 0:
@@ -6994,6 +7049,8 @@ def _evaluate_sam3_greedy_recipe(
                 "det_rate": 0.0,
                 "clip_head_min_prob": float(clip_head_min_prob),
                 "clip_head_margin": float(clip_head_margin),
+                "clip_head_target_precision": float(target_precision),
+                "clip_head_meets_target_precision": False,
             }
         return best_summary
 
@@ -7120,7 +7177,7 @@ class _Sam3GreedyEvalWorker:
         per_class_overrides: Optional[Dict[int, Dict[str, Any]]] = None,
         clip_head: Optional[Dict[str, Any]],
         head_sweep_min_probs: Sequence[float],
-        head_fixed_margin: float,
+        head_sweep_margins: Sequence[float],
         log_fn: Optional[Callable[[str], None]] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> Dict[int, Dict[str, Any]]:
@@ -7292,32 +7349,35 @@ class _Sam3GreedyEvalWorker:
                                 debug_prob_max = float(prob)
 
                 if head_active:
-                    by_prob: Dict[float, Dict[str, int]] = {}
-                    for min_prob in head_sweep_min_probs:
-                        counts = _counts_init()
-                        used: set[int] = set()
-                        any_det = False
-                        for prob, margin, best_iou, best_idx in rows:
-                            if prob < float(min_prob):
-                                continue
-                            if head_fixed_margin > 0.0 and margin < float(head_fixed_margin):
-                                continue
-                            any_det = True
-                            counts["preds"] += 1
-                            if best_idx is not None and best_iou >= float(payload.iou_threshold):
-                                if best_idx in used:
-                                    counts["duplicates"] += 1
+                    by_margin: Dict[float, Dict[float, Dict[str, int]]] = {}
+                    for margin_thr in head_sweep_margins:
+                        by_prob: Dict[float, Dict[str, int]] = {}
+                        for min_prob in head_sweep_min_probs:
+                            counts = _counts_init()
+                            used: set[int] = set()
+                            any_det = False
+                            for prob, margin, best_iou, best_idx in rows:
+                                if prob < float(min_prob):
+                                    continue
+                                if float(margin_thr) > 0.0 and margin < float(margin_thr):
+                                    continue
+                                any_det = True
+                                counts["preds"] += 1
+                                if best_idx is not None and best_iou >= float(payload.iou_threshold):
+                                    if best_idx in used:
+                                        counts["duplicates"] += 1
+                                    else:
+                                        used.add(best_idx)
+                                        counts["matches"] += 1
                                 else:
-                                    used.add(best_idx)
-                                    counts["matches"] += 1
-                            else:
-                                counts["fps"] += 1
-                        if any_det:
-                            counts["det_images"] = 1
-                        by_prob[float(min_prob)] = counts
+                                    counts["fps"] += 1
+                            if any_det:
+                                counts["det_images"] = 1
+                            by_prob[float(min_prob)] = counts
+                        by_margin[float(margin_thr)] = by_prob
                     out[cid_int] = {
                         "head_active": True,
-                        "by_prob": by_prob,
+                        "by_margin": by_margin,
                         "debug": {
                             "base_dets": int(debug_base_dets),
                             "with_prob": int(debug_with_prob),
@@ -7402,27 +7462,11 @@ def _evaluate_sam3_greedy_recipes_image_first(
     if total_images <= 0:
         return {}
 
-    # Head threshold sweep list (applied only when clip_head is active for a class).
-    head_sweep_min_probs = [
-        0.0,
-        0.1,
-        0.2,
-        0.3,
-        0.4,
-        0.5,
-        0.6,
-        0.7,
-        0.8,
-        0.9,
-    ]
-    try:
-        base_min = float(payload.clip_head_min_prob)
-        if 0.0 <= base_min <= 1.0:
-            head_sweep_min_probs.append(base_min)
-    except Exception:
-        pass
-    head_sweep_min_probs = sorted({float(max(0.0, min(1.0, p))) for p in head_sweep_min_probs})
-    head_fixed_margin = float(payload.clip_head_margin)
+    head_sweep_min_probs, head_sweep_margins, head_target_precision = _build_clip_head_sweep_grid(
+        payload,
+        base_min_prob=float(payload.clip_head_min_prob),
+        base_margin=float(payload.clip_head_margin),
+    )
 
     # Build image entries upfront (id, path).
     image_entries: List[Tuple[int, str]] = []
@@ -7464,7 +7508,9 @@ def _evaluate_sam3_greedy_recipes_image_first(
         if head_active:
             agg[cid_int] = {
                 "head_active": True,
-                "by_prob": {p: _counts_init() for p in head_sweep_min_probs},
+                "by_margin": {
+                    float(m): {float(p): _counts_init() for p in head_sweep_min_probs} for m in head_sweep_margins
+                },
                 "total_gt": total_gt,
                 "debug": {"base_dets": 0, "with_prob": 0, "prob_min": None, "prob_max": None},
             }
@@ -7526,17 +7572,21 @@ def _evaluate_sam3_greedy_recipes_image_first(
                     if not dst:
                         continue
                     if data.get("head_active"):
-                        by_prob = data.get("by_prob") or {}
-                        dst_by_prob = dst.get("by_prob") or {}
-                        for p, counts in by_prob.items():
-                            dst_counts = dst_by_prob.get(float(p))
-                            if not isinstance(dst_counts, dict) or not isinstance(counts, dict):
+                        by_margin = data.get("by_margin") or {}
+                        dst_by_margin = dst.get("by_margin") or {}
+                        for m, by_prob in by_margin.items():
+                            dst_by_prob = dst_by_margin.get(float(m))
+                            if not isinstance(dst_by_prob, dict) or not isinstance(by_prob, dict):
                                 continue
-                            for k in ("matches", "fps", "duplicates", "preds", "det_images"):
-                                try:
-                                    dst_counts[k] = int(dst_counts.get(k, 0)) + int(counts.get(k, 0))
-                                except Exception:
+                            for p, counts in by_prob.items():
+                                dst_counts = dst_by_prob.get(float(p))
+                                if not isinstance(dst_counts, dict) or not isinstance(counts, dict):
                                     continue
+                                for k in ("matches", "fps", "duplicates", "preds", "det_images"):
+                                    try:
+                                        dst_counts[k] = int(dst_counts.get(k, 0)) + int(counts.get(k, 0))
+                                    except Exception:
+                                        continue
                         src_debug = data.get("debug") if isinstance(data, dict) else None
                         dst_debug = dst.get("debug") if isinstance(dst, dict) else None
                         if isinstance(src_debug, dict) and isinstance(dst_debug, dict):
@@ -7608,7 +7658,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
                         per_class_overrides=per_class_overrides,
                         clip_head=clip_head,
                         head_sweep_min_probs=head_sweep_min_probs,
-                        head_fixed_margin=head_fixed_margin,
+                        head_sweep_margins=head_sweep_margins,
                         log_fn=log_fn,
                         cancel_event=cancel_event,
                     )
@@ -7654,36 +7704,49 @@ def _evaluate_sam3_greedy_recipes_image_first(
         total_gt = int(data.get("total_gt") or 0)
         if data.get("head_active"):
             best_summary: Optional[Dict[str, Any]] = None
-            best_key: Optional[Tuple[int, int, float, float]] = None
-            by_prob = data.get("by_prob") or {}
-            for min_prob in head_sweep_min_probs:
-                counts = by_prob.get(float(min_prob)) if isinstance(by_prob, dict) else None
-                if not isinstance(counts, dict):
+            best_key: Optional[Tuple[int, float, int, float, float, float]] = None
+            by_margin = data.get("by_margin") or {}
+            for margin_thr in head_sweep_margins:
+                by_prob = by_margin.get(float(margin_thr)) if isinstance(by_margin, dict) else None
+                if not isinstance(by_prob, dict):
                     continue
-                matched = int(counts.get("matches") or 0)
-                fps = int(counts.get("fps") or 0)
-                duplicates = int(counts.get("duplicates") or 0)
-                preds = int(counts.get("preds") or 0)
-                det_images = int(counts.get("det_images") or 0)
-                recall = matched / total_gt if total_gt else 0.0
-                precision = matched / max(1, matched + fps)
-                det_rate = det_images / total_images if total_images else 0.0
-                key = (matched, -fps, float(precision), float(min_prob))
-                if best_key is None or key > best_key:
-                    best_key = key
-                    best_summary = {
-                        "gts": total_gt,
-                        "matches": matched,
-                        "fps": fps,
-                        "duplicates": duplicates,
-                        "preds": preds,
-                        "precision": precision,
-                        "recall": recall,
-                        "coverage_rate": recall,
-                        "det_rate": det_rate,
-                        "clip_head_min_prob": float(min_prob),
-                        "clip_head_margin": float(head_fixed_margin),
-                    }
+                for min_prob in head_sweep_min_probs:
+                    counts = by_prob.get(float(min_prob))
+                    if not isinstance(counts, dict):
+                        continue
+                    matched = int(counts.get("matches") or 0)
+                    fps = int(counts.get("fps") or 0)
+                    duplicates = int(counts.get("duplicates") or 0)
+                    preds = int(counts.get("preds") or 0)
+                    det_images = int(counts.get("det_images") or 0)
+                    recall = matched / total_gt if total_gt else 0.0
+                    precision = matched / max(1, matched + fps)
+                    det_rate = det_images / total_images if total_images else 0.0
+                    key = _score_head_tuning_candidate(
+                        matched=int(matched),
+                        fps=int(fps),
+                        precision=float(precision),
+                        min_prob=float(min_prob),
+                        margin=float(margin_thr),
+                        target_precision=float(head_target_precision),
+                    )
+                    if best_key is None or key > best_key:
+                        best_key = key
+                        best_summary = {
+                            "gts": total_gt,
+                            "matches": matched,
+                            "fps": fps,
+                            "duplicates": duplicates,
+                            "preds": preds,
+                            "precision": precision,
+                            "recall": recall,
+                            "coverage_rate": recall,
+                            "det_rate": det_rate,
+                            "clip_head_min_prob": float(min_prob),
+                            "clip_head_margin": float(margin_thr),
+                            "clip_head_target_precision": float(head_target_precision),
+                            "clip_head_meets_target_precision": bool(precision >= float(head_target_precision)),
+                        }
             if best_summary is None:
                 best_summary = {
                     "gts": total_gt,
@@ -7697,6 +7760,8 @@ def _evaluate_sam3_greedy_recipes_image_first(
                     "det_rate": 0.0,
                     "clip_head_min_prob": float(payload.clip_head_min_prob),
                     "clip_head_margin": float(payload.clip_head_margin),
+                    "clip_head_target_precision": float(head_target_precision),
+                    "clip_head_meets_target_precision": False,
                 }
             if log_fn and total_gt and isinstance(best_summary, dict):
                 try:
@@ -7707,7 +7772,8 @@ def _evaluate_sam3_greedy_recipes_image_first(
                         with_prob = int(debug.get("with_prob") or 0) if isinstance(debug, dict) else 0
                         prob_min = debug.get("prob_min") if isinstance(debug, dict) else None
                         prob_max = debug.get("prob_max") if isinstance(debug, dict) else None
-                        counts0 = by_prob.get(0.0) if isinstance(by_prob, dict) else None
+                        by_prob0 = by_margin.get(0.0) if isinstance(by_margin, dict) else None
+                        counts0 = by_prob0.get(0.0) if isinstance(by_prob0, dict) else None
                         preds0 = int(counts0.get("preds") or 0) if isinstance(counts0, dict) else 0
                         fps0 = int(counts0.get("fps") or 0) if isinstance(counts0, dict) else 0
                         if preds0 <= 0:
@@ -11218,6 +11284,22 @@ class AgentMiningRequest(BaseModel):
         le=1.0,
         description="Require target prob to exceed best other class by this margin when using an embedded CLIP head.",
     )
+    clip_head_auto_tune: bool = Field(
+        True,
+        description=(
+            "When using a pretrained CLIP head, auto-tune per-class min_prob/margin on the validation split "
+            "(recommended). If disabled, uses the fixed min_prob/margin values above."
+        ),
+    )
+    clip_head_target_precision: float = Field(
+        0.9,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "When auto-tuning a pretrained CLIP head, prefer thresholds that reach this target precision on "
+            "the validation split (higher = fewer false positives, lower recall)."
+        ),
+    )
 
     # Exemplar (crop bank) selection.
     positives_per_class: int = Field(20, ge=0, le=500)
@@ -13479,11 +13561,22 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if clip_head_path is not None:
             clip_head = _load_clip_head_from_classifier(clip_head_path)
             clip_head_enabled = bool(isinstance(clip_head, dict))
+            head_mode_bits = ""
+            try:
+                if bool(getattr(payload, "clip_head_auto_tune", True)):
+                    head_mode_bits = (
+                        f"(auto-tune: target_precision={float(getattr(payload, 'clip_head_target_precision', 0.9)):.2f}; "
+                        f"seed min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
+                    )
+                else:
+                    head_mode_bits = f"(fixed thresholds: min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
+            except Exception:
+                head_mode_bits = ""
             _log(
                 "Pretrained CLIP head enabled: "
                 f"{clip_head_path.name} "
                 f"(classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
-                f"(min_prob/margin are tuned per class; starting values min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
+                f"{head_mode_bits}"
             )
             _log("CLIP head mode: example crops / CLIP similarity / negative crops are ignored (head-only filtering).")
 
@@ -13918,6 +14011,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     "classes": clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else [],
                     "min_prob": tuned_min_prob_f,
                     "margin": tuned_margin_f,
+                    "auto_tuned": bool(getattr(payload, "clip_head_auto_tune", True)),
+                    "target_precision": float(getattr(payload, "clip_head_target_precision", 0.9)),
                 }
 
             results.append(

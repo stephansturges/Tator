@@ -4908,6 +4908,17 @@ def _persist_agent_recipe(
         thresholds = sorted({float(s.get("threshold", 0.0)) for s in portable_steps if s.get("threshold") is not None})
         if thresholds:
             params["thresholds"] = thresholds
+        schema_version_out: Optional[int] = None
+        try:
+            schema_version_out = int(recipe_body.get("schema_version")) if recipe_body.get("schema_version") is not None else None
+        except Exception:
+            schema_version_out = None
+        mode_out: Optional[str] = recipe_body.get("mode") if isinstance(recipe_body.get("mode"), str) else None
+        if recipe_mode == "sam3_steps":
+            schema_version_out = 2
+            mode_out = "sam3_steps"
+        elif is_greedy:
+            mode_out = mode_out or "sam3_greedy"
         payload = {
             "id": recipe_id,
             "dataset_id": dataset_id,
@@ -4920,7 +4931,8 @@ def _persist_agent_recipe(
             "created_at": time.time(),
             "params": params,
             "recipe": {
-                "mode": recipe_body.get("mode") or ("sam3_greedy" if is_greedy else None),
+                "schema_version": schema_version_out,
+                "mode": mode_out,
                 "text_prompts": text_prompts if text_prompts else None,
                 "positives": portable_positives if portable_positives else None,
                 "steps": portable_steps,
@@ -5468,11 +5480,12 @@ def _import_agent_recipe_zip_bytes(zip_bytes: bytes) -> Tuple[Optional[str], Dic
                 raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_crops_too_large")
             crops[f"crops/{arc_path.name}"] = zf.read(name)
 
-    dataset_id = data.get("dataset_id") or data.get("recipe", {}).get("dataset_id") or ""
-    label = data.get("label") or data.get("recipe", {}).get("label") or "imported_recipe"
+    if not isinstance(data, dict) or not data:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
+    dataset_id = data.get("dataset_id") or (data.get("recipe") or {}).get("dataset_id") or ""
+    label = data.get("label") or (data.get("recipe") or {}).get("label") or "imported_recipe"
     class_id = data.get("class_id")
     class_name = data.get("class_name")
-    recipe_body = data.get("recipe") or {}
     meta_overrides = {
         "dataset_signature": data.get("dataset_signature"),
         "labelmap_hash": data.get("labelmap_hash"),
@@ -5483,7 +5496,7 @@ def _import_agent_recipe_zip_bytes(zip_bytes: bytes) -> Tuple[Optional[str], Dic
         class_id,
         class_name,
         label,
-        recipe_body,
+        data,
         crop_overrides=crops,
         clip_head_overrides=clip_head_files,
         meta_overrides=meta_overrides,
@@ -16352,11 +16365,12 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_failed:{exc}") from exc
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
-    dataset_id = data.get("dataset_id") or data.get("recipe", {}).get("dataset_id") or ""
-    label = data.get("label") or data.get("recipe", {}).get("label") or "imported_recipe"
+    if not isinstance(data, dict) or not data:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
+    dataset_id = data.get("dataset_id") or (data.get("recipe") or {}).get("dataset_id") or ""
+    label = data.get("label") or (data.get("recipe") or {}).get("label") or "imported_recipe"
     class_id = data.get("class_id")
     class_name = data.get("class_name")
-    recipe_body = data.get("recipe") or {}
     meta_overrides = {
         "dataset_signature": data.get("dataset_signature"),
         "labelmap_hash": data.get("labelmap_hash"),
@@ -16367,7 +16381,7 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
         class_id,
         class_name,
         label,
-        recipe_body,
+        data,
         crop_overrides=crops,
         clip_head_overrides=clip_head_files,
         meta_overrides=meta_overrides,

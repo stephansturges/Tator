@@ -76,3 +76,36 @@ def test_persist_agent_recipe_preserves_schema_v2_steps(tmp_path, monkeypatch):
     )
     assert saved["recipe"]["mode"] == "sam3_steps"
     assert saved["recipe"]["steps"][0]["prompt"] == "car"
+
+
+def test_import_agent_recipe_zip_preserves_top_level_params(tmp_path, monkeypatch):
+    monkeypatch.setattr(localinferenceapi, "AGENT_MINING_RECIPES_ROOT", tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    data = {
+        "id": "ar_source",
+        "dataset_id": "",
+        "dataset_signature": "sig",
+        "labelmap_hash": "hash",
+        "labelmap": ["light_vehicle"],
+        "class_id": 1,
+        "class_name": "light_vehicle",
+        "label": "imported",
+        "created_at": 0.0,
+        "params": {"seed_threshold": 0.33, "dedupe_iou": 0.77},
+        "recipe": {"schema_version": 2, "mode": "sam3_steps", "steps": [{"prompt": "car", "seed_threshold": 0.05}]},
+    }
+
+    import json
+    import zipfile
+    from io import BytesIO
+
+    bio = BytesIO()
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("recipe.json", json.dumps(data, ensure_ascii=False, indent=2))
+
+    _, persisted = localinferenceapi._import_agent_recipe_zip_bytes(bio.getvalue())
+    assert persisted["recipe"]["mode"] == "sam3_steps"
+    assert persisted["recipe"]["steps"][0]["prompt"] == "car"
+    assert persisted["params"]["seed_threshold"] == 0.33
+    assert persisted["params"]["dedupe_iou"] == 0.77

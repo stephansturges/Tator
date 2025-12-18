@@ -8690,6 +8690,70 @@ def _select_steps_from_seed_prompt_stats(
     return selected
 
 
+def _build_steps_recipe_step_list_from_selected_stats(
+    selected_stats: Sequence[Dict[str, Any]],
+    *,
+    prompts_fallback: Optional[Sequence[str]],
+    payload: AgentMiningRequest,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """
+    Build the schema-v2 step list for a class, using the selected per-prompt stats.
+
+    This is intentionally tolerant of future fields:
+    - if a selected stat dict includes a per-prompt `seed_threshold` (or `selected_seed_threshold`), we
+      use it for the corresponding step; otherwise we fall back to `payload.seed_threshold`.
+    """
+    prompts: List[str] = []
+    step_list: List[Dict[str, Any]] = []
+
+    for s in selected_stats or []:
+        if not isinstance(s, dict):
+            continue
+        prompt = str(s.get("prompt") or "").strip()
+        if prompt:
+            prompts.append(prompt)
+
+    if not prompts and prompts_fallback:
+        try:
+            fallback = str(list(prompts_fallback)[0]).strip()
+        except Exception:
+            fallback = ""
+        if fallback:
+            prompts = [fallback]
+            selected_stats = [{}]
+
+    def _pick_seed_threshold(stat: Dict[str, Any]) -> float:
+        for key in ("seed_threshold", "selected_seed_threshold"):
+            if stat.get(key) is None:
+                continue
+            try:
+                val = float(stat.get(key))
+            except Exception:
+                continue
+            return max(0.0, min(1.0, val))
+        try:
+            return max(0.0, min(1.0, float(payload.seed_threshold)))
+        except Exception:
+            return 0.05
+
+    for idx, prompt in enumerate(prompts):
+        stat = selected_stats[idx] if idx < len(selected_stats) and isinstance(selected_stats[idx], dict) else {}
+        step_list.append(
+            {
+                "enabled": True,
+                "prompt": prompt,
+                "seed_threshold": _pick_seed_threshold(stat),
+                "expand_threshold": float(payload.expand_threshold),
+                "max_visual_seeds": int(getattr(payload, "steps_max_visual_seeds_per_step", 5) or 0),
+                "seed_dedupe_iou": float(payload.seed_dedupe_iou),
+                "dedupe_iou": float(payload.dedupe_iou),
+                "max_results": int(payload.max_results),
+            }
+        )
+
+    return prompts, step_list
+
+
 def _mine_seed_prompt_stats_image_first(
     *,
     cat_id: int,
@@ -15617,24 +15681,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
                             log_fn=_log,
                         )
-                        selected_prompts = [str(s.get("prompt") or "").strip() for s in selected if str(s.get("prompt") or "").strip()]
-                        if not selected_prompts and prompts_for_class:
-                            selected_prompts = [str(prompts_for_class[0]).strip()]
-
-                        step_list: List[Dict[str, Any]] = []
-                        for sp in selected_prompts:
-                            step_list.append(
-                                {
-                                    "enabled": True,
-                                    "prompt": sp,
-                                    "seed_threshold": float(eval_payload.seed_threshold),
-                                    "expand_threshold": float(eval_payload.expand_threshold),
-                                    "max_visual_seeds": int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0),
-                                    "seed_dedupe_iou": float(eval_payload.seed_dedupe_iou),
-                                    "dedupe_iou": float(eval_payload.dedupe_iou),
-                                    "max_results": int(eval_payload.max_results),
-                                }
-                            )
+                        selected_prompts, step_list = _build_steps_recipe_step_list_from_selected_stats(
+                            selected,
+                            prompts_fallback=prompts_for_class,
+                            payload=eval_payload,
+                        )
 
                         summary: Dict[str, Any]
                         if clip_head is not None and head_target_index is not None:

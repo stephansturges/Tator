@@ -8640,6 +8640,106 @@ def _select_seed_threshold_operating_point(
     return best2
 
 
+def _select_seed_threshold_candidate_points(
+    curve: Sequence[Dict[str, Any]],
+    *,
+    max_candidates: int,
+    target_precision: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Select up to max_candidates operating points from a seed-threshold curve.
+
+    The curve is typically monotonic in (matches,fps) as threshold increases, so the Pareto frontier can
+    be large. We therefore:
+      - build a simple frontier in (matches, fps)
+      - always include extremes + (optional) a point meeting target precision
+      - downsample deterministically
+    """
+    try:
+        max_c = max(1, int(max_candidates))
+    except Exception:
+        max_c = 6
+
+    pts: List[Dict[str, Any]] = [p for p in (curve or []) if isinstance(p, dict) and p.get("threshold") is not None]
+    if not pts:
+        return []
+
+    def _pt_key(p: Dict[str, Any]) -> Tuple[float, int, int, float]:
+        try:
+            thr = float(p.get("threshold") or 0.0)
+        except Exception:
+            thr = 0.0
+        try:
+            matches = int(p.get("matches") or 0)
+        except Exception:
+            matches = 0
+        try:
+            fps = int(p.get("fps") or 0)
+        except Exception:
+            fps = 0
+        try:
+            prec = float(p.get("precision") or 0.0)
+        except Exception:
+            prec = 0.0
+        return (thr, matches, fps, prec)
+
+    # Build a simple frontier in (matches,fps): keep points that improve fps as matches decreases.
+    by_matches = sorted(pts, key=lambda p: (-_pt_key(p)[1], _pt_key(p)[2], -_pt_key(p)[3], _pt_key(p)[0]))
+    frontier: List[Dict[str, Any]] = []
+    best_fps: Optional[int] = None
+    for p in by_matches:
+        fps = _pt_key(p)[2]
+        if best_fps is None or fps < best_fps:
+            frontier.append(p)
+            best_fps = fps
+    frontier = sorted(frontier, key=lambda p: _pt_key(p)[0])
+
+    chosen: List[Dict[str, Any]] = []
+    chosen_thr: set[float] = set()
+
+    def _add(p: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(p, dict):
+            return
+        thr = _pt_key(p)[0]
+        thr_k = float(round(thr, 6))
+        if thr_k in chosen_thr:
+            return
+        chosen_thr.add(thr_k)
+        chosen.append(p)
+
+    # Always include extremes (best coverage / best cleanliness).
+    _add(frontier[0] if frontier else None)
+    _add(frontier[-1] if frontier else None)
+
+    # If target precision provided, include the best point meeting it (if any).
+    try:
+        tgt = float(target_precision) if target_precision is not None else None
+    except Exception:
+        tgt = None
+    if tgt is not None:
+        tgt = max(0.0, min(1.0, tgt))
+        _add(_select_seed_threshold_operating_point(frontier, min_precision=tgt))
+
+    if len(chosen) >= max_c:
+        return sorted(chosen, key=lambda p: _pt_key(p)[0])[:max_c]
+
+    # Fill with evenly-spaced frontier points.
+    n = len(frontier)
+    if n > 0 and max_c > 1:
+        slots = max_c
+        for i in range(slots):
+            if len(chosen) >= max_c:
+                break
+            if slots == 1:
+                idx = 0
+            else:
+                idx = int(round(i * (n - 1) / float(slots - 1)))
+            if 0 <= idx < n:
+                _add(frontier[idx])
+
+    return sorted(chosen, key=lambda p: _pt_key(p)[0])[:max_c]
+
+
 def _summarize_seed_threshold_curve_for_prompt(
     *,
     gt_best_scores: Mapping[Any, float],
@@ -8696,6 +8796,7 @@ def _select_steps_from_seed_prompt_stats(
     *,
     max_steps: int,
     target_precision: Optional[float] = None,
+    max_candidates_per_prompt: int = 6,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -8724,86 +8825,95 @@ def _select_steps_from_seed_prompt_stats(
         if not prompt:
             continue
 
-        # Pick a per-prompt seed_threshold operating point. If a target precision is provided, prefer a
-        # threshold that reaches it (if possible); otherwise fall back to the prompt's recommended point.
         curve = cand.get("seed_threshold_curve") if isinstance(cand.get("seed_threshold_curve"), list) else None
-        selected_point: Optional[Dict[str, Any]] = None
-        if curve:
-            if target_precision_f is not None:
-                selected_point = _select_seed_threshold_operating_point(curve, min_precision=target_precision_f)
-            else:
-                selected_point = cand.get("seed_threshold_recommended_point") if isinstance(cand.get("seed_threshold_recommended_point"), dict) else None
-                if selected_point is None:
-                    selected_point = _select_seed_threshold_operating_point(curve)
+        curve_points = curve or []
+        candidate_points = _select_seed_threshold_candidate_points(
+            curve_points,
+            max_candidates=max_candidates_per_prompt,
+            target_precision=target_precision_f,
+        )
 
-        selected_thr: Optional[float] = None
-        if selected_point is not None:
-            try:
-                selected_thr = float(selected_point.get("threshold"))
-            except Exception:
-                selected_thr = None
-        if selected_thr is None:
+        # If we have no curve (or it was empty), fall back to a single implicit point.
+        if not candidate_points:
+            thr_fallback: Optional[float] = None
             for key in ("seed_threshold_recommended", "seed_threshold_base"):
                 if cand.get(key) is None:
                     continue
                 try:
-                    selected_thr = float(cand.get(key))
+                    thr_fallback = float(cand.get(key))
                     break
                 except Exception:
                     continue
-        if selected_thr is None:
-            selected_thr = 0.05
-        selected_thr = max(0.0, min(1.0, float(selected_thr)))
+            if thr_fallback is None:
+                thr_fallback = 0.05
+            thr_fallback = max(0.0, min(1.0, float(thr_fallback)))
+            candidate_points = [{"threshold": float(thr_fallback), "matches": 0, "fps": int(cand.get("fps") or 0), "precision": 0.0}]
 
         gt_best_scores = cand.get("gt_best_scores") if isinstance(cand.get("gt_best_scores"), dict) else {}
-        matched_keys: set[int] = set()
-        if gt_best_scores:
-            for k, v in gt_best_scores.items():
-                try:
-                    k_int = int(k)
-                except Exception:
-                    continue
-                try:
-                    v_f = float(v)
-                except Exception:
-                    continue
-                if v_f >= float(selected_thr):
-                    matched_keys.add(k_int)
-        else:
-            covered = cand.get("matched_keys")
-            if isinstance(covered, set):
-                matched_keys = covered
-
-        matches = int(selected_point.get("matches") or 0) if selected_point else len(matched_keys)
-        fps = int(selected_point.get("fps") or 0) if selected_point else int(cand.get("fps") or 0)
-        if selected_point is not None and selected_point.get("precision") is not None:
+        for point in candidate_points:
+            if not isinstance(point, dict):
+                continue
             try:
-                precision = float(selected_point.get("precision"))
+                selected_thr = float(point.get("threshold"))
             except Exception:
-                precision = matches / max(1, matches + fps)
-        else:
-            precision = matches / max(1, matches + fps)
+                continue
+            selected_thr = max(0.0, min(1.0, selected_thr))
 
-        candidates.append(
-            {
-                **cand,
-                "prompt": prompt,
-                "matched_keys": matched_keys,
-                "matches": int(matches),
-                "fps": int(fps),
-                "precision": float(precision),
-                "selected_seed_threshold": float(selected_thr),
-                "selected_seed_threshold_point": selected_point,
-            }
-        )
+            matched_keys: set[int] = set()
+            if gt_best_scores:
+                for k, v in gt_best_scores.items():
+                    try:
+                        k_int = int(k)
+                    except Exception:
+                        continue
+                    try:
+                        v_f = float(v)
+                    except Exception:
+                        continue
+                    if v_f >= float(selected_thr):
+                        matched_keys.add(k_int)
+            else:
+                covered = cand.get("matched_keys")
+                if isinstance(covered, set):
+                    matched_keys = covered
+
+            try:
+                matches = int(point.get("matches") or 0) or len(matched_keys)
+            except Exception:
+                matches = len(matched_keys)
+            try:
+                fps = int(point.get("fps") or 0)
+            except Exception:
+                fps = int(cand.get("fps") or 0)
+            try:
+                precision = float(point.get("precision") or 0.0)
+            except Exception:
+                precision = float(matches) / float(max(1, matches + fps))
+
+            candidates.append(
+                {
+                    **cand,
+                    "prompt": prompt,
+                    "matched_keys": matched_keys,
+                    "matches": int(matches),
+                    "fps": int(fps),
+                    "precision": float(precision),
+                    "selected_seed_threshold": float(selected_thr),
+                    "selected_seed_threshold_point": point,
+                }
+            )
 
     covered_all: set[int] = set()
     selected: List[Dict[str, Any]] = []
+    selected_prompts: set[str] = set()
     remaining = candidates[:]
     while remaining and len(selected) < max_steps_i:
         best: Optional[Dict[str, Any]] = None
         best_key: Optional[Tuple[int, int, float, int]] = None
         for cand in remaining:
+            prompt = str(cand.get("prompt") or "").strip()
+            if prompt in selected_prompts:
+                continue
             new = cand.get("matched_keys") - covered_all
             new_matches = len(new)
             if new_matches <= 0:
@@ -8821,7 +8931,8 @@ def _select_steps_from_seed_prompt_stats(
             break
         selected.append(best)
         covered_all |= best.get("matched_keys")
-        remaining = [c for c in remaining if c is not best]
+        selected_prompts.add(str(best.get("prompt") or "").strip())
+        remaining = [c for c in remaining if str(c.get("prompt") or "").strip() not in selected_prompts]
         if log_fn:
             try:
                 log_fn(

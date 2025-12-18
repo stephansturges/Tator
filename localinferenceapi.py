@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip
-from bisect import bisect_left
+from array import array
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
@@ -8496,33 +8496,47 @@ def _compute_seed_threshold_curve(
     if not thr_list:
         return []
 
-    gt_scores_sorted: List[float] = []
+    gt_vals: List[float] = []
     for _k, v in (gt_best_scores or {}).items():
         try:
             val = float(v)
         except Exception:
             continue
         if 0.0 <= val <= 1.0:
-            gt_scores_sorted.append(val)
-    gt_scores_sorted.sort()
+            gt_vals.append(val)
+    gt_arr = np.asarray(gt_vals, dtype=np.float32) if gt_vals else np.zeros((0,), dtype=np.float32)
+    gt_arr.sort()
 
-    fp_scores_sorted: List[float] = []
-    for v in fp_scores or []:
+    fp_arr: np.ndarray
+    if fp_scores is None:
+        fp_arr = np.zeros((0,), dtype=np.float32)
+    else:
         try:
-            val = float(v)
+            fp_arr = np.asarray(fp_scores, dtype=np.float32)
         except Exception:
-            continue
-        if 0.0 <= val <= 1.0:
-            fp_scores_sorted.append(val)
-    fp_scores_sorted.sort()
+            fp_arr = np.asarray(list(fp_scores), dtype=np.float32) if fp_scores else np.zeros((0,), dtype=np.float32)
+    if fp_arr.size:
+        try:
+            fp_arr = fp_arr[(fp_arr >= 0.0) & (fp_arr <= 1.0)]
+        except Exception:
+            fp_arr = fp_arr
+    fp_arr.sort()
 
-    total_gt = len(gt_scores_sorted)
-    total_fp = len(fp_scores_sorted)
+    total_gt = int(gt_arr.size)
+    total_fp = int(fp_arr.size)
 
     curve: List[Dict[str, Any]] = []
     for thr in thr_list:
-        gt_start = bisect_left(gt_scores_sorted, float(thr))
-        fp_start = bisect_left(fp_scores_sorted, float(thr))
+        try:
+            thr_key_gt = gt_arr.dtype.type(float(thr))
+        except Exception:
+            thr_key_gt = float(thr)
+        try:
+            thr_key_fp = fp_arr.dtype.type(float(thr))
+        except Exception:
+            thr_key_fp = float(thr)
+        gt_start = int(np.searchsorted(gt_arr, thr_key_gt, side="left")) if total_gt else 0
+        fp_start = int(np.searchsorted(fp_arr, thr_key_fp, side="left")) if total_fp else 0
         matches = total_gt - gt_start
         fps = total_fp - fp_start
         precision = float(matches) / float(max(1, matches + fps))
@@ -8624,6 +8638,57 @@ def _select_seed_threshold_operating_point(
             best2_key = key
             best2 = p
     return best2
+
+
+def _summarize_seed_threshold_curve_for_prompt(
+    *,
+    gt_best_scores: Mapping[Any, float],
+    fp_scores: Sequence[float],
+    base_seed_threshold: float,
+    curve_limit: int = 48,
+) -> Dict[str, Any]:
+    """
+    Build a compact per-prompt seed-threshold curve and choose a default operating point.
+
+    For now, the "recommended" point is:
+      - the best matches attainable without reducing seed-stage precision below the base threshold's precision.
+    """
+    try:
+        base_thr = float(base_seed_threshold)
+    except Exception:
+        base_thr = 0.05
+    base_thr = max(0.0, min(1.0, base_thr))
+
+    thresholds = _build_seed_threshold_sweep_grid(
+        base_seed_threshold=base_thr,
+        observed_scores=None,
+        limit=max(8, int(curve_limit)),
+    )
+    curve = _compute_seed_threshold_curve(gt_best_scores=gt_best_scores, fp_scores=fp_scores, thresholds=thresholds)
+    if curve_limit > 0 and len(curve) > int(curve_limit):
+        curve = curve[: int(curve_limit)]
+
+    base_point: Optional[Dict[str, Any]] = None
+    if curve:
+        base_point = min(curve, key=lambda p: abs(float(p.get("threshold") or 0.0) - base_thr))
+    try:
+        base_precision = float(base_point.get("precision") or 0.0) if base_point else 0.0
+    except Exception:
+        base_precision = 0.0
+
+    recommended_point = _select_seed_threshold_operating_point(curve, min_precision=base_precision) if curve else None
+    try:
+        recommended_thr = float(recommended_point.get("threshold")) if recommended_point else base_thr
+    except Exception:
+        recommended_thr = base_thr
+
+    return {
+        "seed_threshold_base": float(base_thr),
+        "seed_threshold_base_point": base_point,
+        "seed_threshold_curve": curve,
+        "seed_threshold_recommended": float(max(0.0, min(1.0, recommended_thr))),
+        "seed_threshold_recommended_point": recommended_point,
+    }
 
 
 def _select_steps_from_seed_prompt_stats(
@@ -8788,9 +8853,20 @@ def _mine_seed_prompt_stats_image_first(
     if total_images <= 0:
         return []
 
-    # Global prompt stats.
+    # Global prompt stats. We keep additional per-prompt score distributions so we can build
+    # seed-threshold curves without extra SAM3 runs.
     agg: List[Dict[str, Any]] = [
-        {"prompt": p, "matched_keys": set(), "fps": 0, "duplicates": 0, "preds": 0, "det_images": 0} for p in prompt_list
+        {
+            "prompt": p,
+            "matched_keys": set(),
+            "gt_best_scores": {},
+            "fp_scores": array("f"),
+            "fps": 0,
+            "duplicates": 0,
+            "preds": 0,
+            "det_images": 0,
+        }
+        for p in prompt_list
     ]
     agg_lock = threading.Lock()
 
@@ -8819,6 +8895,8 @@ def _mine_seed_prompt_stats_image_first(
     def _worker_loop(worker: "_Sam3GreedyEvalWorker") -> None:
         # Local accumulators to avoid hot global locks.
         local_sets: List[set[int]] = [set() for _ in prompt_list]
+        local_best: List[Dict[int, float]] = [{} for _ in prompt_list]
+        local_fp_scores: List[array] = [array("f") for _ in prompt_list]
         local_fps = [0 for _ in prompt_list]
         local_dups = [0 for _ in prompt_list]
         local_preds = [0 for _ in prompt_list]
@@ -8881,6 +8959,10 @@ def _mine_seed_prompt_stats_image_first(
                     used: set[int] = set()
                     for det in dets or []:
                         local_preds[p_idx] += 1
+                        try:
+                            det_score = float(det.score) if det.score is not None else 0.0
+                        except Exception:
+                            det_score = 0.0
                         bbox = det.bbox or []
                         if len(bbox) < 4:
                             continue
@@ -8896,13 +8978,21 @@ def _mine_seed_prompt_stats_image_first(
                                 best_iou = iou
                                 best_idx = j
                         if best_idx is not None and best_iou >= float(payload.iou_threshold):
+                            gt_key = _gt_instance_key(img_id, best_idx)
+                            prev = local_best[p_idx].get(gt_key)
+                            if prev is None or det_score > float(prev):
+                                local_best[p_idx][gt_key] = float(det_score)
                             if best_idx in used:
                                 local_dups[p_idx] += 1
                             else:
                                 used.add(best_idx)
-                                local_sets[p_idx].add(_gt_instance_key(img_id, best_idx))
+                                local_sets[p_idx].add(gt_key)
                         else:
                             local_fps[p_idx] += 1
+                            try:
+                                local_fp_scores[p_idx].append(float(det_score))
+                            except Exception:
+                                pass
 
             try:
                 work_q.task_done()
@@ -8914,6 +9004,32 @@ def _mine_seed_prompt_stats_image_first(
         with agg_lock:
             for i in range(len(prompt_list)):
                 agg[i]["matched_keys"].update(local_sets[i])
+                # Merge GT best-score maps (max per key).
+                dst_best = agg[i].get("gt_best_scores")
+                if not isinstance(dst_best, dict):
+                    dst_best = {}
+                    agg[i]["gt_best_scores"] = dst_best
+                for k, v in (local_best[i] or {}).items():
+                    try:
+                        k_int = int(k)
+                    except Exception:
+                        continue
+                    try:
+                        v_f = float(v)
+                    except Exception:
+                        continue
+                    cur = dst_best.get(k_int)
+                    if cur is None or v_f > float(cur):
+                        dst_best[k_int] = v_f
+                # Merge FP score arrays.
+                dst_fp = agg[i].get("fp_scores")
+                if not isinstance(dst_fp, array):
+                    dst_fp = array("f")
+                    agg[i]["fp_scores"] = dst_fp
+                try:
+                    dst_fp.extend(local_fp_scores[i])
+                except Exception:
+                    pass
                 agg[i]["fps"] = int(agg[i]["fps"] or 0) + int(local_fps[i])
                 agg[i]["duplicates"] = int(agg[i]["duplicates"] or 0) + int(local_dups[i])
                 agg[i]["preds"] = int(agg[i]["preds"] or 0) + int(local_preds[i])
@@ -8928,6 +9044,8 @@ def _mine_seed_prompt_stats_image_first(
     out: List[Dict[str, Any]] = []
     for item in agg:
         matched_keys = item.get("matched_keys") if isinstance(item.get("matched_keys"), set) else set()
+        gt_best_scores = item.get("gt_best_scores") if isinstance(item.get("gt_best_scores"), dict) else {}
+        fp_scores = item.get("fp_scores") if isinstance(item.get("fp_scores"), array) else array("f")
         matches = len(matched_keys)
         fps = int(item.get("fps") or 0)
         preds = int(item.get("preds") or 0)
@@ -8935,16 +9053,23 @@ def _mine_seed_prompt_stats_image_first(
         duplicates = int(item.get("duplicates") or 0)
         precision = matches / max(1, matches + fps)
         det_rate = det_images / total_images if total_images else 0.0
+        curve_summary = _summarize_seed_threshold_curve_for_prompt(
+            gt_best_scores=gt_best_scores,
+            fp_scores=fp_scores,
+            base_seed_threshold=float(payload.seed_threshold),
+        )
         out.append(
             {
                 "prompt": item.get("prompt"),
                 "matched_keys": matched_keys,
+                "gt_best_scores": gt_best_scores,
                 "matches": matches,
                 "fps": fps,
                 "duplicates": duplicates,
                 "preds": preds,
                 "precision": precision,
                 "det_rate": det_rate,
+                **(curve_summary or {}),
             }
         )
     return out
@@ -15746,17 +15871,24 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             },
                             "summary": {
                                 **(summary or {}),
-                                "seed_prompt_stats": [
-                                    {
-                                        "prompt": s.get("prompt"),
-                                        "matches": int(s.get("matches") or 0),
-                                        "fps": int(s.get("fps") or 0),
-                                        "precision": float(s.get("precision") or 0.0),
-                                    }
-                                    for s in selected
-                                ],
-                            },
-                        }
+	                                "seed_prompt_stats": [
+	                                    {
+	                                        "prompt": s.get("prompt"),
+	                                        "matches": int(s.get("matches") or 0),
+	                                        "fps": int(s.get("fps") or 0),
+	                                        "precision": float(s.get("precision") or 0.0),
+	                                        "seed_threshold_base": float(s.get("seed_threshold_base") or eval_payload.seed_threshold),
+	                                        "seed_threshold_recommended": float(
+	                                            s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold
+	                                        ),
+	                                        "seed_threshold_base_point": s.get("seed_threshold_base_point"),
+	                                        "seed_threshold_recommended_point": s.get("seed_threshold_recommended_point"),
+	                                        "seed_threshold_curve": s.get("seed_threshold_curve") or [],
+	                                    }
+	                                    for s in selected
+	                                ],
+	                            },
+	                        }
                     job.progress = max(job.progress, 0.98)
                 else:
                     summaries = _evaluate_sam3_greedy_recipes_image_first(

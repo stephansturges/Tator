@@ -12980,6 +12980,125 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                body.appendChild(meta);
 		            }
 
+	            if (isStepRecipeV2) {
+	                const headMinProb =
+	                    recipe && recipe.clip_head && Number.isFinite(recipe.clip_head.min_prob) ? recipe.clip_head.min_prob : summary.clip_head_min_prob;
+	                const headMargin =
+	                    recipe && recipe.clip_head && Number.isFinite(recipe.clip_head.margin) ? recipe.clip_head.margin : summary.clip_head_margin;
+	                const targetPrecision =
+	                    recipe && recipe.clip_head && Number.isFinite(recipe.clip_head.target_precision)
+	                        ? recipe.clip_head.target_precision
+	                        : summary.clip_head_target_precision;
+	                const meetsTarget =
+	                    typeof summary.clip_head_meets_target_precision === "boolean"
+	                        ? summary.clip_head_meets_target_precision
+	                        : null;
+	                const hasCleanlinessInfo =
+	                    Number.isFinite(targetPrecision) ||
+	                    Number.isFinite(headMinProb) ||
+	                    Number.isFinite(headMargin) ||
+	                    typeof meetsTarget === "boolean";
+
+	                if (hasCleanlinessInfo) {
+	                    const block = document.createElement("div");
+	                    block.className = "training-subsection";
+	                    const title = document.createElement("div");
+	                    title.className = "training-subsection__title";
+	                    title.textContent = "Cleanliness tuning";
+	                    block.appendChild(title);
+
+	                    const bits = [];
+	                    if (Number.isFinite(targetPrecision)) {
+	                        const suffix = meetsTarget === false ? " (missed)" : meetsTarget === true ? " (met)" : "";
+	                        bits.push(`Target precision: ${Number(targetPrecision).toFixed(2)}${suffix}`);
+	                    }
+	                    if (Number.isFinite(precision)) bits.push(`Achieved precision: ${(Number(precision) * 100).toFixed(1)}%`);
+	                    if (Number.isFinite(headMinProb) || Number.isFinite(headMargin)) {
+	                        const headBits = [];
+	                        if (Number.isFinite(headMinProb)) headBits.push(`p≥${Number(headMinProb).toFixed(3)}`);
+	                        if (Number.isFinite(headMargin) && Number(headMargin) > 0) headBits.push(`Δ≥${Number(headMargin).toFixed(3)}`);
+	                        if (headBits.length) bits.push(`CLIP head: ${headBits.join(" ")}`);
+	                    }
+	                    const line = document.createElement("div");
+	                    line.className = "training-help";
+	                    line.textContent = bits.join(" • ");
+	                    block.appendChild(line);
+	                    body.appendChild(block);
+	                }
+
+	                const tier1 = summary.tier1_tuning && typeof summary.tier1_tuning === "object" ? summary.tier1_tuning : null;
+	                if (tier1 && tier1.enabled) {
+	                    const block = document.createElement("div");
+	                    block.className = "training-subsection";
+	                    const title = document.createElement("div");
+	                    title.className = "training-subsection__title";
+	                    title.textContent = "Tier-1 tuning";
+	                    block.appendChild(title);
+
+	                    const base = tier1.base && typeof tier1.base === "object" ? tier1.base : {};
+	                    const sel = tier1.selected && typeof tier1.selected === "object" ? tier1.selected : {};
+	                    const expandTxt =
+	                        Number.isFinite(base.expand_threshold) && Number.isFinite(sel.expand_threshold)
+	                            ? `expand_thr: ${Number(base.expand_threshold).toFixed(3)} → ${Number(sel.expand_threshold).toFixed(3)}`
+	                            : Number.isFinite(sel.expand_threshold)
+	                            ? `expand_thr: ${Number(sel.expand_threshold).toFixed(3)}`
+	                            : "";
+	                    const seedsTxt =
+	                        Number.isFinite(base.max_visual_seeds) && Number.isFinite(sel.max_visual_seeds)
+	                            ? `seeds: ${Number(base.max_visual_seeds)} → ${Number(sel.max_visual_seeds)}`
+	                            : Number.isFinite(sel.max_visual_seeds)
+	                            ? `seeds: ${Number(sel.max_visual_seeds)}`
+	                            : "";
+	                    const capTxt = Number.isFinite(tier1.eval_cap) ? `eval_cap: ${Number(tier1.eval_cap)}` : "";
+	                    const trialsTxt = Number.isFinite(tier1.max_trials) ? `trials: ${Number(tier1.max_trials)}` : "";
+	                    const line = document.createElement("div");
+	                    line.className = "training-help";
+	                    line.textContent = [expandTxt, seedsTxt, capTxt, trialsTxt].filter(Boolean).join(" • ");
+	                    block.appendChild(line);
+	                    body.appendChild(block);
+	                }
+
+	                const seedStats = Array.isArray(summary.seed_prompt_stats) ? summary.seed_prompt_stats : [];
+	                if (seedStats.length) {
+	                    const block = document.createElement("div");
+	                    block.className = "training-subsection";
+	                    const title = document.createElement("div");
+	                    title.className = "training-subsection__title";
+	                    title.textContent = `Seed prompt stats (${seedStats.length})`;
+	                    block.appendChild(title);
+
+	                    const table = document.createElement("table");
+	                    table.className = "training-table";
+	                    table.innerHTML = `
+	                        <thead>
+	                            <tr><th>#</th><th>Prompt</th><th>Matches</th><th>FPs</th><th>Prec</th><th>Seed thr</th></tr>
+	                        </thead>
+	                    `;
+	                    const tbody = document.createElement("tbody");
+	                    seedStats.forEach((s, idx) => {
+	                        if (!s || typeof s !== "object") return;
+	                        const row = document.createElement("tr");
+	                        const p = typeof s.prompt === "string" ? s.prompt : "";
+	                        const matches = Number.isFinite(s.matches) ? s.matches : 0;
+	                        const fps = Number.isFinite(s.fps) ? s.fps : 0;
+	                        const pPrec = Number.isFinite(s.precision) ? (Number(s.precision) * 100).toFixed(1) : "";
+	                        const thr = s.selected_seed_threshold ?? s.seed_threshold_recommended ?? s.seed_threshold_base ?? "";
+	                        row.innerHTML = `
+	                            <td>${idx + 1}</td>
+	                            <td>${escapeHtml(String(p))}</td>
+	                            <td>${escapeHtml(String(matches))}</td>
+	                            <td>${escapeHtml(String(fps))}</td>
+	                            <td>${escapeHtml(String(pPrec ? `${pPrec}%` : ""))}</td>
+	                            <td>${escapeHtml(String(thr))}</td>
+	                        `;
+	                        tbody.appendChild(row);
+	                    });
+	                    table.appendChild(tbody);
+	                    block.appendChild(table);
+	                    body.appendChild(block);
+	                }
+	            }
+
 	            if (prompts.length) {
 	                const block = document.createElement("div");
 	                block.className = "training-subsection";

@@ -7393,6 +7393,55 @@ def _score_head_tuning_candidate(
     return (0, float(precision), int(matched), -int(fps), -float(min_prob), -float(margin))
 
 
+def _update_best_clip_head_sweep_summary(
+    *,
+    best_summary: Optional[Dict[str, Any]],
+    best_key: Optional[Tuple[int, float, int, float, float, float]],
+    total_gt: int,
+    total_images: int,
+    matched: int,
+    fps: int,
+    duplicates: int,
+    preds: int,
+    det_images: int,
+    min_prob: float,
+    margin: float,
+    target_precision: float,
+    debug: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[int, float, int, float, float, float]]]:
+    recall = matched / total_gt if total_gt else 0.0
+    precision = matched / max(1, matched + fps)
+    det_rate = det_images / total_images if total_images else 0.0
+    key = _score_head_tuning_candidate(
+        matched=int(matched),
+        fps=int(fps),
+        precision=float(precision),
+        min_prob=float(min_prob),
+        margin=float(margin),
+        target_precision=float(target_precision),
+    )
+    if best_key is not None and key <= best_key:
+        return best_summary, best_key
+    summary: Dict[str, Any] = {
+        "gts": int(total_gt),
+        "matches": int(matched),
+        "fps": int(fps),
+        "duplicates": int(duplicates),
+        "preds": int(preds),
+        "precision": float(precision),
+        "recall": float(recall),
+        "coverage_rate": float(recall),
+        "det_rate": float(det_rate),
+        "clip_head_min_prob": float(min_prob),
+        "clip_head_margin": float(margin),
+        "clip_head_target_precision": float(target_precision),
+        "clip_head_meets_target_precision": bool(float(precision) >= float(target_precision)),
+    }
+    if debug is not None:
+        summary["debug"] = debug
+    return summary, key
+
+
 def _evaluate_sam3_greedy_recipe(
     *,
     cat_id: int,
@@ -7539,34 +7588,20 @@ def _evaluate_sam3_greedy_recipe(
                             fps += 1
                     if any_det:
                         det_images += 1
-                recall = matched / total_gt if total_gt else 0.0
-                precision = matched / max(1, matched + fps)
-                det_rate = det_images / len(image_ids) if image_ids else 0.0
-                key = _score_head_tuning_candidate(
+                best_summary, best_key = _update_best_clip_head_sweep_summary(
+                    best_summary=best_summary,
+                    best_key=best_key,
+                    total_gt=int(total_gt),
+                    total_images=int(len(image_ids)),
                     matched=int(matched),
                     fps=int(fps),
-                    precision=float(precision),
+                    duplicates=int(duplicates),
+                    preds=int(preds),
+                    det_images=int(det_images),
                     min_prob=float(min_prob),
                     margin=float(margin_thr),
                     target_precision=float(target_precision),
                 )
-                if best_key is None or key > best_key:
-                    best_key = key
-                    best_summary = {
-                        "gts": total_gt,
-                        "matches": matched,
-                        "fps": fps,
-                        "duplicates": duplicates,
-                        "preds": preds,
-                        "precision": precision,
-                        "recall": recall,
-                        "coverage_rate": recall,
-                        "det_rate": det_rate,
-                        "clip_head_min_prob": float(min_prob),
-                        "clip_head_margin": float(margin_thr),
-                        "clip_head_target_precision": float(target_precision),
-                        "clip_head_meets_target_precision": bool(precision >= float(target_precision)),
-                    }
         if log_fn and total_gt and best_summary is not None:
             try:
                 if int(best_summary.get("preds") or 0) == 0 and observed_rows > 0:
@@ -8264,34 +8299,20 @@ def _evaluate_sam3_greedy_recipes_image_first(
                     duplicates = int(counts.get("duplicates") or 0)
                     preds = int(counts.get("preds") or 0)
                     det_images = int(counts.get("det_images") or 0)
-                    recall = matched / total_gt if total_gt else 0.0
-                    precision = matched / max(1, matched + fps)
-                    det_rate = det_images / total_images if total_images else 0.0
-                    key = _score_head_tuning_candidate(
+                    best_summary, best_key = _update_best_clip_head_sweep_summary(
+                        best_summary=best_summary,
+                        best_key=best_key,
+                        total_gt=int(total_gt),
+                        total_images=int(total_images),
                         matched=int(matched),
                         fps=int(fps),
-                        precision=float(precision),
+                        duplicates=int(duplicates),
+                        preds=int(preds),
+                        det_images=int(det_images),
                         min_prob=float(min_prob),
                         margin=float(margin_thr),
                         target_precision=float(head_target_precision),
                     )
-                    if best_key is None or key > best_key:
-                        best_key = key
-                        best_summary = {
-                            "gts": total_gt,
-                            "matches": matched,
-                            "fps": fps,
-                            "duplicates": duplicates,
-                            "preds": preds,
-                            "precision": precision,
-                            "recall": recall,
-                            "coverage_rate": recall,
-                            "det_rate": det_rate,
-                            "clip_head_min_prob": float(min_prob),
-                            "clip_head_margin": float(margin_thr),
-                            "clip_head_target_precision": float(head_target_precision),
-                            "clip_head_meets_target_precision": bool(precision >= float(head_target_precision)),
-                        }
             if best_summary is None:
                 best_summary = {
                     "gts": total_gt,
@@ -9526,35 +9547,21 @@ def _tune_clip_head_for_selected_steps_image_first(
             duplicates = int(counts.get("duplicates") or 0)
             preds = int(counts.get("preds") or 0)
             det_images = int(counts.get("det_images") or 0)
-            recall = matched / total_gt if total_gt else 0.0
-            precision = matched / max(1, matched + fps)
-            det_rate = det_images / total_images if total_images else 0.0
-            key = _score_head_tuning_candidate(
-                matched=matched,
-                fps=fps,
-                precision=precision,
+            best_summary, best_key = _update_best_clip_head_sweep_summary(
+                best_summary=best_summary,
+                best_key=best_key,
+                total_gt=int(total_gt),
+                total_images=int(total_images),
+                matched=int(matched),
+                fps=int(fps),
+                duplicates=int(duplicates),
+                preds=int(preds),
+                det_images=int(det_images),
                 min_prob=float(min_prob),
                 margin=float(margin_thr),
                 target_precision=float(target_precision),
+                debug=debug,
             )
-            if best_key is None or key > best_key:
-                best_key = key
-                best_summary = {
-                    "gts": total_gt,
-                    "matches": matched,
-                    "fps": fps,
-                    "duplicates": duplicates,
-                    "preds": preds,
-                    "precision": precision,
-                    "recall": recall,
-                    "coverage_rate": recall,
-                    "det_rate": det_rate,
-                    "clip_head_min_prob": float(min_prob),
-                    "clip_head_margin": float(margin_thr),
-                    "clip_head_target_precision": float(target_precision),
-                    "clip_head_meets_target_precision": bool(precision >= float(target_precision)),
-                    "debug": debug,
-                }
     if best_summary is None:
         best_summary = {
             "gts": total_gt,

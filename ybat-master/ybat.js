@@ -1441,6 +1441,9 @@ const sam3TrainState = {
 	        reuseSplit: null,
 	        workersPerGpu: null,
 	        searchMode: null,
+	        stepsOptions: null,
+	        stepsMaxSteps: null,
+	        stepsMaxSeedsPerStep: null,
 	        beamOptions: null,
 	        beamWidth: null,
 	        beamRounds: null,
@@ -13382,24 +13385,28 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-	    function parseAgentPayload() {
-	        const datasetId = agentElements.datasetSelect?.value;
-	        if (!datasetId) {
-	            setAgentStatus("Select a dataset.", "warn");
-	            return null;
-	        }
+		    function parseAgentPayload() {
+		        const datasetId = agentElements.datasetSelect?.value;
+		        if (!datasetId) {
+		            setAgentStatus("Select a dataset.", "warn");
+		            return null;
+		        }
 
-	        const searchMode =
-	            agentElements.searchMode && agentElements.searchMode.value === "beam" ? "beam" : "greedy";
-	        const beamWidthRaw = readNumberInput(agentElements.beamWidth, { integer: true });
-	        const beamWidth = Number.isFinite(beamWidthRaw) ? Math.max(1, Math.min(16, beamWidthRaw)) : 4;
-	        const beamRoundsRaw = readNumberInput(agentElements.beamRounds, { integer: true });
-	        const beamRounds = Number.isFinite(beamRoundsRaw) ? Math.max(1, Math.min(10, beamRoundsRaw)) : 3;
+		        const rawSearchMode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "greedy";
+		        const searchMode = ["greedy", "beam", "steps"].includes(rawSearchMode) ? rawSearchMode : "greedy";
+		        const beamWidthRaw = readNumberInput(agentElements.beamWidth, { integer: true });
+		        const beamWidth = Number.isFinite(beamWidthRaw) ? Math.max(1, Math.min(16, beamWidthRaw)) : 4;
+		        const beamRoundsRaw = readNumberInput(agentElements.beamRounds, { integer: true });
+		        const beamRounds = Number.isFinite(beamRoundsRaw) ? Math.max(1, Math.min(10, beamRoundsRaw)) : 3;
 	        const beamMinImproveRaw = readNumberInput(agentElements.beamMinImprove, { integer: false });
 	        const beamMinImprove = Number.isFinite(beamMinImproveRaw) ? Math.max(0, Math.min(1, beamMinImproveRaw)) : 0.005;
-	        const beamEvalCapRaw = readNumberInput(agentElements.beamEvalCap, { integer: true });
-	        const beamEvalCap = Number.isFinite(beamEvalCapRaw) ? Math.max(1, Math.min(50000, beamEvalCapRaw)) : 48;
-	        const beamReuseCache = !!(agentElements.beamReuseCache && agentElements.beamReuseCache.checked);
+		        const beamEvalCapRaw = readNumberInput(agentElements.beamEvalCap, { integer: true });
+		        const beamEvalCap = Number.isFinite(beamEvalCapRaw) ? Math.max(1, Math.min(50000, beamEvalCapRaw)) : 48;
+		        const beamReuseCache = !!(agentElements.beamReuseCache && agentElements.beamReuseCache.checked);
+		        const stepsMaxStepsRaw = readNumberInput(agentElements.stepsMaxSteps, { integer: true });
+		        const stepsMaxSteps = Number.isFinite(stepsMaxStepsRaw) ? Math.max(1, Math.min(50, stepsMaxStepsRaw)) : 6;
+		        const stepsMaxSeedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
+		        const stepsMaxSeedsPerStep = Number.isFinite(stepsMaxSeedsRaw) ? Math.max(0, Math.min(500, stepsMaxSeedsRaw)) : 5;
 
 	        const valPctRaw = readNumberInput(agentElements.valPercent, { integer: false });
 	        const valPercent = Number.isFinite(valPctRaw) ? Math.max(5, Math.min(95, valPctRaw)) / 100 : 0.3;
@@ -13510,13 +13517,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        const testTrainLimitRaw = readNumberInput(agentElements.trainLimit, { integer: true });
 		        const testValLimitRaw = readNumberInput(agentElements.valLimit, { integer: true });
 
-	        return {
-	            dataset_id: datasetId,
-	            search_mode: searchMode,
-	            beam_width: beamWidth,
-	            beam_rounds: beamRounds,
-	            beam_min_improve: beamMinImprove,
-	            beam_eval_cap: beamEvalCap,
+		        return {
+		            dataset_id: datasetId,
+		            search_mode: searchMode,
+		            steps_max_steps_per_recipe: stepsMaxSteps,
+		            steps_max_visual_seeds_per_step: stepsMaxSeedsPerStep,
+		            beam_width: beamWidth,
+		            beam_rounds: beamRounds,
+		            beam_min_improve: beamMinImprove,
+		            beam_eval_cap: beamEvalCap,
 	            reuse_cache: beamReuseCache,
 	            val_percent: valPercent,
 	            split_seed: Number.isFinite(splitSeed) ? splitSeed : 42,
@@ -13774,6 +13783,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.reuseSplit = document.getElementById("agentReuseSplit");
 	        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
 	        agentElements.searchMode = document.getElementById("agentSearchMode");
+	        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
+	        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
+	        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
 	        agentElements.beamOptions = document.getElementById("agentBeamOptions");
 	        agentElements.beamWidth = document.getElementById("agentBeamWidth");
 	        agentElements.beamRounds = document.getElementById("agentBeamRounds");
@@ -13863,12 +13875,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         updatePrecisionTargetRange();
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
-	        const syncBeamUi = () => {
-	            const isBeam = !!(agentElements.searchMode && agentElements.searchMode.value === "beam");
+	        const syncSearchModeUi = () => {
+	            const mode = agentElements.searchMode ? agentElements.searchMode.value : "greedy";
+	            const isBeam = mode === "beam";
+	            const isSteps = mode === "steps";
 	            if (agentElements.beamOptions) agentElements.beamOptions.style.display = isBeam ? "block" : "none";
+	            if (agentElements.stepsOptions) agentElements.stepsOptions.style.display = isSteps ? "block" : "none";
 	        };
-	        if (agentElements.searchMode) agentElements.searchMode.addEventListener("change", syncBeamUi);
-	        syncBeamUi();
+	        if (agentElements.searchMode) agentElements.searchMode.addEventListener("change", syncSearchModeUi);
+	        syncSearchModeUi();
 	        stopAgentPoll();
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());

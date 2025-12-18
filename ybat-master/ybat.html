@@ -952,11 +952,27 @@
 					                                <input type="number" id="agentWorkersPerGpu" min="1" max="8" value="1" />
 					                            </div>
 					                            <div>
-					                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Greedy is the default and is fastest.&#10;Beam search tries many parameter combinations to improve coverage/precision, so it is usually MUCH slower.&#10;Start with Test mode first.">?</span></label>
+					                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Greedy is the default and is fastest.&#10;Multi-step selects a chain of prompt steps and tunes the CLIP head threshold for your cleanliness target (slower; best with a trained CLIP head).&#10;Beam search tries many parameter combinations and is usually MUCH slower.&#10;Start with Test mode first.">?</span></label>
 					                                <select id="agentSearchMode">
 					                                    <option value="greedy" selected>Greedy (fast)</option>
+					                                    <option value="steps">Multi-step (precision-first)</option>
 					                                    <option value="beam">Beam search (slower)</option>
 					                                </select>
+					                            </div>
+					                        </div>
+					                        <div id="agentStepsOptions" class="training-card" style="display: none; margin-bottom: 12px;">
+					                            <div class="training-card__body">
+					                                <div class="training-message info" style="margin-bottom: 10px;">Multi-step mode builds a recipe as a chain of prompt steps (usually one per prompt), then tunes the CLIP head threshold to hit your cleanliness target. This is slower than Greedy, but avoids “annihilating” all detections when CLIP is strict. <em>(screenshot coming)</em></div>
+					                                <div class="training-grid">
+					                                    <div>
+					                                        <label for="agentStepsMaxSteps">Max recipe steps<span class="help-icon" title="How many prompt steps we are allowed to select for a class.&#10;More steps can increase coverage but costs more compute and can add false positives.&#10;A good starting point is 4–8.">?</span></label>
+					                                        <input type="number" id="agentStepsMaxSteps" min="1" max="50" value="6" />
+					                                    </div>
+					                                    <div>
+					                                        <label for="agentStepsMaxSeedsPerStep">Visual seeds per step<span class="help-icon" title="Per step and per image, how many seed detections we expand with SAM3 visual prompting.&#10;Higher can improve coverage on diverse objects, but is slower.&#10;Typical: 3–8.">?</span></label>
+					                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="5" />
+					                                    </div>
+					                                </div>
 					                            </div>
 					                        </div>
 					                        <div id="agentBeamOptions" class="training-card" style="display: none; margin-bottom: 12px;">
@@ -1171,9 +1187,10 @@
 		                        <details class="training-card" open>
 		                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
 		                            <div class="training-card__body">
-			                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
-			                                <p><strong>What “Greedy” means here:</strong> We build one “wide net” recipe per class (text → filter → refine → de-dupe). It keeps anything that passes the filters instead of doing a complex multi-step search over many combinations.</p>
-			                                <p><strong>What “Beam search” means here:</strong> We repeatedly try different parameter settings and keep the best few each round. This is more thorough than Greedy, but it is usually MUCH slower.</p>
+				                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
+				                                <p><strong>What “Greedy” means here:</strong> We build one “wide net” recipe per class (text → filter → refine → de-dupe). It keeps anything that passes the filters instead of doing a complex multi-step search over many combinations.</p>
+				                                <p><strong>What “Multi-step” means here:</strong> We select a short chain of prompt steps (usually one step per prompt) based on which prompts find the most ground-truth objects. Then we run the full pipeline and auto-tune the CLIP head thresholds to hit your cleanliness target. This works best after you train a CLIP head.</p>
+				                                <p><strong>What “Beam search” means here:</strong> We repeatedly try different parameter settings and keep the best few each round. This is more thorough than Greedy, but it is usually MUCH slower.</p>
 			                                <ol>
 		                                    <li><strong>Split:</strong> We split your dataset into “train” (to pick example crops) and “val” (to test how good the recipe is). The split is repeatable using the seed.</li>
 		                                    <li><strong>Words:</strong> We try the class name (and optional extra phrases) to ask SAM3 to propose candidate boxes.</li>

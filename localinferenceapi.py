@@ -8566,6 +8566,53 @@ def _build_seed_threshold_sweep_grid(
     return grid
 
 
+def _compute_steps_seed_eval_threshold(payload: "AgentMiningRequest") -> float:
+    """
+    Seed-stage prompt eval threshold used for steps-mode mining.
+
+    This can be lower than the user-configured `seed_threshold` so seed-threshold curves can represent
+    operating points below the base threshold.
+    """
+    try:
+        base = float(getattr(payload, "seed_threshold", 0.05))
+    except Exception:
+        base = 0.05
+    base = max(0.0, min(1.0, float(base)))
+
+    floor_raw = getattr(payload, "steps_seed_eval_floor", None)
+    if floor_raw is None:
+        return base
+    try:
+        floor = float(floor_raw)
+    except Exception:
+        return base
+    floor = max(0.0, min(1.0, float(floor)))
+    return float(min(base, floor))
+
+
+def _compute_steps_seed_eval_max_results(payload: "AgentMiningRequest") -> int:
+    """
+    Seed-stage prompt eval max_results override used for steps-mode mining.
+
+    This exists because very low `steps_seed_eval_floor` values can return many detections.
+    """
+    try:
+        base = int(getattr(payload, "max_results", 1000) or 1000)
+    except Exception:
+        base = 1000
+    base = max(1, min(5000, int(base)))
+
+    override_raw = getattr(payload, "steps_seed_eval_max_results", None)
+    if override_raw is None:
+        return base
+    try:
+        override = int(override_raw)
+    except Exception:
+        return base
+    override = max(1, min(5000, int(override)))
+    return override
+
+
 def _compute_seed_threshold_curve(
     *,
     gt_best_scores: Mapping[Any, float],
@@ -9140,6 +9187,17 @@ def _mine_seed_prompt_stats_image_first(
     if total_images <= 0:
         return []
 
+    seed_eval_threshold = _compute_steps_seed_eval_threshold(payload)
+    seed_eval_max_results = _compute_steps_seed_eval_max_results(payload)
+    if log_fn and seed_eval_threshold < float(payload.seed_threshold) - 1e-9:
+        try:
+            log_fn(
+                f"[steps] Seed eval floor enabled: base_seed_thr={float(payload.seed_threshold):.3f} "
+                f"eval_seed_thr={float(seed_eval_threshold):.3f} max_results={int(seed_eval_max_results)} (class_id {cat_id})"
+            )
+        except Exception:
+            pass
+
     # Global prompt stats. We keep additional per-prompt score distributions so we can build
     # seed-threshold curves without extra SAM3 runs.
     agg: List[Dict[str, Any]] = [
@@ -9231,9 +9289,9 @@ def _mine_seed_prompt_stats_image_first(
                         dets = _run_sam3_text_inference(
                             pil_img,
                             prompt,
-                            float(payload.seed_threshold),
+                            float(seed_eval_threshold),
                             float(payload.mask_threshold),
-                            int(payload.max_results),
+                            int(seed_eval_max_results),
                             min_size=int(payload.min_size) if int(payload.min_size) > 0 else None,
                             simplify_epsilon=float(payload.simplify_epsilon),
                             processor_override=worker.processor,
@@ -9356,6 +9414,8 @@ def _mine_seed_prompt_stats_image_first(
                 "preds": preds,
                 "precision": precision,
                 "det_rate": det_rate,
+                "seed_eval_threshold_used": float(seed_eval_threshold),
+                "seed_eval_max_results_used": int(seed_eval_max_results),
                 **(curve_summary or {}),
             }
         )
@@ -13732,6 +13792,25 @@ class AgentMiningRequest(BaseModel):
         le=256,
         description="Max candidate configurations evaluated during Tier-1 tuning (search_mode='steps').",
     )
+    steps_seed_eval_floor: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "When search_mode='steps', optionally run the seed-stage prompt evaluation at a lower threshold than "
+            "`seed_threshold` so seed-threshold curves can include values below the base. If unset, defaults to "
+            "the base `seed_threshold` (behavior unchanged)."
+        ),
+    )
+    steps_seed_eval_max_results: Optional[int] = Field(
+        None,
+        ge=1,
+        le=5000,
+        description=(
+            "When search_mode='steps' and `steps_seed_eval_floor` is set low, this optional override caps the number "
+            "of seed-stage detections returned per prompt per image (safety valve). If unset, uses `max_results`."
+        ),
+    )
 
     # Mining concurrency controls (SAM3 workers).
     # By default we fan out across all CUDA devices; this controls how many workers we run per device.
@@ -16517,6 +16596,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             "max_steps_per_recipe": int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
                             "seed_threshold": {
                                 "base": float(eval_payload.seed_threshold),
+                                "seed_eval_threshold": float(_compute_steps_seed_eval_threshold(eval_payload)),
+                                "seed_eval_max_results": int(_compute_steps_seed_eval_max_results(eval_payload)),
                                 "strategy": "curve_candidates",
                                 "max_candidates_per_prompt": 6,
                             },

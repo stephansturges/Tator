@@ -1,4 +1,5 @@
-/!\ Under active development. The SAM3 “Agent Mining” recipe miner + recipe application pipeline is evolving; run small “test mode” jobs first and expect sharp edges. /!\
+/!\ Under active development. A lot of things are somewhat broken, especially in the dataset management side. SAM3 recipe "mining" as well as SAM3 training are both very much WIP. They work, but the methods are not optimized yet so don't take current performance as an indicator of anything. /!\
+
 
 # 🥔 Tator – Local CLIP + SAM Image Annotation Toolkit
 

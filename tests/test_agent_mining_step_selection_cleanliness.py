@@ -39,3 +39,17 @@ def test_step_selection_changes_with_target_precision():
     assert abs(float(by_prompt["A"].get("selected_seed_threshold") or 0.0) - 0.9) < 1e-6
     assert abs(float(by_prompt["B"].get("selected_seed_threshold") or 0.0) - 0.1) < 1e-6
 
+
+def test_step_selection_picks_at_most_one_threshold_per_prompt():
+    prompt = {
+        "prompt": "A",
+        "gt_best_scores": {1: 0.95, 2: 0.2},
+        "seed_threshold_curve": [
+            {"threshold": 0.1, "matches": 2, "fps": 50, "precision": 2 / 52},
+            {"threshold": 0.9, "matches": 1, "fps": 0, "precision": 1.0},
+        ],
+    }
+    selected = _select_steps_from_seed_prompt_stats([prompt], max_steps=2, target_precision=0.9, max_candidates_per_prompt=4)
+    assert len(selected) == 1
+    assert selected[0]["prompt"] == "A"
+    assert abs(float(selected[0].get("selected_seed_threshold") or 0.0) - 0.9) < 1e-6

@@ -973,6 +973,28 @@
 					                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="5" />
 					                                    </div>
 					                                </div>
+					                                <details class="training-help" style="margin-top: 10px;">
+					                                    <summary style="cursor: pointer;">Advanced optimization</summary>
+					                                    <div class="training-help" style="margin-top: 8px;">
+					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate settings to improve coverage at your cleanliness target.&#10;This tunes the recipe’s expand threshold + seeds per step.&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
+					                                            <input type="checkbox" id="agentStepsTier1Optimize" />
+					                                            Auto-tune expand threshold &amp; seed count (Tier‑1)
+					                                        </label>
+					                                        <div class="training-grid" style="margin-top: 10px;">
+					                                            <div>
+					                                                <label for="agentStepsTier1EvalCap">Tier‑1 eval cap (val images)<span class="help-icon" title="How many validation images we use while comparing candidate settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
+					                                                <input type="number" id="agentStepsTier1EvalCap" min="10" max="50000" value="200" />
+					                                            </div>
+					                                            <div>
+					                                                <label for="agentStepsTier1MaxTrials">Tier‑1 max trials<span class="help-icon" title="How many candidate settings we try during Tier‑1 tuning.&#10;More trials can find better settings but costs time.&#10;Typical: 6–12.">?</span></label>
+					                                                <input type="number" id="agentStepsTier1MaxTrials" min="1" max="256" value="9" />
+					                                            </div>
+					                                        </div>
+					                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
+					                                            Note: Tier‑1 tuning is only used in Multi-step mode and only when a pretrained CLIP head is selected.
+					                                        </div>
+					                                    </div>
+					                                </details>
 					                            </div>
 					                        </div>
 					                        <div id="agentBeamOptions" class="training-card" style="display: none; margin-bottom: 12px;">

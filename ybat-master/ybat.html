@@ -993,6 +993,20 @@
 					                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
 					                                            Note: Tier‑1 tuning is only used in Multi-step mode and only when a pretrained CLIP head is selected.
 					                                        </div>
+					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
+					                                        <div class="training-help" style="margin-top: 6px;">
+					                                            <div style="font-weight: 600; margin-bottom: 6px;">Seed-threshold curve collection</div>
+					                                            <div class="training-grid">
+					                                                <div>
+					                                                    <label for="agentStepsSeedEvalFloor">Seed curve floor (optional)<span class="help-icon" title="Multi-step mode measures each prompt at many seed thresholds.&#10;By default we only see detections above your Seed text threshold, so thresholds below it can’t improve coverage.&#10;Set a lower floor (e.g., 0.0–0.01) so the curve can include lower thresholds.&#10;Warning: lower floor can be slower.">?</span></label>
+					                                                    <input type="number" id="agentStepsSeedEvalFloor" step="0.01" min="0" max="1" placeholder="auto" />
+					                                                </div>
+					                                                <div>
+					                                                    <label for="agentStepsSeedEvalMaxResults">Seed curve max dets (optional)<span class="help-icon" title="Safety valve for very low seed curve floors.&#10;Caps how many seed detections we consider per prompt per image while building curves.&#10;Lower = faster/cleaner curves, but can miss low-score matches.&#10;Leave blank to reuse Max dets/image.">?</span></label>
+					                                                    <input type="number" id="agentStepsSeedEvalMaxResults" min="1" max="5000" placeholder="auto" />
+					                                                </div>
+					                                            </div>
+					                                        </div>
 					                                    </div>
 					                                </details>
 					                            </div>

@@ -1447,6 +1447,8 @@ const sam3TrainState = {
 	        stepsTier1Optimize: null,
 	        stepsTier1EvalCap: null,
 	        stepsTier1MaxTrials: null,
+	        stepsSeedEvalFloor: null,
+	        stepsSeedEvalMaxResults: null,
 	        beamOptions: null,
 	        beamWidth: null,
 	        beamRounds: null,
@@ -13636,6 +13638,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            : 9;
 	        const stepsOptimizeTier1 = !!(stepsTier1Optimize && searchMode === "steps" && hasClipHead);
 
+	        const stepsSeedEvalFloorRaw = readNumberInput(agentElements.stepsSeedEvalFloor, { integer: false });
+	        const stepsSeedEvalFloor = Number.isFinite(stepsSeedEvalFloorRaw)
+	            ? Math.max(0, Math.min(1, stepsSeedEvalFloorRaw))
+	            : null;
+	        const stepsSeedEvalMaxResultsRaw = readNumberInput(agentElements.stepsSeedEvalMaxResults, { integer: true });
+	        const stepsSeedEvalMaxResults = Number.isFinite(stepsSeedEvalMaxResultsRaw)
+	            ? Math.max(1, Math.min(5000, stepsSeedEvalMaxResultsRaw))
+	            : null;
+
 	        const classesRaw = agentElements.classesInput?.value || "";
 		        const classes =
 		            classesRaw
@@ -13674,6 +13685,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            search_mode: searchMode,
 		            steps_max_steps_per_recipe: stepsMaxSteps,
 		            steps_max_visual_seeds_per_step: stepsMaxSeedsPerStep,
+		            steps_seed_eval_floor: stepsSeedEvalFloor,
+		            steps_seed_eval_max_results: stepsSeedEvalMaxResults,
 		            steps_optimize_tier1: stepsOptimizeTier1,
 		            steps_optimize_tier1_eval_cap: stepsTier1EvalCap,
 		            steps_optimize_tier1_max_trials: stepsTier1MaxTrials,
@@ -13944,6 +13957,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.stepsTier1Optimize = document.getElementById("agentStepsTier1Optimize");
 	        agentElements.stepsTier1EvalCap = document.getElementById("agentStepsTier1EvalCap");
 	        agentElements.stepsTier1MaxTrials = document.getElementById("agentStepsTier1MaxTrials");
+	        agentElements.stepsSeedEvalFloor = document.getElementById("agentStepsSeedEvalFloor");
+	        agentElements.stepsSeedEvalMaxResults = document.getElementById("agentStepsSeedEvalMaxResults");
 	        agentElements.beamOptions = document.getElementById("agentBeamOptions");
 	        agentElements.beamWidth = document.getElementById("agentBeamWidth");
 	        agentElements.beamRounds = document.getElementById("agentBeamRounds");

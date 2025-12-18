@@ -1012,6 +1012,22 @@
 					                                                Note: Tier‑2 currently applies one set of IoU values per class (shared across all steps).
 					                                            </div>
 					                                        </div>
+					                                        <div class="training-help" style="margin-top: 10px;">
+					                                            <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;After the initial prompt selection, do a small local search that can add/drop/swap prompt steps.&#10;This is seed-stage only (fast) and does not run extra SAM evaluations.&#10;Useful when the greedy selection gets stuck in a suboptimal prompt set.">
+					                                                <input type="checkbox" id="agentStepsRefinePromptSubset" />
+					                                                Refine prompt subset (local search)
+					                                            </label>
+					                                            <div class="training-grid" style="margin-top: 10px;">
+					                                                <div>
+					                                                    <label for="agentStepsRefineMaxIters">Refine iterations<span class="help-icon" title="How many local-search improvement steps to try.&#10;0 = disabled even if the checkbox is on.&#10;Typical: 3–10.">?</span></label>
+					                                                    <input type="number" id="agentStepsRefineMaxIters" min="0" max="100" value="6" />
+					                                                </div>
+					                                                <div>
+					                                                    <label for="agentStepsRefineTopK">Candidates per iter<span class="help-icon" title="How many add/swap candidates to consider per iteration (higher = more thorough, slower).&#10;Typical: 4–10.">?</span></label>
+					                                                    <input type="number" id="agentStepsRefineTopK" min="1" max="50" value="6" />
+					                                                </div>
+					                                            </div>
+					                                        </div>
 					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
 					                                        <div class="training-help" style="margin-top: 6px;">
 					                                            <div style="font-weight: 600; margin-bottom: 6px;">Seed-threshold curve collection</div>

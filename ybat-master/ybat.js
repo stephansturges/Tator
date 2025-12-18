@@ -1450,6 +1450,9 @@ const sam3TrainState = {
 	        stepsTier2Optimize: null,
 	        stepsTier2EvalCap: null,
 	        stepsTier2MaxTrials: null,
+	        stepsRefinePromptSubset: null,
+	        stepsRefineMaxIters: null,
+	        stepsRefineTopK: null,
 	        stepsSeedEvalFloor: null,
 	        stepsSeedEvalMaxResults: null,
 	        beamOptions: null,
@@ -13095,6 +13098,32 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    body.appendChild(block);
 	                }
 
+	                const refine =
+	                    summary.prompt_subset_refinement && typeof summary.prompt_subset_refinement === "object"
+	                        ? summary.prompt_subset_refinement
+	                        : null;
+	                if (refine && refine.enabled) {
+	                    const block = document.createElement("div");
+	                    block.className = "training-subsection";
+	                    const title = document.createElement("div");
+	                    title.className = "training-subsection__title";
+	                    title.textContent = "Prompt subset refinement";
+	                    block.appendChild(title);
+
+	                    const startSteps = Array.isArray(refine.start_steps) ? refine.start_steps : [];
+	                    const finalSteps = Array.isArray(refine.final_steps) ? refine.final_steps : [];
+	                    const countTxt =
+	                        startSteps.length || finalSteps.length ? `Steps: ${startSteps.length} → ${finalSteps.length}` : "";
+	                    const modeTxt = typeof refine.mode === "string" && refine.mode ? `mode: ${refine.mode}` : "";
+	                    const itersTxt = Number.isFinite(refine.max_iters) ? `iters: ${Number(refine.max_iters)}` : "";
+	                    const topKTxt = Number.isFinite(refine.top_k) ? `top_k: ${Number(refine.top_k)}` : "";
+	                    const line = document.createElement("div");
+	                    line.className = "training-help";
+	                    line.textContent = [countTxt, modeTxt, itersTxt, topKTxt].filter(Boolean).join(" • ");
+	                    block.appendChild(line);
+	                    body.appendChild(block);
+	                }
+
 	                const seedStats = Array.isArray(summary.seed_prompt_stats) ? summary.seed_prompt_stats : [];
 	                if (seedStats.length) {
 	                    const block = document.createElement("div");
@@ -13481,6 +13510,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const enabled2 = !!(allowTier2 && agentElements.stepsTier2Optimize && agentElements.stepsTier2Optimize.checked);
         if (agentElements.stepsTier2EvalCap) agentElements.stepsTier2EvalCap.disabled = !enabled2;
         if (agentElements.stepsTier2MaxTrials) agentElements.stepsTier2MaxTrials.disabled = !enabled2;
+
+        const allowRefine = isSteps;
+        const refineReason = !isSteps ? "Only available in Multi-step mode." : "";
+        if (agentElements.stepsRefinePromptSubset) {
+            agentElements.stepsRefinePromptSubset.disabled = !allowRefine;
+            agentElements.stepsRefinePromptSubset.title = refineReason;
+        }
+        const refineEnabled = !!(
+            allowRefine &&
+            agentElements.stepsRefinePromptSubset &&
+            agentElements.stepsRefinePromptSubset.checked
+        );
+        if (agentElements.stepsRefineMaxIters) agentElements.stepsRefineMaxIters.disabled = !refineEnabled;
+        if (agentElements.stepsRefineTopK) agentElements.stepsRefineTopK.disabled = !refineEnabled;
     }
 
     async function loadAgentClipClassifiers() {
@@ -13693,6 +13736,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            : 12;
 	        const stepsOptimizeTier2 = !!(stepsTier2Optimize && searchMode === "steps" && hasClipHead);
 
+	        const stepsRefinePromptSubset = !!(agentElements.stepsRefinePromptSubset && agentElements.stepsRefinePromptSubset.checked);
+	        const stepsRefineMaxItersRaw = readNumberInput(agentElements.stepsRefineMaxIters, { integer: true });
+	        const stepsRefineMaxIters = Number.isFinite(stepsRefineMaxItersRaw)
+	            ? Math.max(0, Math.min(100, stepsRefineMaxItersRaw))
+	            : 6;
+	        const stepsRefineTopKRaw = readNumberInput(agentElements.stepsRefineTopK, { integer: true });
+	        const stepsRefineTopK = Number.isFinite(stepsRefineTopKRaw) ? Math.max(1, Math.min(50, stepsRefineTopKRaw)) : 6;
+	        const stepsEnableRefine = !!(stepsRefinePromptSubset && searchMode === "steps");
+
 	        const stepsSeedEvalFloorRaw = readNumberInput(agentElements.stepsSeedEvalFloor, { integer: false });
 	        const stepsSeedEvalFloor = Number.isFinite(stepsSeedEvalFloorRaw)
 	            ? Math.max(0, Math.min(1, stepsSeedEvalFloorRaw))
@@ -13748,6 +13800,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            steps_optimize_tier2: stepsOptimizeTier2,
 		            steps_optimize_tier2_eval_cap: stepsTier2EvalCap,
 		            steps_optimize_tier2_max_trials: stepsTier2MaxTrials,
+		            steps_refine_prompt_subset: stepsEnableRefine,
+		            steps_refine_prompt_subset_max_iters: stepsRefineMaxIters,
+		            steps_refine_prompt_subset_top_k: stepsRefineTopK,
 		            beam_width: beamWidth,
 		            beam_rounds: beamRounds,
 		            beam_min_improve: beamMinImprove,
@@ -14018,6 +14073,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.stepsTier2Optimize = document.getElementById("agentStepsTier2Optimize");
 	        agentElements.stepsTier2EvalCap = document.getElementById("agentStepsTier2EvalCap");
 	        agentElements.stepsTier2MaxTrials = document.getElementById("agentStepsTier2MaxTrials");
+	        agentElements.stepsRefinePromptSubset = document.getElementById("agentStepsRefinePromptSubset");
+	        agentElements.stepsRefineMaxIters = document.getElementById("agentStepsRefineMaxIters");
+	        agentElements.stepsRefineTopK = document.getElementById("agentStepsRefineTopK");
 	        agentElements.stepsSeedEvalFloor = document.getElementById("agentStepsSeedEvalFloor");
 	        agentElements.stepsSeedEvalMaxResults = document.getElementById("agentStepsSeedEvalMaxResults");
 	        agentElements.beamOptions = document.getElementById("agentBeamOptions");
@@ -14086,6 +14144,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.stepsTier1Optimize) agentElements.stepsTier1Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
 	        if (agentElements.stepsTier2Optimize) agentElements.stepsTier2Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
+	        if (agentElements.stepsRefinePromptSubset)
+	            agentElements.stepsRefinePromptSubset.addEventListener("change", syncAgentStepsOptimizationControls);
         const syncPrecisionLabel = () => {
             if (!agentElements.clipHeadTargetPrecisionValue) return;
             const val = agentElements.clipHeadTargetPrecision ? parseFloat(agentElements.clipHeadTargetPrecision.value) : NaN;

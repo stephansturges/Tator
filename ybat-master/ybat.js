@@ -1447,6 +1447,9 @@ const sam3TrainState = {
 	        stepsTier1Optimize: null,
 	        stepsTier1EvalCap: null,
 	        stepsTier1MaxTrials: null,
+	        stepsTier2Optimize: null,
+	        stepsTier2EvalCap: null,
+	        stepsTier2MaxTrials: null,
 	        stepsSeedEvalFloor: null,
 	        stepsSeedEvalMaxResults: null,
 	        beamOptions: null,
@@ -13060,6 +13063,38 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    body.appendChild(block);
 	                }
 
+	                const tier2 = summary.tier2_tuning && typeof summary.tier2_tuning === "object" ? summary.tier2_tuning : null;
+	                if (tier2 && tier2.enabled) {
+	                    const block = document.createElement("div");
+	                    block.className = "training-subsection";
+	                    const title = document.createElement("div");
+	                    title.className = "training-subsection__title";
+	                    title.textContent = "Tier-2 tuning";
+	                    block.appendChild(title);
+
+	                    const base = tier2.base && typeof tier2.base === "object" ? tier2.base : {};
+	                    const sel = tier2.selected && typeof tier2.selected === "object" ? tier2.selected : {};
+	                    const seedTxt =
+	                        Number.isFinite(base.seed_dedupe_iou) && Number.isFinite(sel.seed_dedupe_iou)
+	                            ? `seed_iou: ${Number(base.seed_dedupe_iou).toFixed(3)} → ${Number(sel.seed_dedupe_iou).toFixed(3)}`
+	                            : Number.isFinite(sel.seed_dedupe_iou)
+	                            ? `seed_iou: ${Number(sel.seed_dedupe_iou).toFixed(3)}`
+	                            : "";
+	                    const outTxt =
+	                        Number.isFinite(base.dedupe_iou) && Number.isFinite(sel.dedupe_iou)
+	                            ? `out_iou: ${Number(base.dedupe_iou).toFixed(3)} → ${Number(sel.dedupe_iou).toFixed(3)}`
+	                            : Number.isFinite(sel.dedupe_iou)
+	                            ? `out_iou: ${Number(sel.dedupe_iou).toFixed(3)}`
+	                            : "";
+	                    const capTxt = Number.isFinite(tier2.eval_cap) ? `eval_cap: ${Number(tier2.eval_cap)}` : "";
+	                    const trialsTxt = Number.isFinite(tier2.max_trials) ? `trials: ${Number(tier2.max_trials)}` : "";
+	                    const line = document.createElement("div");
+	                    line.className = "training-help";
+	                    line.textContent = [seedTxt, outTxt, capTxt, trialsTxt].filter(Boolean).join(" • ");
+	                    block.appendChild(line);
+	                    body.appendChild(block);
+	                }
+
 	                const seedStats = Array.isArray(summary.seed_prompt_stats) ? summary.seed_prompt_stats : [];
 	                if (seedStats.length) {
 	                    const block = document.createElement("div");
@@ -13437,6 +13472,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const enabled = !!(allowTier1 && agentElements.stepsTier1Optimize && agentElements.stepsTier1Optimize.checked);
         if (agentElements.stepsTier1EvalCap) agentElements.stepsTier1EvalCap.disabled = !enabled;
         if (agentElements.stepsTier1MaxTrials) agentElements.stepsTier1MaxTrials.disabled = !enabled;
+
+        const allowTier2 = isSteps && hasHead;
+        if (agentElements.stepsTier2Optimize) {
+            agentElements.stepsTier2Optimize.disabled = !allowTier2;
+            agentElements.stepsTier2Optimize.title = reason;
+        }
+        const enabled2 = !!(allowTier2 && agentElements.stepsTier2Optimize && agentElements.stepsTier2Optimize.checked);
+        if (agentElements.stepsTier2EvalCap) agentElements.stepsTier2EvalCap.disabled = !enabled2;
+        if (agentElements.stepsTier2MaxTrials) agentElements.stepsTier2MaxTrials.disabled = !enabled2;
     }
 
     async function loadAgentClipClassifiers() {
@@ -13638,6 +13682,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            : 9;
 	        const stepsOptimizeTier1 = !!(stepsTier1Optimize && searchMode === "steps" && hasClipHead);
 
+	        const stepsTier2Optimize = !!(agentElements.stepsTier2Optimize && agentElements.stepsTier2Optimize.checked);
+	        const stepsTier2EvalCapRaw = readNumberInput(agentElements.stepsTier2EvalCap, { integer: true });
+	        const stepsTier2EvalCap = Number.isFinite(stepsTier2EvalCapRaw)
+	            ? Math.max(10, Math.min(50000, stepsTier2EvalCapRaw))
+	            : 200;
+	        const stepsTier2MaxTrialsRaw = readNumberInput(agentElements.stepsTier2MaxTrials, { integer: true });
+	        const stepsTier2MaxTrials = Number.isFinite(stepsTier2MaxTrialsRaw)
+	            ? Math.max(1, Math.min(256, stepsTier2MaxTrialsRaw))
+	            : 12;
+	        const stepsOptimizeTier2 = !!(stepsTier2Optimize && searchMode === "steps" && hasClipHead);
+
 	        const stepsSeedEvalFloorRaw = readNumberInput(agentElements.stepsSeedEvalFloor, { integer: false });
 	        const stepsSeedEvalFloor = Number.isFinite(stepsSeedEvalFloorRaw)
 	            ? Math.max(0, Math.min(1, stepsSeedEvalFloorRaw))
@@ -13690,6 +13745,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            steps_optimize_tier1: stepsOptimizeTier1,
 		            steps_optimize_tier1_eval_cap: stepsTier1EvalCap,
 		            steps_optimize_tier1_max_trials: stepsTier1MaxTrials,
+		            steps_optimize_tier2: stepsOptimizeTier2,
+		            steps_optimize_tier2_eval_cap: stepsTier2EvalCap,
+		            steps_optimize_tier2_max_trials: stepsTier2MaxTrials,
 		            beam_width: beamWidth,
 		            beam_rounds: beamRounds,
 		            beam_min_improve: beamMinImprove,
@@ -13957,6 +14015,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.stepsTier1Optimize = document.getElementById("agentStepsTier1Optimize");
 	        agentElements.stepsTier1EvalCap = document.getElementById("agentStepsTier1EvalCap");
 	        agentElements.stepsTier1MaxTrials = document.getElementById("agentStepsTier1MaxTrials");
+	        agentElements.stepsTier2Optimize = document.getElementById("agentStepsTier2Optimize");
+	        agentElements.stepsTier2EvalCap = document.getElementById("agentStepsTier2EvalCap");
+	        agentElements.stepsTier2MaxTrials = document.getElementById("agentStepsTier2MaxTrials");
 	        agentElements.stepsSeedEvalFloor = document.getElementById("agentStepsSeedEvalFloor");
 	        agentElements.stepsSeedEvalMaxResults = document.getElementById("agentStepsSeedEvalMaxResults");
 	        agentElements.beamOptions = document.getElementById("agentBeamOptions");
@@ -14024,6 +14085,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.stepsTier1Optimize) agentElements.stepsTier1Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
+	        if (agentElements.stepsTier2Optimize) agentElements.stepsTier2Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
         const syncPrecisionLabel = () => {
             if (!agentElements.clipHeadTargetPrecisionValue) return;
             const val = agentElements.clipHeadTargetPrecision ? parseFloat(agentElements.clipHeadTargetPrecision.value) : NaN;

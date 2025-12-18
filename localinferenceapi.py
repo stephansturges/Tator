@@ -9089,6 +9089,308 @@ def _select_steps_from_seed_prompt_stats(
     return selected
 
 
+def _build_seed_stage_candidate_from_prompt_stat(
+    stat: Dict[str, Any],
+    *,
+    prompt: str,
+    fallback_seed_threshold: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Build a "selected-style" candidate dict for a single prompt from its seed-stage stats.
+
+    This uses the prompt's recommended seed threshold (if available) as the operating point so it can be
+    considered during prompt-subset refinement.
+    """
+    if not isinstance(stat, dict):
+        return None
+    prompt_s = str(prompt or "").strip()
+    if not prompt_s:
+        return None
+
+    try:
+        thr = float(stat.get("seed_threshold_recommended"))
+    except Exception:
+        try:
+            thr = float(stat.get("seed_threshold_base"))
+        except Exception:
+            thr = float(fallback_seed_threshold)
+    thr = max(0.0, min(1.0, float(thr)))
+
+    gt_best_scores = stat.get("gt_best_scores") if isinstance(stat.get("gt_best_scores"), dict) else {}
+    matched_keys: set[int] = set()
+    for k, v in (gt_best_scores or {}).items():
+        try:
+            k_int = int(k)
+        except Exception:
+            continue
+        try:
+            v_f = float(v)
+        except Exception:
+            continue
+        if v_f >= float(thr):
+            matched_keys.add(k_int)
+
+    curve = stat.get("seed_threshold_curve") if isinstance(stat.get("seed_threshold_curve"), list) else []
+    selected_point: Optional[Dict[str, Any]] = None
+    if curve:
+        try:
+            selected_point = min(curve, key=lambda p: abs(float(p.get("threshold") or 0.0) - float(thr)))
+        except Exception:
+            selected_point = None
+    if selected_point is None and isinstance(stat.get("seed_threshold_recommended_point"), dict):
+        selected_point = stat.get("seed_threshold_recommended_point")
+
+    try:
+        matches = int(selected_point.get("matches") or 0) if selected_point else len(matched_keys)
+    except Exception:
+        matches = len(matched_keys)
+    try:
+        fps = int(selected_point.get("fps") or 0) if selected_point else 0
+    except Exception:
+        fps = 0
+    try:
+        precision = float(selected_point.get("precision") or 0.0) if selected_point else float(matches) / float(max(1, matches + fps))
+    except Exception:
+        precision = float(matches) / float(max(1, matches + fps))
+
+    return {
+        **stat,
+        "prompt": prompt_s,
+        "matched_keys": matched_keys,
+        "matches": int(matches),
+        "fps": int(fps),
+        "precision": float(precision),
+        "selected_seed_threshold": float(thr),
+        "selected_seed_threshold_point": selected_point,
+    }
+
+
+def _refine_steps_prompt_subset_seed_stage(
+    prompt_stats: Sequence[Dict[str, Any]],
+    selected: Sequence[Dict[str, Any]],
+    *,
+    max_steps: int,
+    target_precision: Optional[float] = None,
+    max_iters: int = 6,
+    top_k: int = 6,
+    base_seed_threshold: float = 0.05,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Bounded prompt-subset refinement using only seed-stage stats (fast; no extra SAM runs).
+
+    This is intended as a "local search" improvement on top of the greedy set-cover selection:
+      - drop redundant steps (no unique GT coverage)
+      - try a small number of add/swap moves guided by uncovered GT keys
+
+    NOTE: This does not run full expansion/head tuning. It is a cheap approximation to improve step choice.
+    """
+    try:
+        max_steps_i = max(1, int(max_steps))
+    except Exception:
+        max_steps_i = 6
+    try:
+        iters = max(0, int(max_iters))
+    except Exception:
+        iters = 0
+    try:
+        k = max(1, int(top_k))
+    except Exception:
+        k = 6
+    try:
+        base_thr = float(base_seed_threshold)
+    except Exception:
+        base_thr = 0.05
+    base_thr = max(0.0, min(1.0, float(base_thr)))
+
+    tgt: Optional[float]
+    try:
+        tgt = float(target_precision) if target_precision is not None else None
+    except Exception:
+        tgt = None
+    if tgt is not None:
+        tgt = max(0.0, min(1.0, float(tgt)))
+
+    current: List[Dict[str, Any]] = [c for c in (selected or []) if isinstance(c, dict) and str(c.get("prompt") or "").strip()]
+    if not current:
+        return [], {"enabled": False, "reason": "no_selected"}
+
+    # Build a pool of one "default operating point" per prompt for add/swap moves.
+    pool: Dict[str, Dict[str, Any]] = {}
+    for stat in prompt_stats or []:
+        if not isinstance(stat, dict):
+            continue
+        p = str(stat.get("prompt") or "").strip()
+        if not p:
+            continue
+        cand = _build_seed_stage_candidate_from_prompt_stat(stat, prompt=p, fallback_seed_threshold=base_thr)
+        if cand:
+            pool[p.lower()] = cand
+
+    start_prompts = [str(c.get("prompt") or "") for c in current]
+
+    def _score(cands: Sequence[Dict[str, Any]]) -> Tuple[int, float, int, float, int]:
+        covered: set[int] = set()
+        fps_total = 0
+        for c in cands:
+            mk = c.get("matched_keys")
+            if isinstance(mk, set):
+                covered |= mk
+            try:
+                fps_total += int(c.get("fps") or 0)
+            except Exception:
+                pass
+        cov = int(len(covered))
+        prec = float(cov) / float(max(1, cov + int(fps_total)))
+        if tgt is not None and cov > 0 and prec >= float(tgt):
+            return (1, float(cov), -int(fps_total), float(prec), -len(cands))
+        return (0, float(prec), int(cov), -int(fps_total), -len(cands))
+
+    def _unique_counts(cands: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[int, int] = {}
+        by_prompt: Dict[str, set[int]] = {}
+        for c in cands:
+            p = str(c.get("prompt") or "").strip()
+            mk = c.get("matched_keys") if isinstance(c.get("matched_keys"), set) else set()
+            by_prompt[p] = mk
+            for k_int in mk:
+                counts[int(k_int)] = counts.get(int(k_int), 0) + 1
+        uniq: Dict[str, int] = {}
+        for p, mk in by_prompt.items():
+            uniq[p] = sum(1 for k_int in mk if counts.get(int(k_int), 0) == 1)
+        return uniq
+
+    history: List[Dict[str, Any]] = []
+
+    # First, drop purely redundant steps deterministically (no unique coverage).
+    changed = True
+    while changed and len(current) > 1:
+        changed = False
+        uniq = _unique_counts(current)
+        redundant = [c for c in current if uniq.get(str(c.get("prompt") or "").strip(), 0) <= 0]
+        if not redundant:
+            break
+        # Drop the most "costly" redundant step first (highest fps, then lowest precision).
+        redundant = sorted(
+            redundant,
+            key=lambda c: (
+                -int(c.get("fps") or 0),
+                float(c.get("precision") or 0.0),
+                str(c.get("prompt") or ""),
+            ),
+        )
+        drop = redundant[0]
+        before = [str(c.get("prompt") or "") for c in current]
+        current = [c for c in current if c is not drop]
+        after = [str(c.get("prompt") or "") for c in current]
+        history.append({"op": "drop_redundant", "dropped": str(drop.get("prompt") or ""), "before": before, "after": after})
+        changed = True
+
+    cur_key = _score(current)
+
+    for _iter in range(iters):
+        prompts_now = {str(c.get("prompt") or "").strip().lower() for c in current}
+        covered_now: set[int] = set()
+        for c in current:
+            mk = c.get("matched_keys")
+            if isinstance(mk, set):
+                covered_now |= mk
+
+        add_pool: List[Dict[str, Any]] = []
+        for p_l, cand in pool.items():
+            if p_l in prompts_now:
+                continue
+            mk = cand.get("matched_keys")
+            if not isinstance(mk, set):
+                continue
+            new_cov = len(mk - covered_now)
+            if new_cov <= 0:
+                continue
+            add_pool.append({**cand, "_new_cov": int(new_cov)})
+        add_pool = sorted(
+            add_pool,
+            key=lambda c: (
+                int(c.get("_new_cov") or 0),
+                float(c.get("precision") or 0.0),
+                -int(c.get("fps") or 0),
+                str(c.get("prompt") or ""),
+            ),
+            reverse=True,
+        )[:k]
+
+        uniq = _unique_counts(current)
+        drop_pool = sorted(
+            current,
+            key=lambda c: (
+                uniq.get(str(c.get("prompt") or "").strip(), 0),
+                -int(c.get("fps") or 0),
+                float(c.get("precision") or 0.0),
+                str(c.get("prompt") or ""),
+            ),
+        )[:k]
+
+        best_move: Optional[Dict[str, Any]] = None
+        best_next: Optional[List[Dict[str, Any]]] = None
+        best_key = cur_key
+
+        def _try(next_cands: List[Dict[str, Any]], move: Dict[str, Any]) -> None:
+            nonlocal best_move, best_next, best_key
+            # Enforce unique prompts + max_steps.
+            if len(next_cands) > max_steps_i:
+                return
+            seen: set[str] = set()
+            for c in next_cands:
+                p = str(c.get("prompt") or "").strip().lower()
+                if not p or p in seen:
+                    return
+                seen.add(p)
+            key = _score(next_cands)
+            if key > best_key:
+                best_key = key
+                best_next = next_cands
+                best_move = move
+
+        # Add moves (only if room).
+        if len(current) < max_steps_i:
+            for add in add_pool:
+                _try(current + [add], {"op": "add", "added": str(add.get("prompt") or "")})
+
+        # Swap moves.
+        for add in add_pool:
+            for drop in drop_pool:
+                next_cands = [c for c in current if c is not drop] + [add]
+                _try(
+                    next_cands,
+                    {"op": "swap", "added": str(add.get("prompt") or ""), "dropped": str(drop.get("prompt") or "")},
+                )
+
+        if best_next is None or best_move is None:
+            break
+
+        before = [str(c.get("prompt") or "") for c in current]
+        current = best_next
+        after = [str(c.get("prompt") or "") for c in current]
+        history.append({**best_move, "before": before, "after": after, "key_before": cur_key, "key_after": best_key})
+        cur_key = best_key
+
+        if log_fn:
+            try:
+                log_fn(f"[steps] refine prompt subset: {history[-1]}")
+            except Exception:
+                pass
+
+    final_prompts = [str(c.get("prompt") or "") for c in current]
+    return current, {
+        "enabled": True,
+        "mode": "seed_stage_local_search",
+        "max_iters": int(iters),
+        "top_k": int(k),
+        "start_steps": start_prompts,
+        "final_steps": final_prompts,
+        "history": history,
+    }
+
+
 def _build_steps_recipe_step_list_from_selected_stats(
     selected_stats: Sequence[Dict[str, Any]],
     *,
@@ -14116,6 +14418,25 @@ class AgentMiningRequest(BaseModel):
         le=256,
         description="Max candidate configurations evaluated during Tier-2 tuning (search_mode='steps').",
     )
+    steps_refine_prompt_subset: bool = Field(
+        False,
+        description=(
+            "When search_mode='steps', enable a bounded seed-stage local search that can add/drop/swap prompt steps "
+            "after the initial greedy set-cover selection. This is a fast heuristic pass (no extra SAM runs)."
+        ),
+    )
+    steps_refine_prompt_subset_max_iters: int = Field(
+        6,
+        ge=0,
+        le=100,
+        description="Max number of refinement iterations when steps_refine_prompt_subset is enabled (search_mode='steps').",
+    )
+    steps_refine_prompt_subset_top_k: int = Field(
+        6,
+        ge=1,
+        le=50,
+        description="How many add/swap candidates to consider per refinement iteration (search_mode='steps').",
+    )
 
     # Mining concurrency controls (SAM3 workers).
     # By default we fan out across all CUDA devices; this controls how many workers we run per device.
@@ -16813,6 +17134,22 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             ),
                             log_fn=_log,
                         )
+                        refine_info: Optional[Dict[str, Any]] = None
+                        if bool(getattr(eval_payload, "steps_refine_prompt_subset", False)):
+                            selected, refine_info = _refine_steps_prompt_subset_seed_stage(
+                                seed_stats,
+                                selected,
+                                max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
+                                target_precision=(
+                                    float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0)
+                                    if (clip_head is not None and head_target_index is not None)
+                                    else None
+                                ),
+                                max_iters=int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 6) or 6),
+                                top_k=int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 6) or 6),
+                                base_seed_threshold=float(eval_payload.seed_threshold),
+                                log_fn=_log,
+                            )
                         selected_prompts, step_list = _build_steps_recipe_step_list_from_selected_stats(
                             selected,
                             prompts_fallback=prompts_for_class,
@@ -16876,6 +17213,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 summary["tier1_tuning"] = tier1_info
                             if tier2_info and isinstance(summary, dict):
                                 summary["tier2_tuning"] = tier2_info
+                            if refine_info and isinstance(summary, dict):
+                                summary["prompt_subset_refinement"] = refine_info
                         else:
                             # No head available for this class: fall back to a trivial summary (no tuning).
                             total_gt = 0
@@ -16892,6 +17231,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 "coverage_rate": 0.0,
                                 "det_rate": 0.0,
                             }
+                            if refine_info:
+                                summary["prompt_subset_refinement"] = refine_info
 
                         summaries[cid] = summary
                         tuned_expand = float(eval_payload.expand_threshold)
@@ -16958,6 +17299,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 "requested": bool(getattr(eval_payload, "steps_optimize_tier2", False)),
                                 "eval_cap": int(getattr(eval_payload, "steps_optimize_tier2_eval_cap", 0) or 0),
                                 "max_trials": int(getattr(eval_payload, "steps_optimize_tier2_max_trials", 0) or 0),
+                            },
+                            "prompt_subset_refinement": refine_info
+                            if isinstance(refine_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(getattr(eval_payload, "steps_refine_prompt_subset", False)),
+                                "max_iters": int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 0) or 0),
+                                "top_k": int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 0) or 0),
                             },
                         }
                         recipes_by_class[cid] = {

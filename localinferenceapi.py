@@ -7442,6 +7442,75 @@ def _update_best_clip_head_sweep_summary(
     return summary, key
 
 
+def _successive_halving_search(
+    *,
+    candidates: Sequence[Any],
+    budgets: Sequence[int],
+    evaluator: Callable[[Any, int], Tuple[Tuple[Any, ...], Any]],
+    keep_ratio: float = 0.5,
+) -> Tuple[Any, List[Dict[str, Any]]]:
+    """
+    Deterministic successive-halving controller.
+
+    - candidates: initial list of candidate configs
+    - budgets: increasing list of evaluation budgets (ints); larger budgets are more expensive but more reliable
+    - evaluator: function(candidate, budget) -> (key, result), where `key` is a comparable tuple; larger is better
+    - keep_ratio: fraction of candidates to keep between stages (0 < keep_ratio <= 1)
+    """
+    if not candidates:
+        raise ValueError("no_candidates")
+    if not budgets:
+        raise ValueError("no_budgets")
+    budgets_clean: List[int] = []
+    last = 0
+    for b in budgets:
+        try:
+            b_int = int(b)
+        except Exception:
+            continue
+        if b_int <= 0:
+            continue
+        if b_int <= last:
+            raise ValueError("budgets_must_be_increasing")
+        budgets_clean.append(b_int)
+        last = b_int
+    if not budgets_clean:
+        raise ValueError("no_valid_budgets")
+    try:
+        keep = float(keep_ratio)
+    except Exception:
+        keep = 0.5
+    keep = max(0.0, min(1.0, keep))
+    if keep <= 0.0:
+        raise ValueError("keep_ratio_must_be_positive")
+
+    active: List[Any] = list(candidates)
+    history: List[Dict[str, Any]] = []
+    for stage_idx, budget in enumerate(budgets_clean):
+        evaluated: List[Tuple[Tuple[Any, ...], Any, Any]] = []
+        for cand in active:
+            key, result = evaluator(cand, int(budget))
+            evaluated.append((key, cand, result))
+        evaluated.sort(key=lambda x: x[0], reverse=True)
+        best_key = evaluated[0][0] if evaluated else None
+        history.append(
+            {
+                "stage": int(stage_idx),
+                "budget": int(budget),
+                "n_candidates": int(len(active)),
+                "best_key": best_key,
+            }
+        )
+        if stage_idx >= len(budgets_clean) - 1:
+            break
+        keep_n = max(1, int(math.ceil(len(evaluated) * keep)))
+        active = [cand for _, cand, _ in evaluated[:keep_n]]
+
+    if not evaluated:
+        raise ValueError("no_evaluations")
+    return evaluated[0][1], history
+
+
 def _evaluate_sam3_greedy_recipe(
     *,
     cat_id: int,
@@ -9286,10 +9355,81 @@ def _mine_seed_prompt_stats_image_first(
     return out
 
 
+def _normalize_steps_for_head_tuning(
+    steps: Sequence[Dict[str, Any]],
+    *,
+    payload: "AgentMiningRequest",
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        if step.get("enabled") is False:
+            continue
+        prompt = str(step.get("prompt") or "").strip()
+        if not prompt:
+            continue
+
+        try:
+            seed_thr = float(step.get("seed_threshold") if step.get("seed_threshold") is not None else payload.seed_threshold)
+        except Exception:
+            seed_thr = float(payload.seed_threshold)
+        seed_thr = max(0.0, min(1.0, float(seed_thr)))
+
+        try:
+            expand_thr = float(
+                step.get("expand_threshold") if step.get("expand_threshold") is not None else payload.expand_threshold
+            )
+        except Exception:
+            expand_thr = float(payload.expand_threshold)
+        expand_thr = max(0.0, min(1.0, float(expand_thr)))
+
+        try:
+            max_seeds = int(
+                step.get("max_visual_seeds")
+                if step.get("max_visual_seeds") is not None
+                else getattr(payload, "steps_max_visual_seeds_per_step", 0)
+            )
+        except Exception:
+            max_seeds = int(getattr(payload, "steps_max_visual_seeds_per_step", 0) or 0)
+        max_seeds = max(0, int(max_seeds))
+
+        try:
+            seed_iou = float(step.get("seed_dedupe_iou") if step.get("seed_dedupe_iou") is not None else payload.seed_dedupe_iou)
+        except Exception:
+            seed_iou = float(payload.seed_dedupe_iou)
+        seed_iou = max(0.0, min(1.0, float(seed_iou)))
+
+        try:
+            out_iou = float(step.get("dedupe_iou") if step.get("dedupe_iou") is not None else payload.dedupe_iou)
+        except Exception:
+            out_iou = float(payload.dedupe_iou)
+        out_iou = max(0.0, min(1.0, float(out_iou)))
+
+        try:
+            max_results = int(step.get("max_results") if step.get("max_results") is not None else payload.max_results)
+        except Exception:
+            max_results = int(payload.max_results)
+        max_results = max(1, int(max_results))
+
+        out.append(
+            {
+                "prompt": prompt,
+                "seed_threshold": float(seed_thr),
+                "expand_threshold": float(expand_thr),
+                "max_visual_seeds": int(max_seeds),
+                "seed_dedupe_iou": float(seed_iou),
+                "dedupe_iou": float(out_iou),
+                "max_results": int(max_results),
+            }
+        )
+    return out
+
+
 def _tune_clip_head_for_selected_steps_image_first(
     *,
     cat_id: int,
-    selected_prompts: Sequence[str],
+    steps: Sequence[Dict[str, Any]],
     val_ids: Sequence[int],
     images: Dict[int, Dict[str, Any]],
     gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
@@ -9306,8 +9446,8 @@ def _tune_clip_head_for_selected_steps_image_first(
     Run the full step pipeline (seed->diverse->expand) for the selected prompts, then sweep CLIP-head
     thresholds (min_prob/margin) to find a cleanliness operating point on the val split.
     """
-    prompts = [str(p).strip() for p in selected_prompts if str(p).strip()]
-    if not prompts:
+    steps_norm = _normalize_steps_for_head_tuning(steps, payload=payload)
+    if not steps_norm:
         return {"gts": 0, "matches": 0, "fps": 0, "duplicates": 0, "preds": 0, "precision": 0.0, "recall": 0.0, "det_rate": 0.0}
 
     image_entries: List[Tuple[int, str]] = []
@@ -9404,9 +9544,12 @@ def _tune_clip_head_for_selected_steps_image_first(
                 except Exception:
                     state = None
                 if state is not None:
-                    for prompt in prompts:
+                    for step_cfg in steps_norm:
                         if cancel_event is not None and cancel_event.is_set():
                             break
+                        prompt = str(step_cfg.get("prompt") or "").strip()
+                        if not prompt:
+                            continue
                         try:
                             dets_step = _infer_sam3_greedy_recipe_on_image(
                                 pil_img=pil_img,
@@ -9414,15 +9557,15 @@ def _tune_clip_head_for_selected_steps_image_first(
                                 text_prompts=[prompt],
                                 exemplar_embeddings=None,
                                 negative_embeddings=None,
-                                seed_threshold=float(payload.seed_threshold),
-                                expand_threshold=float(payload.expand_threshold),
-                                max_visual_seeds=int(payload.steps_max_visual_seeds_per_step),
-                                seed_dedupe_iou=float(payload.seed_dedupe_iou),
-                                out_dedupe_iou=float(payload.dedupe_iou),
+                                seed_threshold=float(step_cfg["seed_threshold"]),
+                                expand_threshold=float(step_cfg["expand_threshold"]),
+                                max_visual_seeds=int(step_cfg["max_visual_seeds"]),
+                                seed_dedupe_iou=float(step_cfg["seed_dedupe_iou"]),
+                                out_dedupe_iou=float(step_cfg["dedupe_iou"]),
                                 mask_threshold=float(payload.mask_threshold),
                                 min_size=int(payload.min_size),
                                 simplify_epsilon=float(payload.simplify_epsilon),
-                                max_results=int(payload.max_results),
+                                max_results=int(step_cfg["max_results"]),
                                 negative_strength=0.0,
                                 similarity_floor=0.0,
                                 clip_head=clip_head,
@@ -9580,6 +9723,252 @@ def _tune_clip_head_for_selected_steps_image_first(
             "debug": debug,
         }
     return best_summary
+
+
+def _tune_steps_tier1_knobs_image_first(
+    *,
+    cat_id: int,
+    steps: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: "AgentMiningRequest",
+    clip_head: Dict[str, Any],
+    clip_head_target_index: int,
+    workers: Sequence["_Sam3GreedyEvalWorker"],
+    log_fn: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Bounded Tier-1 tuning for steps-mode mining.
+
+    Tunes a small grid over:
+      - expand_threshold
+      - max_visual_seeds (per step)
+
+    Candidates are ranked via the steps CLIP-head sweep evaluator (precision/coverage/FP tradeoff),
+    using small subsets of the validation split.
+    """
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+
+    steps_norm = _normalize_steps_for_head_tuning(steps, payload=payload)
+    if not steps_norm:
+        return [], {"enabled": False, "reason": "no_steps"}
+
+    try:
+        enabled = bool(getattr(payload, "steps_optimize_tier1", False))
+    except Exception:
+        enabled = False
+    if not enabled:
+        return list(steps), {"enabled": False, "reason": "disabled"}
+
+    total_val = len(val_ids)
+    if total_val <= 0:
+        return list(steps), {"enabled": False, "reason": "no_val_images"}
+
+    try:
+        eval_cap = int(getattr(payload, "steps_optimize_tier1_eval_cap", 200) or 0)
+    except Exception:
+        eval_cap = 200
+    eval_cap = max(1, min(int(eval_cap), int(total_val)))
+
+    try:
+        max_trials = int(getattr(payload, "steps_optimize_tier1_max_trials", 9) or 0)
+    except Exception:
+        max_trials = 9
+    max_trials = max(1, int(max_trials))
+
+    try:
+        base_expand = float(steps_norm[0].get("expand_threshold", payload.expand_threshold))
+    except Exception:
+        base_expand = float(payload.expand_threshold)
+    base_expand = max(0.0, min(1.0, float(base_expand)))
+    try:
+        base_max_seeds = int(
+            steps_norm[0].get("max_visual_seeds", getattr(payload, "steps_max_visual_seeds_per_step", 0))
+        )
+    except Exception:
+        base_max_seeds = int(getattr(payload, "steps_max_visual_seeds_per_step", 0) or 0)
+    base_max_seeds = max(0, int(base_max_seeds))
+
+    expand_raw = [base_expand + d for d in (-0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2)]
+    expand_vals = sorted({float(max(0.0, min(1.0, round(v, 6)))) for v in expand_raw})
+    if float(base_expand) not in expand_vals:
+        expand_vals.append(float(base_expand))
+        expand_vals = sorted(set(expand_vals))
+
+    seeds_raw = [base_max_seeds + d for d in (-8, -4, -2, 0, 2, 4, 8)]
+    seeds_vals = sorted({max(0, min(500, int(v))) for v in seeds_raw})
+    if int(base_max_seeds) not in seeds_vals:
+        seeds_vals.append(int(base_max_seeds))
+        seeds_vals = sorted(set(seeds_vals))
+
+    def _select_near_base(vals: Sequence[Any], base: Any, n: int) -> List[Any]:
+        if n <= 0:
+            return []
+        vals_list = list(vals)
+        if not vals_list:
+            return []
+        if n >= len(vals_list):
+            return vals_list
+        try:
+            base_idx = vals_list.index(base)
+        except Exception:
+            base_idx = len(vals_list) // 2
+        picked: List[int] = [base_idx]
+        left = base_idx - 1
+        right = base_idx + 1
+        while len(picked) < n and (left >= 0 or right < len(vals_list)):
+            if left >= 0:
+                picked.append(left)
+                left -= 1
+                if len(picked) >= n:
+                    break
+            if right < len(vals_list):
+                picked.append(right)
+                right += 1
+        picked_sorted = sorted(set(picked))[:n]
+        return [vals_list[i] for i in picked_sorted]
+
+    n_expand = max(1, int(round(math.sqrt(max_trials))))
+    n_expand = min(n_expand, len(expand_vals))
+    n_seeds = max(1, max_trials // n_expand)
+    n_seeds = min(n_seeds, len(seeds_vals))
+    while n_expand * n_seeds > max_trials and n_seeds > 1:
+        n_seeds -= 1
+
+    expand_pick = _select_near_base(expand_vals, float(base_expand), n_expand)
+    seeds_pick = _select_near_base(seeds_vals, int(base_max_seeds), n_seeds)
+
+    candidates: List[Dict[str, Any]] = [
+        {"expand_threshold": float(e), "max_visual_seeds": int(s)} for e in expand_pick for s in seeds_pick
+    ]
+    candidates.sort(
+        key=lambda c: (
+            0
+            if (
+                float(c.get("expand_threshold")) == float(base_expand)
+                and int(c.get("max_visual_seeds")) == int(base_max_seeds)
+            )
+            else 1,
+            float(c.get("expand_threshold")),
+            int(c.get("max_visual_seeds")),
+        )
+    )
+    candidates = candidates[: max(1, int(max_trials))]
+
+    stage1 = max(1, int(eval_cap // 4))
+    budgets = [int(eval_cap)] if stage1 >= eval_cap else [int(stage1), int(eval_cap)]
+
+    _, _, target_precision = _build_clip_head_sweep_grid(
+        payload,
+        base_min_prob=float(payload.clip_head_min_prob),
+        base_margin=float(payload.clip_head_margin),
+    )
+
+    def _apply_candidate(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+        try:
+            expand_thr = float(candidate.get("expand_threshold"))
+        except Exception:
+            expand_thr = float(base_expand)
+        expand_thr = max(0.0, min(1.0, float(expand_thr)))
+        try:
+            max_seeds = int(candidate.get("max_visual_seeds"))
+        except Exception:
+            max_seeds = int(base_max_seeds)
+        max_seeds = max(0, min(500, int(max_seeds)))
+        out: List[Dict[str, Any]] = []
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            s2 = dict(step)
+            s2["expand_threshold"] = float(expand_thr)
+            s2["max_visual_seeds"] = int(max_seeds)
+            out.append(s2)
+        return out
+
+    def _eval_candidate(candidate: Dict[str, Any], budget: int) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        steps_candidate = _apply_candidate(candidate)
+        subset = val_ids[: max(1, min(int(budget), int(total_val)))]
+        summary = _tune_clip_head_for_selected_steps_image_first(
+            cat_id=cat_id,
+            steps=steps_candidate,
+            val_ids=subset,
+            images=images,
+            gt_by_image_cat=gt_by_image_cat,
+            payload=payload,
+            clip_head=clip_head,
+            clip_head_target_index=int(clip_head_target_index),
+            workers=workers,
+            log_every=0,
+            log_fn=None,
+            cancel_event=cancel_event,
+            progress_callback=None,
+        )
+        try:
+            matched = int(summary.get("matches") or 0)
+        except Exception:
+            matched = 0
+        try:
+            fps = int(summary.get("fps") or 0)
+        except Exception:
+            fps = 0
+        try:
+            precision = float(summary.get("precision") or 0.0)
+        except Exception:
+            precision = 0.0
+        try:
+            min_prob = float(summary.get("clip_head_min_prob") or 0.0)
+        except Exception:
+            min_prob = 0.0
+        try:
+            margin = float(summary.get("clip_head_margin") or 0.0)
+        except Exception:
+            margin = 0.0
+        key = _score_head_tuning_candidate(
+            matched=matched,
+            fps=fps,
+            precision=precision,
+            min_prob=min_prob,
+            margin=margin,
+            target_precision=float(target_precision),
+        )
+        return key, {"candidate": dict(candidate), "summary": summary, "key": key, "budget": int(budget)}
+
+    _log(
+        f"[steps] Tier-1 tuning: trying up to {len(candidates)} configs (eval_cap={eval_cap}, budgets={budgets}) for class_id {cat_id} "
+        f"(expand_thr≈{base_expand:.3f}, max_seeds≈{base_max_seeds})"
+    )
+    best_candidate, history = _successive_halving_search(
+        candidates=candidates,
+        budgets=budgets,
+        evaluator=_eval_candidate,
+        keep_ratio=0.5,
+    )
+    tuned_steps = _apply_candidate(best_candidate)
+    _log(
+        f"[steps] Tier-1 tuning: selected expand_thr={float(best_candidate.get('expand_threshold')):.3f} "
+        f"max_seeds={int(best_candidate.get('max_visual_seeds'))} for class_id {cat_id}"
+    )
+    return tuned_steps, {
+        "enabled": True,
+        "base": {"expand_threshold": float(base_expand), "max_visual_seeds": int(base_max_seeds)},
+        "selected": {
+            "expand_threshold": float(best_candidate.get("expand_threshold")),
+            "max_visual_seeds": int(best_candidate.get("max_visual_seeds")),
+        },
+        "eval_cap": int(eval_cap),
+        "max_trials": int(max_trials),
+        "history": history,
+    }
 
 
 def _beam_tune_sam3_greedy_params(
@@ -13316,6 +13705,26 @@ class AgentMiningRequest(BaseModel):
         le=500,
         description="Max visual seeds expanded per step when search_mode='steps' (per-image, per-step).",
     )
+    steps_optimize_tier1: bool = Field(
+        False,
+        description=(
+            "When search_mode='steps' and a pretrained CLIP head is provided, enable bounded Tier-1 tuning of "
+            "`expand_threshold` and `steps_max_visual_seeds_per_step` (uses small validation subsets to rank "
+            "candidates, then re-tunes on the full validation split for the final recipe)."
+        ),
+    )
+    steps_optimize_tier1_eval_cap: int = Field(
+        200,
+        ge=10,
+        le=50_000,
+        description="Max number of validation images used during Tier-1 tuning stages (search_mode='steps').",
+    )
+    steps_optimize_tier1_max_trials: int = Field(
+        9,
+        ge=1,
+        le=256,
+        description="Max candidate configurations evaluated during Tier-1 tuning (search_mode='steps').",
+    )
 
     # Mining concurrency controls (SAM3 workers).
     # By default we fan out across all CUDA devices; this controls how many workers we run per device.
@@ -16016,11 +16425,28 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
                         summary: Dict[str, Any]
                         if clip_head is not None and head_target_index is not None:
+                            tier1_info: Optional[Dict[str, Any]] = None
+                            if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
+                                job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
+                                job.updated_at = time.time()
+                                step_list, tier1_info = _tune_steps_tier1_knobs_image_first(
+                                    cat_id=cid,
+                                    steps=step_list,
+                                    val_ids=val_ids,
+                                    images=images,
+                                    gt_by_image_cat=gt_by_image_cat,
+                                    payload=eval_payload,
+                                    clip_head=clip_head,
+                                    clip_head_target_index=int(head_target_index),
+                                    workers=eval_workers,
+                                    log_fn=_log,
+                                    cancel_event=job.cancel_event,
+                                )
                             job.message = f"[steps] Tuning CLIP head for {name} ({class_idx}/{total_classes})…"
                             job.updated_at = time.time()
                             summary = _tune_clip_head_for_selected_steps_image_first(
                                 cat_id=cid,
-                                selected_prompts=selected_prompts,
+                                steps=step_list,
                                 val_ids=val_ids,
                                 images=images,
                                 gt_by_image_cat=gt_by_image_cat,
@@ -16033,6 +16459,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 cancel_event=job.cancel_event,
                                 progress_callback=_mk_phase_cb(class_base + seed_span, tune_span, "[steps] Final tune"),
                             )
+                            if tier1_info and isinstance(summary, dict):
+                                summary["tier1_tuning"] = tier1_info
                         else:
                             # No head available for this class: fall back to a trivial summary (no tuning).
                             total_gt = 0
@@ -16051,6 +16479,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             }
 
                         summaries[cid] = summary
+                        tuned_expand = float(eval_payload.expand_threshold)
+                        tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                        if step_list and isinstance(step_list[0], dict):
+                            try:
+                                if step_list[0].get("expand_threshold") is not None:
+                                    tuned_expand = float(step_list[0].get("expand_threshold"))
+                            except Exception:
+                                tuned_expand = float(eval_payload.expand_threshold)
+                            try:
+                                if step_list[0].get("max_visual_seeds") is not None:
+                                    tuned_max_seeds = int(step_list[0].get("max_visual_seeds"))
+                            except Exception:
+                                tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
                         recipes_by_class[cid] = {
                             "schema_version": 2,
                             "mode": "sam3_steps",
@@ -16062,8 +16503,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 "negative_strength": 0.0,
                                 "similarity_score": 0.0,
                                 "seed_threshold": float(eval_payload.seed_threshold),
-                                "expand_threshold": float(eval_payload.expand_threshold),
-                                "max_visual_seeds": int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0),
+                                "expand_threshold": float(tuned_expand),
+                                "max_visual_seeds": int(tuned_max_seeds),
                                 "seed_dedupe_iou": float(eval_payload.seed_dedupe_iou),
                                 "dedupe_iou": float(eval_payload.dedupe_iou),
                                 "mask_threshold": float(eval_payload.mask_threshold),

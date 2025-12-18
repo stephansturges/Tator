@@ -13034,6 +13034,37 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    body.appendChild(block);
 	                }
 
+	                const globalOpt =
+	                    summary.global_optimizer && typeof summary.global_optimizer === "object" ? summary.global_optimizer : null;
+	                if (globalOpt && globalOpt.enabled) {
+	                    const block = document.createElement("div");
+	                    block.className = "training-subsection";
+	                    const title = document.createElement("div");
+	                    title.className = "training-subsection__title";
+	                    title.textContent = "Global optimizer";
+	                    block.appendChild(title);
+
+	                    const bits = [];
+	                    const caps = Array.isArray(globalOpt.eval_caps) ? globalOpt.eval_caps : [];
+	                    if (caps.length) bits.push(`budgets: ${caps.join(", ")}`);
+	                    if (Number.isFinite(globalOpt.keep_ratio)) bits.push(`keep: ${Number(globalOpt.keep_ratio).toFixed(2)}`);
+	                    if (Number.isFinite(globalOpt.max_trials)) bits.push(`trials: ${Number(globalOpt.max_trials)}`);
+	                    if (Number.isFinite(globalOpt.rounds)) bits.push(`rounds: ${Number(globalOpt.rounds)}`);
+	                    if (Number.isFinite(globalOpt.mutations_per_round))
+	                        bits.push(`mutations/round: ${Number(globalOpt.mutations_per_round)}`);
+	                    if (globalOpt.enable_ordering) bits.push("order: on");
+	                    if (globalOpt.enable_max_results) bits.push("max dets: tuned");
+	                    if (globalOpt.selected_mutation && typeof globalOpt.selected_mutation === "object") {
+	                        const op = typeof globalOpt.selected_mutation.op === "string" ? globalOpt.selected_mutation.op : "";
+	                        if (op) bits.push(`picked: ${op}`);
+	                    }
+	                    const line = document.createElement("div");
+	                    line.className = "training-help";
+	                    line.textContent = bits.filter(Boolean).join(" • ");
+	                    block.appendChild(line);
+	                    body.appendChild(block);
+	                }
+
 	                const tier1 = summary.tier1_tuning && typeof summary.tier1_tuning === "object" ? summary.tier1_tuning : null;
 	                if (tier1 && tier1.enabled) {
 	                    const block = document.createElement("div");
@@ -13472,7 +13503,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !hasHead || autoTune;
         if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !hasHead || autoTune;
 
-        const disableCropBank = hasHead;
+        // Recipe mining requires a pretrained CLIP head; crop-bank settings are deprecated.
+        const disableCropBank = true;
         if (agentElements.exemplars) agentElements.exemplars.disabled = disableCropBank;
         if (agentElements.exemplarPoolMode) agentElements.exemplarPoolMode.disabled = disableCropBank;
         if (agentElements.exemplarPoolValue) agentElements.exemplarPoolValue.disabled = disableCropBank;
@@ -13484,28 +13516,77 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.negStrength) agentElements.negStrength.disabled = disableCropBank;
 
         syncAgentStepsOptimizationControls();
+        syncAgentRunButtonAvailability();
+    }
+
+    function syncAgentRunButtonAvailability() {
+        if (!agentElements.runButton) return;
+        const hasSelectedHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
+        const hasAnyHead = !!(
+            agentElements.clipHeadSelect &&
+            Array.from(agentElements.clipHeadSelect.options || []).some((opt) => opt && opt.value)
+        );
+        const running = agentState.lastJob && agentState.lastJob.status === "running";
+        const disabled = running || !hasSelectedHead;
+        agentElements.runButton.disabled = disabled;
+        if (disabled) {
+            if (running) {
+                agentElements.runButton.title = "A recipe mining job is already running.";
+            } else if (!hasAnyHead) {
+                agentElements.runButton.title = "No pretrained CLIP heads found. Train CLIP first, then select the head here.";
+            } else {
+                agentElements.runButton.title = "Select a pretrained CLIP head to run recipe mining.";
+            }
+        } else {
+            agentElements.runButton.title = "Run SAM3 Recipe Mining";
+        }
     }
 
     function syncAgentStepsOptimizationControls() {
-        const mode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "greedy";
+        const mode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "steps";
         const isSteps = mode === "steps";
         const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
-        const allowTier1 = isSteps && hasHead;
+        const allowGlobal = isSteps && hasHead;
         const reason = !isSteps ? "Only available in Multi-step mode." : !hasHead ? "Requires a pretrained CLIP head." : "";
+        const globalChecked = !!(agentElements.stepsGlobalOptimize && agentElements.stepsGlobalOptimize.checked);
+        const globalEnabled = !!(allowGlobal && globalChecked);
 
-        if (agentElements.stepsTier1Optimize) {
-            agentElements.stepsTier1Optimize.disabled = !allowTier1;
-            agentElements.stepsTier1Optimize.title = reason;
+        if (agentElements.stepsGlobalOptimize) {
+            agentElements.stepsGlobalOptimize.disabled = !allowGlobal;
+            agentElements.stepsGlobalOptimize.title = !allowGlobal ? reason : "Enable the global optimizer (slow).";
         }
 
+        const globalFields = [
+            agentElements.stepsGlobalEvalCap1,
+            agentElements.stepsGlobalEvalCap2,
+            agentElements.stepsGlobalEvalCap3,
+            agentElements.stepsGlobalMaxTrials,
+            agentElements.stepsGlobalKeepRatio,
+            agentElements.stepsGlobalRounds,
+            agentElements.stepsGlobalMutationsPerRound,
+            agentElements.stepsGlobalEnableOrdering,
+            agentElements.stepsGlobalEnableMaxResults,
+        ];
+        globalFields.forEach((el) => {
+            if (!el) return;
+            el.disabled = !globalEnabled;
+        });
+
+        const allowTier1 = isSteps && hasHead;
+        if (agentElements.stepsTier1Optimize) {
+            agentElements.stepsTier1Optimize.disabled = !allowTier1 || globalEnabled;
+            agentElements.stepsTier1Optimize.title = globalEnabled ? "Disabled because Global optimization is enabled." : reason;
+            if (globalEnabled) agentElements.stepsTier1Optimize.checked = false;
+        }
         const enabled = !!(allowTier1 && agentElements.stepsTier1Optimize && agentElements.stepsTier1Optimize.checked);
         if (agentElements.stepsTier1EvalCap) agentElements.stepsTier1EvalCap.disabled = !enabled;
         if (agentElements.stepsTier1MaxTrials) agentElements.stepsTier1MaxTrials.disabled = !enabled;
 
         const allowTier2 = isSteps && hasHead;
         if (agentElements.stepsTier2Optimize) {
-            agentElements.stepsTier2Optimize.disabled = !allowTier2;
-            agentElements.stepsTier2Optimize.title = reason;
+            agentElements.stepsTier2Optimize.disabled = !allowTier2 || globalEnabled;
+            agentElements.stepsTier2Optimize.title = globalEnabled ? "Disabled because Global optimization is enabled." : reason;
+            if (globalEnabled) agentElements.stepsTier2Optimize.checked = false;
         }
         const enabled2 = !!(allowTier2 && agentElements.stepsTier2Optimize && agentElements.stepsTier2Optimize.checked);
         if (agentElements.stepsTier2EvalCap) agentElements.stepsTier2EvalCap.disabled = !enabled2;
@@ -13514,14 +13595,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const allowRefine = isSteps;
         const refineReason = !isSteps ? "Only available in Multi-step mode." : "";
         if (agentElements.stepsRefinePromptSubset) {
-            agentElements.stepsRefinePromptSubset.disabled = !allowRefine;
-            agentElements.stepsRefinePromptSubset.title = refineReason;
+            agentElements.stepsRefinePromptSubset.disabled = !allowRefine || globalEnabled;
+            agentElements.stepsRefinePromptSubset.title = globalEnabled ? "Disabled because Global optimization is enabled." : refineReason;
+            if (globalEnabled) agentElements.stepsRefinePromptSubset.checked = false;
         }
-        const refineEnabled = !!(
-            allowRefine &&
-            agentElements.stepsRefinePromptSubset &&
-            agentElements.stepsRefinePromptSubset.checked
-        );
+        const refineEnabled = !!(allowRefine && agentElements.stepsRefinePromptSubset && agentElements.stepsRefinePromptSubset.checked);
         if (agentElements.stepsRefineMaxIters) agentElements.stepsRefineMaxIters.disabled = !refineEnabled;
         if (agentElements.stepsRefineTopK) agentElements.stepsRefineTopK.disabled = !refineEnabled;
     }
@@ -13529,6 +13607,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     async function loadAgentClipClassifiers() {
         if (!agentElements.clipHeadSelect) return;
         try {
+            const prev = agentElements.clipHeadSelect.value || "";
             const resp = await fetch(`${API_ROOT}/clip/classifiers`);
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
@@ -13536,7 +13615,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             agentElements.clipHeadSelect.innerHTML = "";
             const empty = document.createElement("option");
             empty.value = "";
-            empty.textContent = "(none)";
+            empty.textContent = list.length ? "Select a CLIP head…" : "No CLIP heads found (train CLIP first)";
             agentElements.clipHeadSelect.appendChild(empty);
             list.forEach((entry) => {
                 const rel = entry.rel_path || "";
@@ -13550,6 +13629,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 opt.textContent = bits.join(" • ") || rel;
                 agentElements.clipHeadSelect.appendChild(opt);
             });
+            const hasPrev = prev && Array.from(agentElements.clipHeadSelect.options || []).some((opt) => opt && opt.value === prev);
+            if (hasPrev) {
+                agentElements.clipHeadSelect.value = prev;
+            } else if (list.length === 1 && list[0] && list[0].rel_path) {
+                agentElements.clipHeadSelect.value = String(list[0].rel_path);
+            } else {
+                agentElements.clipHeadSelect.value = "";
+            }
         } catch (err) {
             console.warn("Failed to load CLIP classifiers", err);
         } finally {
@@ -13622,8 +13709,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            return null;
 		        }
 
-		        const rawSearchMode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "greedy";
-		        const searchMode = ["greedy", "beam", "steps"].includes(rawSearchMode) ? rawSearchMode : "greedy";
+		        const rawSearchMode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "steps";
+		        const searchMode = ["greedy", "beam", "steps"].includes(rawSearchMode) ? rawSearchMode : "steps";
 		        const beamWidthRaw = readNumberInput(agentElements.beamWidth, { integer: true });
 		        const beamWidth = Number.isFinite(beamWidthRaw) ? Math.max(1, Math.min(16, beamWidthRaw)) : 4;
 		        const beamRoundsRaw = readNumberInput(agentElements.beamRounds, { integer: true });
@@ -13637,6 +13724,30 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        const stepsMaxSteps = Number.isFinite(stepsMaxStepsRaw) ? Math.max(1, Math.min(50, stepsMaxStepsRaw)) : 6;
 		        const stepsMaxSeedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
 		        const stepsMaxSeedsPerStep = Number.isFinite(stepsMaxSeedsRaw) ? Math.max(0, Math.min(500, stepsMaxSeedsRaw)) : 5;
+		        const stepsGlobalOptimizeRaw = !!(agentElements.stepsGlobalOptimize && agentElements.stepsGlobalOptimize.checked);
+		        const stepsGlobalCap1Raw = readNumberInput(agentElements.stepsGlobalEvalCap1, { integer: true });
+		        const stepsGlobalCap1 = Number.isFinite(stepsGlobalCap1Raw) ? Math.max(1, Math.min(50000, stepsGlobalCap1Raw)) : 50;
+		        const stepsGlobalCap2Raw = readNumberInput(agentElements.stepsGlobalEvalCap2, { integer: true });
+		        const stepsGlobalCap2 = Number.isFinite(stepsGlobalCap2Raw) ? Math.max(1, Math.min(50000, stepsGlobalCap2Raw)) : 200;
+		        const stepsGlobalCap3Raw = readNumberInput(agentElements.stepsGlobalEvalCap3, { integer: true });
+		        const stepsGlobalCap3 = Number.isFinite(stepsGlobalCap3Raw) ? Math.max(1, Math.min(50000, stepsGlobalCap3Raw)) : 1000;
+		        const stepsGlobalEvalCaps = [stepsGlobalCap1, stepsGlobalCap2, stepsGlobalCap3];
+		        const stepsGlobalMaxTrialsRaw = readNumberInput(agentElements.stepsGlobalMaxTrials, { integer: true });
+		        const stepsGlobalMaxTrials = Number.isFinite(stepsGlobalMaxTrialsRaw)
+		            ? Math.max(1, Math.min(4096, stepsGlobalMaxTrialsRaw))
+		            : 36;
+		        const stepsGlobalKeepRatioRaw = readNumberInput(agentElements.stepsGlobalKeepRatio, { integer: false });
+		        const stepsGlobalKeepRatio = Number.isFinite(stepsGlobalKeepRatioRaw)
+		            ? Math.max(0.1, Math.min(0.9, stepsGlobalKeepRatioRaw))
+		            : 0.5;
+		        const stepsGlobalRoundsRaw = readNumberInput(agentElements.stepsGlobalRounds, { integer: true });
+		        const stepsGlobalRounds = Number.isFinite(stepsGlobalRoundsRaw) ? Math.max(1, Math.min(20, stepsGlobalRoundsRaw)) : 2;
+		        const stepsGlobalMutationsRaw = readNumberInput(agentElements.stepsGlobalMutationsPerRound, { integer: true });
+		        const stepsGlobalMutationsPerRound = Number.isFinite(stepsGlobalMutationsRaw)
+		            ? Math.max(1, Math.min(10000, stepsGlobalMutationsRaw))
+		            : 24;
+		        const stepsGlobalEnableOrdering = !!(agentElements.stepsGlobalEnableOrdering && agentElements.stepsGlobalEnableOrdering.checked);
+		        const stepsGlobalEnableMaxResults = !!(agentElements.stepsGlobalEnableMaxResults && agentElements.stepsGlobalEnableMaxResults.checked);
 
 	        const valPctRaw = readNumberInput(agentElements.valPercent, { integer: false });
 	        const valPercent = Number.isFinite(valPctRaw) ? Math.max(5, Math.min(95, valPctRaw)) / 100 : 0.3;
@@ -13705,6 +13816,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        let negStrength = Number.isFinite(negStrengthRaw) ? Math.max(0, Math.min(5, negStrengthRaw)) : 0.5;
 
 	        const hasClipHead = !!clipHeadClassifierPath;
+	        if (!hasClipHead) {
+	            setAgentStatus("Select a pretrained CLIP head (required). Train one in the CLIP tab first.", "warn");
+	            return null;
+	        }
 	        if (hasClipHead) {
 	            // When a pretrained CLIP head is selected, we don't use crop-bank exemplars/negatives.
 	            useClipGuard = false;
@@ -13723,7 +13838,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const stepsTier1MaxTrials = Number.isFinite(stepsTier1MaxTrialsRaw)
 	            ? Math.max(1, Math.min(256, stepsTier1MaxTrialsRaw))
 	            : 9;
-	        const stepsOptimizeTier1 = !!(stepsTier1Optimize && searchMode === "steps" && hasClipHead);
+	        const stepsOptimizeGlobal = !!(stepsGlobalOptimizeRaw && searchMode === "steps" && hasClipHead);
+	        const stepsOptimizeTier1 = !!(stepsTier1Optimize && searchMode === "steps" && hasClipHead && !stepsOptimizeGlobal);
 
 	        const stepsTier2Optimize = !!(agentElements.stepsTier2Optimize && agentElements.stepsTier2Optimize.checked);
 	        const stepsTier2EvalCapRaw = readNumberInput(agentElements.stepsTier2EvalCap, { integer: true });
@@ -13734,7 +13850,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const stepsTier2MaxTrials = Number.isFinite(stepsTier2MaxTrialsRaw)
 	            ? Math.max(1, Math.min(256, stepsTier2MaxTrialsRaw))
 	            : 12;
-	        const stepsOptimizeTier2 = !!(stepsTier2Optimize && searchMode === "steps" && hasClipHead);
+	        const stepsOptimizeTier2 = !!(stepsTier2Optimize && searchMode === "steps" && hasClipHead && !stepsOptimizeGlobal);
 
 	        const stepsRefinePromptSubset = !!(agentElements.stepsRefinePromptSubset && agentElements.stepsRefinePromptSubset.checked);
 	        const stepsRefineMaxItersRaw = readNumberInput(agentElements.stepsRefineMaxIters, { integer: true });
@@ -13743,7 +13859,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            : 6;
 	        const stepsRefineTopKRaw = readNumberInput(agentElements.stepsRefineTopK, { integer: true });
 	        const stepsRefineTopK = Number.isFinite(stepsRefineTopKRaw) ? Math.max(1, Math.min(50, stepsRefineTopKRaw)) : 6;
-	        const stepsEnableRefine = !!(stepsRefinePromptSubset && searchMode === "steps");
+	        const stepsEnableRefine = !!(stepsRefinePromptSubset && searchMode === "steps" && !stepsOptimizeGlobal);
 
 	        const stepsSeedEvalFloorRaw = readNumberInput(agentElements.stepsSeedEvalFloor, { integer: false });
 	        const stepsSeedEvalFloor = Number.isFinite(stepsSeedEvalFloorRaw)
@@ -13792,6 +13908,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            search_mode: searchMode,
 		            steps_max_steps_per_recipe: stepsMaxSteps,
 		            steps_max_visual_seeds_per_step: stepsMaxSeedsPerStep,
+		            steps_optimize_global: stepsOptimizeGlobal,
+		            steps_optimize_global_eval_caps: stepsGlobalEvalCaps,
+		            steps_optimize_global_max_trials: stepsGlobalMaxTrials,
+		            steps_optimize_global_keep_ratio: stepsGlobalKeepRatio,
+		            steps_optimize_global_rounds: stepsGlobalRounds,
+		            steps_optimize_global_mutations_per_round: stepsGlobalMutationsPerRound,
+		            steps_optimize_global_enable_max_results: stepsGlobalEnableMaxResults,
+		            steps_optimize_global_enable_ordering: stepsGlobalEnableOrdering,
 		            steps_seed_eval_floor: stepsSeedEvalFloor,
 		            steps_seed_eval_max_results: stepsSeedEvalMaxResults,
 		            steps_optimize_tier1: stepsOptimizeTier1,
@@ -13874,7 +13998,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             console.error("Agent mining start failed", err);
             setAgentStatus(`Start failed: ${err.message || err}`, "error");
         } finally {
-            if (agentElements.runButton) agentElements.runButton.disabled = false;
+            syncAgentRunButtonAvailability();
         }
     }
 
@@ -13911,6 +14035,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             renderAgentResults(job.result);
             renderAgentLogs(job);
             refreshAgentCacheSize();
+            syncAgentRunButtonAvailability();
             const keepPolling = !["completed", "failed", "cancelled"].includes(job.status || "");
             if (keepPolling) {
                 scheduleAgentPoll();
@@ -13943,6 +14068,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setAgentStatus(`Job ${jobId} cancelled`, "success");
             updateAgentProgress(job);
             renderAgentLogs(job);
+            syncAgentRunButtonAvailability();
             stopAgentPoll();
         } catch (err) {
             console.error("Agent cancel failed", err);
@@ -14067,6 +14193,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
 	        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
 	        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
+	        agentElements.stepsGlobalOptimize = document.getElementById("agentStepsGlobalOptimize");
+	        agentElements.stepsGlobalEvalCap1 = document.getElementById("agentStepsGlobalEvalCap1");
+	        agentElements.stepsGlobalEvalCap2 = document.getElementById("agentStepsGlobalEvalCap2");
+	        agentElements.stepsGlobalEvalCap3 = document.getElementById("agentStepsGlobalEvalCap3");
+	        agentElements.stepsGlobalMaxTrials = document.getElementById("agentStepsGlobalMaxTrials");
+	        agentElements.stepsGlobalKeepRatio = document.getElementById("agentStepsGlobalKeepRatio");
+	        agentElements.stepsGlobalRounds = document.getElementById("agentStepsGlobalRounds");
+	        agentElements.stepsGlobalMutationsPerRound = document.getElementById("agentStepsGlobalMutationsPerRound");
+	        agentElements.stepsGlobalEnableOrdering = document.getElementById("agentStepsGlobalEnableOrdering");
+	        agentElements.stepsGlobalEnableMaxResults = document.getElementById("agentStepsGlobalEnableMaxResults");
 	        agentElements.stepsTier1Optimize = document.getElementById("agentStepsTier1Optimize");
 	        agentElements.stepsTier1EvalCap = document.getElementById("agentStepsTier1EvalCap");
 	        agentElements.stepsTier1MaxTrials = document.getElementById("agentStepsTier1MaxTrials");
@@ -14142,6 +14278,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipGuard) agentElements.clipGuard.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
+	        if (agentElements.stepsGlobalOptimize) agentElements.stepsGlobalOptimize.addEventListener("change", syncAgentStepsOptimizationControls);
 	        if (agentElements.stepsTier1Optimize) agentElements.stepsTier1Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
 	        if (agentElements.stepsTier2Optimize) agentElements.stepsTier2Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
 	        if (agentElements.stepsRefinePromptSubset)
@@ -14172,7 +14309,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
 	        const syncSearchModeUi = () => {
-	            const mode = agentElements.searchMode ? agentElements.searchMode.value : "greedy";
+	            const mode = agentElements.searchMode ? agentElements.searchMode.value : "steps";
 	            const isBeam = mode === "beam";
 	            const isSteps = mode === "steps";
 	            if (agentElements.beamOptions) agentElements.beamOptions.style.display = isBeam ? "block" : "none";

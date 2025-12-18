@@ -204,7 +204,7 @@
 		                                    <div class="sam3-text-buttons">
 		                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
 		                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
-		                                        <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). It contains a JSON recipe + example crops.">Import recipe (zip)</label>
+		                                        <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). New recipe zips contain recipe.json + embedded pretrained CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">Import recipe (zip)</label>
 		                                        <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
 		                                        <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
 
@@ -921,7 +921,109 @@
 	                <div class="training-wrapper two-col">
 	                    <section class="training-form-section">
 	                        <h2>SAM3 Recipe Mining</h2>
-	                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip file (JSON + example crops) you can reuse in the labeling panel.</p>
+	                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
+	                        <div class="training-message info" style="margin-bottom: 12px;">
+	                            <div style="font-weight: 600; margin-bottom: 6px;">How recipe mining works (read this first)</div>
+	                            <div class="training-help">
+	                                <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
+	                            </div>
+	                            <details class="training-help" open style="margin-top: 8px;">
+	                                <summary style="cursor: pointer; font-weight: 600;">Full flow + how to tune it</summary>
+	                                <div class="training-help" style="margin-top: 10px;">
+	                                    <div style="font-weight: 600; margin-bottom: 6px;">High-level flow</div>
+	                                    <pre class="training-help" style="white-space: pre; overflow-x: auto; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">Dataset (YOLO/COCO) + trained CLIP head
+        │
+        ├─ Split images (Train/Val)  [repeatable by seed]
+        │
+        ├─ Build prompt list per class
+        │    - class name + your extra prompts
+        │    - optional GPT prompt expansion
+        │    - base prompts (e.g., “object”, “small object”)
+        │
+        ├─ Seed-stage prompt eval (Val, text-only)
+        │    - run SAM3 text inference per prompt
+        │    - build a seed-threshold curve per prompt (coverage vs false positives)
+        │
+        ├─ Build a multi-step recipe (per class)
+        │    - pick a short chain of prompt steps (usually 3–8)
+        │    - each step has its own seed threshold (from the prompt curve)
+        │
+        ├─ Run the full steps pipeline (Val)
+        │    - for each step:
+        │        1) text seeds → pick diverse seeds
+        │        2) expand with SAM3 “similarity prompt”
+        │        3) de-dupe
+        │
+        ├─ CLIP head gating (Val)
+        │    - crop each detection and score with the pretrained CLIP head
+        │    - auto-tune min prob + (optional) margin to hit your “cleanliness” target
+        │
+        └─ Save portable recipe zip
+             - recipe.json (schema v2, multi-step)
+             - clip_head/head.npz + meta.json (embedded head + tuned thresholds)</pre>
+
+	                                    <div style="font-weight: 600; margin: 12px 0 6px;">What we optimize for (“cleanliness”)</div>
+	                                    <div class="training-help">
+	                                        We optimize to <strong>maximize coverage</strong> (find as many GT objects as possible) while meeting your <strong>precision target</strong>:
+	                                        <ul style="margin: 6px 0 0 18px;">
+	                                            <li><strong>Match</strong> = a detection overlaps an unmatched GT box for that class with IoU ≥ “Eval IoU”.</li>
+	                                            <li><strong>Precision</strong> = matches / (matches + false positives). Higher = fewer wrong boxes.</li>
+	                                            <li><strong>Coverage</strong> = matches / GT count. Higher = finds more objects.</li>
+	                                            <li><strong>Duplicates</strong> = extra detections on the same GT object (tracked separately).</li>
+	                                        </ul>
+	                                    </div>
+
+	                                    <div style="font-weight: 600; margin: 12px 0 6px;">Multi-step tuning modes (what to enable)</div>
+	                                    <div class="training-help">
+	                                        <ul style="margin: 6px 0 0 18px;">
+		                                            <li><strong>Default (no extra tuning):</strong> seed curves → prompt/step selection (set-cover heuristic) → full pipeline → CLIP head thresholds tuned for your cleanliness.</li>
+	                                            <li><strong>Refine prompt subset:</strong> fast seed-stage local search that can add/drop/swap steps (no extra SAM runs). Use when the selected prompts look “obviously wrong”.</li>
+	                                            <li><strong>Tier‑1:</strong> bounded search over <code>expand_threshold</code> + <code>seeds/step</code> (applied across all steps). Good first knob-search if Global is off.</li>
+	                                            <li><strong>Tier‑2:</strong> bounded search over <code>seed_dedupe_iou</code> + <code>dedupe_iou</code> (applied across all steps). Helps duplicates/FPs.</li>
+	                                            <li><strong>Global optimizer (best quality):</strong> successive-halving search over full recipe configs (prompt subset + per-step knobs). This is slower but matches the “multi-knob” vision.</li>
+	                                        </ul>
+	                                    </div>
+
+	                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer: what knobs it can change</div>
+		                                    <div class="training-help">
+		                                        A candidate is a full per-class recipe config (ordered steps + per-step knobs). Each mutation changes one thing at a time:
+		                                        <ul style="margin: 6px 0 0 18px;">
+		                                            <li><strong>Prompt subset:</strong> add / drop / swap a step’s prompt.</li>
+		                                            <li><strong>Per-step seed threshold:</strong> picks alternative operating points from the prompt’s seed-threshold curve.</li>
+		                                            <li><strong>Per-step expand threshold</strong> and <strong>per-step seeds/step</strong>.</li>
+		                                            <li><strong>Per-step de-dupe IoUs:</strong> seed de-dupe and output de-dupe.</li>
+		                                            <li><strong>Optional:</strong> step order (adjacent swaps) and per-step max dets/image.</li>
+		                                        </ul>
+		                                        Each candidate is evaluated by running the <em>real</em> steps pipeline on a deterministic subset of validation images, then sweeping CLIP-head thresholds to hit your cleanliness target.
+		                                    </div>
+
+		                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer controls (what they mean)</div>
+		                                    <div class="training-help">
+		                                        <ul style="margin: 6px 0 0 18px;">
+		                                            <li><strong>Stage‑1/2/3 eval cap:</strong> how many validation images we use per stage (bigger = more reliable, slower). Stages are successive‑halving budgets.</li>
+		                                            <li><strong>Max trials:</strong> how many candidate recipe configs we consider per round (higher = more thorough, slower).</li>
+		                                            <li><strong>Keep ratio:</strong> how aggressively we prune candidates each stage (0.5 keeps the top half).</li>
+		                                            <li><strong>Rounds</strong> + <strong>Mutations/round:</strong> how long we keep exploring around the current best recipe.</li>
+		                                            <li><strong>Tune step order</strong> / <strong>Tune max dets/image:</strong> optional extra dimensions the optimizer is allowed to mutate.</li>
+		                                        </ul>
+		                                    </div>
+
+		                                    <div style="font-weight: 600; margin: 12px 0 6px;">How to influence results (practical)</div>
+		                                    <div class="training-help">
+		                                        <ul style="margin: 6px 0 0 18px;">
+	                                            <li><strong>Cleaner / fewer FPs:</strong> raise “Recipe cleanliness”. Expect lower coverage.</li>
+	                                            <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Seed curve floor (lets per-step thresholds go below the base).</li>
+	                                            <li><strong>More thorough search:</strong> enable Global optimization and increase Max trials / Rounds / Mutations per round (slower).</li>
+	                                            <li><strong>Faster runs:</strong> use Test mode first; lower Stage‑3 eval cap; lower Max trials.</li>
+	                                        </ul>
+	                                    </div>
+
+	                                    <div style="margin-top: 12px; color: #64748b;">
+	                                        Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
+	                                    </div>
+	                                </div>
+	                            </details>
+	                        </div>
 	                        <div class="training-field">
 	                            <label>Dataset</label>
 	                            <div class="sam3-dataset-row">
@@ -952,17 +1054,15 @@
 					                                <input type="number" id="agentWorkersPerGpu" min="1" max="8" value="1" />
 					                            </div>
 					                            <div>
-					                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Greedy is the default and is fastest.&#10;Multi-step selects a chain of prompt steps and tunes the CLIP head threshold for your cleanliness target (slower; best with a trained CLIP head).&#10;Beam search tries many parameter combinations and is usually MUCH slower.&#10;Start with Test mode first.">?</span></label>
+					                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Recipe mining now always uses Multi-step: it builds a chain of prompt steps and tunes CLIP head thresholds for your cleanliness target.&#10;Legacy modes are deprecated and are no longer exposed in the UI.">?</span></label>
 					                                <select id="agentSearchMode">
-					                                    <option value="greedy" selected>Greedy (fast)</option>
-					                                    <option value="steps">Multi-step (precision-first)</option>
-					                                    <option value="beam">Beam search (slower)</option>
+					                                    <option value="steps" selected>Multi-step (precision-first)</option>
 					                                </select>
 					                            </div>
 					                        </div>
 					                        <div id="agentStepsOptions" class="training-card" style="display: none; margin-bottom: 12px;">
 					                            <div class="training-card__body">
-					                                <div class="training-message info" style="margin-bottom: 10px;">Multi-step mode builds a recipe as a chain of prompt steps (usually one per prompt), then tunes the CLIP head threshold to hit your cleanliness target. This is slower than Greedy, but avoids “annihilating” all detections when CLIP is strict. <em>(screenshot coming)</em></div>
+					                                <div class="training-message info" style="margin-bottom: 10px;">Multi-step mode builds a recipe as a chain of prompt steps (usually one per prompt), runs the full step pipeline (seed → expand → de-dupe), then tunes CLIP head thresholds to hit your cleanliness target. For best quality, enable Global optimization below. <em>(screenshot coming)</em></div>
 					                                <div class="training-grid">
 					                                    <div>
 					                                        <label for="agentStepsMaxSteps">Max recipe steps<span class="help-icon" title="How many prompt steps we are allowed to select for a class.&#10;More steps can increase coverage but costs more compute and can add false positives.&#10;A good starting point is 4–8.">?</span></label>
@@ -976,6 +1076,60 @@
 					                                <details class="training-help" style="margin-top: 10px;">
 					                                    <summary style="cursor: pointer;">Advanced optimization</summary>
 					                                    <div class="training-help" style="margin-top: 8px;">
+					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;Enable a budgeted global optimizer that jointly searches the full recipe configuration (prompt subset + per-step knobs).&#10;&#10;Objective: maximize coverage while meeting your Recipe cleanliness (precision target). If the target cannot be met, it maximizes precision first.&#10;&#10;How it works: successive halving (multi-stage budgets). Each candidate runs the real steps pipeline, then we sweep CLIP-head thresholds to meet cleanliness.&#10;&#10;Runtime: roughly scales with (trials × sum(stage caps) × rounds).&#10;Requires a pretrained CLIP head.&#10;Tip: use Test mode first.">
+					                                            <input type="checkbox" id="agentStepsGlobalOptimize" />
+					                                            Global optimization (slow, best quality)
+					                                        </label>
+					                                        <div class="training-grid" style="margin-top: 10px;">
+					                                            <div>
+					                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
+					                                                <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
+					                                            </div>
+					                                            <div>
+					                                                <label for="agentStepsGlobalEvalCap2">Stage‑2 eval cap<span class="help-icon" title="How many validation images we use for the second stage.&#10;Typical: 100–500.">?</span></label>
+					                                                <input type="number" id="agentStepsGlobalEvalCap2" min="1" max="50000" value="200" />
+					                                            </div>
+					                                            <div>
+					                                                <label for="agentStepsGlobalEvalCap3">Stage‑3 eval cap<span class="help-icon" title="How many validation images we use for the final stage.&#10;Typical: 500–2000.&#10;If your val split is smaller, we automatically use the full val split.">?</span></label>
+					                                                <input type="number" id="agentStepsGlobalEvalCap3" min="1" max="50000" value="1000" />
+					                                            </div>
+					                                        </div>
+					                                        <div class="training-grid" style="margin-top: 10px;">
+					                                            <div>
+					                                                <label for="agentStepsGlobalMaxTrials">Max trials<span class="help-icon" title="Max candidate recipe configs evaluated per class (per stage).&#10;Higher = more thorough, slower.&#10;Typical: 16–64.">?</span></label>
+					                                                <input type="number" id="agentStepsGlobalMaxTrials" min="1" max="4096" value="36" />
+					                                            </div>
+					                                            <div>
+					                                                <label for="agentStepsGlobalKeepRatio">Keep ratio<span class="help-icon" title="Successive-halving prune ratio per stage.&#10;0.5 keeps the top half.&#10;Lower = more aggressive pruning (faster, riskier).">?</span></label>
+					                                                <input type="number" id="agentStepsGlobalKeepRatio" step="0.05" min="0.1" max="0.9" value="0.5" />
+					                                            </div>
+					                                            <div>
+					                                                <label for="agentStepsGlobalRounds">Rounds<span class="help-icon" title="How many mutation rounds to run.&#10;More rounds = more chances to improve, slower.&#10;Typical: 1–3.">?</span></label>
+					                                                <input type="number" id="agentStepsGlobalRounds" min="1" max="20" value="2" />
+					                                            </div>
+					                                            <div>
+					                                                <label for="agentStepsGlobalMutationsPerRound">Mutations/round<span class="help-icon" title="How many small candidate changes we generate around the current best recipe each round.&#10;Higher = more thorough, slower.&#10;Typical: 12–40.">?</span></label>
+					                                                <input type="number" id="agentStepsGlobalMutationsPerRound" min="1" max="10000" value="24" />
+					                                            </div>
+					                                        </div>
+					                                        <div class="training-grid" style="margin-top: 10px;">
+					                                            <div class="training-field training-field--inline">
+					                                                <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional. Step ordering usually has a minor effect, but can matter when Max dets/image is small.">
+					                                                    <input type="checkbox" id="agentStepsGlobalEnableOrdering" />
+					                                                    Tune step order
+					                                                </label>
+					                                            </div>
+					                                            <div class="training-field training-field--inline">
+					                                                <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional. Tune per-step max dets/image. This can reduce false positives, but can also miss objects and can change runtime.">
+					                                                    <input type="checkbox" id="agentStepsGlobalEnableMaxResults" />
+					                                                    Tune max dets/image
+					                                                </label>
+					                                            </div>
+					                                        </div>
+					                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
+					                                            Note: When Global optimization is enabled, Tier‑1 and Tier‑2 toggles are ignored.
+					                                        </div>
+					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
 					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate settings to improve coverage at your cleanliness target.&#10;This tunes the recipe’s expand threshold + seeds per step.&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
 					                                            <input type="checkbox" id="agentStepsTier1Optimize" />
 					                                            Auto-tune expand threshold &amp; seed count (Tier‑1)
@@ -1117,38 +1271,13 @@
 			                                <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" />
 			                            </div>
 			                        </div>
-			                        <div class="training-grid">
-			                            <div>
-			                                <label for="agentExemplars">Example crops/class<span class="help-icon" title="Crop-bank mode only.&#10;How many positive example cut-outs we save into the recipe zip for each class.&#10;More examples can reduce false positives but increases mining time and zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-			                                <input type="number" id="agentExemplars" min="0" value="20" />
-			                            </div>
-			                            <div>
-			                                <label for="agentExemplarPoolValue">Candidate pool size<span class="help-icon" title="Crop-bank mode only.&#10;We build a pool of labeled boxes from the training split, then choose diverse examples from that pool.&#10;This controls how many candidate boxes we consider before picking the final crops.&#10;Bigger = more diversity, more CLIP work.">?</span></label>
-			                                <input type="number" id="agentExemplarPoolValue" min="1" value="25" />
-			                            </div>
-			                            <div>
-			                                <label for="agentExemplarPoolMode">Pool mode<span class="help-icon" title="How to interpret “candidate pool size”.&#10;% mode: pool = that percent of all labeled boxes for the class.&#10;Count mode: pool = fixed number of boxes.&#10;Only used when selecting example crops.">?</span></label>
-			                                <select id="agentExemplarPoolMode">
-			                                    <option value="percent" selected>% of labeled objects</option>
-			                                    <option value="count">Fixed count</option>
-			                                </select>
-			                            </div>
-			                            <div class="training-field training-field--inline">
-			                                <label for="agentClusterExemplars">Diversify crops<span class="help-icon" title="Crop-bank mode only.&#10;Try to pick different-looking example crops (sizes/angles) instead of many near-identical ones.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-			                                <input type="checkbox" id="agentClusterExemplars" checked />
-			                            </div>
-			                            <div class="training-field training-field--inline">
-			                                <label for="agentClipGuard">Use CLIP filter<span class="help-icon" title="Crop-bank mode only.&#10;Use CLIP image similarity to keep detections that look like your saved example crops, and (optionally) suppress detections that look like negatives.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-			                                <input type="checkbox" id="agentClipGuard" checked />
-			                            </div>
-			                        </div>
 				                        <div class="training-grid">
 					                            <div>
-					                                <label for="agentClipHeadSelect">Pretrained CLIP head (optional)<span class="help-icon" title="Optional: use a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections.&#10;The head (and its tuned thresholds) is embedded into saved recipe zips (portable).&#10;When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead.&#10;Tip: you can also tighten CLIP thresholds later at inference time per cascade step (cumulative).">?</span></label>
+					                                <label for="agentClipHeadSelect">Pretrained CLIP head (required)<span class="help-icon" title="Required for recipe mining.&#10;Agent Mining uses a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections and tune “cleanliness” (precision).&#10;The head (and its tuned thresholds) is embedded into saved recipe zips (portable).&#10;Tip: you can also tighten CLIP thresholds later at inference time per cascade step (cumulative).">?</span></label>
 						                                <select id="agentClipHeadSelect">
-						                                    <option value="">(none)</option>
+						                                    <option value="">Select a CLIP head…</option>
 						                                </select>
-						                                <div class="training-help">Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). When selected, crop-bank settings (example crops / CLIP similarity / negatives) are disabled and the head is used instead. Recommended: keep auto-tune on and use a high target precision for clean recipes.</div>
+						                                <div class="training-help">Required. Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). Recommended: keep auto-tune on and use a high target precision for clean recipes.</div>
 						                            </div>
 					                            <div class="training-field training-field--inline">
 					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the validation split so recipes are clean (few false positives).&#10;These tuned thresholds are baked into the saved recipe ZIP and used whenever the recipe runs.&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
@@ -1186,20 +1315,53 @@
 				                                <input type="number" id="agentClipHeadMargin" step="0.05" min="0" max="1" value="0.0" />
 				                            </div>
 				                        </div>
-			                        <div class="training-grid">
-			                            <div class="training-field training-field--inline">
-			                                <label for="agentUseNegExemplars">Use negative crops<span class="help-icon" title="Crop-bank mode only.&#10;Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-			                                <input type="checkbox" id="agentUseNegExemplars" checked />
-			                            </div>
-				                            <div>
-				                                <label for="agentMaxNegExemplars">Max negatives/class<span class="help-icon" title="Crop-bank mode only.&#10;How many negative example crops we collect from other classes.&#10;Negatives suppress detections that look like another class.&#10;More negatives can reduce false positives but costs time and increases recipe zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
+				                        <details class="training-card" style="margin-bottom: 12px;">
+				                            <summary style="cursor: pointer; font-weight: 600;">Legacy crop-bank settings (deprecated)</summary>
+				                            <div class="training-card__body">
+				                                <div class="training-help" style="color: #64748b;">
+				                                    New recipes always embed a pretrained CLIP head and do not use crop banks. These settings are kept only for legacy recipe zips and are ignored during mining.
+				                                </div>
+				                                <div class="training-grid" style="margin-top: 10px;">
+				                                    <div>
+				                                        <label for="agentExemplars">Example crops/class<span class="help-icon" title="Crop-bank mode only.&#10;How many positive example cut-outs we save into the recipe zip for each class.&#10;More examples can reduce false positives but increases mining time and zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                        <input type="number" id="agentExemplars" min="0" value="20" />
+				                                    </div>
+				                                    <div>
+				                                        <label for="agentExemplarPoolValue">Candidate pool size<span class="help-icon" title="Crop-bank mode only.&#10;We build a pool of labeled boxes from the training split, then choose diverse examples from that pool.&#10;This controls how many candidate boxes we consider before picking the final crops.&#10;Bigger = more diversity, more CLIP work.">?</span></label>
+				                                        <input type="number" id="agentExemplarPoolValue" min="1" value="25" />
+				                                    </div>
+				                                    <div>
+				                                        <label for="agentExemplarPoolMode">Pool mode<span class="help-icon" title="How to interpret “candidate pool size”.&#10;% mode: pool = that percent of all labeled boxes for the class.&#10;Count mode: pool = fixed number of boxes.&#10;Only used when selecting example crops.">?</span></label>
+				                                        <select id="agentExemplarPoolMode">
+				                                            <option value="percent" selected>% of labeled objects</option>
+				                                            <option value="count">Fixed count</option>
+				                                        </select>
+				                                    </div>
+				                                    <div class="training-field training-field--inline">
+				                                        <label for="agentClusterExemplars">Diversify crops<span class="help-icon" title="Crop-bank mode only.&#10;Try to pick different-looking example crops (sizes/angles) instead of many near-identical ones.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                        <input type="checkbox" id="agentClusterExemplars" checked />
+				                                    </div>
+				                                    <div class="training-field training-field--inline">
+				                                        <label for="agentClipGuard">Use CLIP filter<span class="help-icon" title="Crop-bank mode only.&#10;Use CLIP image similarity to keep detections that look like your saved example crops, and (optionally) suppress detections that look like negatives.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                        <input type="checkbox" id="agentClipGuard" checked />
+				                                    </div>
+				                                </div>
+				                                <div class="training-grid" style="margin-top: 10px;">
+				                                    <div class="training-field training-field--inline">
+				                                        <label for="agentUseNegExemplars">Use negative crops<span class="help-icon" title="Crop-bank mode only.&#10;Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                        <input type="checkbox" id="agentUseNegExemplars" checked />
+				                                    </div>
+				                                    <div>
+				                                        <label for="agentMaxNegExemplars">Max negatives/class<span class="help-icon" title="Crop-bank mode only.&#10;How many negative example crops we collect from other classes.&#10;Negatives suppress detections that look like another class.&#10;More negatives can reduce false positives but costs time and increases recipe zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                        <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
+				                                    </div>
+				                                    <div>
+				                                        <label for="agentNegStrength">Negative filter strength<span class="help-icon" title="Crop-bank mode only.&#10;How strongly negative crops suppress detections.&#10;0 disables negatives.&#10;Higher = more suppression (fewer false positives; can also remove true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                        <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" />
+				                                    </div>
+				                                </div>
 				                            </div>
-			                            <div>
-			                                <label for="agentNegStrength">Negative filter strength<span class="help-icon" title="Crop-bank mode only.&#10;How strongly negative crops suppress detections.&#10;0 disables negatives.&#10;Higher = more suppression (fewer false positives; can also remove true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-			                                <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" />
-			                            </div>
-			                        </div>
+				                        </details>
 		                        <div class="two-col-grid">
 		                            <div>
 		                                <label for="agentClasses">Class IDs (optional)<span class="help-icon" title="Optional: restrict mining to specific class IDs. Leave blank to mine all classes.&#10;Example: 1,2,5">?</span></label>
@@ -1255,36 +1417,21 @@
 	                        <div class="training-help" id="agentProgressText" aria-live="polite"></div>
 	                    </section>
 	                    <section class="training-status-section">
-		                        <details class="training-card" open>
-		                            <summary style="font-weight: 600; cursor: pointer;">Agent Mining overview</summary>
-		                            <div class="training-card__body">
-				                                <p><strong>In plain English:</strong> You already have a labeled dataset. Agent Mining tries lots of ways to find the same objects automatically, then saves the best “recipe” so you can auto-label new images with fewer mistakes.</p>
-				                                <p><strong>What “Greedy” means here:</strong> We build one “wide net” recipe per class (text → filter → refine → de-dupe). It keeps anything that passes the filters instead of doing a complex multi-step search over many combinations.</p>
-				                                <p><strong>What “Multi-step” means here:</strong> We select a short chain of prompt steps (usually one step per prompt) based on which prompts find the most ground-truth objects. Then we run the full pipeline and auto-tune the CLIP head thresholds to hit your cleanliness target. This works best after you train a CLIP head.</p>
-				                                <p><strong>What “Beam search” means here:</strong> We repeatedly try different parameter settings and keep the best few each round. This is more thorough than Greedy, but it is usually MUCH slower.</p>
-			                                <ol>
-		                                    <li><strong>Split:</strong> We split your dataset into “train” (to pick example crops) and “val” (to test how good the recipe is). The split is repeatable using the seed.</li>
-		                                    <li><strong>Words:</strong> We try the class name (and optional extra phrases) to ask SAM3 to propose candidate boxes.</li>
-		                                    <li><strong>Example crops (optional):</strong> If you are using crop-bank mode, we save a small set of example cut-outs of the object from your dataset (e.g., a few cars of different sizes/angles). If you select a pretrained CLIP head, we skip crops and use the head instead.</li>
-		                                    <li><strong>Seed boxes:</strong> On each validation image we run a very “loose” text pass to get lots of candidate boxes.</li>
-		                                    <li><strong>Filter:</strong> We keep boxes that look like the target class (either by comparing to example crops with CLIP, or by using the pretrained CLIP head probabilities). Optional negative crops can suppress common confusions in crop-bank mode.</li>
-		                                    <li><strong>Refine:</strong> We optionally run a second SAM3 pass starting from selected boxes to improve coverage/quality.</li>
-		                                    <li><strong>Remove duplicates:</strong> If two detections overlap heavily, we keep the best one so the same object isn’t labeled twice.</li>
-		                                    <li><strong>Score:</strong> We measure how many ground-truth objects were found (“coverage”) and how many extra/wrong boxes were added (“false positives”).</li>
-		                                    <li><strong>Portable output:</strong> Saved recipes export as a zip containing <code>recipe.json</code> + all crops under <code>crops/</code> so you can copy it to another machine.</li>
-		                                </ol>
-	                                <ul class="training-help" style="margin-top: 10px;">
-	                                    <li><strong>SAM3:</strong> the model that proposes boxes/polygons when you give it words (text prompt) or a box (visual prompt).</li>
-	                                    <li><strong>CLIP:</strong> an image “similarity checker” we use to decide whether a candidate box looks like your saved examples.</li>
-	                                    <li><strong>Threshold:</strong> how confident the model must be before we keep a box; lower = more boxes (more noise), higher = fewer (cleaner).</li>
-	                                    <li><strong>Overlap (IoU):</strong> how much two boxes overlap; we use it to decide “same object” for de-duplication and scoring.</li>
-	                                    <li><strong>Coverage:</strong> how many true objects we found (higher is better).</li>
-	                                    <li><strong>False positives:</strong> boxes we found that are not actually that class (lower is better).</li>
-	                                </ul>
-	                                <p class="training-help" style="margin-top: 10px;"><strong>Typical workflow:</strong> Pick a dataset → keep test mode on → run mining → review results → save the best class recipes → go back to the labeling tab and apply the saved recipe presets to new images.</p>
-	                                <p class="training-help">Tip: Start with test mode first. If disk usage grows, use “Purge cache” to delete cached detections (it only affects speed, not your datasets).</p>
-	                            </div>
-	                        </details>
+			                        <details class="training-card">
+			                            <summary style="font-weight: 600; cursor: pointer;">Recipe mining quick reference</summary>
+			                            <div class="training-card__body">
+			                                <p><strong>Workflow:</strong> Train a CLIP head → run mining (test mode first) → review per-class results → save recipes → apply (and optionally chain) recipes from the labeling tab.</p>
+			                                <p class="training-help" style="margin-top: 10px;"><strong>How to read scores:</strong></p>
+			                                <ul class="training-help" style="margin-top: 6px;">
+			                                    <li><strong>Coverage</strong> = matches / GT objects (higher is better).</li>
+			                                    <li><strong>Precision</strong> = matches / (matches + false positives) (higher is cleaner).</li>
+			                                    <li><strong>FPs</strong> = detections that match no ground-truth box for that class (lower is better).</li>
+			                                    <li><strong>Duplicates</strong> = extra detections on the same GT object (lower is better; tracked separately).</li>
+			                                    <li><strong>Det rate</strong> = % of validation images that produced at least one detection (useful “is anything happening?” sanity check).</li>
+			                                </ul>
+			                                <p class="training-help" style="margin-top: 10px;"><strong>If results look “dead”:</strong> verify your CLIP head includes the dataset class names, and try lowering “Seed curve floor” or temporarily lowering “Recipe cleanliness” to confirm SAM3 is producing seeds before tightening filters.</p>
+			                            </div>
+			                        </details>
                         <h3>Progress & Logs</h3>
                         <div class="training-help">Live status and logs for the latest SAM3 Recipe Mining job.</div>
                         <div class="training-actions">
@@ -1311,12 +1458,12 @@
 		                            <button type="button" class="training-button danger" id="agentRecipeDelete">Delete recipe</button>
 		                        </div>
 		                        <div class="training-field">
-		                            <label for="agentRecipeFile">Import recipe zip<span class="help-icon" title="Import a recipe zip from another machine or previous run.&#10;The zip contains the recipe JSON plus any crops/weights needed, so it’s portable.">?</span></label>
+			                            <label for="agentRecipeFile">Import recipe zip<span class="help-icon" title="Import a recipe zip from another machine or previous run.&#10;New zips contain recipe.json + embedded CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">?</span></label>
 		                            <div class="training-grid training-grid--buttons">
 		                                <input type="file" id="agentRecipeFile" accept=".zip" />
 		                                <button type="button" class="training-button secondary" id="agentRecipeImport">Import</button>
 		                            </div>
-		                            <div class="training-help">Packages include the recipe JSON plus exemplar crops so they are portable between machines.</div>
+			                            <div class="training-help">Packages include recipe.json plus embedded CLIP head artifacts (and legacy crops when present) so they are portable between machines.</div>
 		                        </div>
 		                        <div class="training-help">Refresh, download, import, or delete saved recipes. Apply recipes to images from the labeling tab.</div>
 		                    </section>

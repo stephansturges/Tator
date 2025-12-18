@@ -477,12 +477,12 @@
             </div>
             <div class="tab-panel" id="tabQwenTrain" data-tab-panel="qwen-train">
                 <div class="training-wrapper two-col">
-                    <section class="training-form-section">
-                        <h2>Fine-tune Qwen 2.5 VL</h2>
-                        <p class="qwen-train-intro">
-                            Turn the images + YOLO boxes you have loaded into a Qwen fine-tuning dataset. We will package them automatically and train
-                            Qwen to respond with JSON detections (bbox + point) for every class in your label map.
-                        </p>
+	                    <section class="training-form-section">
+	                        <h2>Fine-tune Qwen 2.5 VL</h2>
+	                        <p class="qwen-train-intro">
+	                            Fine-tune Qwen on a dataset managed in the Dataset Management tab. Upload a YOLO / YOLO-seg dataset first, then build Qwen
+	                            annotations (JSONL) so Qwen can learn to return JSON detections (bbox + point) for every class in your label map.
+	                        </p>
                         <div class="qwen-train-callouts">
                             <div>
                                 <strong>LoRA</strong>
@@ -504,14 +504,14 @@
                             <input type="text" id="qwenTrainRunName" placeholder="Optional; defaults to job id" />
                             <div class="training-help">Checkpoints land in <code>uploads/qwen_runs/&lt;run_name&gt;</code>.</div>
                         </div>
-                        <div class="training-field">
-                            <label>Dataset (cached)</label>
-                            <div class="qwen-dataset-cache-controls">
-                                <select id="qwenDatasetSelect"></select>
-                                <button type="button" class="training-button" id="qwenDatasetRefresh">Refresh</button>
-                            </div>
-                            <div class="training-help" id="qwenDatasetSummary">Create and manage datasets in the Dataset Management tab.</div>
-                        </div>
+	                        <div class="training-field">
+	                            <label>Dataset</label>
+	                            <div class="qwen-dataset-cache-controls">
+	                                <select id="qwenDatasetSelect"></select>
+	                                <button type="button" class="training-button" id="qwenDatasetRefresh">Refresh</button>
+	                            </div>
+	                            <div class="training-help" id="qwenDatasetSummary">If the selected dataset says "needs Qwen build", go to Dataset Management and click "Build Qwen".</div>
+	                        </div>
                         <div class="training-grid">
                             <div class="checkbox-row">
                                 <label><input type="checkbox" id="qwenTrainRandomSplit" checked /> Random split (ignore existing train/val)</label>
@@ -1436,25 +1436,25 @@
                                 <div class="training-card__title">Dataset Management</div>
                                 <div class="training-help">Upload YOLO/YOLO-seg datasets once and reuse them across CLIP, Qwen, and SAM3 training.</div>
                             </div>
-                            <div class="training-card__body dataset-manager">
-                                <div class="training-subsection">
-                                    <div class="training-subsection__title">Upload current labeling session</div>
-                                    <div class="training-help">Packages the images + bboxes you have loaded in the labeling tab and caches them as a Qwen dataset (JSONL) for Qwen training and SAM3 conversion.</div>
-                                    <div class="training-grid">
-                                        <div>
-                                            <label for="datasetUploadCurrentName">Dataset name (optional)</label>
-                                            <input type="text" id="datasetUploadCurrentName" placeholder="Defaults to qwen_dataset" />
-                                        </div>
-                                        <div>
-                                            <label for="datasetUploadCurrentContext">Describe these images (optional)</label>
-                                            <input type="text" id="datasetUploadCurrentContext" placeholder="Optional: included in the per-image instruction text" />
-                                        </div>
-                                    </div>
-                                    <div class="training-actions">
-                                        <button type="button" id="datasetUploadCurrentBtn" class="training-button">Cache as Qwen dataset</button>
-                                        <div id="datasetUploadCurrentSummary" class="training-help"></div>
-                                    </div>
-                                </div>
+	                        <div class="training-card__body dataset-manager">
+	                                <div class="training-subsection">
+	                                    <div class="training-subsection__title">Upload current labeling session</div>
+	                                    <div class="training-help">Packages the images + labels you have loaded in the labeling tab and uploads them as a YOLO / YOLO-seg dataset (train split) so you can reuse it for CLIP, Qwen, and SAM3 flows.</div>
+	                                    <div class="training-grid">
+	                                        <div>
+	                                            <label for="datasetUploadCurrentName">Dataset name (optional)</label>
+	                                            <input type="text" id="datasetUploadCurrentName" placeholder="Defaults to labeling_session" />
+	                                        </div>
+	                                        <div>
+	                                            <label for="datasetUploadCurrentContext">Dataset context (optional)</label>
+	                                            <input type="text" id="datasetUploadCurrentContext" placeholder="Optional: used for Qwen instruction text" />
+	                                        </div>
+	                                    </div>
+	                                    <div class="training-actions">
+	                                        <button type="button" id="datasetUploadCurrentBtn" class="training-button">Save as YOLO dataset</button>
+	                                        <div id="datasetUploadCurrentSummary" class="training-help"></div>
+	                                    </div>
+	                                </div>
                                 <div class="training-subsection">
                                     <div class="training-subsection__title">Upload YOLO/YOLO-seg zip</div>
                                     <label for="datasetUploadFile">Zip file (root: labelmap.txt + images + labels)</label>

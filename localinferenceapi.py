@@ -10,7 +10,7 @@ from collections import deque
 import torch, clip, joblib, tiktoken
 from io import BytesIO
 from PIL import Image
-from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, root_validator, Field
@@ -2952,7 +2952,8 @@ qwen_prompt_config = DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True)
 
 
 class QwenTrainRequest(BaseModel):
-    dataset_root: str
+    dataset_id: Optional[str] = None
+    dataset_root: Optional[str] = None
     run_name: Optional[str] = None
     model_id: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -2981,6 +2982,12 @@ class QwenTrainRequest(BaseModel):
     split_seed: Optional[int] = None
     train_limit: Optional[int] = None
     val_limit: Optional[int] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_dataset_fields(cls, values):  # noqa: N805
+        if not (values.get("dataset_id") or values.get("dataset_root")):
+            raise ValueError("dataset_id_or_root_required")
+        return values
 
 
 class Sam3TrainRequest(BaseModel):
@@ -3763,6 +3770,24 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 coco_train = sam3_meta.get("coco_train_json")
                 coco_val = sam3_meta.get("coco_val_json")
                 coco_ready = bool(coco_train and coco_val)
+            yolo_ready = bool(
+                (path / "labelmap.txt").exists()
+                and (
+                    ((path / "train" / "images").exists() and (path / "train" / "labels").exists())
+                    or ((path / "images").exists() and (path / "labels").exists())
+                )
+            )
+            qwen_meta = _load_qwen_dataset_metadata(path)
+            qwen_ready = bool(
+                qwen_meta
+                and (path / "train" / "annotations.jsonl").exists()
+                and (path / "val" / "annotations.jsonl").exists()
+            )
+            dataset_format = "unknown"
+            if yolo_ready:
+                dataset_format = "yolo"
+            elif qwen_ready:
+                dataset_format = "qwen"
             signature = meta.get("signature") or ""
             key = signature or meta["id"]
             entry = {
@@ -3781,6 +3806,11 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 "coco_ready": coco_ready,
                 "coco_train_json": coco_train,
                 "coco_val_json": coco_val,
+                "format": dataset_format,
+                "yolo_ready": yolo_ready,
+                "qwen_ready": qwen_ready,
+                "qwen_train_count": qwen_meta.get("train_count") if qwen_meta else None,
+                "qwen_val_count": qwen_meta.get("val_count") if qwen_meta else None,
             }
             existing = seen.get(key)
             if existing is not None:
@@ -10237,9 +10267,19 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str, job_logs: Optiona
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"qwen_training_unavailable:{QWEN_TRAINING_IMPORT_ERROR}",
         )
-    dataset_root = Path(os.path.abspath(payload.dataset_root))
+    dataset_root: Optional[Path] = None
+    if payload.dataset_id:
+        dataset_root = _resolve_sam3_or_qwen_dataset(str(payload.dataset_id))
+    else:
+        dataset_root_value = payload.dataset_root or ""
+        dataset_root = Path(os.path.abspath(dataset_root_value))
     if not dataset_root.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_not_found")
+    qwen_meta = _load_qwen_dataset_metadata(dataset_root)
+    if not qwen_meta:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_qwen_not_ready")
+    if not (dataset_root / "train" / "annotations.jsonl").exists() or not (dataset_root / "val" / "annotations.jsonl").exists():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_qwen_not_ready")
     val_percent = payload.val_percent if payload.val_percent is not None else 0.3
     split_seed = int(payload.split_seed) if payload.split_seed is not None else 42
     random_split = payload.random_split if payload.random_split is not None else True
@@ -10772,11 +10812,271 @@ def _infer_yolo_dataset_type(labels_dir: Path, fallback: str = "bbox") -> str:
     return fallback
 
 
+class QwenDatasetBuildRequest(BaseModel):
+    force: bool = False
+    context: Optional[str] = None
+
+
+def _build_qwen_instruction(context_text: str, class_names: List[str]) -> str:
+    parts: List[str] = []
+    context_text = (context_text or "").strip()
+    if context_text:
+        parts.append(f"This image shows {context_text}.")
+    cleaned = [str(name).strip() for name in (class_names or []) if str(name).strip()]
+    if cleaned:
+        parts.append(f"Objects of interest: {', '.join(cleaned)}.")
+    return " ".join(parts).strip()
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp_{uuid.uuid4().hex[:8]}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _iter_yolo_images(images_dir: Path) -> List[Path]:
+    if not images_dir.exists():
+        return []
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+    return sorted([p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in exts])
+
+
+def _load_image_size(image_path: Path) -> Tuple[int, int]:
+    try:
+        with Image.open(image_path) as im:
+            width, height = im.size
+            return int(width), int(height)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"image_read_failed:{image_path.name}:{exc}") from exc
+
+
+def _qwen_det_from_yolo(
+    tokens: List[str],
+    *,
+    labelmap: List[str],
+    width: int,
+    height: int,
+) -> Optional[Dict[str, Any]]:
+    if not tokens:
+        return None
+    try:
+        class_idx = int(float(tokens[0]))
+    except Exception:
+        return None
+    if class_idx < 0 or class_idx >= len(labelmap):
+        return None
+    coords: List[float] = []
+    for part in tokens[1:]:
+        try:
+            coords.append(float(part))
+        except Exception:
+            return None
+    if len(coords) < 4:
+        return None
+    if len(coords) > 4:
+        if len(coords) < 6 or len(coords) % 2 != 0:
+            return None
+        xs = coords[0::2]
+        ys = coords[1::2]
+        if not xs or not ys:
+            return None
+        x1n = max(0.0, min(1.0, min(xs)))
+        x2n = max(0.0, min(1.0, max(xs)))
+        y1n = max(0.0, min(1.0, min(ys)))
+        y2n = max(0.0, min(1.0, max(ys)))
+    else:
+        cx, cy, w, h = coords[:4]
+        if w <= 0 or h <= 0:
+            return None
+        x1n = cx - w / 2.0
+        x2n = cx + w / 2.0
+        y1n = cy - h / 2.0
+        y2n = cy + h / 2.0
+        x1n = max(0.0, min(1.0, x1n))
+        x2n = max(0.0, min(1.0, x2n))
+        y1n = max(0.0, min(1.0, y1n))
+        y2n = max(0.0, min(1.0, y2n))
+    if x2n <= x1n or y2n <= y1n:
+        return None
+    x1 = int(round(x1n * width))
+    x2 = int(round(x2n * width))
+    y1 = int(round(y1n * height))
+    y2 = int(round(y2n * height))
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    cxp = int(round((x1 + x2) / 2.0))
+    cyp = int(round((y1 + y2) / 2.0))
+    return {
+        "label": labelmap[class_idx],
+        "bbox": [x1, y1, x2, y2],
+        "point": [cxp, cyp],
+    }
+
+
+def _build_qwen_dataset_from_yolo(dataset_root: Path, *, context_text: str = "", force: bool = False) -> Dict[str, Any]:
+    labelmap_path = dataset_root / "labelmap.txt"
+    if not labelmap_path.exists():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_txt_missing")
+    try:
+        labelmap = [line.strip() for line in labelmap_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"labelmap_txt_invalid:{exc}") from exc
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_missing_classes")
+
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    if not train_images.exists() or not train_labels.exists():
+        root_images = dataset_root / "images"
+        root_labels = dataset_root / "labels"
+        if root_images.exists() and root_labels.exists():
+            train_images = root_images
+            train_labels = root_labels
+        else:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_layout_not_found")
+
+    val_images = dataset_root / "val" / "images"
+    val_labels = dataset_root / "val" / "labels"
+
+    train_list = _iter_yolo_images(train_images)
+    val_list = _iter_yolo_images(val_images) if val_images.exists() else []
+    if not train_list and not val_list:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_missing_images")
+
+    # Ensure both splits have at least one entry by duplicating across splits when needed.
+    if not train_list and val_list:
+        train_list = [val_list[0]]
+    if not val_list and train_list:
+        val_list = [train_list[0]]
+
+    instruction = _build_qwen_instruction(context_text, labelmap)
+    total_detections = 0
+
+    def _label_path_for_image(img_path: Path, primary_images: Path, primary_labels: Path) -> Tuple[Path, Path]:
+        candidates: List[Tuple[Path, Path]] = [(primary_images, primary_labels)]
+        if train_images != primary_images:
+            candidates.append((train_images, train_labels))
+        if val_images.exists() and val_labels.exists() and val_images != primary_images:
+            candidates.append((val_images, val_labels))
+        for img_dir, lbl_dir in candidates:
+            try:
+                rel = img_path.relative_to(img_dir)
+            except Exception:
+                continue
+            return rel, lbl_dir / rel.with_suffix(".txt")
+        return Path(img_path.name), primary_labels / Path(img_path.stem + ".txt")
+
+    def _write_split(split_name: str, images_dir: Path, labels_dir: Path, images_list: List[Path]) -> int:
+        nonlocal total_detections
+        out_dir = dataset_root / split_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = out_dir / "annotations.jsonl"
+        if jsonl_path.exists() and not force:
+            # Assume existing annotations are valid; count entries quickly.
+            try:
+                with jsonl_path.open("r", encoding="utf-8") as handle:
+                    return sum(1 for _ in handle if _.strip())
+            except Exception:
+                pass
+        tmp_path = jsonl_path.with_name(f".{jsonl_path.name}.tmp_{uuid.uuid4().hex[:8]}")
+        count = 0
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                for img_path in images_list:
+                    rel, label_path = _label_path_for_image(img_path, images_dir, labels_dir)
+                    width, height = _load_image_size(img_path)
+                    detections: List[Dict[str, Any]] = []
+                    if label_path.exists():
+                        try:
+                            for raw in label_path.read_text(encoding="utf-8").splitlines():
+                                raw = raw.strip()
+                                if not raw:
+                                    continue
+                                det = _qwen_det_from_yolo(raw.split(), labelmap=labelmap, width=width, height=height)
+                                if det:
+                                    detections.append(det)
+                        except Exception:
+                            detections = []
+                    total_detections += len(detections)
+                    record = {
+                        "image": str(rel.as_posix()),
+                        "context": instruction,
+                        "detections": detections,
+                    }
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    count += 1
+            tmp_path.replace(jsonl_path)
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return count
+
+    train_count = _write_split("train", train_images, train_labels, train_list)
+    val_count = _write_split("val", val_images if val_images.exists() else train_images, val_labels if val_labels.exists() else train_labels, val_list)
+    if total_detections <= 0:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_missing_labels")
+
+    meta = _load_sam3_dataset_metadata(dataset_root) or _load_registry_dataset_metadata(dataset_root) or {}
+    dataset_type = str(meta.get("type") or "bbox")
+    meta_payload = {
+        "id": meta.get("id") or dataset_root.name,
+        "label": meta.get("label") or meta.get("id") or dataset_root.name,
+        "classes": labelmap,
+        "context": context_text,
+        "created_at": time.time(),
+        "image_count": train_count + val_count,
+        "train_count": train_count,
+        "val_count": val_count,
+        "type": dataset_type,
+    }
+    _atomic_write_json(dataset_root / QWEN_METADATA_FILENAME, meta_payload)
+    return meta_payload
+
+
+@app.post("/datasets/{dataset_id}/build/qwen")
+def build_dataset_qwen_artifact(
+    dataset_id: str,
+    payload: QwenDatasetBuildRequest = Body(default_factory=QwenDatasetBuildRequest),
+):
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    entry = None
+    for candidate in _list_all_datasets(prefer_registry=True):
+        if dataset_id in (candidate.get("id"), candidate.get("signature")):
+            entry = candidate
+            break
+    context_text = ""
+    if payload and payload.context is not None:
+        context_text = str(payload.context)
+    elif entry:
+        context_text = str(entry.get("context") or "")
+    force = bool(payload.force) if payload else False
+    meta = _build_qwen_dataset_from_yolo(dataset_root, context_text=context_text, force=force)
+    return {"status": "ready", "dataset_id": entry.get("id") if entry else dataset_id, "qwen_metadata": meta}
+
+
 @app.post("/datasets/upload")
 async def upload_dataset_zip(
     file: UploadFile = File(...),
     dataset_id: Optional[str] = Form(None),
     dataset_type: Optional[str] = Form(None),
+    context: Optional[str] = Form(None),
 ):
     # Purge stale staging before creating a new one.
     _purge_staging_dirs(DATASET_UPLOAD_ROOT, active_roots=set(), prefix="dataset_upload_")
@@ -10842,6 +11142,7 @@ async def upload_dataset_zip(
             "image_count": image_count,
             "train_count": train_count,
             "val_count": val_count,
+            "context": (context or "").strip(),
             "classes": labelmap,
             "signature": signature,
         }

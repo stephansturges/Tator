@@ -4585,7 +4585,16 @@ def _persist_agent_recipe(
         labelmap_entries = meta_overrides.get("labelmap")
     if not labelmap_entries:
         raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_labelmap_missing")
-    steps_raw = _normalize_agent_recipe_steps(recipe_body.get("steps") or [])
+    recipe_mode = _classify_agent_recipe_mode(recipe_body)
+    if recipe_mode == "sam3_steps":
+        raw_steps = recipe_body.get("steps")
+        if raw_steps is None:
+            raw_steps = []
+        if not isinstance(raw_steps, list):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        steps_raw = [dict(s) for s in raw_steps if isinstance(s, dict)]
+    else:
+        steps_raw = _normalize_agent_recipe_steps(recipe_body.get("steps") or [])
     text_prompts_raw = recipe_body.get("text_prompts")
     positives_raw = recipe_body.get("positives")
     negatives_raw = recipe_body.get("negatives")

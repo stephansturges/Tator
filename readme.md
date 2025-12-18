@@ -400,6 +400,10 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
 
+## 2025-12-18 – Recipe ZIP Import Fix
+- Fixed recipe ZIP import so it **preserves the saved `params` block** (tuned thresholds/knobs) instead of dropping it. This also applies when importing cascade ZIP bundles (they import recipe ZIPs internally).
+- Hardened schema-v2 step recipes on save so they persist with `schema_version=2` and `mode=sam3_steps` (portable + unambiguous).
+
 ## 2025-12-17 – Recipe Cascades + CLIP Head Robustness
 - Added **recipe cascades** in the Label Images tab: chain multiple recipes, optionally re-label outputs per step, and merge results with configurable per-class + cross-class IoU de-dupe.
 - Added **dedupe groups** + per-step opt-out for cross-class de-dupe (useful when overlap is expected, e.g. person-on-bike).

@@ -6197,11 +6197,16 @@ def _apply_agent_recipe_to_image(
     """
     Apply a portable Agent Mining recipe to a single image.
 
-    Current (greedy) semantics:
-    1) Run seed text prompts at low threshold to generate many candidate boxes.
-    2) Use CLIP similarity against the recipe's positive/negative crop banks to keep good seeds.
-    3) Run SAM3 visual prompting from the kept seed boxes to expand detections.
-    4) CLIP-filter and IoU-dedupe final detections to avoid double-labeling.
+    Supported formats:
+    - schema v2 ("sam3_steps"): run each step (text seeds -> optional CLIP seed gate -> expand -> de-dupe),
+      then apply final CLIP filtering (embedded CLIP head thresholds, optionally tightened by overrides),
+      merge all steps, and de-dupe.
+    - legacy ("sam3_greedy"/"legacy_steps"): crop-bank-based flow kept for backward compatibility.
+
+    Notes:
+    - `clip_head_min_prob_override` / `clip_head_margin_override` are extra per-run filters applied on top
+      of the baked-in recipe thresholds (cumulative via max(...)).
+    - `extra_clip_*` applies an additional CLIP head after the recipe's own filtering (also cumulative).
     """
     recipe_body = recipe.get("recipe") if "steps" not in recipe and isinstance(recipe.get("recipe"), dict) else recipe
     img_path = image.get("path")
@@ -10626,6 +10631,648 @@ def _tune_steps_tier2_knobs_image_first(
     }
 
 
+def _stable_sample_ids(
+    ids: Sequence[int],
+    *,
+    cap: int,
+    seed: int,
+    salt: str,
+) -> List[int]:
+    """Deterministically sample up to cap ids, independent of thread scheduling."""
+    try:
+        cap_i = int(cap)
+    except Exception:
+        cap_i = 0
+    if cap_i <= 0:
+        return []
+    uniq = sorted({int(i) for i in ids})
+    if not uniq:
+        return []
+    if cap_i >= len(uniq):
+        return uniq
+
+    scored: List[Tuple[bytes, int]] = []
+    for i in uniq:
+        h = hashlib.sha256(f"{salt}:{seed}:{i}".encode("utf-8")).digest()
+        scored.append((h, int(i)))
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return [i for _h, i in scored[:cap_i]]
+
+
+def _clamp01(val: Any, default: float) -> float:
+    try:
+        f = float(val)
+    except Exception:
+        f = float(default)
+    return float(max(0.0, min(1.0, f)))
+
+
+def _clamp_int(val: Any, default: int, *, lo: int, hi: int) -> int:
+    try:
+        i = int(val)
+    except Exception:
+        i = int(default)
+    return int(max(int(lo), min(int(hi), i)))
+
+
+def _steps_candidate_signature(steps: Sequence[Dict[str, Any]]) -> Tuple[Tuple[Any, ...], ...]:
+    """Canonical signature for deduping step candidates (order-sensitive)."""
+    out: List[Tuple[Any, ...]] = []
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        if not bool(step.get("enabled", True)):
+            continue
+        prompt = str(step.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        sig = (
+            prompt,
+            float(round(_clamp01(step.get("seed_threshold"), 0.05), 6)),
+            float(round(_clamp01(step.get("expand_threshold"), 0.3), 6)),
+            int(_clamp_int(step.get("max_visual_seeds"), 5, lo=0, hi=500)),
+            float(round(_clamp01(step.get("seed_dedupe_iou"), 0.9), 6)),
+            float(round(_clamp01(step.get("dedupe_iou"), 0.5), 6)),
+            int(_clamp_int(step.get("max_results"), 1000, lo=1, hi=5000)),
+        )
+        out.append(sig)
+    return tuple(out)
+
+
+def _seed_threshold_candidates_for_prompt_stat(
+    stat: Dict[str, Any],
+    *,
+    max_candidates: int,
+    target_precision: Optional[float],
+    fallback_seed_threshold: float,
+) -> List[float]:
+    curve = stat.get("seed_threshold_curve") if isinstance(stat.get("seed_threshold_curve"), list) else []
+    points = _select_seed_threshold_candidate_points(
+        curve,
+        max_candidates=max(1, int(max_candidates)),
+        target_precision=target_precision,
+    )
+    vals: List[float] = []
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        if p.get("threshold") is None:
+            continue
+        try:
+            vals.append(float(p.get("threshold")))
+        except Exception:
+            continue
+    # Always include the recommended/base thresholds when present.
+    for k in ("seed_threshold_recommended", "seed_threshold_base", "selected_seed_threshold"):
+        if stat.get(k) is None:
+            continue
+        try:
+            vals.append(float(stat.get(k)))
+        except Exception:
+            continue
+    if not vals:
+        vals = [float(fallback_seed_threshold)]
+    vals = sorted({float(round(_clamp01(v, fallback_seed_threshold), 6)) for v in vals})
+    return vals
+
+
+def _default_step_for_prompt(
+    *,
+    prompt: str,
+    prompt_stat: Optional[Dict[str, Any]],
+    payload: "AgentMiningRequest",
+) -> Dict[str, Any]:
+    base_seed = float(getattr(payload, "seed_threshold", 0.05) or 0.05)
+    seed_thr = None
+    if isinstance(prompt_stat, dict):
+        for k in ("selected_seed_threshold", "seed_threshold_recommended", "seed_threshold_base"):
+            if prompt_stat.get(k) is None:
+                continue
+            try:
+                seed_thr = float(prompt_stat.get(k))
+                break
+            except Exception:
+                continue
+    seed_thr = float(_clamp01(seed_thr, base_seed))
+    return {
+        "enabled": True,
+        "prompt": str(prompt),
+        "seed_threshold": float(seed_thr),
+        "expand_threshold": float(_clamp01(getattr(payload, "expand_threshold", 0.3), 0.3)),
+        "max_visual_seeds": int(_clamp_int(getattr(payload, "steps_max_visual_seeds_per_step", 5), 5, lo=0, hi=500)),
+        "seed_dedupe_iou": float(_clamp01(getattr(payload, "seed_dedupe_iou", 0.9), 0.9)),
+        "dedupe_iou": float(_clamp01(getattr(payload, "dedupe_iou", 0.5), 0.5)),
+        "max_results": int(_clamp_int(getattr(payload, "max_results", 1000), 1000, lo=1, hi=5000)),
+    }
+
+
+def _normalize_steps_candidate_steps(
+    steps: Sequence[Dict[str, Any]],
+    *,
+    payload: "AgentMiningRequest",
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        if not bool(step.get("enabled", True)):
+            continue
+        prompt = str(step.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        key = prompt.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "enabled": True,
+                "prompt": prompt,
+                "seed_threshold": float(_clamp01(step.get("seed_threshold"), getattr(payload, "seed_threshold", 0.05))),
+                "expand_threshold": float(_clamp01(step.get("expand_threshold"), getattr(payload, "expand_threshold", 0.3))),
+                "max_visual_seeds": int(
+                    _clamp_int(
+                        step.get("max_visual_seeds"),
+                        int(getattr(payload, "steps_max_visual_seeds_per_step", 5) or 0),
+                        lo=0,
+                        hi=500,
+                    )
+                ),
+                "seed_dedupe_iou": float(_clamp01(step.get("seed_dedupe_iou"), getattr(payload, "seed_dedupe_iou", 0.9))),
+                "dedupe_iou": float(_clamp01(step.get("dedupe_iou"), getattr(payload, "dedupe_iou", 0.5))),
+                "max_results": int(_clamp_int(step.get("max_results"), int(getattr(payload, "max_results", 1000) or 1000), lo=1, hi=5000)),
+            }
+        )
+    return out
+
+
+def _build_steps_global_prompt_pool(
+    seed_stats: Sequence[Dict[str, Any]],
+    *,
+    max_pool: int,
+) -> List[str]:
+    """
+    Deterministically pick a bounded prompt pool for the global optimizer.
+
+    We prioritize high-coverage prompts from seed-stage stats.
+    """
+    rows: List[Tuple[int, float, int, str]] = []
+    for stat in seed_stats or []:
+        if not isinstance(stat, dict):
+            continue
+        prompt = str(stat.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        try:
+            matches = int(stat.get("matches") or 0)
+        except Exception:
+            matches = 0
+        try:
+            precision = float(stat.get("precision") or 0.0)
+        except Exception:
+            precision = 0.0
+        try:
+            fps = int(stat.get("fps") or 0)
+        except Exception:
+            fps = 0
+        rows.append((int(matches), float(precision), int(fps), prompt))
+    rows.sort(key=lambda r: (-r[0], -r[1], r[2], r[3]))
+    prompts = [p for *_rest, p in rows]
+    uniq: List[str] = []
+    seen: set[str] = set()
+    for p in prompts:
+        k = p.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(p)
+        if len(uniq) >= max(1, int(max_pool)):
+            break
+    return uniq
+
+
+def _generate_steps_global_mutations(
+    *,
+    base_candidate: Dict[str, Any],
+    seed_stats: Sequence[Dict[str, Any]],
+    payload: "AgentMiningRequest",
+    max_mutations: int,
+    target_precision: Optional[float],
+    enable_max_results: bool,
+    enable_ordering: bool,
+) -> List[Dict[str, Any]]:
+    """
+    Deterministically generate a bounded neighborhood of candidates around base_candidate.
+
+    This is intentionally conservative and order-stable so the optimizer is reproducible.
+    """
+    base_steps = _normalize_steps_candidate_steps(base_candidate.get("steps") or [], payload=payload)
+    if not base_steps:
+        return []
+
+    try:
+        max_steps = int(getattr(payload, "steps_max_steps_per_recipe", 6) or 6)
+    except Exception:
+        max_steps = 6
+    max_steps = max(1, min(50, int(max_steps)))
+
+    prompt_pool = _build_steps_global_prompt_pool(seed_stats, max_pool=max(12, max_steps * 6))
+    stats_by_prompt = {str(s.get("prompt") or "").strip().lower(): s for s in seed_stats if isinstance(s, dict)}
+
+    existing = {str(s.get("prompt") or "").strip().lower() for s in base_steps}
+
+    base_seed = float(getattr(payload, "seed_threshold", 0.05) or 0.05)
+    candidates: List[Dict[str, Any]] = []
+    seen_sig: set[Tuple[Tuple[Any, ...], ...]] = set()
+
+    def _add(steps: List[Dict[str, Any]], mutation: Dict[str, Any]) -> None:
+        nonlocal candidates
+        if len(candidates) >= int(max_mutations):
+            return
+        norm = _normalize_steps_candidate_steps(steps, payload=payload)
+        if not norm:
+            return
+        sig = _steps_candidate_signature(norm)
+        if sig in seen_sig:
+            return
+        seen_sig.add(sig)
+        candidates.append({"steps": norm, "mutation": mutation, "sig": sig})
+
+    # 1) Ordering moves (swap adjacent).
+    if enable_ordering and len(base_steps) > 1:
+        for i in range(len(base_steps) - 1):
+            swapped = list(base_steps)
+            swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
+            _add(swapped, {"op": "swap_order", "i": int(i)})
+
+    # 2) Drop moves.
+    if len(base_steps) > 1:
+        for i, step in enumerate(base_steps):
+            dropped = [s for j, s in enumerate(base_steps) if j != i]
+            _add(dropped, {"op": "drop_step", "prompt": str(step.get("prompt") or ""), "i": int(i)})
+
+    # 3) Add moves (append).
+    if len(base_steps) < max_steps:
+        for p in prompt_pool:
+            k = p.lower()
+            if k in existing:
+                continue
+            stat = stats_by_prompt.get(k)
+            added = list(base_steps) + [_default_step_for_prompt(prompt=p, prompt_stat=stat, payload=payload)]
+            _add(added, {"op": "add_step", "prompt": p})
+
+    # 4) Swap prompt moves.
+    for i, step in enumerate(base_steps):
+        for p in prompt_pool:
+            k = p.lower()
+            if k in existing:
+                continue
+            stat = stats_by_prompt.get(k)
+            swapped = list(base_steps)
+            swapped[i] = _default_step_for_prompt(prompt=p, prompt_stat=stat, payload=payload)
+            _add(swapped, {"op": "swap_prompt", "i": int(i), "dropped": str(step.get("prompt") or ""), "added": p})
+
+    # 5) Per-step seed-threshold moves (from curve candidates).
+    for i, step in enumerate(base_steps):
+        p = str(step.get("prompt") or "").strip()
+        if not p:
+            continue
+        stat = stats_by_prompt.get(p.lower())
+        if not isinstance(stat, dict):
+            continue
+        thr_candidates = _seed_threshold_candidates_for_prompt_stat(
+            stat,
+            max_candidates=6,
+            target_precision=target_precision,
+            fallback_seed_threshold=base_seed,
+        )
+        cur_thr = float(_clamp01(step.get("seed_threshold"), base_seed))
+        for thr in thr_candidates:
+            thr_f = float(_clamp01(thr, base_seed))
+            if abs(thr_f - cur_thr) < 1e-9:
+                continue
+            mutated = list(base_steps)
+            s2 = dict(mutated[i])
+            s2["seed_threshold"] = float(thr_f)
+            mutated[i] = s2
+            _add(mutated, {"op": "seed_threshold", "i": int(i), "prompt": p, "seed_threshold": float(thr_f)})
+
+    # 6) Per-step expand threshold moves (small grid around current).
+    for i, step in enumerate(base_steps):
+        cur = float(_clamp01(step.get("expand_threshold"), getattr(payload, "expand_threshold", 0.3)))
+        for d in (-0.2, -0.1, -0.05, 0.05, 0.1, 0.2):
+            nxt = float(_clamp01(cur + float(d), cur))
+            if abs(nxt - cur) < 1e-9:
+                continue
+            mutated = list(base_steps)
+            s2 = dict(mutated[i])
+            s2["expand_threshold"] = float(nxt)
+            mutated[i] = s2
+            _add(mutated, {"op": "expand_threshold", "i": int(i), "prompt": str(step.get("prompt") or ""), "expand_threshold": float(nxt)})
+
+    # 7) Per-step max_visual_seeds moves.
+    for i, step in enumerate(base_steps):
+        cur = int(_clamp_int(step.get("max_visual_seeds"), int(getattr(payload, "steps_max_visual_seeds_per_step", 5) or 0), lo=0, hi=500))
+        for d in (-8, -4, -2, 2, 4, 8):
+            nxt = int(_clamp_int(cur + int(d), cur, lo=0, hi=500))
+            if nxt == cur:
+                continue
+            mutated = list(base_steps)
+            s2 = dict(mutated[i])
+            s2["max_visual_seeds"] = int(nxt)
+            mutated[i] = s2
+            _add(mutated, {"op": "max_visual_seeds", "i": int(i), "prompt": str(step.get("prompt") or ""), "max_visual_seeds": int(nxt)})
+
+    # 8) Per-step IoU moves.
+    for i, step in enumerate(base_steps):
+        seed_iou = float(_clamp01(step.get("seed_dedupe_iou"), getattr(payload, "seed_dedupe_iou", 0.9)))
+        out_iou = float(_clamp01(step.get("dedupe_iou"), getattr(payload, "dedupe_iou", 0.5)))
+        for d in (-0.2, -0.1, -0.05, 0.05, 0.1, 0.2):
+            nxt = float(_clamp01(seed_iou + float(d), seed_iou))
+            if abs(nxt - seed_iou) >= 1e-9:
+                mutated = list(base_steps)
+                s2 = dict(mutated[i])
+                s2["seed_dedupe_iou"] = float(nxt)
+                mutated[i] = s2
+                _add(mutated, {"op": "seed_dedupe_iou", "i": int(i), "prompt": str(step.get("prompt") or ""), "seed_dedupe_iou": float(nxt)})
+        for d in (-0.2, -0.1, -0.05, 0.05, 0.1, 0.2, 0.3):
+            nxt = float(_clamp01(out_iou + float(d), out_iou))
+            if abs(nxt - out_iou) < 1e-9:
+                continue
+            mutated = list(base_steps)
+            s2 = dict(mutated[i])
+            s2["dedupe_iou"] = float(nxt)
+            mutated[i] = s2
+            _add(mutated, {"op": "dedupe_iou", "i": int(i), "prompt": str(step.get("prompt") or ""), "dedupe_iou": float(nxt)})
+
+    # 9) Per-step max_results moves (optional).
+    if enable_max_results:
+        for i, step in enumerate(base_steps):
+            cur = int(_clamp_int(step.get("max_results"), int(getattr(payload, "max_results", 1000) or 1000), lo=1, hi=5000))
+            grid = [10, 25, 50, 100, 200, 500, 1000, 2000]
+            for nxt in grid:
+                nxt_i = int(_clamp_int(nxt, cur, lo=1, hi=5000))
+                if nxt_i == cur:
+                    continue
+                mutated = list(base_steps)
+                s2 = dict(mutated[i])
+                s2["max_results"] = int(nxt_i)
+                mutated[i] = s2
+                _add(mutated, {"op": "max_results", "i": int(i), "prompt": str(step.get("prompt") or ""), "max_results": int(nxt_i)})
+
+    return candidates[: max(1, int(max_mutations))]
+
+
+def _run_steps_global_successive_halving_rounds(
+    *,
+    base_candidate: Any,
+    budgets: Sequence[int],
+    keep_ratio: float,
+    rounds: int,
+    max_trials: int,
+    mutate: Callable[[Any, int], Sequence[Any]],
+    evaluator: Callable[[Any, int], Tuple[Tuple[Any, ...], Any]],
+) -> Tuple[Any, List[Dict[str, Any]]]:
+    """
+    Pure controller logic for the global optimizer (testable without GPUs).
+
+    Repeats successive-halving over a bounded neighborhood for multiple rounds, carrying forward
+    the best candidate each time.
+    """
+    try:
+        rounds_i = max(1, int(rounds))
+    except Exception:
+        rounds_i = 1
+    try:
+        max_trials_i = max(1, int(max_trials))
+    except Exception:
+        max_trials_i = 1
+    try:
+        keep_f = float(keep_ratio)
+    except Exception:
+        keep_f = 0.5
+
+    best = base_candidate
+    history: List[Dict[str, Any]] = []
+    for r in range(int(rounds_i)):
+        neighborhood = list(mutate(best, int(r)) or [])
+        candidates = [best] + neighborhood
+        candidates = candidates[: max_trials_i]
+        best, sh_history = _successive_halving_search(
+            candidates=candidates,
+            budgets=budgets,
+            evaluator=evaluator,
+            keep_ratio=float(keep_f),
+        )
+        history.append({"round": int(r), "successive_halving": sh_history, "n_candidates": int(len(candidates))})
+    return best, history
+
+
+def _tune_steps_global_optimizer_image_first(
+    *,
+    cat_id: int,
+    steps: Sequence[Dict[str, Any]],
+    seed_stats: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: "AgentMiningRequest",
+    clip_head: Dict[str, Any],
+    clip_head_target_index: int,
+    workers: Sequence["_Sam3GreedyEvalWorker"],
+    log_fn: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Global optimizer wrapper for steps-mode mining (image-first, multi-GPU friendly).
+    """
+
+    def _log(msg: str) -> None:
+        if not log_fn:
+            return
+        try:
+            log_fn(msg)
+        except Exception:
+            return
+
+    steps_norm = _normalize_steps_candidate_steps(steps, payload=payload)
+    if not steps_norm:
+        return list(steps), {"enabled": False, "reason": "no_steps"}
+
+    total_val = len(val_ids)
+    if total_val <= 0:
+        return list(steps_norm), {"enabled": False, "reason": "no_val_images"}
+
+    try:
+        enabled = bool(getattr(payload, "steps_optimize_global", False))
+    except Exception:
+        enabled = False
+    if not enabled:
+        return list(steps_norm), {"enabled": False, "reason": "disabled"}
+
+    # Budgets (eval caps) for successive halving.
+    caps_raw: List[int] = []
+    try:
+        raw = getattr(payload, "steps_optimize_global_eval_caps", None)
+        if isinstance(raw, list):
+            caps_raw = [int(x) for x in raw]
+    except Exception:
+        caps_raw = []
+    if not caps_raw:
+        caps_raw = [50, 200, 1000]
+    budgets = sorted({max(1, min(int(total_val), int(c))) for c in caps_raw if int(c) > 0})
+    if not budgets:
+        budgets = [int(total_val)]
+
+    try:
+        max_trials = int(getattr(payload, "steps_optimize_global_max_trials", 36) or 0)
+    except Exception:
+        max_trials = 36
+    max_trials = max(1, int(max_trials))
+
+    try:
+        keep_ratio = float(getattr(payload, "steps_optimize_global_keep_ratio", 0.5) or 0.5)
+    except Exception:
+        keep_ratio = 0.5
+    keep_ratio = max(0.1, min(0.9, float(keep_ratio)))
+
+    try:
+        rounds = int(getattr(payload, "steps_optimize_global_rounds", 2) or 0)
+    except Exception:
+        rounds = 2
+    rounds = max(1, int(rounds))
+
+    try:
+        mutations_per_round = int(getattr(payload, "steps_optimize_global_mutations_per_round", 24) or 0)
+    except Exception:
+        mutations_per_round = 24
+    mutations_per_round = max(1, int(mutations_per_round))
+
+    enable_max_results = bool(getattr(payload, "steps_optimize_global_enable_max_results", False))
+    enable_ordering = bool(getattr(payload, "steps_optimize_global_enable_ordering", False))
+
+    _, _, target_precision = _build_clip_head_sweep_grid(
+        payload,
+        base_min_prob=float(payload.clip_head_min_prob),
+        base_margin=float(payload.clip_head_margin),
+    )
+
+    # Precompute deterministic val subsets for each budget.
+    seed = int(getattr(payload, "split_seed", 42) or 42)
+    val_subsets: Dict[int, List[int]] = {}
+    for b in budgets:
+        val_subsets[int(b)] = _stable_sample_ids(val_ids, cap=int(b), seed=seed, salt=f"steps_global:{cat_id}:{b}")
+
+    base_candidate: Dict[str, Any] = {
+        "steps": steps_norm,
+        "mutation": {"op": "base"},
+        "sig": _steps_candidate_signature(steps_norm),
+    }
+
+    def _mutate(best_candidate: Any, round_idx: int) -> Sequence[Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        cand = best_candidate if isinstance(best_candidate, dict) else {}
+        max_mut = max(1, min(int(mutations_per_round), max(1, int(max_trials) - 1)))
+        return _generate_steps_global_mutations(
+            base_candidate=cand,
+            seed_stats=seed_stats,
+            payload=payload,
+            max_mutations=int(max_mut),
+            target_precision=float(target_precision),
+            enable_max_results=bool(enable_max_results),
+            enable_ordering=bool(enable_ordering),
+        )
+
+    def _eval(cand: Any, budget: int) -> Tuple[Tuple[Any, ...], Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        c = cand if isinstance(cand, dict) else {}
+        steps_c = c.get("steps") if isinstance(c.get("steps"), list) else []
+        steps_c = _normalize_steps_candidate_steps(steps_c, payload=payload)
+        subset = val_subsets.get(int(budget)) or list(val_ids)[: max(1, min(int(budget), int(total_val)))]
+        summary = _tune_clip_head_for_selected_steps_image_first(
+            cat_id=cat_id,
+            steps=steps_c,
+            val_ids=subset,
+            images=images,
+            gt_by_image_cat=gt_by_image_cat,
+            payload=payload,
+            clip_head=clip_head,
+            clip_head_target_index=int(clip_head_target_index),
+            workers=workers,
+            log_every=0,
+            log_fn=None,
+            cancel_event=cancel_event,
+            progress_callback=None,
+        )
+        try:
+            matched = int(summary.get("matches") or 0)
+        except Exception:
+            matched = 0
+        try:
+            fps = int(summary.get("fps") or 0)
+        except Exception:
+            fps = 0
+        try:
+            precision = float(summary.get("precision") or 0.0)
+        except Exception:
+            precision = 0.0
+        try:
+            min_prob = float(summary.get("clip_head_min_prob") or 0.0)
+        except Exception:
+            min_prob = 0.0
+        try:
+            margin = float(summary.get("clip_head_margin") or 0.0)
+        except Exception:
+            margin = 0.0
+        key = _score_head_tuning_candidate(
+            matched=matched,
+            fps=fps,
+            precision=precision,
+            min_prob=min_prob,
+            margin=margin,
+            target_precision=float(target_precision),
+        )
+        return key, {"summary": summary, "candidate": c, "key": key, "budget": int(budget)}
+
+    _log(
+        f"[steps] Global optimizer: rounds={rounds} max_trials={max_trials} budgets={budgets} keep_ratio={keep_ratio} "
+        f"mutations/round={mutations_per_round} (ordering={enable_ordering}, max_results={enable_max_results}) "
+        f"for class_id {cat_id}"
+    )
+
+    best, round_history = _run_steps_global_successive_halving_rounds(
+        base_candidate=base_candidate,
+        budgets=budgets,
+        keep_ratio=float(keep_ratio),
+        rounds=int(rounds),
+        max_trials=int(max_trials),
+        mutate=_mutate,
+        evaluator=_eval,
+    )
+    best_steps = _normalize_steps_candidate_steps(best.get("steps") if isinstance(best, dict) else [], payload=payload)
+
+    info = {
+        "enabled": True,
+        "algorithm": "sam3_steps_global_v1",
+        "version": 1,
+        "eval_caps": budgets,
+        "keep_ratio": float(keep_ratio),
+        "max_trials": int(max_trials),
+        "rounds": int(rounds),
+        "mutations_per_round": int(mutations_per_round),
+        "enable_ordering": bool(enable_ordering),
+        "enable_max_results": bool(enable_max_results),
+        "history": round_history,
+        "selected_signature": _steps_candidate_signature(best_steps),
+    }
+    if isinstance(best, dict) and isinstance(best.get("mutation"), dict):
+        info["selected_mutation"] = best.get("mutation")
+    return best_steps, info
+
+
 def _beam_tune_sam3_greedy_params(
     *,
     class_entries: Sequence[Dict[str, Any]],
@@ -14337,10 +14984,9 @@ class AgentMiningRequest(BaseModel):
     reuse_split: bool = True
 
     # Search strategy:
-    # - greedy: fastest
-    # - beam: tries more parameter combinations (can be much slower)
-    # - steps: multi-step recipe mining (schema v2) driven by seed-prompt set-cover + final CLIP tuning
-    search_mode: Literal["greedy", "beam", "steps"] = "greedy"
+    # - steps: multi-step recipe mining (schema v2) driven by seed-prompt set-cover + CLIP head tuning
+    # - greedy/beam: legacy (deprecated; no longer used by the web UI)
+    search_mode: Literal["greedy", "beam", "steps"] = "steps"
     beam_width: int = Field(4, ge=1, le=16)
     beam_rounds: int = Field(3, ge=1, le=10)
     beam_min_improve: float = Field(0.005, ge=0.0, le=1.0)
@@ -14437,6 +15083,60 @@ class AgentMiningRequest(BaseModel):
         le=50,
         description="How many add/swap candidates to consider per refinement iteration (search_mode='steps').",
     )
+    steps_optimize_global: bool = Field(
+        False,
+        description=(
+            "When search_mode='steps' and a pretrained CLIP head is provided, enable a budgeted global optimizer that "
+            "jointly searches the whole recipe configuration (prompt subset + per-step knobs + optional ordering). "
+            "This is the highest-quality mode but can be much slower than Tier-1/Tier-2."
+        ),
+    )
+    steps_optimize_global_eval_caps: List[int] = Field(
+        default_factory=lambda: [50, 200, 1000],
+        description=(
+            "When steps_optimize_global is enabled, validation image caps for successive-halving stages. "
+            "Example: [50, 200, 1000] means candidates are first ranked on 50 val images, then the best subset is "
+            "re-ranked on 200, then finalized on up to 1000 (or the full val split if smaller)."
+        ),
+    )
+    steps_optimize_global_max_trials: int = Field(
+        36,
+        ge=1,
+        le=4096,
+        description="When steps_optimize_global is enabled, cap on candidate configs evaluated per class (stage-1).",
+    )
+    steps_optimize_global_keep_ratio: float = Field(
+        0.5,
+        ge=0.1,
+        le=0.9,
+        description="When steps_optimize_global is enabled, prune ratio per successive-halving stage (0.5 keeps top half).",
+    )
+    steps_optimize_global_rounds: int = Field(
+        2,
+        ge=1,
+        le=20,
+        description="When steps_optimize_global is enabled, how many mutation rounds to run (each round uses successive halving).",
+    )
+    steps_optimize_global_mutations_per_round: int = Field(
+        24,
+        ge=1,
+        le=10_000,
+        description="When steps_optimize_global is enabled, how many mutated candidates to generate per round (per class).",
+    )
+    steps_optimize_global_max_steps_mutated: int = Field(
+        2,
+        ge=1,
+        le=10,
+        description="When steps_optimize_global is enabled, maximum number of steps whose knobs can change in a single mutation.",
+    )
+    steps_optimize_global_enable_max_results: bool = Field(
+        False,
+        description="When steps_optimize_global is enabled, include max_results tuning (can impact precision/recall and runtime).",
+    )
+    steps_optimize_global_enable_ordering: bool = Field(
+        False,
+        description="When steps_optimize_global is enabled, include step ordering mutations (usually minor effect; can matter with caps).",
+    )
 
     # Mining concurrency controls (SAM3 workers).
     # By default we fan out across all CUDA devices; this controls how many workers we run per device.
@@ -14454,7 +15154,8 @@ class AgentMiningRequest(BaseModel):
     # Optional: extra user-provided prompt phrases per class (merged into the prompt list).
     extra_prompts_by_class: Optional[Dict[str, List[str]]] = None
 
-    # Optional pretrained CLIP head (LogReg) to use for filtering instead of raw crop-similarity.
+    # Pretrained CLIP head (LogReg) used for filtering/tuning during recipe mining.
+    # NOTE: Agent Mining requires this; jobs will be rejected if missing.
     # This should point at a classifier file on the backend (typically under uploads/classifiers/).
     clip_head_classifier_path: Optional[str] = None
     clip_head_min_prob: float = Field(
@@ -16635,10 +17336,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
     """
     SAM3 Recipe Mining (sam3_greedy mode).
 
-    Builds one greedy recipe per class:
+    Builds one recipe per class using:
     - prompt bank (text prompts)
-    - positive crop bank (diverse train GT crops)
-    - optional negative crop bank (diverse other-class crops)
+    - a pretrained CLIP head (required) for filtering + cleanliness tuning
 
     Then evaluates the full greedy recipe pipeline on the validation split.
     """
@@ -16726,7 +17426,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if not selected_categories:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_classes_selected")
 
-        effective_search_mode = payload.search_mode
+        # Web UI only exposes schema-v2 multi-step mining now; keep legacy modes for API back-compat
+        # but force the effective mode to steps so we never generate the old recipe style.
+        effective_search_mode = "steps"
+        if payload.search_mode != "steps":
+            _log(f"Requested search_mode={payload.search_mode} is deprecated; forcing steps.")
 
         _log(
             "Config: "
@@ -16756,13 +17460,15 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             )
         )
 
-        # Optional pretrained CLIP head (LogReg) used as an additional filter during mining.
+        # Pretrained CLIP head (LogReg) is required for Agent Mining (recipe mining).
         clip_head_path = _resolve_agent_clip_classifier_path(payload.clip_head_classifier_path)
-        clip_head: Optional[Dict[str, Any]] = None
-        clip_head_enabled = False
+        if clip_head_path is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
+        clip_head = _load_clip_head_from_classifier(clip_head_path)
+        clip_head_enabled = bool(isinstance(clip_head, dict))
+        if not clip_head_enabled:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
         if clip_head_path is not None:
-            clip_head = _load_clip_head_from_classifier(clip_head_path)
-            clip_head_enabled = bool(isinstance(clip_head, dict))
             head_mode_bits = ""
             try:
                 if bool(getattr(payload, "clip_head_auto_tune", True)):
@@ -16782,9 +17488,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             )
             _log("CLIP head mode: example crops / CLIP similarity / negative crops are ignored (head-only filtering).")
 
-        # Crop-bank mode (raw CLIP similarity) is disabled whenever a CLIP head is selected.
-        # It also requires at least 1 positive crop per class; otherwise there's nothing to compare against.
-        crop_banks_enabled = bool(payload.use_clip_fp_guard) and not clip_head_enabled and int(payload.positives_per_class) > 0
+        # Crop-bank mode (raw CLIP similarity) is deprecated; CLIP head is required for recipe mining.
+        crop_banks_enabled = False
 
         # Prompt mining (GPT-OSS) per class.
         base_prompts_all: List[str] = []
@@ -17158,14 +17863,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
                         tier1_info: Optional[Dict[str, Any]] = None
                         tier2_info: Optional[Dict[str, Any]] = None
+                        global_info: Optional[Dict[str, Any]] = None
                         summary: Dict[str, Any]
                         if clip_head is not None and head_target_index is not None:
-                            if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
-                                job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
+                            global_enabled = bool(getattr(eval_payload, "steps_optimize_global", False))
+                            if global_enabled:
+                                job.message = f"[steps] Global optimization for {name} ({class_idx}/{total_classes})…"
                                 job.updated_at = time.time()
-                                step_list, tier1_info = _tune_steps_tier1_knobs_image_first(
+                                step_list, global_info = _tune_steps_global_optimizer_image_first(
                                     cat_id=cid,
                                     steps=step_list,
+                                    seed_stats=seed_stats,
                                     val_ids=val_ids,
                                     images=images,
                                     gt_by_image_cat=gt_by_image_cat,
@@ -17176,22 +17884,39 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                     log_fn=_log,
                                     cancel_event=job.cancel_event,
                                 )
-                            if bool(getattr(eval_payload, "steps_optimize_tier2", False)):
-                                job.message = f"[steps] Tier-2 tuning for {name} ({class_idx}/{total_classes})…"
-                                job.updated_at = time.time()
-                                step_list, tier2_info = _tune_steps_tier2_knobs_image_first(
-                                    cat_id=cid,
-                                    steps=step_list,
-                                    val_ids=val_ids,
-                                    images=images,
-                                    gt_by_image_cat=gt_by_image_cat,
-                                    payload=eval_payload,
-                                    clip_head=clip_head,
-                                    clip_head_target_index=int(head_target_index),
-                                    workers=eval_workers,
-                                    log_fn=_log,
-                                    cancel_event=job.cancel_event,
-                                )
+                            else:
+                                if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
+                                    job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
+                                    job.updated_at = time.time()
+                                    step_list, tier1_info = _tune_steps_tier1_knobs_image_first(
+                                        cat_id=cid,
+                                        steps=step_list,
+                                        val_ids=val_ids,
+                                        images=images,
+                                        gt_by_image_cat=gt_by_image_cat,
+                                        payload=eval_payload,
+                                        clip_head=clip_head,
+                                        clip_head_target_index=int(head_target_index),
+                                        workers=eval_workers,
+                                        log_fn=_log,
+                                        cancel_event=job.cancel_event,
+                                    )
+                                if bool(getattr(eval_payload, "steps_optimize_tier2", False)):
+                                    job.message = f"[steps] Tier-2 tuning for {name} ({class_idx}/{total_classes})…"
+                                    job.updated_at = time.time()
+                                    step_list, tier2_info = _tune_steps_tier2_knobs_image_first(
+                                        cat_id=cid,
+                                        steps=step_list,
+                                        val_ids=val_ids,
+                                        images=images,
+                                        gt_by_image_cat=gt_by_image_cat,
+                                        payload=eval_payload,
+                                        clip_head=clip_head,
+                                        clip_head_target_index=int(head_target_index),
+                                        workers=eval_workers,
+                                        log_fn=_log,
+                                        cancel_event=job.cancel_event,
+                                    )
                             job.message = f"[steps] Tuning CLIP head for {name} ({class_idx}/{total_classes})…"
                             job.updated_at = time.time()
                             summary = _tune_clip_head_for_selected_steps_image_first(
@@ -17213,6 +17938,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 summary["tier1_tuning"] = tier1_info
                             if tier2_info and isinstance(summary, dict):
                                 summary["tier2_tuning"] = tier2_info
+                            if global_info and isinstance(summary, dict):
+                                summary["global_optimizer"] = global_info
                             if refine_info and isinstance(summary, dict):
                                 summary["prompt_subset_refinement"] = refine_info
                         else:
@@ -17283,6 +18010,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 "seed_eval_max_results": int(_compute_steps_seed_eval_max_results(eval_payload)),
                                 "strategy": "curve_candidates",
                                 "max_candidates_per_prompt": 6,
+                            },
+                            "global_optimizer": global_info
+                            if isinstance(global_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(getattr(eval_payload, "steps_optimize_global", False)),
+                                "eval_caps": list(getattr(eval_payload, "steps_optimize_global_eval_caps", []) or []),
+                                "max_trials": int(getattr(eval_payload, "steps_optimize_global_max_trials", 0) or 0),
+                                "keep_ratio": float(getattr(eval_payload, "steps_optimize_global_keep_ratio", 0.0) or 0.0),
+                                "rounds": int(getattr(eval_payload, "steps_optimize_global_rounds", 0) or 0),
+                                "mutations_per_round": int(getattr(eval_payload, "steps_optimize_global_mutations_per_round", 0) or 0),
+                                "enable_ordering": bool(getattr(eval_payload, "steps_optimize_global_enable_ordering", False)),
+                                "enable_max_results": bool(getattr(eval_payload, "steps_optimize_global_enable_max_results", False)),
                             },
                             "tier1": tier1_info
                             if isinstance(tier1_info, dict)
@@ -17585,6 +18325,11 @@ def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
 
 
 def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
+    clip_head_path = _resolve_agent_clip_classifier_path(payload.clip_head_classifier_path)
+    if clip_head_path is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
+    # Validate early so we fail fast (no background job created).
+    _load_clip_head_from_classifier(clip_head_path)
     job_id = f"am_{uuid.uuid4().hex[:8]}"
     job = AgentMiningJob(job_id=job_id)
     with AGENT_MINING_JOBS_LOCK:

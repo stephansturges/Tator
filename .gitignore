@@ -256,4 +256,5 @@ pyrightconfig.json
 # Local session/agent notes (never commit)
 SESSION_SUMMARY.txt
 SESSION.md
+recipe_brief_*.txt
 AGENTS.md

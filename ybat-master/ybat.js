@@ -12867,20 +12867,23 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            return;
 	        }
 	        const frag = document.createDocumentFragment();
-	        result.classes.forEach((cls) => {
-	            const card = document.createElement("details");
-	            card.className = "training-card";
-	            card.open = false;
-	            const summaryEl = document.createElement("summary");
-	            const body = document.createElement("div");
-	            body.className = "training-card__body";
-	            const recipe = cls.recipe || {};
-	            const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
-	            const prompts = Array.isArray(recipe.text_prompts) ? recipe.text_prompts : [];
-	            const positives = Array.isArray(recipe.positives) ? recipe.positives : [];
-	            const negatives = Array.isArray(recipe.negatives) ? recipe.negatives : [];
-	            const params = recipe.params || {};
-	            const summary = recipe.summary || {};
+		        result.classes.forEach((cls) => {
+		            const card = document.createElement("details");
+		            card.className = "training-card";
+		            card.open = false;
+		            const summaryEl = document.createElement("summary");
+		            const body = document.createElement("div");
+		            body.className = "training-card__body";
+		            const recipe = cls.recipe || {};
+		            const steps = Array.isArray(recipe.steps) ? recipe.steps : [];
+		            const prompts = Array.isArray(recipe.text_prompts) ? recipe.text_prompts : [];
+		            const positives = Array.isArray(recipe.positives) ? recipe.positives : [];
+		            const negatives = Array.isArray(recipe.negatives) ? recipe.negatives : [];
+		            const params = recipe.params || {};
+		            const summary = recipe.summary || {};
+		            const schemaVersion =
+		                recipe && (Number.isFinite(recipe.schema_version) ? recipe.schema_version : Number.isFinite(recipe.schemaVersion) ? recipe.schemaVersion : null);
+		            const isStepRecipeV2 = recipe && (recipe.mode === "sam3_steps" || schemaVersion === 2);
 
 	            const totalGt = Number.isFinite(summary.gts) ? summary.gts : (Number.isFinite(summary.total_gt) ? summary.total_gt : 0);
 	            const matched = Number.isFinite(summary.matches) ? summary.matches : (Number.isFinite(summary.covered) ? summary.covered : 0);
@@ -12893,7 +12896,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            const covPct = Number.isFinite(recall) ? (recall * 100).toFixed(1) : "0.0";
 	            const precPct = Number.isFinite(precision) ? (precision * 100).toFixed(1) : "0.0";
 	            const detPct = Number.isFinite(detRate) ? (detRate * 100).toFixed(1) : "0.0";
-	            const modeLabel = recipe.mode || (steps.length ? "legacy" : "sam3_greedy");
+		            const modeLabel = isStepRecipeV2 ? "sam3_steps" : recipe.mode || (steps.length ? "legacy" : "sam3_greedy");
 	            const displayName = escapeHtml(cls.name || cls.id);
 	            const showIdSuffix = !!(cls.name && cls.id !== undefined && cls.id !== null && String(cls.id).length);
 
@@ -12910,7 +12913,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 	            body.innerHTML = `<div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>`;
 
-	            const configBits = [];
+		            const configBits = [];
 	            if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
 	                configBits.push(`CLIP filter on (sim ≥ ${params.similarity_score ?? 0.25})`);
 	            } else {
@@ -12945,15 +12948,31 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                }
 		                configBits.push(parts.join(" "));
 		            }
-	            if (typeof params.seed_threshold === "number") configBits.push(`seed thr ${params.seed_threshold}`);
-	            if (typeof params.expand_threshold === "number") configBits.push(`expand thr ${params.expand_threshold}`);
-	            if (typeof params.max_visual_seeds === "number") configBits.push(`seeds ${params.max_visual_seeds}`);
-	            if (configBits.length) {
-	                const meta = document.createElement("div");
-	                meta.className = "training-help";
-	                meta.textContent = `Prompts: ${prompts.length} • +crops: ${positives.length} • -crops: ${negatives.length} • ${configBits.join(" • ")}`;
-	                body.appendChild(meta);
-	            }
+		            if (typeof params.seed_threshold === "number") configBits.push(`seed thr ${params.seed_threshold}`);
+		            if (typeof params.expand_threshold === "number") configBits.push(`expand thr ${params.expand_threshold}`);
+		            if (typeof params.max_visual_seeds === "number") configBits.push(`seeds ${params.max_visual_seeds}`);
+		            if (configBits.length) {
+		                const meta = document.createElement("div");
+		                meta.className = "training-help";
+		                let promptBits = `Prompts: ${prompts.length}`;
+		                if (isStepRecipeV2) {
+		                    const uniq = new Set();
+		                    steps.forEach((step) => {
+		                        if (!step || typeof step !== "object") return;
+		                        const p = typeof step.prompt === "string" ? step.prompt.trim() : "";
+		                        if (p) uniq.add(p.toLowerCase());
+		                        if (Array.isArray(step.prompts)) {
+		                            step.prompts.forEach((raw) => {
+		                                const s = typeof raw === "string" ? raw.trim() : "";
+		                                if (s) uniq.add(s.toLowerCase());
+		                            });
+		                        }
+		                    });
+		                    promptBits = `Steps: ${steps.length} • Prompts: ${uniq.size}`;
+		                }
+		                meta.textContent = `${promptBits} • +crops: ${positives.length} • -crops: ${negatives.length} • ${configBits.join(" • ")}`;
+		                body.appendChild(meta);
+		            }
 
 	            if (prompts.length) {
 	                const block = document.createElement("div");
@@ -12989,14 +13008,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                body.appendChild(block);
 	            }
 
-	            if (steps.length) {
-	                const table = document.createElement("table");
-	                table.className = "training-table";
-	                table.innerHTML = `
-	                    <thead>
-	                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Adds</th><th>Cov after %</th><th>FPs (step)</th><th>FPs (total)</th><th>Prec</th></tr>
-	                    </thead>
-	                `;
+		            if (!isStepRecipeV2 && steps.length) {
+		                const table = document.createElement("table");
+		                table.className = "training-table";
+		                table.innerHTML = `
+		                    <thead>
+		                        <tr><th>#</th><th>Type</th><th>Prompt/Exemplar</th><th>Thr</th><th>Adds</th><th>Cov after %</th><th>FPs (step)</th><th>FPs (total)</th><th>Prec</th></tr>
+		                    </thead>
+		                `;
 	                const tbody = document.createElement("tbody");
 	                steps.forEach((step, idx) => {
 	                    const covVal =
@@ -13025,8 +13044,69 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    tbody.appendChild(row);
 	                });
 	                table.appendChild(tbody);
-	                body.appendChild(table);
-	            }
+		                body.appendChild(table);
+		            }
+
+		            if (isStepRecipeV2 && steps.length) {
+		                const block = document.createElement("div");
+		                block.className = "training-subsection";
+		                const title = document.createElement("div");
+		                title.className = "training-subsection__title";
+		                title.textContent = `Recipe steps (${steps.length})`;
+		                block.appendChild(title);
+
+		                const table = document.createElement("table");
+		                table.className = "training-table";
+		                table.innerHTML = `
+		                    <thead>
+		                        <tr><th>#</th><th>Prompt(s)</th><th>Seed thr</th><th>Expand thr</th><th>Seeds</th><th>Seed IoU</th><th>Out IoU</th><th>Seed CLIP</th><th>Final CLIP</th></tr>
+		                    </thead>
+		                `;
+		                const tbody = document.createElement("tbody");
+
+		                function formatClipCfg(cfg) {
+		                    if (!cfg || typeof cfg !== "object") return "";
+		                    const bits = [];
+		                    if (Number.isFinite(cfg.similarity_floor)) bits.push(`sim≥${cfg.similarity_floor}`);
+		                    if (Number.isFinite(cfg.min_prob)) bits.push(`p≥${cfg.min_prob}`);
+		                    if (Number.isFinite(cfg.margin) && cfg.margin > 0) bits.push(`Δ≥${cfg.margin}`);
+		                    return bits.join(" ");
+		                }
+
+		                steps.forEach((step, idx) => {
+		                    if (!step || typeof step !== "object") return;
+		                    const stepPrompts = [];
+		                    if (typeof step.prompt === "string" && step.prompt.trim()) stepPrompts.push(step.prompt.trim());
+		                    if (Array.isArray(step.prompts)) {
+		                        step.prompts.forEach((raw) => {
+		                            if (typeof raw === "string" && raw.trim()) stepPrompts.push(raw.trim());
+		                        });
+		                    }
+		                    const seedThr = step.seed_threshold ?? params.seed_threshold ?? "";
+		                    const expandThr = step.expand_threshold ?? params.expand_threshold ?? "";
+		                    const seeds = step.max_visual_seeds ?? params.max_visual_seeds ?? "";
+		                    const seedIou = step.seed_dedupe_iou ?? params.seed_dedupe_iou ?? "";
+		                    const outIou = step.dedupe_iou ?? step.step_dedupe_iou ?? params.dedupe_iou ?? "";
+		                    const seedClip = formatClipCfg(step.clip_seed);
+		                    const finalClip = formatClipCfg(step.clip_final);
+		                    const row = document.createElement("tr");
+		                    row.innerHTML = `
+		                        <td>${idx + 1}</td>
+		                        <td>${escapeHtml(stepPrompts.join(", "))}</td>
+		                        <td>${escapeHtml(String(seedThr))}</td>
+		                        <td>${escapeHtml(String(expandThr))}</td>
+		                        <td>${escapeHtml(String(seeds))}</td>
+		                        <td>${escapeHtml(String(seedIou))}</td>
+		                        <td>${escapeHtml(String(outIou))}</td>
+		                        <td>${escapeHtml(seedClip)}</td>
+		                        <td>${escapeHtml(finalClip)}</td>
+		                    `;
+		                    tbody.appendChild(row);
+		                });
+		                table.appendChild(tbody);
+		                block.appendChild(table);
+		                body.appendChild(block);
+		            }
 
 	            if (!prompts.length && !steps.length) {
 	                const empty = document.createElement("div");

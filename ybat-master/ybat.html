@@ -993,6 +993,25 @@
 					                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
 					                                            Note: Tier‑1 tuning is only used in Multi-step mode and only when a pretrained CLIP head is selected.
 					                                        </div>
+					                                        <div class="training-help" style="margin-top: 10px;">
+					                                            <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate de-duplication settings to reduce duplicates and false positives at your cleanliness target.&#10;This tunes the seed de-dupe IoU + output de-dupe IoU for the class (applied across all steps).&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
+					                                                <input type="checkbox" id="agentStepsTier2Optimize" />
+					                                                Auto-tune dedupe overlaps (Tier‑2)
+					                                            </label>
+					                                            <div class="training-grid" style="margin-top: 10px;">
+					                                                <div>
+					                                                    <label for="agentStepsTier2EvalCap">Tier‑2 eval cap (val images)<span class="help-icon" title="How many validation images we use while comparing candidate de-dupe settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
+					                                                    <input type="number" id="agentStepsTier2EvalCap" min="10" max="50000" value="200" />
+					                                                </div>
+					                                                <div>
+					                                                    <label for="agentStepsTier2MaxTrials">Tier‑2 max trials<span class="help-icon" title="How many candidate de-dupe settings we try during Tier‑2 tuning.&#10;More trials can find better settings but costs time.&#10;Typical: 6–16.">?</span></label>
+					                                                    <input type="number" id="agentStepsTier2MaxTrials" min="1" max="256" value="12" />
+					                                                </div>
+					                                            </div>
+					                                            <div class="training-help" style="margin-top: 6px; color: #64748b;">
+					                                                Note: Tier‑2 currently applies one set of IoU values per class (shared across all steps).
+					                                            </div>
+					                                        </div>
 					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
 					                                        <div class="training-help" style="margin-top: 6px;">
 					                                            <div style="font-weight: 600; margin-bottom: 6px;">Seed-threshold curve collection</div>

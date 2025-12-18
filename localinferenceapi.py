@@ -10038,6 +10038,292 @@ def _tune_steps_tier1_knobs_image_first(
     }
 
 
+def _build_steps_tier2_candidate_grid(
+    *,
+    base_seed_dedupe_iou: float,
+    base_dedupe_iou: float,
+    max_trials: int,
+) -> List[Dict[str, Any]]:
+    """
+    Build a bounded candidate grid for Tier-2 steps-mode tuning.
+
+    Tier-2 currently tunes dedupe IoUs (global-per-class, applied to all steps):
+      - seed_dedupe_iou
+      - dedupe_iou
+    """
+    try:
+        base_seed = float(base_seed_dedupe_iou)
+    except Exception:
+        base_seed = 0.9
+    try:
+        base_out = float(base_dedupe_iou)
+    except Exception:
+        base_out = 0.5
+    base_seed = max(0.0, min(1.0, float(base_seed)))
+    base_out = max(0.0, min(1.0, float(base_out)))
+
+    try:
+        max_trials_i = max(1, int(max_trials))
+    except Exception:
+        max_trials_i = 12
+
+    seed_raw = [base_seed + d for d in (-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2)]
+    out_raw = [base_out + d for d in (-0.3, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.3)]
+    seed_vals = sorted({float(max(0.0, min(1.0, round(v, 6)))) for v in seed_raw})
+    out_vals = sorted({float(max(0.0, min(1.0, round(v, 6)))) for v in out_raw})
+    if float(base_seed) not in seed_vals:
+        seed_vals.append(float(base_seed))
+        seed_vals = sorted(set(seed_vals))
+    if float(base_out) not in out_vals:
+        out_vals.append(float(base_out))
+        out_vals = sorted(set(out_vals))
+
+    def _select_near_base(vals: Sequence[float], base: float, n: int) -> List[float]:
+        if n <= 0:
+            return []
+        vals_list = list(vals)
+        if not vals_list:
+            return []
+        if n >= len(vals_list):
+            return vals_list
+        try:
+            base_idx = vals_list.index(float(base))
+        except Exception:
+            base_idx = len(vals_list) // 2
+        picked: List[int] = [base_idx]
+        left = base_idx - 1
+        right = base_idx + 1
+        while len(picked) < n and (left >= 0 or right < len(vals_list)):
+            if left >= 0:
+                picked.append(left)
+                left -= 1
+                if len(picked) >= n:
+                    break
+            if right < len(vals_list):
+                picked.append(right)
+                right += 1
+        picked_sorted = sorted(set(picked))[:n]
+        return [vals_list[i] for i in picked_sorted]
+
+    n_seed = max(1, int(round(math.sqrt(max_trials_i))))
+    n_seed = min(n_seed, len(seed_vals))
+    n_out = max(1, max_trials_i // n_seed)
+    n_out = min(n_out, len(out_vals))
+    while n_seed * n_out > max_trials_i and n_out > 1:
+        n_out -= 1
+    while n_seed * n_out > max_trials_i and n_seed > 1:
+        n_seed -= 1
+
+    seed_sel = _select_near_base(seed_vals, float(base_seed), n_seed)
+    out_sel = _select_near_base(out_vals, float(base_out), n_out)
+
+    candidates: List[Dict[str, Any]] = []
+    for s in seed_sel:
+        for o in out_sel:
+            candidates.append({"seed_dedupe_iou": float(s), "dedupe_iou": float(o)})
+    candidates = sorted(
+        candidates,
+        key=lambda c: (
+            0
+            if (
+                float(c.get("seed_dedupe_iou")) == float(base_seed)
+                and float(c.get("dedupe_iou")) == float(base_out)
+            )
+            else 1,
+            float(c.get("seed_dedupe_iou")),
+            float(c.get("dedupe_iou")),
+        ),
+    )
+    return candidates[:max_trials_i]
+
+
+def _tune_steps_tier2_knobs_image_first(
+    *,
+    cat_id: int,
+    steps: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: "AgentMiningRequest",
+    clip_head: Dict[str, Any],
+    clip_head_target_index: int,
+    workers: Sequence["_Sam3GreedyEvalWorker"],
+    log_fn: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Bounded Tier-2 tuning for steps-mode mining.
+
+    Tunes a small grid over:
+      - seed_dedupe_iou
+      - dedupe_iou
+
+    Candidates are ranked via the steps CLIP-head sweep evaluator (precision/coverage/FP tradeoff),
+    using capped subsets of the validation split.
+    """
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+
+    steps_norm = _normalize_steps_for_head_tuning(steps, payload=payload)
+    if not steps_norm:
+        return [], {"enabled": False, "reason": "no_steps"}
+
+    try:
+        enabled = bool(getattr(payload, "steps_optimize_tier2", False))
+    except Exception:
+        enabled = False
+    if not enabled:
+        return list(steps), {"enabled": False, "reason": "disabled"}
+
+    total_val = len(val_ids)
+    if total_val <= 0:
+        return list(steps), {"enabled": False, "reason": "no_val_images"}
+
+    try:
+        eval_cap = int(getattr(payload, "steps_optimize_tier2_eval_cap", 200) or 0)
+    except Exception:
+        eval_cap = 200
+    eval_cap = max(1, min(int(eval_cap), int(total_val)))
+
+    try:
+        max_trials = int(getattr(payload, "steps_optimize_tier2_max_trials", 12) or 0)
+    except Exception:
+        max_trials = 12
+    max_trials = max(1, int(max_trials))
+
+    try:
+        base_seed_iou = float(steps_norm[0].get("seed_dedupe_iou", payload.seed_dedupe_iou))
+    except Exception:
+        base_seed_iou = float(payload.seed_dedupe_iou)
+    base_seed_iou = max(0.0, min(1.0, float(base_seed_iou)))
+    try:
+        base_out_iou = float(steps_norm[0].get("dedupe_iou", payload.dedupe_iou))
+    except Exception:
+        base_out_iou = float(payload.dedupe_iou)
+    base_out_iou = max(0.0, min(1.0, float(base_out_iou)))
+
+    candidates = _build_steps_tier2_candidate_grid(
+        base_seed_dedupe_iou=float(base_seed_iou),
+        base_dedupe_iou=float(base_out_iou),
+        max_trials=int(max_trials),
+    )
+    if not candidates:
+        return list(steps), {"enabled": False, "reason": "no_candidates"}
+
+    stage1 = max(1, int(eval_cap // 4))
+    budgets = [int(eval_cap)] if stage1 >= eval_cap else [int(stage1), int(eval_cap)]
+
+    _, _, target_precision = _build_clip_head_sweep_grid(
+        payload,
+        base_min_prob=float(payload.clip_head_min_prob),
+        base_margin=float(payload.clip_head_margin),
+    )
+
+    def _apply_candidate(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+        try:
+            seed_iou = float(candidate.get("seed_dedupe_iou"))
+        except Exception:
+            seed_iou = float(base_seed_iou)
+        seed_iou = max(0.0, min(1.0, float(seed_iou)))
+        try:
+            out_iou = float(candidate.get("dedupe_iou"))
+        except Exception:
+            out_iou = float(base_out_iou)
+        out_iou = max(0.0, min(1.0, float(out_iou)))
+
+        out_steps: List[Dict[str, Any]] = []
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            s2 = dict(step)
+            s2["seed_dedupe_iou"] = float(seed_iou)
+            s2["dedupe_iou"] = float(out_iou)
+            out_steps.append(s2)
+        return out_steps
+
+    def _eval_candidate(candidate: Dict[str, Any], budget: int) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        steps_candidate = _apply_candidate(candidate)
+        subset = val_ids[: max(1, min(int(budget), int(total_val)))]
+        summary = _tune_clip_head_for_selected_steps_image_first(
+            cat_id=cat_id,
+            steps=steps_candidate,
+            val_ids=subset,
+            images=images,
+            gt_by_image_cat=gt_by_image_cat,
+            payload=payload,
+            clip_head=clip_head,
+            clip_head_target_index=int(clip_head_target_index),
+            workers=workers,
+            log_every=0,
+            log_fn=None,
+            cancel_event=cancel_event,
+            progress_callback=None,
+        )
+        try:
+            matched = int(summary.get("matches") or 0)
+        except Exception:
+            matched = 0
+        try:
+            fps = int(summary.get("fps") or 0)
+        except Exception:
+            fps = 0
+        try:
+            precision = float(summary.get("precision") or 0.0)
+        except Exception:
+            precision = 0.0
+        try:
+            min_prob = float(summary.get("clip_head_min_prob") or 0.0)
+        except Exception:
+            min_prob = 0.0
+        try:
+            margin = float(summary.get("clip_head_margin") or 0.0)
+        except Exception:
+            margin = 0.0
+        key = _score_head_tuning_candidate(
+            matched=matched,
+            fps=fps,
+            precision=precision,
+            min_prob=min_prob,
+            margin=margin,
+            target_precision=float(target_precision),
+        )
+        return key, {"candidate": dict(candidate), "summary": summary, "key": key, "budget": int(budget)}
+
+    _log(
+        f"[steps] Tier-2 tuning: trying up to {len(candidates)} configs (eval_cap={eval_cap}, budgets={budgets}) for class_id {cat_id} "
+        f"(seed_iou≈{base_seed_iou:.3f}, out_iou≈{base_out_iou:.3f})"
+    )
+    best_candidate, history = _successive_halving_search(
+        candidates=candidates,
+        budgets=budgets,
+        evaluator=_eval_candidate,
+        keep_ratio=0.5,
+    )
+    tuned_steps = _apply_candidate(best_candidate)
+    _log(
+        f"[steps] Tier-2 tuning: selected seed_iou={float(best_candidate.get('seed_dedupe_iou')):.3f} "
+        f"out_iou={float(best_candidate.get('dedupe_iou')):.3f} for class_id {cat_id}"
+    )
+    return tuned_steps, {
+        "enabled": True,
+        "base": {"seed_dedupe_iou": float(base_seed_iou), "dedupe_iou": float(base_out_iou)},
+        "selected": {
+            "seed_dedupe_iou": float(best_candidate.get("seed_dedupe_iou")),
+            "dedupe_iou": float(best_candidate.get("dedupe_iou")),
+        },
+        "eval_cap": int(eval_cap),
+        "max_trials": int(max_trials),
+        "history": history,
+    }
+
+
 def _beam_tune_sam3_greedy_params(
     *,
     class_entries: Sequence[Dict[str, Any]],
@@ -13811,6 +14097,25 @@ class AgentMiningRequest(BaseModel):
             "of seed-stage detections returned per prompt per image (safety valve). If unset, uses `max_results`."
         ),
     )
+    steps_optimize_tier2: bool = Field(
+        False,
+        description=(
+            "When search_mode='steps' and a pretrained CLIP head is provided, enable bounded Tier-2 tuning of "
+            "`seed_dedupe_iou` and `dedupe_iou` (applied globally per class across all steps)."
+        ),
+    )
+    steps_optimize_tier2_eval_cap: int = Field(
+        200,
+        ge=10,
+        le=50_000,
+        description="Max number of validation images used during Tier-2 tuning stages (search_mode='steps').",
+    )
+    steps_optimize_tier2_max_trials: int = Field(
+        12,
+        ge=1,
+        le=256,
+        description="Max candidate configurations evaluated during Tier-2 tuning (search_mode='steps').",
+    )
 
     # Mining concurrency controls (SAM3 workers).
     # By default we fan out across all CUDA devices; this controls how many workers we run per device.
@@ -16515,12 +16820,29 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         )
 
                         tier1_info: Optional[Dict[str, Any]] = None
+                        tier2_info: Optional[Dict[str, Any]] = None
                         summary: Dict[str, Any]
                         if clip_head is not None and head_target_index is not None:
                             if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
                                 job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
                                 job.updated_at = time.time()
                                 step_list, tier1_info = _tune_steps_tier1_knobs_image_first(
+                                    cat_id=cid,
+                                    steps=step_list,
+                                    val_ids=val_ids,
+                                    images=images,
+                                    gt_by_image_cat=gt_by_image_cat,
+                                    payload=eval_payload,
+                                    clip_head=clip_head,
+                                    clip_head_target_index=int(head_target_index),
+                                    workers=eval_workers,
+                                    log_fn=_log,
+                                    cancel_event=job.cancel_event,
+                                )
+                            if bool(getattr(eval_payload, "steps_optimize_tier2", False)):
+                                job.message = f"[steps] Tier-2 tuning for {name} ({class_idx}/{total_classes})…"
+                                job.updated_at = time.time()
+                                step_list, tier2_info = _tune_steps_tier2_knobs_image_first(
                                     cat_id=cid,
                                     steps=step_list,
                                     val_ids=val_ids,
@@ -16552,6 +16874,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             )
                             if tier1_info and isinstance(summary, dict):
                                 summary["tier1_tuning"] = tier1_info
+                            if tier2_info and isinstance(summary, dict):
+                                summary["tier2_tuning"] = tier2_info
                         else:
                             # No head available for this class: fall back to a trivial summary (no tuning).
                             total_gt = 0
@@ -16572,6 +16896,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         summaries[cid] = summary
                         tuned_expand = float(eval_payload.expand_threshold)
                         tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                        tuned_seed_iou = float(eval_payload.seed_dedupe_iou)
+                        tuned_out_iou = float(eval_payload.dedupe_iou)
+                        tuned_max_results = int(eval_payload.max_results)
                         if step_list and isinstance(step_list[0], dict):
                             try:
                                 if step_list[0].get("expand_threshold") is not None:
@@ -16583,6 +16910,21 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                     tuned_max_seeds = int(step_list[0].get("max_visual_seeds"))
                             except Exception:
                                 tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                            try:
+                                if step_list[0].get("seed_dedupe_iou") is not None:
+                                    tuned_seed_iou = float(step_list[0].get("seed_dedupe_iou"))
+                            except Exception:
+                                tuned_seed_iou = float(eval_payload.seed_dedupe_iou)
+                            try:
+                                if step_list[0].get("dedupe_iou") is not None:
+                                    tuned_out_iou = float(step_list[0].get("dedupe_iou"))
+                            except Exception:
+                                tuned_out_iou = float(eval_payload.dedupe_iou)
+                            try:
+                                if step_list[0].get("max_results") is not None:
+                                    tuned_max_results = int(step_list[0].get("max_results"))
+                            except Exception:
+                                tuned_max_results = int(eval_payload.max_results)
                         optimizer = {
                             "algorithm": "sam3_steps_v2",
                             "version": 1,
@@ -16609,6 +16951,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 "eval_cap": int(getattr(eval_payload, "steps_optimize_tier1_eval_cap", 0) or 0),
                                 "max_trials": int(getattr(eval_payload, "steps_optimize_tier1_max_trials", 0) or 0),
                             },
+                            "tier2": tier2_info
+                            if isinstance(tier2_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(getattr(eval_payload, "steps_optimize_tier2", False)),
+                                "eval_cap": int(getattr(eval_payload, "steps_optimize_tier2_eval_cap", 0) or 0),
+                                "max_trials": int(getattr(eval_payload, "steps_optimize_tier2_max_trials", 0) or 0),
+                            },
                         }
                         recipes_by_class[cid] = {
                             "schema_version": 2,
@@ -16624,12 +16974,12 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                 "seed_threshold": float(eval_payload.seed_threshold),
                                 "expand_threshold": float(tuned_expand),
                                 "max_visual_seeds": int(tuned_max_seeds),
-                                "seed_dedupe_iou": float(eval_payload.seed_dedupe_iou),
-                                "dedupe_iou": float(eval_payload.dedupe_iou),
+                                "seed_dedupe_iou": float(tuned_seed_iou),
+                                "dedupe_iou": float(tuned_out_iou),
                                 "mask_threshold": float(eval_payload.mask_threshold),
                                 "min_size": int(eval_payload.min_size),
                                 "simplify_epsilon": float(eval_payload.simplify_epsilon),
-                                "max_results": int(eval_payload.max_results),
+                                "max_results": int(tuned_max_results),
                             },
                             "summary": {
                                 **(summary or {}),

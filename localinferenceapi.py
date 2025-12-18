@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, root_validator, Field
 from omegaconf import OmegaConf
 import psutil
+from starlette.background import BackgroundTask
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_403_FORBIDDEN,
@@ -10666,7 +10667,14 @@ def qwen_dataset_finalize(
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", desired_name).strip("_") or f"dataset_{job_id}"
     dest_dir = (QWEN_DATASET_ROOT / safe_name).resolve()
     if dest_dir.exists():
-        shutil.rmtree(dest_dir, ignore_errors=True)
+        # Never overwrite an existing dataset on disk. If a name collision happens
+        # (common with defaults like "qwen_dataset"), pick a unique suffix.
+        alt_name = f"{safe_name}_{job_id[:6]}"
+        dest_dir = (QWEN_DATASET_ROOT / alt_name).resolve()
+        if dest_dir.exists():
+            alt_name = f"{safe_name}_{job_id[:6]}_{uuid.uuid4().hex[:4]}"
+            dest_dir = (QWEN_DATASET_ROOT / alt_name).resolve()
+        safe_name = alt_name
     shutil.move(str(job.root_dir), str(dest_dir))
     job.completed = True
     dataset_meta = {
@@ -10840,7 +10848,7 @@ async def upload_dataset_zip(
         _persist_sam3_dataset_metadata(target_dir, metadata)
         # Build COCO JSONs immediately so Qwen/SAM3 consumers have them ready.
         try:
-            coco_meta = _convert_yolo_dataset_to_coco(target_dir, existing_meta=metadata)
+            coco_meta = _convert_yolo_dataset_to_coco(target_dir)
             metadata.update(
                 {
                     "coco_train_json": coco_meta.get("coco_train_json"),
@@ -10893,6 +10901,56 @@ def delete_dataset(dataset_id: str):
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
     _purge_dataset_artifacts(dataset_id)
     return {"status": "deleted", "dataset_id": dataset_id}
+
+
+def _cleanup_stream_and_dir(stream: Any, staging_dir: Path) -> None:
+    try:
+        stream.close()
+    except Exception:
+        pass
+    shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+@app.get("/datasets/{dataset_id}/download")
+def download_dataset(dataset_id: str):
+    target_entry = None
+    for entry in _list_all_datasets(prefer_registry=True):
+        if dataset_id in (entry.get("id"), entry.get("signature")):
+            target_entry = entry
+            break
+    if not target_entry:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
+    target_path = Path(target_entry["dataset_root"]).resolve()
+    allowed_roots = {
+        DATASET_REGISTRY_ROOT.resolve(),
+        SAM3_DATASET_ROOT.resolve(),
+        QWEN_DATASET_ROOT.resolve(),
+    }
+    if not any(str(target_path).startswith(str(root)) for root in allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_invalid")
+    staging_dir = Path(tempfile.mkdtemp(prefix="dataset_export_", dir=str(DATASET_UPLOAD_ROOT)))
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", (target_entry.get("id") or target_path.name)).strip("_") or target_path.name
+    zip_path = staging_dir / f"{safe_name}.zip"
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            root_name = Path(target_path.name)
+            for path in sorted(target_path.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(target_path)
+                zf.write(path, arcname=str(root_name / rel))
+        stream = zip_path.open("rb")
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"dataset_export_failed:{exc}") from exc
+    filename = zip_path.name
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        stream,
+        media_type="application/zip",
+        headers=headers,
+        background=BackgroundTask(_cleanup_stream_and_dir, stream, staging_dir),
+    )
 
 
 @app.get("/sam3/datasets")
@@ -15414,9 +15472,18 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     train_labels = dataset_root / "train" / "labels"
     val_images = dataset_root / "val" / "images"
     val_labels = dataset_root / "val" / "labels"
-    for path in (train_images, train_labels, val_images, val_labels):
+    for path in (train_images, train_labels):
         if not path.exists():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_yolo_split_missing")
+    has_val_images = val_images.exists()
+    has_val_labels = val_labels.exists()
+    if has_val_images != has_val_labels:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_yolo_val_split_incomplete")
+    if not has_val_images:
+        # Allow train-only YOLO zips. We create an empty val split so downstream
+        # code paths (COCO conversion, random split, etc.) have a consistent layout.
+        val_images.mkdir(parents=True, exist_ok=True)
+        val_labels.mkdir(parents=True, exist_ok=True)
 
     labelmap = _discover_yolo_labelmap(dataset_root)
     if not labelmap:

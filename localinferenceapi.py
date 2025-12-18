@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip
+from bisect import bisect_left
 from copy import deepcopy
 from pathlib import Path
 import numpy as np
@@ -8410,6 +8411,219 @@ def _score_greedy_eval_summaries(
 def _gt_instance_key(img_id: int, gt_idx: int) -> int:
     # Pack (image_id, gt_index) into a single int key for compact set operations.
     return (int(img_id) << 20) | int(gt_idx)
+
+
+def _build_seed_threshold_sweep_grid(
+    *,
+    base_seed_threshold: float,
+    observed_scores: Optional[Sequence[float]] = None,
+    limit: int = 64,
+) -> List[float]:
+    """
+    Build a threshold grid for SAM3 seed-stage threshold sweeps.
+
+    Notes:
+    - SAM3 text scores can cluster near 0.0, so we include dense points in [0.0..0.1].
+    - This is a *seed* sweep grid (SAM score threshold), not a CLIP-head sweep grid.
+    """
+    try:
+        base = float(base_seed_threshold)
+    except Exception:
+        base = 0.05
+    base = max(0.0, min(1.0, base))
+    try:
+        limit_i = max(4, int(limit))
+    except Exception:
+        limit_i = 64
+
+    raw: List[float] = []
+    raw.extend([0.0, 0.001, 0.002, 0.005])
+    raw.extend([round(i * 0.01, 3) for i in range(0, 11)])  # 0.00..0.10
+    raw.extend([round(i * 0.05, 3) for i in range(3, 20)])  # 0.15..0.95
+    raw.extend([0.975, 0.99, 1.0])
+    raw.append(base)
+
+    if observed_scores:
+        cleaned_scores: List[float] = []
+        for s in observed_scores:
+            try:
+                val = float(s)
+            except Exception:
+                continue
+            if not (0.0 <= val <= 1.0):
+                continue
+            cleaned_scores.append(val)
+            if len(cleaned_scores) >= 20_000:
+                break
+        if cleaned_scores:
+            try:
+                qs = np.quantile(np.asarray(cleaned_scores, dtype=np.float32), np.linspace(0.0, 1.0, num=21))
+                raw.extend([float(x) for x in qs.tolist()])
+            except Exception:
+                pass
+
+    grid = sorted({float(max(0.0, min(1.0, round(v, 4)))) for v in raw})
+    if len(grid) > limit_i:
+        # Keep low thresholds dense; truncate the tail.
+        grid = grid[:limit_i]
+    return grid
+
+
+def _compute_seed_threshold_curve(
+    *,
+    gt_best_scores: Mapping[Any, float],
+    fp_scores: Sequence[float],
+    thresholds: Sequence[float],
+) -> List[Dict[str, Any]]:
+    """
+    Compute seed-stage (matches,fps,precision) at each threshold.
+
+    - `gt_best_scores` maps a GT instance key -> best SAM score among detections matching that GT.
+    - `fp_scores` contains SAM scores for detections that did not match any GT (false positives).
+
+    Precision here mirrors our existing seed-stage notion:
+      precision = matches / (matches + fps)
+
+    (Duplicates are intentionally not modeled in this helper; they can be tracked separately.)
+    """
+    thr_list: List[float] = []
+    for t in thresholds:
+        try:
+            thr_list.append(float(t))
+        except Exception:
+            continue
+    thr_list = sorted({max(0.0, min(1.0, round(v, 6))) for v in thr_list})
+    if not thr_list:
+        return []
+
+    gt_scores_sorted: List[float] = []
+    for _k, v in (gt_best_scores or {}).items():
+        try:
+            val = float(v)
+        except Exception:
+            continue
+        if 0.0 <= val <= 1.0:
+            gt_scores_sorted.append(val)
+    gt_scores_sorted.sort()
+
+    fp_scores_sorted: List[float] = []
+    for v in fp_scores or []:
+        try:
+            val = float(v)
+        except Exception:
+            continue
+        if 0.0 <= val <= 1.0:
+            fp_scores_sorted.append(val)
+    fp_scores_sorted.sort()
+
+    total_gt = len(gt_scores_sorted)
+    total_fp = len(fp_scores_sorted)
+
+    curve: List[Dict[str, Any]] = []
+    for thr in thr_list:
+        gt_start = bisect_left(gt_scores_sorted, float(thr))
+        fp_start = bisect_left(fp_scores_sorted, float(thr))
+        matches = total_gt - gt_start
+        fps = total_fp - fp_start
+        precision = float(matches) / float(max(1, matches + fps))
+        curve.append(
+            {
+                "threshold": float(thr),
+                "matches": int(matches),
+                "fps": int(fps),
+                "precision": float(precision),
+            }
+        )
+    return curve
+
+
+def _select_seed_threshold_operating_point(
+    curve: Sequence[Dict[str, Any]],
+    *,
+    min_precision: Optional[float] = None,
+    max_fps: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Select a single operating point from a seed-threshold curve.
+
+    Selection rule:
+      1) Prefer points that satisfy constraints (precision >= min_precision, fps <= max_fps).
+      2) Among those, maximize matches, then minimize fps, then prefer lower threshold (less brittle).
+      3) If none satisfy, fall back to maximizing precision, then matches, then minimizing fps.
+    """
+    if not curve:
+        return None
+
+    try:
+        min_prec = float(min_precision) if min_precision is not None else None
+    except Exception:
+        min_prec = None
+    if min_prec is not None:
+        min_prec = max(0.0, min(1.0, min_prec))
+
+    try:
+        max_fps_i = int(max_fps) if max_fps is not None else None
+    except Exception:
+        max_fps_i = None
+    if max_fps_i is not None:
+        max_fps_i = max(0, max_fps_i)
+
+    def _as_point(p: Dict[str, Any]) -> Tuple[float, int, int, float]:
+        try:
+            thr = float(p.get("threshold") or 0.0)
+        except Exception:
+            thr = 0.0
+        try:
+            matches = int(p.get("matches") or 0)
+        except Exception:
+            matches = 0
+        try:
+            fps = int(p.get("fps") or 0)
+        except Exception:
+            fps = 0
+        try:
+            precision = float(p.get("precision") or 0.0)
+        except Exception:
+            precision = 0.0
+        return thr, matches, fps, precision
+
+    candidates: List[Dict[str, Any]] = []
+    for p in curve:
+        if not isinstance(p, dict):
+            continue
+        thr, matches, fps, precision = _as_point(p)
+        ok = True
+        if min_prec is not None and precision < float(min_prec):
+            ok = False
+        if max_fps_i is not None and fps > int(max_fps_i):
+            ok = False
+        if ok:
+            candidates.append(p)
+
+    best: Optional[Dict[str, Any]] = None
+    best_key: Optional[Tuple[int, int, float]] = None
+    if candidates:
+        for p in candidates:
+            thr, matches, fps, _precision = _as_point(p)
+            # Prefer more matches, then fewer FPs, then lower threshold.
+            key = (int(matches), -int(fps), -float(thr))
+            if best_key is None or key > best_key:
+                best_key = key
+                best = p
+        return best
+
+    # Fallback: maximize precision, then matches, then minimize fps, then prefer lower threshold.
+    best2: Optional[Dict[str, Any]] = None
+    best2_key: Optional[Tuple[float, int, int, float]] = None
+    for p in curve:
+        if not isinstance(p, dict):
+            continue
+        thr, matches, fps, precision = _as_point(p)
+        key = (float(precision), int(matches), -int(fps), -float(thr))
+        if best2_key is None or key > best2_key:
+            best2_key = key
+            best2 = p
+    return best2
 
 
 def _select_steps_from_seed_prompt_stats(

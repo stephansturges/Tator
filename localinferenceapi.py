@@ -8695,6 +8695,7 @@ def _select_steps_from_seed_prompt_stats(
     prompt_stats: Sequence[Dict[str, Any]],
     *,
     max_steps: int,
+    target_precision: Optional[float] = None,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -8707,6 +8708,14 @@ def _select_steps_from_seed_prompt_stats(
     except Exception:
         max_steps_i = 6
 
+    target_precision_f: Optional[float]
+    try:
+        target_precision_f = float(target_precision) if target_precision is not None else None
+    except Exception:
+        target_precision_f = None
+    if target_precision_f is not None:
+        target_precision_f = max(0.0, min(1.0, target_precision_f))
+
     candidates: List[Dict[str, Any]] = []
     for cand in prompt_stats:
         if not isinstance(cand, dict):
@@ -8714,20 +8723,86 @@ def _select_steps_from_seed_prompt_stats(
         prompt = str(cand.get("prompt") or "").strip()
         if not prompt:
             continue
-        covered = cand.get("matched_keys")
-        if not isinstance(covered, set):
-            covered = set()
-        matches = len(covered)
-        fps = int(cand.get("fps") or 0)
-        precision = matches / max(1, matches + fps)
-        candidates.append({**cand, "prompt": prompt, "matched_keys": covered, "matches": matches, "precision": precision})
+
+        # Pick a per-prompt seed_threshold operating point. If a target precision is provided, prefer a
+        # threshold that reaches it (if possible); otherwise fall back to the prompt's recommended point.
+        curve = cand.get("seed_threshold_curve") if isinstance(cand.get("seed_threshold_curve"), list) else None
+        selected_point: Optional[Dict[str, Any]] = None
+        if curve:
+            if target_precision_f is not None:
+                selected_point = _select_seed_threshold_operating_point(curve, min_precision=target_precision_f)
+            else:
+                selected_point = cand.get("seed_threshold_recommended_point") if isinstance(cand.get("seed_threshold_recommended_point"), dict) else None
+                if selected_point is None:
+                    selected_point = _select_seed_threshold_operating_point(curve)
+
+        selected_thr: Optional[float] = None
+        if selected_point is not None:
+            try:
+                selected_thr = float(selected_point.get("threshold"))
+            except Exception:
+                selected_thr = None
+        if selected_thr is None:
+            for key in ("seed_threshold_recommended", "seed_threshold_base"):
+                if cand.get(key) is None:
+                    continue
+                try:
+                    selected_thr = float(cand.get(key))
+                    break
+                except Exception:
+                    continue
+        if selected_thr is None:
+            selected_thr = 0.05
+        selected_thr = max(0.0, min(1.0, float(selected_thr)))
+
+        gt_best_scores = cand.get("gt_best_scores") if isinstance(cand.get("gt_best_scores"), dict) else {}
+        matched_keys: set[int] = set()
+        if gt_best_scores:
+            for k, v in gt_best_scores.items():
+                try:
+                    k_int = int(k)
+                except Exception:
+                    continue
+                try:
+                    v_f = float(v)
+                except Exception:
+                    continue
+                if v_f >= float(selected_thr):
+                    matched_keys.add(k_int)
+        else:
+            covered = cand.get("matched_keys")
+            if isinstance(covered, set):
+                matched_keys = covered
+
+        matches = int(selected_point.get("matches") or 0) if selected_point else len(matched_keys)
+        fps = int(selected_point.get("fps") or 0) if selected_point else int(cand.get("fps") or 0)
+        if selected_point is not None and selected_point.get("precision") is not None:
+            try:
+                precision = float(selected_point.get("precision"))
+            except Exception:
+                precision = matches / max(1, matches + fps)
+        else:
+            precision = matches / max(1, matches + fps)
+
+        candidates.append(
+            {
+                **cand,
+                "prompt": prompt,
+                "matched_keys": matched_keys,
+                "matches": int(matches),
+                "fps": int(fps),
+                "precision": float(precision),
+                "selected_seed_threshold": float(selected_thr),
+                "selected_seed_threshold_point": selected_point,
+            }
+        )
 
     covered_all: set[int] = set()
     selected: List[Dict[str, Any]] = []
     remaining = candidates[:]
     while remaining and len(selected) < max_steps_i:
         best: Optional[Dict[str, Any]] = None
-        best_key: Optional[Tuple[int, float, int]] = None
+        best_key: Optional[Tuple[int, int, float, int]] = None
         for cand in remaining:
             new = cand.get("matched_keys") - covered_all
             new_matches = len(new)
@@ -8735,7 +8810,10 @@ def _select_steps_from_seed_prompt_stats(
                 continue
             precision = float(cand.get("precision") or 0.0)
             fps = int(cand.get("fps") or 0)
-            key = (new_matches, precision, -fps)
+            meets = 1
+            if target_precision_f is not None:
+                meets = 1 if precision >= float(target_precision_f) else 0
+            key = (meets, new_matches, precision, -fps)
             if best_key is None or key > best_key:
                 best_key = key
                 best = cand
@@ -8747,7 +8825,8 @@ def _select_steps_from_seed_prompt_stats(
         if log_fn:
             try:
                 log_fn(
-                    f"[steps] select step '{best.get('prompt')}' (new_gt={best_key[0] if best_key else 0}, "
+                    f"[steps] select step '{best.get('prompt')}' (new_gt={best_key[1] if best_key else 0}, "
+                    f"seed_thr={float(best.get('selected_seed_threshold') or 0.0):.3f} "
                     f"seed_prec={float(best.get('precision') or 0.0):.3f}, seed_fps={int(best.get('fps') or 0)})"
                 )
             except Exception:
@@ -15804,6 +15883,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         selected = _select_steps_from_seed_prompt_stats(
                             seed_stats,
                             max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
+                            target_precision=(
+                                float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0)
+                                if (clip_head is not None and head_target_index is not None)
+                                else None
+                            ),
                             log_fn=_log,
                         )
                         selected_prompts, step_list = _build_steps_recipe_step_list_from_selected_stats(
@@ -15877,6 +15961,12 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 	                                        "matches": int(s.get("matches") or 0),
 	                                        "fps": int(s.get("fps") or 0),
 	                                        "precision": float(s.get("precision") or 0.0),
+	                                        "selected_seed_threshold": float(
+	                                            s.get("selected_seed_threshold")
+	                                            if s.get("selected_seed_threshold") is not None
+	                                            else (s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold)
+	                                        ),
+	                                        "selected_seed_threshold_point": s.get("selected_seed_threshold_point"),
 	                                        "seed_threshold_base": float(s.get("seed_threshold_base") or eval_payload.seed_threshold),
 	                                        "seed_threshold_recommended": float(
 	                                            s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold

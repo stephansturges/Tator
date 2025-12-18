@@ -1444,6 +1444,9 @@ const sam3TrainState = {
 	        stepsOptions: null,
 	        stepsMaxSteps: null,
 	        stepsMaxSeedsPerStep: null,
+	        stepsTier1Optimize: null,
+	        stepsTier1EvalCap: null,
+	        stepsTier1MaxTrials: null,
 	        beamOptions: null,
 	        beamWidth: null,
 	        beamRounds: null,
@@ -13294,6 +13297,25 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.useNegExemplars) agentElements.useNegExemplars.disabled = disableCropBank;
         if (agentElements.maxNegExemplars) agentElements.maxNegExemplars.disabled = disableCropBank;
         if (agentElements.negStrength) agentElements.negStrength.disabled = disableCropBank;
+
+        syncAgentStepsOptimizationControls();
+    }
+
+    function syncAgentStepsOptimizationControls() {
+        const mode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "greedy";
+        const isSteps = mode === "steps";
+        const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
+        const allowTier1 = isSteps && hasHead;
+        const reason = !isSteps ? "Only available in Multi-step mode." : !hasHead ? "Requires a pretrained CLIP head." : "";
+
+        if (agentElements.stepsTier1Optimize) {
+            agentElements.stepsTier1Optimize.disabled = !allowTier1;
+            agentElements.stepsTier1Optimize.title = reason;
+        }
+
+        const enabled = !!(allowTier1 && agentElements.stepsTier1Optimize && agentElements.stepsTier1Optimize.checked);
+        if (agentElements.stepsTier1EvalCap) agentElements.stepsTier1EvalCap.disabled = !enabled;
+        if (agentElements.stepsTier1MaxTrials) agentElements.stepsTier1MaxTrials.disabled = !enabled;
     }
 
     async function loadAgentClipClassifiers() {
@@ -13484,6 +13506,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            negStrength = 0;
 	        }
 
+	        const stepsTier1Optimize = !!(agentElements.stepsTier1Optimize && agentElements.stepsTier1Optimize.checked);
+	        const stepsTier1EvalCapRaw = readNumberInput(agentElements.stepsTier1EvalCap, { integer: true });
+	        const stepsTier1EvalCap = Number.isFinite(stepsTier1EvalCapRaw)
+	            ? Math.max(10, Math.min(50000, stepsTier1EvalCapRaw))
+	            : 200;
+	        const stepsTier1MaxTrialsRaw = readNumberInput(agentElements.stepsTier1MaxTrials, { integer: true });
+	        const stepsTier1MaxTrials = Number.isFinite(stepsTier1MaxTrialsRaw)
+	            ? Math.max(1, Math.min(256, stepsTier1MaxTrialsRaw))
+	            : 9;
+	        const stepsOptimizeTier1 = !!(stepsTier1Optimize && searchMode === "steps" && hasClipHead);
+
 	        const classesRaw = agentElements.classesInput?.value || "";
 		        const classes =
 		            classesRaw
@@ -13522,6 +13555,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            search_mode: searchMode,
 		            steps_max_steps_per_recipe: stepsMaxSteps,
 		            steps_max_visual_seeds_per_step: stepsMaxSeedsPerStep,
+		            steps_optimize_tier1: stepsOptimizeTier1,
+		            steps_optimize_tier1_eval_cap: stepsTier1EvalCap,
+		            steps_optimize_tier1_max_trials: stepsTier1MaxTrials,
 		            beam_width: beamWidth,
 		            beam_rounds: beamRounds,
 		            beam_min_improve: beamMinImprove,
@@ -13786,6 +13822,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
 	        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
 	        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
+	        agentElements.stepsTier1Optimize = document.getElementById("agentStepsTier1Optimize");
+	        agentElements.stepsTier1EvalCap = document.getElementById("agentStepsTier1EvalCap");
+	        agentElements.stepsTier1MaxTrials = document.getElementById("agentStepsTier1MaxTrials");
 	        agentElements.beamOptions = document.getElementById("agentBeamOptions");
 	        agentElements.beamWidth = document.getElementById("agentBeamWidth");
 	        agentElements.beamRounds = document.getElementById("agentBeamRounds");
@@ -13850,6 +13889,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipGuard) agentElements.clipGuard.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
+	        if (agentElements.stepsTier1Optimize) agentElements.stepsTier1Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
         const syncPrecisionLabel = () => {
             if (!agentElements.clipHeadTargetPrecisionValue) return;
             const val = agentElements.clipHeadTargetPrecision ? parseFloat(agentElements.clipHeadTargetPrecision.value) : NaN;
@@ -13881,6 +13921,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            const isSteps = mode === "steps";
 	            if (agentElements.beamOptions) agentElements.beamOptions.style.display = isBeam ? "block" : "none";
 	            if (agentElements.stepsOptions) agentElements.stepsOptions.style.display = isSteps ? "block" : "none";
+	            syncAgentStepsOptimizationControls();
 	        };
 	        if (agentElements.searchMode) agentElements.searchMode.addEventListener("change", syncSearchModeUi);
 	        syncSearchModeUi();

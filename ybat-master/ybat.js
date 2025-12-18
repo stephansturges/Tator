@@ -1197,13 +1197,12 @@
         hardMiningCheckbox: null,
     };
 
-const qwenTrainElements = {
-        runNameInput: null,
-        contextInput: null,
-        modelIdInput: null,
-        systemPromptInput: null,
-        systemPromptNoiseInput: null,
-        acceleratorSelect: null,
+	const qwenTrainElements = {
+	        runNameInput: null,
+	        modelIdInput: null,
+	        systemPromptInput: null,
+	        systemPromptNoiseInput: null,
+	        acceleratorSelect: null,
         loraRadios: null,
         batchSizeInput: null,
         epochsInput: null,
@@ -1213,16 +1212,13 @@ const qwenTrainElements = {
         loraRankInput: null,
         loraAlphaInput: null,
         loraDropoutInput: null,
-        patienceInput: null,
-        maxImageDimInput: null,
-        maxDetectionsInput: null,
-        datasetModeUpload: null,
-        datasetModeCached: null,
-        datasetSelect: null,
-        datasetRefresh: null,
-        datasetDelete: null,
-        datasetSummary: null,
-        sampleButton: null,
+	        patienceInput: null,
+	        maxImageDimInput: null,
+	        maxDetectionsInput: null,
+	        datasetSelect: null,
+	        datasetRefresh: null,
+	        datasetSummary: null,
+	        sampleButton: null,
         sampleCanvas: null,
         samplePrompt: null,
         sampleExpected: null,
@@ -1549,6 +1545,8 @@ const sam3TrainState = {
         uploadBtn: null,
         uploadMessage: null,
         uploadCurrentBtn: null,
+        uploadCurrentName: null,
+        uploadCurrentContext: null,
         uploadCurrentSummary: null,
         refreshBtn: null,
         list: null,
@@ -1592,6 +1590,23 @@ const sam3TrainState = {
                     header.appendChild(badge);
                     const actions = document.createElement("div");
                     actions.className = "training-history-actions";
+                    const downloadBtn = document.createElement("button");
+                    downloadBtn.type = "button";
+                    downloadBtn.className = "button button-outline";
+                    downloadBtn.textContent = "Download";
+                    downloadBtn.title = "Download this dataset as a zip.";
+                    downloadBtn.addEventListener("click", () => handleDatasetDownload(entry));
+                    actions.appendChild(downloadBtn);
+                    const convertBtn = document.createElement("button");
+                    convertBtn.type = "button";
+                    convertBtn.className = "button button-outline";
+                    convertBtn.textContent = entry.coco_ready ? "COCO ready" : "Convert to COCO";
+                    convertBtn.disabled = !!entry.coco_ready;
+                    convertBtn.title = entry.coco_ready
+                        ? "COCO annotations are already present."
+                        : "Generate COCO annotations for SAM3 training, prompt helper, and recipe mining.";
+                    convertBtn.addEventListener("click", () => handleDatasetConvert(entry));
+                    actions.appendChild(convertBtn);
                     const delBtn = document.createElement("button");
                     delBtn.type = "button";
                     delBtn.className = "button button-outline";
@@ -1599,14 +1614,15 @@ const sam3TrainState = {
                     delBtn.addEventListener("click", () => handleDatasetDelete(entry));
                     actions.appendChild(delBtn);
                     header.appendChild(actions);
-                    const meta = document.createElement("div");
-                    meta.className = "training-help";
-                    const parts = [];
-                    if (entry.source) parts.push(entry.source);
-                    const counts = [];
-                    if (entry.image_count) counts.push(`${entry.image_count} img`);
-                    if (entry.train_count) counts.push(`train ${entry.train_count}`);
-                    if (entry.val_count) counts.push(`val ${entry.val_count}`);
+	                    const meta = document.createElement("div");
+	                    meta.className = "training-help";
+	                    const parts = [];
+	                    if (entry.source) parts.push(entry.source);
+	                    parts.push(entry.coco_ready ? "COCO ready" : "COCO missing");
+	                    const counts = [];
+	                    if (entry.image_count) counts.push(`${entry.image_count} img`);
+	                    if (entry.train_count) counts.push(`train ${entry.train_count}`);
+	                    if (entry.val_count) counts.push(`val ${entry.val_count}`);
                     if (counts.length) parts.push(counts.join(" / "));
                     meta.textContent = parts.join(" • ") || "Dataset ready";
                     item.appendChild(header);
@@ -1618,10 +1634,10 @@ const sam3TrainState = {
         renderSegBuilderDatasets(datasetManagerState.datasets);
     }
 
-    async function handleDatasetDelete(entry) {
-        if (!entry || !entry.id) return;
-        const ok = window.confirm(`Delete dataset "${entry.label || entry.id}"? This cannot be undone.`);
-        if (!ok) return;
+	    async function handleDatasetDelete(entry) {
+	        if (!entry || !entry.id) return;
+	        const ok = window.confirm(`Delete dataset "${entry.label || entry.id}"? This cannot be undone.`);
+	        if (!ok) return;
         setDatasetUploadMessage(`Deleting ${entry.label || entry.id}…`, "info");
         try {
             const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(entry.id)}`, { method: "DELETE" });
@@ -1634,12 +1650,40 @@ const sam3TrainState = {
         } catch (err) {
             console.error("Failed to delete dataset", err);
             setDatasetUploadMessage(err.message || "Failed to delete dataset", "error");
-        }
-    }
+	        }
+	    }
 
-    async function refreshDatasetList() {
-        try {
-            const resp = await fetch(`${API_ROOT}/datasets`);
+	    async function handleDatasetConvert(entry) {
+	        if (!entry || !entry.id) return;
+	        setDatasetUploadMessage(`Converting ${entry.label || entry.id} to COCO…`, "info");
+	        try {
+	            const resp = await fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(entry.id)}/convert`, { method: "POST" });
+	            if (!resp.ok) {
+	                const detail = await resp.text();
+	                throw new Error(detail || `HTTP ${resp.status}`);
+	            }
+	            setDatasetUploadMessage(`Converted ${entry.label || entry.id}.`, "success");
+	            await refreshDatasetList();
+	        } catch (err) {
+	            console.error("Failed to convert dataset", err);
+	            setDatasetUploadMessage(err.message || "Failed to convert dataset", "error");
+	        }
+	    }
+
+	    function handleDatasetDownload(entry) {
+	        if (!entry || !entry.id) return;
+	        const url = `${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/download`;
+	        const link = document.createElement("a");
+	        link.href = url;
+	        link.rel = "noopener";
+	        document.body.appendChild(link);
+	        link.click();
+	        link.remove();
+	    }
+
+	    async function refreshDatasetList() {
+	        try {
+	            const resp = await fetch(`${API_ROOT}/datasets`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             renderDatasetList(data);
@@ -1686,19 +1730,21 @@ const sam3TrainState = {
         }
     }
 
-    async function uploadCurrentDatasetToCache() {
-        try {
-            if (datasetType === "seg") {
-                setDatasetUploadMessage("Uploading current dataset is only supported for bbox mode right now.", "warn");
-                return;
-            }
-            setDatasetUploadMessage("Packaging current dataset…", "info");
-            const result = await uploadQwenDatasetStream();
-            const label = result?.run_name || "dataset";
-            setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
-            if (datasetManagerElements.uploadCurrentSummary) {
-                datasetManagerElements.uploadCurrentSummary.textContent = `Cached as ${label}`;
-            }
+	    async function uploadCurrentDatasetToCache() {
+	        try {
+	            if (datasetType === "seg") {
+	                setDatasetUploadMessage("Uploading current dataset is only supported for bbox mode right now.", "warn");
+	                return;
+	            }
+	            setDatasetUploadMessage("Packaging current dataset…", "info");
+	            const runName = datasetManagerElements.uploadCurrentName?.value?.trim() || "";
+	            const contextText = datasetManagerElements.uploadCurrentContext?.value?.trim() || "";
+	            const result = await uploadQwenDatasetStream({ runName, contextText });
+	            const label = result?.run_name || "dataset";
+	            setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
+	            if (datasetManagerElements.uploadCurrentSummary) {
+	                datasetManagerElements.uploadCurrentSummary.textContent = `Cached as ${label}`;
+	            }
             await refreshDatasetList();
         } catch (err) {
             console.error("Upload current dataset failed", err);
@@ -1713,13 +1759,15 @@ const sam3TrainState = {
         datasetManagerElements.uploadFile = document.getElementById("datasetUploadFile");
         datasetManagerElements.uploadName = document.getElementById("datasetUploadName");
         datasetManagerElements.uploadType = document.getElementById("datasetUploadType");
-        datasetManagerElements.uploadBtn = document.getElementById("datasetUploadBtn");
-        datasetManagerElements.uploadMessage = document.getElementById("datasetUploadMessage");
-        datasetManagerElements.uploadCurrentBtn = document.getElementById("datasetUploadCurrentBtn");
-        datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
-        datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
-        datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
-        datasetManagerElements.list = document.getElementById("datasetList");
+	        datasetManagerElements.uploadBtn = document.getElementById("datasetUploadBtn");
+	        datasetManagerElements.uploadMessage = document.getElementById("datasetUploadMessage");
+	        datasetManagerElements.uploadCurrentBtn = document.getElementById("datasetUploadCurrentBtn");
+	        datasetManagerElements.uploadCurrentName = document.getElementById("datasetUploadCurrentName");
+	        datasetManagerElements.uploadCurrentContext = document.getElementById("datasetUploadCurrentContext");
+	        datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
+	        datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
+	        datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
+	        datasetManagerElements.list = document.getElementById("datasetList");
         if (datasetManagerElements.uploadBtn) {
             datasetManagerElements.uploadBtn.addEventListener("click", () => uploadDatasetZip());
         }
@@ -1914,14 +1962,10 @@ const sam3TrainState = {
         }
     }
 
-    function useCachedQwenDataset() {
-        return Boolean(qwenTrainElements.datasetModeCached?.checked);
-    }
-
-    function getSelectedQwenDataset() {
-        const id = qwenDatasetState.selectedId;
-        if (!id) {
-            return null;
+	    function getSelectedQwenDataset() {
+	        const id = qwenDatasetState.selectedId;
+	        if (!id) {
+	            return null;
         }
         return qwenDatasetState.items.find((entry) => entry.id === id) || null;
     }
@@ -1937,40 +1981,29 @@ const sam3TrainState = {
         updateQwenDatasetSummary();
     }
 
-    function updateQwenDatasetSummary() {
-        const summaryEl = qwenTrainElements.datasetSummary;
-        if (!summaryEl) {
-            return;
-        }
-        if (useCachedQwenDataset()) {
-            const entry = getSelectedQwenDataset();
-            if (entry) {
-                const context = entry.context ? ` Context: ${entry.context}` : "";
-                summaryEl.textContent = `Using cached dataset "${entry.label}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}).${context}`;
-            } else {
-                summaryEl.textContent = "Select a cached dataset or switch back to uploading the current dataset.";
-            }
-        } else {
-            summaryEl.textContent = "We'll upload the dataset from the labeling tab and cache it automatically.";
-        }
-    }
+	    function updateQwenDatasetSummary() {
+	        const summaryEl = qwenTrainElements.datasetSummary;
+	        if (!summaryEl) {
+	            return;
+	        }
+	        const entry = getSelectedQwenDataset();
+	        if (entry) {
+	            const context = entry.context ? ` Context: ${entry.context}` : "";
+	            summaryEl.textContent = `Using cached dataset "${entry.label}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}).${context}`;
+	            return;
+	        }
+	        summaryEl.textContent = "No cached datasets selected. Create one in the Dataset Management tab, then refresh.";
+	    }
 
-    function setQwenDatasetModeState() {
-        const useCached = useCachedQwenDataset();
-        if (qwenTrainElements.datasetSelect) {
-            qwenTrainElements.datasetSelect.disabled = !useCached || !qwenDatasetState.items.length;
-        }
-        if (qwenTrainElements.datasetRefresh) {
-            qwenTrainElements.datasetRefresh.disabled = !useCached;
-        }
-        if (qwenTrainElements.datasetDelete) {
-            qwenTrainElements.datasetDelete.disabled = !useCached || !qwenDatasetState.items.length;
-        }
-        if (useCached && !qwenDatasetState.items.length) {
-            loadQwenDatasetList(true).catch((error) => console.error("Failed to load cached datasets", error));
-        }
-        updateQwenDatasetSummary();
-    }
+	    function setQwenDatasetModeState() {
+	        if (qwenTrainElements.datasetSelect) {
+	            qwenTrainElements.datasetSelect.disabled = !qwenDatasetState.items.length;
+	        }
+	        if (qwenTrainElements.datasetRefresh) {
+	            qwenTrainElements.datasetRefresh.disabled = false;
+	        }
+	        updateQwenDatasetSummary();
+	    }
 
     function populateQwenDatasetSelect() {
         const select = qwenTrainElements.datasetSelect;
@@ -1984,27 +2017,24 @@ const sam3TrainState = {
             option.textContent = "No cached datasets";
             select.appendChild(option);
             select.disabled = true;
-        } else {
-            qwenDatasetState.items.forEach((entry) => {
-                const option = document.createElement("option");
-                option.value = entry.id;
+	        } else {
+	            qwenDatasetState.items.forEach((entry) => {
+	                const option = document.createElement("option");
+	                option.value = entry.id;
                 option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images)`;
                 select.appendChild(option);
             });
             if (!qwenDatasetState.selectedId || !qwenDatasetState.items.some((entry) => entry.id === qwenDatasetState.selectedId)) {
                 qwenDatasetState.selectedId = qwenDatasetState.items[0].id;
             }
-            select.disabled = false;
-            select.value = qwenDatasetState.selectedId;
-        }
-        if (qwenTrainElements.datasetDelete) {
-            qwenTrainElements.datasetDelete.disabled = !useCachedQwenDataset() || !qwenDatasetState.items.length;
-        }
-        if (qwenTrainElements.datasetRefresh) {
-            qwenTrainElements.datasetRefresh.disabled = !useCachedQwenDataset();
-        }
-        updateQwenDatasetSummary();
-    }
+	            select.disabled = false;
+	            select.value = qwenDatasetState.selectedId;
+	        }
+	        if (qwenTrainElements.datasetRefresh) {
+	            qwenTrainElements.datasetRefresh.disabled = false;
+	        }
+	        updateQwenDatasetSummary();
+	    }
 
     async function loadQwenDatasetList(force = false) {
         if (!force && qwenDatasetState.items.length) {
@@ -5832,18 +5862,19 @@ async function cancelQwenDatasetUpload(jobId) {
     }
 }
 
-async function uploadQwenDatasetStream() {
-    const imageNames = Object.keys(images);
-    if (!imageNames.length) {
-        throw new Error("Load images before starting Qwen training.");
-    }
-    const classNames = Object.keys(classes || {});
-    if (!classNames.length) {
-        throw new Error("Load a label map before starting Qwen training.");
-    }
-    const contextText = qwenTrainElements.contextInput?.value?.trim() || "";
-    const instruction = buildQwenInstruction(contextText, classNames);
-    const stats = computeQwenDatasetStats(imageNames);
+	async function uploadQwenDatasetStream(options = {}) {
+	    const imageNames = Object.keys(images);
+	    if (!imageNames.length) {
+	        throw new Error("Load images before starting Qwen training.");
+	    }
+	    const classNames = Object.keys(classes || {});
+	    if (!classNames.length) {
+	        throw new Error("Load a label map before starting Qwen training.");
+	    }
+	    const contextOverride = typeof options.contextText === "string" ? options.contextText.trim() : "";
+	    const contextText = contextOverride || qwenTrainElements.contextInput?.value?.trim() || "";
+	    const instruction = buildQwenInstruction(contextText, classNames);
+	    const stats = computeQwenDatasetStats(imageNames);
     let packagingModalVisible = false;
     let jobId = null;
     try {
@@ -5855,8 +5886,9 @@ async function uploadQwenDatasetStream() {
             summaryText,
         });
         packagingModalVisible = true;
-        const runName = qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
-        const initInfo = await initQwenDatasetUpload(runName);
+	        const runNameOverride = typeof options.runName === "string" ? options.runName.trim() : "";
+	        const runName = runNameOverride || qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
+	        const initInfo = await initQwenDatasetUpload(runName);
         jobId = initInfo?.job_id;
         if (!jobId) {
             throw new Error("Dataset upload job id missing in response.");
@@ -6173,35 +6205,25 @@ async function renderQwenSamplePreview(sample) {
     }
 }
 
-async function handleStartQwenTraining() {
-    if (qwenTrainElements.startButton) {
-        qwenTrainElements.startButton.disabled = true;
-    }
-    try {
-        const useCachedDataset = useCachedQwenDataset();
-        let datasetInfo;
-        if (useCachedDataset) {
-            const cachedEntry = getSelectedQwenDataset();
-            if (!cachedEntry) {
-                setQwenTrainMessage("Select a cached dataset or switch back to uploading the current dataset.", "error");
-                if (qwenTrainElements.startButton) {
-                    qwenTrainElements.startButton.disabled = false;
-                }
-                return;
-            }
-            datasetInfo = {
-                dataset_root: cachedEntry.dataset_root,
-                run_name: qwenTrainElements.runNameInput?.value?.trim() || cachedEntry.id,
-            };
-        } else {
-            datasetInfo = await uploadQwenDatasetStream();
-            await loadQwenDatasetList(true);
-            if (datasetInfo?.run_name) {
-                selectQwenDatasetById(datasetInfo.run_name);
-            }
-        }
-        setQwenTrainMessage("Starting training job…");
-        const payload = buildQwenTrainingPayload(datasetInfo.dataset_root, datasetInfo.run_name);
+	async function handleStartQwenTraining() {
+	    if (qwenTrainElements.startButton) {
+	        qwenTrainElements.startButton.disabled = true;
+	    }
+	    try {
+	        const cachedEntry = getSelectedQwenDataset();
+	        if (!cachedEntry) {
+	            setQwenTrainMessage("Select a cached dataset (create one in Dataset Management first).", "error");
+	            if (qwenTrainElements.startButton) {
+	                qwenTrainElements.startButton.disabled = false;
+	            }
+	            return;
+	        }
+	        const datasetInfo = {
+	            dataset_root: cachedEntry.dataset_root,
+	            run_name: qwenTrainElements.runNameInput?.value?.trim() || cachedEntry.id,
+	        };
+	        setQwenTrainMessage("Starting training job…");
+	        const payload = buildQwenTrainingPayload(datasetInfo.dataset_root, datasetInfo.run_name);
         const resp = await fetch(`${API_ROOT}/qwen/train/jobs`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -6576,15 +6598,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 }
 
-    function initQwenTrainingTab() {
-        if (qwenTrainElements.runNameInput) {
-            return;
-        }
-        qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
-        qwenTrainElements.contextInput = document.getElementById("qwenTrainContext");
-        qwenTrainElements.modelIdInput = document.getElementById("qwenTrainModelId");
-        qwenTrainElements.systemPromptInput = document.getElementById("qwenTrainSystemPrompt");
-        qwenTrainElements.systemPromptNoiseInput = document.getElementById("qwenTrainPromptNoise");
+	    function initQwenTrainingTab() {
+	        if (qwenTrainElements.runNameInput) {
+	            return;
+	        }
+	        qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
+	        qwenTrainElements.modelIdInput = document.getElementById("qwenTrainModelId");
+	        qwenTrainElements.systemPromptInput = document.getElementById("qwenTrainSystemPrompt");
+	        qwenTrainElements.systemPromptNoiseInput = document.getElementById("qwenTrainPromptNoise");
         qwenTrainElements.acceleratorSelect = document.getElementById("qwenTrainAccelerator");
         qwenTrainElements.batchSizeInput = document.getElementById("qwenTrainBatchSize");
         qwenTrainElements.epochsInput = document.getElementById("qwenTrainEpochs");
@@ -6593,17 +6614,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
         qwenTrainElements.loraRankInput = document.getElementById("qwenTrainLoraRank");
         qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
-        qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
-        qwenTrainElements.patienceInput = document.getElementById("qwenTrainPatience");
-        qwenTrainElements.maxImageDimInput = document.getElementById("qwenTrainMaxImageDim");
-        qwenTrainElements.maxDetectionsInput = document.getElementById("qwenTrainMaxDetections");
-        qwenTrainElements.datasetModeUpload = document.getElementById("qwenDatasetModeUpload");
-        qwenTrainElements.datasetModeCached = document.getElementById("qwenDatasetModeCached");
-        qwenTrainElements.datasetSelect = document.getElementById("qwenDatasetSelect");
-        qwenTrainElements.datasetRefresh = document.getElementById("qwenDatasetRefresh");
-        qwenTrainElements.datasetDelete = document.getElementById("qwenDatasetDelete");
-        qwenTrainElements.datasetSummary = document.getElementById("qwenDatasetSummary");
-        qwenTrainElements.randomSplit = document.getElementById("qwenTrainRandomSplit");
+	        qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
+	        qwenTrainElements.patienceInput = document.getElementById("qwenTrainPatience");
+	        qwenTrainElements.maxImageDimInput = document.getElementById("qwenTrainMaxImageDim");
+	        qwenTrainElements.maxDetectionsInput = document.getElementById("qwenTrainMaxDetections");
+	        qwenTrainElements.datasetSelect = document.getElementById("qwenDatasetSelect");
+	        qwenTrainElements.datasetRefresh = document.getElementById("qwenDatasetRefresh");
+	        qwenTrainElements.datasetSummary = document.getElementById("qwenDatasetSummary");
+	        qwenTrainElements.randomSplit = document.getElementById("qwenTrainRandomSplit");
         qwenTrainElements.valPercent = document.getElementById("qwenTrainValPercent");
         qwenTrainElements.splitSeed = document.getElementById("qwenTrainSplitSeed");
         qwenTrainElements.cacheInfo = document.getElementById("qwenCacheInfo");
@@ -6638,29 +6656,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             });
             qwenTrainElements.cancelButton.disabled = true;
         }
-        if (qwenTrainElements.sampleButton) {
-            qwenTrainElements.sampleButton.addEventListener("click", () => {
-                generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
-            });
-        }
-        if (qwenTrainElements.datasetModeUpload) {
-            qwenTrainElements.datasetModeUpload.addEventListener("change", () => {
-                if (qwenTrainElements.datasetModeUpload?.checked) {
-                    setQwenDatasetModeState();
-                }
-            });
-        }
-        if (qwenTrainElements.datasetModeCached) {
-            qwenTrainElements.datasetModeCached.addEventListener("change", () => {
-                if (qwenTrainElements.datasetModeCached?.checked) {
-                    setQwenDatasetModeState();
-                }
-            });
-        }
-        if (qwenTrainElements.datasetSelect) {
-            qwenTrainElements.datasetSelect.addEventListener("change", () => {
-                qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
-                updateQwenDatasetSummary();
+	        if (qwenTrainElements.sampleButton) {
+	            qwenTrainElements.sampleButton.addEventListener("click", () => {
+	                generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
+	            });
+	        }
+	        if (qwenTrainElements.datasetSelect) {
+	            qwenTrainElements.datasetSelect.addEventListener("change", () => {
+	                qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
+	                updateQwenDatasetSummary();
             });
         }
         if (qwenTrainElements.randomSplit && qwenTrainElements.valPercent && qwenTrainElements.splitSeed) {
@@ -6676,19 +6680,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             qwenTrainElements.cachePurge.addEventListener("click", purgeQwenSplitCache);
         }
         refreshQwenSplitCache();
-        if (qwenTrainElements.datasetRefresh) {
-            qwenTrainElements.datasetRefresh.addEventListener("click", () => {
-                loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh cached datasets", error));
-            });
-        }
-        if (qwenTrainElements.datasetDelete) {
-            qwenTrainElements.datasetDelete.addEventListener("click", () => {
-                handleQwenDatasetDelete().catch((error) => console.error("Failed to delete cached dataset", error));
-            });
-        }
-        if (qwenTrainElements.chartSmoothing) {
-            const initial = parseInt(qwenTrainElements.chartSmoothing.value, 10);
-            qwenTrainState.chartSmoothing = Number.isFinite(initial) && initial > 0 ? initial : 1;
+	        if (qwenTrainElements.datasetRefresh) {
+	            qwenTrainElements.datasetRefresh.addEventListener("click", () => {
+	                loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh cached datasets", error));
+	            });
+	        }
+	        if (qwenTrainElements.chartSmoothing) {
+	            const initial = parseInt(qwenTrainElements.chartSmoothing.value, 10);
+	            qwenTrainState.chartSmoothing = Number.isFinite(initial) && initial > 0 ? initial : 1;
             qwenTrainElements.chartSmoothing.addEventListener("change", () => {
                 const nextValue = parseInt(qwenTrainElements.chartSmoothing.value, 10);
                 qwenTrainState.chartSmoothing = Number.isFinite(nextValue) && nextValue > 0 ? nextValue : 1;

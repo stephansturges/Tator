@@ -505,22 +505,12 @@
                             <div class="training-help">Checkpoints land in <code>uploads/qwen_runs/&lt;run_name&gt;</code>.</div>
                         </div>
                         <div class="training-field">
-                            <label for="qwenTrainContext">Describe these images</label>
-                            <textarea id="qwenTrainContext" rows="2" placeholder="e.g., CCTV footage inside a warehouse"></textarea>
-                            <div class="training-help">Used to enrich the prompt we send for every image.</div>
-                        </div>
-                        <div class="training-field">
-                            <label>Dataset source</label>
-                            <div class="qwen-dataset-modes">
-                                <label><input type="radio" name="qwenDatasetMode" id="qwenDatasetModeUpload" value="upload" checked /> Upload current dataset</label>
-                                <label><input type="radio" name="qwenDatasetMode" id="qwenDatasetModeCached" value="cached" /> Reuse cached dataset</label>
-                            </div>
+                            <label>Dataset (cached)</label>
                             <div class="qwen-dataset-cache-controls">
-                                <select id="qwenDatasetSelect" disabled></select>
-                                <button type="button" class="training-button" id="qwenDatasetRefresh" disabled>Refresh</button>
-                                <button type="button" class="training-button training-button-danger" id="qwenDatasetDelete" disabled>Delete</button>
+                                <select id="qwenDatasetSelect"></select>
+                                <button type="button" class="training-button" id="qwenDatasetRefresh">Refresh</button>
                             </div>
-                            <div class="training-help" id="qwenDatasetSummary">We'll package the dataset from the labeling tab and cache it automatically.</div>
+                            <div class="training-help" id="qwenDatasetSummary">Create and manage datasets in the Dataset Management tab.</div>
                         </div>
                         <div class="training-grid">
                             <div class="checkbox-row">
@@ -1449,9 +1439,19 @@
                             <div class="training-card__body dataset-manager">
                                 <div class="training-subsection">
                                     <div class="training-subsection__title">Upload current labeling session</div>
-                                    <div class="training-help">Packages the images + bboxes you have loaded in the labeling tab and caches them as a bbox dataset.</div>
+                                    <div class="training-help">Packages the images + bboxes you have loaded in the labeling tab and caches them as a Qwen dataset (JSONL) for Qwen training and SAM3 conversion.</div>
+                                    <div class="training-grid">
+                                        <div>
+                                            <label for="datasetUploadCurrentName">Dataset name (optional)</label>
+                                            <input type="text" id="datasetUploadCurrentName" placeholder="Defaults to qwen_dataset" />
+                                        </div>
+                                        <div>
+                                            <label for="datasetUploadCurrentContext">Describe these images (optional)</label>
+                                            <input type="text" id="datasetUploadCurrentContext" placeholder="Optional: included in the per-image instruction text" />
+                                        </div>
+                                    </div>
                                     <div class="training-actions">
-                                        <button type="button" id="datasetUploadCurrentBtn" class="training-button">Upload current dataset</button>
+                                        <button type="button" id="datasetUploadCurrentBtn" class="training-button">Cache as Qwen dataset</button>
                                         <div id="datasetUploadCurrentSummary" class="training-help"></div>
                                     </div>
                                 </div>

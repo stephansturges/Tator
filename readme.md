@@ -100,8 +100,13 @@ Tator/
 - **CLIP (recommended first)**: `Train CLIP` tab → `/clip/train` job → activate via `/clip/active_model` → used by Auto Class, CLIP verification, and as an optional **pretrained CLIP head** for Agent Mining / cascade scoring.
 - **SAM assists (Label Images tab)**: UI actions → SAM endpoints (SAM1/2/3 depending on `SAM_VARIANT`) → detections written into the current image session.
 - **SAM3 text prompt**: `SAM3 Text Prompt` panel → SAM3 processor runtime → returns boxes/polygons via the same `QwenDetection` response model used elsewhere.
-- **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → `/agent_mining/results/latest` (per-class summaries + best recipe steps) → save as portable ZIP via `/agent_mining/recipes`.
-- **Apply one recipe**: UI → `/agent_mining/apply_image` → `_apply_agent_recipe_to_image()` (text seeds → CLIP filtering → SAM3 expansion → optional CLIP-head gate → IoU de-dupe) → detections returned to UI.
+- **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → results include per-class recipes in either:
+  - `sam3_greedy`: prompt bank + optional crop bank (positives/negatives) + optional embedded pretrained CLIP head
+  - `sam3_steps` (`schema_version=2`): explicit multi-step prompt chain (step list), plus optional embedded pretrained CLIP head
+  Save/export as portable ZIP via `/agent_mining/recipes`.
+- **Apply one recipe**: UI → `/agent_mining/apply_image` → `_apply_agent_recipe_to_image()`:
+  - `sam3_steps`: run each step (seed → diverse seed selection → SAM3 visual expand → final CLIP filter + IoU de-dupe)
+  - `sam3_greedy`: prompt bank → (optional) crop-bank CLIP filter → SAM3 expand → (optional) CLIP head gate → IoU de-dupe
 - **Apply a recipe cascade**: UI → `/agent_mining/apply_image_chain` → run multiple recipes → per-class de-dupe → optional cross-class de-dupe (by group or global) with optional CLIP-head-based confidence → detections returned to UI.
 
 ## Prerequisites
@@ -314,8 +319,8 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 
 ### Agent Mining Tab (SAM3 Recipe Mining)
 The **Agent Mining** tab mines **portable SAM3 “recipes”** for each class in a labeled dataset. A recipe is a **single ZIP** that includes:
-- `recipe.json` (parameters + per-class prompt/crop banks + summary metrics)
-- `crops/` (example cut-outs used for CLIP filtering)
+- `recipe.json` (portable parameters + summary metrics + either a prompt bank (`sam3_greedy`) or an explicit step list (`sam3_steps`, schema v2))
+- optional `crops/` (example cut-outs used for crop-bank CLIP filtering; not used in head-only recipes)
 - optional `clip_head/` (a pretrained CLIP classifier head exported from the CLIP training tab)
 
 *(Screenshot coming: Agent Mining tab overview + per-class recipe details.)*
@@ -327,13 +332,27 @@ The **Agent Mining** tab mines **portable SAM3 “recipes”** for each class in
 
 High-level flow (what it’s doing, in human terms):
 1. **Split the dataset** into train/val (random seed is exposed so results are repeatable).
-2. For each class, pick a **small, diverse set of example crops** from the train split.
-3. Build a **prompt bank** (class name + optional GPT‑OSS suggestions + optional user-provided extra prompts).
-4. Run SAM3 prompts on val images to produce lots of candidate boxes, then **filter** them:
-   - keep boxes that look like the positive crops (CLIP similarity),
-   - optionally suppress boxes that look like other classes (negative crops),
-   - optionally require the **pretrained CLIP head** to agree (and auto-tune per-class head thresholds to hit a target precision on the val split).
+2. Build a **prompt bank** for each class (class name + optional GPT‑OSS suggestions + optional user-provided extra prompts).
+3. Choose a filtering strategy:
+   - **Pretrained CLIP head selected (recommended):** crop-bank settings are ignored and we filter using the classifier head instead.
+   - **Crop-bank mode (no CLIP head):** we sample positive crops (and optional negatives) from the train split and use CLIP similarity as the filter.
+4. Choose a recipe search mode:
+   - **Greedy (fast):** evaluate using the full prompt bank (one “greedy” recipe per class).
+   - **Multi-step (precision-first):** select a **small chain of prompt steps** per class and save it as a schema‑v2 step recipe (`mode=sam3_steps`).
+     - Seed-stage: run **text-only** prompt detections on the val split and pick prompt steps using a greedy set-cover (maximize new GT coverage, tie-break on seed precision / fewer seed FPs).
+     - Full-stage: for the selected steps, run a per-image pipeline: **seed → pick diverse seeds → SAM3 visual expand**.
+     - Final-stage: if a pretrained CLIP head is selected, **sweep head thresholds** (`min_prob`, optional `margin`) and pick the best operating point for your chosen **Target precision**; these tuned thresholds get baked into the saved recipe ZIP.
+   - **Beam search (slower):** explores more parameter combinations for greedy recipes.
 5. Score each class recipe on the val split (coverage/precision/FPs) and show results. Click **Save recipe** to persist the portable ZIP on disk.
+
+Important UI note: when you see **“CLIP filter off”** in Agent Mining results, that refers to **crop-bank CLIP similarity** (positive/negative crops). If you are using a pretrained CLIP head you should still see **“pretrained CLIP head …”** — that is the CLIP-based filtering being applied in that run.
+
+#### Interpreting the scores
+- **Coverage** = how many ground-truth objects were matched (recall): `matches / ground_truth`.
+- **Precision** = `matches / (matches + false_positives)` on the val split.
+- **FPs** = detections that do not match any ground-truth box at the job’s Eval IoU threshold.
+- **Duplicates** = extra detections that overlap a ground-truth box that was already matched (double-labeling the same object).
+- **Det rate** = fraction of val images that produced at least one detection.
 
 Using it:
 - Pick a converted dataset under **Datasets on disk**.
@@ -344,7 +363,8 @@ Using it:
 
 Notes:
 - IDs shown during mining are **dataset category ids** (COCO `category_id` when the dataset is COCO-format) and may not match your labelmap index/order.
-- The pretrained CLIP head is matched to classes by **name**, not by “index in a list”, to avoid ordering mismatches.
+- A recipe’s **CLIP head index** (shown as “head idx …”) is the index inside the classifier head’s class list; it is normal for this to differ from your labelmap index. Head matching is done by **class name** (after normalization), not by numeric ID.
+- If a recipe class name can’t be found inside the embedded CLIP head, head-based filtering is skipped for that recipe (expect noisier results). Use a cascade **Output class override** or re-mine with consistent class names.
 
 #### Apply a single recipe
 - **Agent Mining tab (debugging):** select a saved recipe and apply it to a specific dataset image id to sanity-check what the recipe is doing.
@@ -401,8 +421,12 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
 
 ## 2025-12-18 – Recipe ZIP Import Fix
-- Fixed recipe ZIP import so it **preserves the saved `params` block** (tuned thresholds/knobs) instead of dropping it. This also applies when importing cascade ZIP bundles (they import recipe ZIPs internally).
-- Hardened schema-v2 step recipes on save so they persist with `schema_version=2` and `mode=sam3_steps` (portable + unambiguous).
+- Rebuilt Agent Mining’s “Multi-step” mode so it produces **schema‑v2 step recipes** (`mode=sam3_steps`, `schema_version=2`) instead of a legacy/implicit structure.
+  - Mining now explicitly selects a **chain of prompt steps** per class (up to `Max recipe steps`) and saves them as `recipe.steps[]`.
+  - Each step runs a consistent per-image pipeline: **seed → diverse seed selection → SAM3 visual expand → final filter + de-dupe**.
+  - When a pretrained CLIP head is used, we **auto-tune the head thresholds** (probability + optional margin) to hit the user’s **Target precision** and bake that into the recipe ZIP.
+- Fixed recipe ZIP import so it **preserves the saved top-level `params` block** (tuned thresholds/knobs) instead of dropping it. This also applies when importing cascade ZIP bundles (they import recipe ZIPs internally).
+- Hardened step recipe saving so the on-disk recipe JSON is unambiguous (`schema_version=2`, `mode=sam3_steps`) even if the incoming payload relied on implicit classification.
 
 ## 2025-12-17 – Recipe Cascades + CLIP Head Robustness
 - Added **recipe cascades** in the Label Images tab: chain multiple recipes, optionally re-label outputs per step, and merge results with configurable per-class + cross-class IoU de-dupe.

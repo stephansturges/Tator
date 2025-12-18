@@ -12095,8 +12095,11 @@ class AgentMiningRequest(BaseModel):
     split_seed: int = 42
     reuse_split: bool = True
 
-    # Search strategy. Greedy is fastest; beam tries more parameter combinations and can be much slower.
-    search_mode: Literal["greedy", "beam"] = "greedy"
+    # Search strategy:
+    # - greedy: fastest
+    # - beam: tries more parameter combinations (can be much slower)
+    # - steps: (reserved) multi-step recipe mining; currently falls back to greedy
+    search_mode: Literal["greedy", "beam", "steps"] = "greedy"
     beam_width: int = Field(4, ge=1, le=16)
     beam_rounds: int = Field(3, ge=1, le=10)
     beam_min_improve: float = Field(0.005, ge=0.0, le=1.0)
@@ -14386,20 +14389,32 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if not selected_categories:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_classes_selected")
 
+        effective_search_mode = payload.search_mode
+        if effective_search_mode == "steps":
+            # Reserved for multi-step recipe mining (schema v2). The rest of this pipeline currently evaluates
+            # prompt-bank greedy recipes, so we fall back until the multistep miner lands.
+            _log("Search mode 'steps' requested; falling back to 'greedy' mining for now.")
+            effective_search_mode = "greedy"
+
         _log(
             "Config: "
-            f"mode={payload.search_mode} "
-            f"seed_thr={payload.seed_threshold} expand_thr={payload.expand_threshold} sim_floor={payload.similarity_score} "
-            f"pos_crops={payload.positives_per_class} "
-            f"neg_crops={payload.max_negatives_per_class if payload.use_negative_exemplars else 0} "
-            f"neg_strength={payload.negative_strength} "
-            f"max_seeds={payload.max_visual_seeds} seed_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
-            f"mask_thr={payload.mask_threshold} max_results={payload.max_results} iou_eval={payload.iou_threshold} "
-            f"cluster_exemplars={payload.cluster_exemplars} llm_prompts={payload.prompt_llm_max_prompts} "
-            f"workers_per_gpu={getattr(payload, 'max_workers_per_device', 1)}"
+            + f"mode={payload.search_mode}"
+            + (
+                f" (effective={effective_search_mode}) "
+                if effective_search_mode != payload.search_mode
+                else " "
+            )
+            + f"seed_thr={payload.seed_threshold} expand_thr={payload.expand_threshold} sim_floor={payload.similarity_score} "
+            + f"pos_crops={payload.positives_per_class} "
+            + f"neg_crops={payload.max_negatives_per_class if payload.use_negative_exemplars else 0} "
+            + f"neg_strength={payload.negative_strength} "
+            + f"max_seeds={payload.max_visual_seeds} seed_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
+            + f"mask_thr={payload.mask_threshold} max_results={payload.max_results} iou_eval={payload.iou_threshold} "
+            + f"cluster_exemplars={payload.cluster_exemplars} llm_prompts={payload.prompt_llm_max_prompts} "
+            + f"workers_per_gpu={getattr(payload, 'max_workers_per_device', 1)}"
             + (
                 f" beam(k={payload.beam_width}, rounds={payload.beam_rounds}, eps={payload.beam_min_improve}, cap={payload.beam_eval_cap})"
-                if payload.search_mode == "beam"
+                if effective_search_mode == "beam"
                 else ""
             )
         )
@@ -14710,7 +14725,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             eval_workers: Optional[List[_Sam3GreedyEvalWorker]] = None
             try:
                 eval_workers = _build_sam3_greedy_eval_workers(eval_payload, log_fn=_log)
-                if payload.search_mode == "beam" and not _cancelled():
+                if effective_search_mode == "beam" and not _cancelled():
                     job.message = "Beam search: tuning parameters (slow)…"
                     job.updated_at = time.time()
                     job.progress = max(job.progress, 0.12)
@@ -14902,7 +14917,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             "split": {"train": len(train_ids), "val": len(val_ids), "seed": payload.split_seed, "val_percent": payload.val_percent},
             "classes": results,
             "config": {**eval_payload.dict(), "per_class_overrides": per_class_overrides or {}},
-            "note": f"Agent mining completed ({eval_payload.search_mode} mode).",
+            "note": (
+                f"Agent mining completed (requested={payload.search_mode}, effective={effective_search_mode})."
+                if payload.search_mode != effective_search_mode
+                else f"Agent mining completed ({effective_search_mode} mode)."
+            ),
         }
         if _cancelled():
             job.status = "cancelled"

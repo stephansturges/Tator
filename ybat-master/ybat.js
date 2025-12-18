@@ -1564,34 +1564,63 @@ const sam3TrainState = {
         datasetManagerElements.uploadMessage.className = `training-message ${tone || ""}`;
     }
 
-    function renderDatasetList(list) {
-        datasetManagerState.datasets = Array.isArray(list) ? list : [];
-        const container = datasetManagerElements.list;
-        if (container) {
-            container.innerHTML = "";
+	    function renderDatasetList(list) {
+	        datasetManagerState.datasets = Array.isArray(list) ? list : [];
+	        const container = datasetManagerElements.list;
+	        if (container) {
+	            container.innerHTML = "";
             if (!datasetManagerState.datasets.length) {
                 const empty = document.createElement("div");
                 empty.className = "training-history-item";
                 empty.textContent = "No datasets yet. Upload one to get started.";
                 container.appendChild(empty);
             } else {
-                datasetManagerState.datasets.forEach((entry) => {
-                    const item = document.createElement("div");
-                    item.className = "training-history-item";
-                    const header = document.createElement("div");
-                    header.className = "training-history-row";
-                    const title = document.createElement("div");
-                    title.className = "training-history-title";
-                    title.textContent = entry.label || entry.id;
-                    const badge = document.createElement("span");
-                    badge.className = "badge";
-                    badge.textContent = (entry.type || "bbox").toUpperCase();
-                    header.appendChild(title);
-                    header.appendChild(badge);
-                    const actions = document.createElement("div");
-                    actions.className = "training-history-actions";
-                    const downloadBtn = document.createElement("button");
-                    downloadBtn.type = "button";
+	                datasetManagerState.datasets.forEach((entry) => {
+	                    const item = document.createElement("div");
+	                    item.className = "training-history-item";
+	                    const header = document.createElement("div");
+	                    header.className = "training-history-row";
+	                    const title = document.createElement("div");
+	                    title.className = "training-history-title";
+	                    title.textContent = entry.label || entry.id;
+	                    const badgeWrap = document.createElement("div");
+	                    badgeWrap.style.display = "flex";
+	                    badgeWrap.style.gap = "6px";
+	                    badgeWrap.style.flexWrap = "wrap";
+	                    const typeBadge = document.createElement("span");
+	                    typeBadge.className = "badge";
+	                    typeBadge.textContent = (entry.type || "bbox").toUpperCase();
+	                    typeBadge.title = (entry.type || "bbox") === "seg"
+	                        ? "Polygon / YOLO-seg geometry"
+	                        : "Bounding box / YOLO geometry";
+	                    badgeWrap.appendChild(typeBadge);
+	                    if (entry.yolo_ready) {
+	                        const yoloBadge = document.createElement("span");
+	                        yoloBadge.className = "badge";
+	                        yoloBadge.textContent = "YOLO";
+	                        yoloBadge.title = "YOLO images/labels + labelmap.txt detected.";
+	                        badgeWrap.appendChild(yoloBadge);
+	                    }
+	                    if (entry.coco_ready) {
+	                        const cocoBadge = document.createElement("span");
+	                        cocoBadge.className = "badge";
+	                        cocoBadge.textContent = "COCO";
+	                        cocoBadge.title = "COCO annotations present (used by SAM3 training + recipe mining).";
+	                        badgeWrap.appendChild(cocoBadge);
+	                    }
+	                    if (entry.qwen_ready) {
+	                        const qwenBadge = document.createElement("span");
+	                        qwenBadge.className = "badge";
+	                        qwenBadge.textContent = "QWEN";
+	                        qwenBadge.title = "Qwen JSONL annotations present (used by Qwen training).";
+	                        badgeWrap.appendChild(qwenBadge);
+	                    }
+	                    header.appendChild(title);
+	                    header.appendChild(badgeWrap);
+	                    const actions = document.createElement("div");
+	                    actions.className = "training-history-actions";
+	                    const downloadBtn = document.createElement("button");
+	                    downloadBtn.type = "button";
                     downloadBtn.className = "button button-outline";
                     downloadBtn.textContent = "Download";
                     downloadBtn.title = "Download this dataset as a zip.";
@@ -1605,12 +1634,22 @@ const sam3TrainState = {
                     convertBtn.title = entry.coco_ready
                         ? "COCO annotations are already present."
                         : "Generate COCO annotations for SAM3 training, prompt helper, and recipe mining.";
-                    convertBtn.addEventListener("click", () => handleDatasetConvert(entry));
-                    actions.appendChild(convertBtn);
-                    const delBtn = document.createElement("button");
-                    delBtn.type = "button";
-                    delBtn.className = "button button-outline";
-                    delBtn.textContent = "Delete";
+	                    convertBtn.addEventListener("click", () => handleDatasetConvert(entry));
+	                    actions.appendChild(convertBtn);
+	                    const qwenBtn = document.createElement("button");
+	                    qwenBtn.type = "button";
+	                    qwenBtn.className = "button button-outline";
+	                    qwenBtn.textContent = entry.qwen_ready ? "Qwen ready" : "Build Qwen";
+	                    qwenBtn.disabled = !!entry.qwen_ready;
+	                    qwenBtn.title = entry.qwen_ready
+	                        ? "Qwen JSONL annotations are already present."
+	                        : "Generate Qwen JSONL annotations for Qwen training (uses your labelmap order + optional dataset context).";
+	                    qwenBtn.addEventListener("click", () => handleDatasetBuildQwen(entry));
+	                    actions.appendChild(qwenBtn);
+	                    const delBtn = document.createElement("button");
+	                    delBtn.type = "button";
+	                    delBtn.className = "button button-outline";
+	                    delBtn.textContent = "Delete";
                     delBtn.addEventListener("click", () => handleDatasetDelete(entry));
                     actions.appendChild(delBtn);
                     header.appendChild(actions);
@@ -1618,17 +1657,29 @@ const sam3TrainState = {
 	                    meta.className = "training-help";
 	                    const parts = [];
 	                    if (entry.source) parts.push(entry.source);
+	                    if (entry.format) parts.push(entry.format.toUpperCase());
 	                    parts.push(entry.coco_ready ? "COCO ready" : "COCO missing");
+	                    if (entry.qwen_ready) {
+	                        const qwenTrain = Number.isFinite(entry.qwen_train_count) ? entry.qwen_train_count : null;
+	                        const qwenVal = Number.isFinite(entry.qwen_val_count) ? entry.qwen_val_count : null;
+	                        if (qwenTrain !== null && qwenVal !== null) {
+	                            parts.push(`Qwen ready (train ${qwenTrain} / val ${qwenVal})`);
+	                        } else {
+	                            parts.push("Qwen ready");
+	                        }
+	                    } else {
+	                        parts.push("Qwen missing");
+	                    }
 	                    const counts = [];
 	                    if (entry.image_count) counts.push(`${entry.image_count} img`);
 	                    if (entry.train_count) counts.push(`train ${entry.train_count}`);
 	                    if (entry.val_count) counts.push(`val ${entry.val_count}`);
-                    if (counts.length) parts.push(counts.join(" / "));
-                    meta.textContent = parts.join(" • ") || "Dataset ready";
-                    item.appendChild(header);
-                    item.appendChild(meta);
-                    container.appendChild(item);
-                });
+	                    if (counts.length) parts.push(counts.join(" / "));
+	                    meta.textContent = parts.join(" • ") || "Dataset ready";
+	                    item.appendChild(header);
+	                    item.appendChild(meta);
+	                    container.appendChild(item);
+	                });
             }
         }
         renderSegBuilderDatasets(datasetManagerState.datasets);
@@ -1653,10 +1704,10 @@ const sam3TrainState = {
 	        }
 	    }
 
-	    async function handleDatasetConvert(entry) {
-	        if (!entry || !entry.id) return;
-	        setDatasetUploadMessage(`Converting ${entry.label || entry.id} to COCO…`, "info");
-	        try {
+		    async function handleDatasetConvert(entry) {
+		        if (!entry || !entry.id) return;
+		        setDatasetUploadMessage(`Converting ${entry.label || entry.id} to COCO…`, "info");
+		        try {
 	            const resp = await fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(entry.id)}/convert`, { method: "POST" });
 	            if (!resp.ok) {
 	                const detail = await resp.text();
@@ -1667,13 +1718,34 @@ const sam3TrainState = {
 	        } catch (err) {
 	            console.error("Failed to convert dataset", err);
 	            setDatasetUploadMessage(err.message || "Failed to convert dataset", "error");
-	        }
-	    }
+		        }
+		    }
 
-	    function handleDatasetDownload(entry) {
-	        if (!entry || !entry.id) return;
-	        const url = `${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/download`;
-	        const link = document.createElement("a");
+		    async function handleDatasetBuildQwen(entry) {
+		        if (!entry || !entry.id) return;
+		        setDatasetUploadMessage(`Building Qwen annotations for ${entry.label || entry.id}…`, "info");
+		        try {
+		            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/build/qwen`, {
+		                method: "POST",
+		                headers: { "Content-Type": "application/json" },
+		                body: JSON.stringify({ force: false }),
+		            });
+		            if (!resp.ok) {
+		                const detail = await resp.text();
+		                throw new Error(detail || `HTTP ${resp.status}`);
+		            }
+		            setDatasetUploadMessage(`Built Qwen annotations for ${entry.label || entry.id}.`, "success");
+		            await refreshDatasetList();
+		        } catch (err) {
+		            console.error("Failed to build Qwen dataset", err);
+		            setDatasetUploadMessage(err.message || "Failed to build Qwen dataset", "error");
+		        }
+		    }
+
+		    function handleDatasetDownload(entry) {
+		        if (!entry || !entry.id) return;
+		        const url = `${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/download`;
+		        const link = document.createElement("a");
 	        link.href = url;
 	        link.rel = "noopener";
 	        document.body.appendChild(link);
@@ -1725,32 +1797,117 @@ const sam3TrainState = {
         } catch (err) {
             console.error("Dataset upload failed", err);
             setDatasetUploadMessage(err.message || "Dataset upload failed", "error");
-        } finally {
-            datasetManagerState.uploading = false;
-        }
-    }
+	        } finally {
+	            datasetManagerState.uploading = false;
+	        }
+	    }
 
-	    async function uploadCurrentDatasetToCache() {
-	        try {
-	            if (datasetType === "seg") {
-	                setDatasetUploadMessage("Uploading current dataset is only supported for bbox mode right now.", "warn");
-	                return;
-	            }
-	            setDatasetUploadMessage("Packaging current dataset…", "info");
-	            const runName = datasetManagerElements.uploadCurrentName?.value?.trim() || "";
-	            const contextText = datasetManagerElements.uploadCurrentContext?.value?.trim() || "";
-	            const result = await uploadQwenDatasetStream({ runName, contextText });
-	            const label = result?.run_name || "dataset";
-	            setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
-	            if (datasetManagerElements.uploadCurrentSummary) {
-	                datasetManagerElements.uploadCurrentSummary.textContent = `Cached as ${label}`;
-	            }
-            await refreshDatasetList();
-        } catch (err) {
-            console.error("Upload current dataset failed", err);
-            setDatasetUploadMessage(err.message || "Failed to upload current dataset", "error");
-        }
-    }
+		    async function uploadCurrentDatasetToCache() {
+		        try {
+		            const validation = validateGeometryForSave();
+		            if (!validation.ok) {
+		                setDatasetUploadMessage(validation.message || "Dataset geometry invalid.", "warn");
+		                return;
+		            }
+		            const imageKeys = Object.keys(images || {});
+		            if (!imageKeys.length) {
+		                setDatasetUploadMessage("Load images in the labeling tab first.", "warn");
+		                return;
+		            }
+		            const classNames = Object.keys(classes || {});
+		            if (!classNames.length) {
+		                setDatasetUploadMessage("Load a labelmap in the labeling tab first.", "warn");
+		                return;
+		            }
+		            setDatasetUploadMessage("Packaging current dataset as YOLO zip…", "info");
+		            const runNameRaw = datasetManagerElements.uploadCurrentName?.value?.trim() || "";
+		            const contextText = datasetManagerElements.uploadCurrentContext?.value?.trim() || "";
+		            const runName = runNameRaw || "labeling_session";
+		            const zip = new JSZip();
+		            const folderName = sanitizeDatasetFilename(runName) || "labeling_session";
+		            const root = zip.folder(folderName);
+		            const labelmapEntries = Object.keys(classes || {}).map((name) => ({
+		                name,
+		                idx: Number(classes[name]),
+		            })).filter((entry) => Number.isFinite(entry.idx));
+		            labelmapEntries.sort((a, b) => a.idx - b.idx);
+		            if (!labelmapEntries.length) {
+		                throw new Error("Labelmap is empty.");
+		            }
+		            const maxIdx = labelmapEntries[labelmapEntries.length - 1].idx;
+		            if (labelmapEntries[0].idx !== 0 || maxIdx !== labelmapEntries.length - 1) {
+		                throw new Error("Labelmap indices must be contiguous starting at 0.");
+		            }
+		            root.file("labelmap.txt", labelmapEntries.map((entry) => entry.name).join("\n"));
+		            const usedNames = new Map();
+		            for (const imageKey of imageKeys) {
+		                const imageRecord = images[imageKey];
+		                if (!imageRecord || !imageRecord.meta) {
+		                    throw new Error(`Missing original file for ${imageKey}. Re-import the images and try again.`);
+		                }
+		                await ensureImageDimensions(imageRecord);
+		                const baseName = imageRecord.meta.name || imageKey;
+		                const safeName = makeUniqueFilename(baseName, usedNames);
+		                root.file(`train/images/${safeName}`, imageRecord.meta);
+		                const labelNameParts = safeName.split(".");
+		                if (labelNameParts.length > 1) {
+		                    labelNameParts[labelNameParts.length - 1] = "txt";
+		                } else {
+		                    labelNameParts.push("txt");
+		                }
+		                const labelRel = labelNameParts.join(".");
+		                const result = [];
+		                const buckets = bboxes[imageKey] || {};
+		                for (const className of Object.keys(buckets)) {
+		                    const bucket = buckets[className] || [];
+		                    const classIdx = classes[className];
+		                    bucket.forEach((bbox) => {
+		                        if (!bbox) return;
+		                        if (datasetType === "seg" && Array.isArray(bbox.points) && bbox.points.length >= 3) {
+		                            const coords = bbox.points
+		                                .map((pt) => {
+		                                    const nx = pt.x / imageRecord.width;
+		                                    const ny = pt.y / imageRecord.height;
+		                                    return `${nx} ${ny}`;
+		                                })
+		                                .join(" ");
+		                            result.push(`${classIdx} ${coords}`);
+		                        } else {
+		                            const x = (bbox.x + bbox.width / 2) / imageRecord.width;
+		                            const y = (bbox.y + bbox.height / 2) / imageRecord.height;
+		                            const w = bbox.width / imageRecord.width;
+		                            const h = bbox.height / imageRecord.height;
+		                            result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
+		                        }
+		                    });
+		                }
+		                root.file(`train/labels/${labelRel}`, result.join("\n"));
+		            }
+		            const blob = await zip.generateAsync({ type: "blob" });
+		            const formData = new FormData();
+		            formData.append("file", blob, `${folderName}.zip`);
+		            formData.append("dataset_id", runName);
+		            formData.append("dataset_type", datasetType === "seg" ? "seg" : "bbox");
+		            if (contextText) {
+		                formData.append("context", contextText);
+		            }
+		            const resp = await fetch(`${API_ROOT}/datasets/upload`, { method: "POST", body: formData });
+		            const detail = await resp.text();
+		            if (!resp.ok) {
+		                throw new Error(detail || `HTTP ${resp.status}`);
+		            }
+		            const data = detail ? JSON.parse(detail) : {};
+		            const label = data?.label || data?.id || runName;
+		            setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
+		            if (datasetManagerElements.uploadCurrentSummary) {
+		                datasetManagerElements.uploadCurrentSummary.textContent = `Saved as ${label}`;
+		            }
+		            await refreshDatasetList();
+	        } catch (err) {
+	            console.error("Upload current dataset failed", err);
+	            setDatasetUploadMessage(err.message || "Failed to upload current dataset", "error");
+	        }
+	    }
 
     async function initDatasetManagerTab() {
         if (datasetManagerElements.uploadBtn) {
@@ -1989,10 +2146,13 @@ const sam3TrainState = {
 	        const entry = getSelectedQwenDataset();
 	        if (entry) {
 	            const context = entry.context ? ` Context: ${entry.context}` : "";
-	            summaryEl.textContent = `Using cached dataset "${entry.label}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}).${context}`;
+	            const qwenTrain = Number.isFinite(entry.qwen_train_count) ? entry.qwen_train_count : null;
+	            const qwenVal = Number.isFinite(entry.qwen_val_count) ? entry.qwen_val_count : null;
+	            const qwenCounts = (qwenTrain !== null && qwenVal !== null) ? `Qwen: train ${qwenTrain} / val ${qwenVal}` : (entry.qwen_ready ? "Qwen ready" : "Qwen missing");
+	            summaryEl.textContent = `Dataset "${entry.label}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}) • ${qwenCounts}.${context}`;
 	            return;
 	        }
-	        summaryEl.textContent = "No cached datasets selected. Create one in the Dataset Management tab, then refresh.";
+	        summaryEl.textContent = "No dataset selected. Create and manage datasets in the Dataset Management tab, then refresh.";
 	    }
 
 	    function setQwenDatasetModeState() {
@@ -2005,10 +2165,10 @@ const sam3TrainState = {
 	        updateQwenDatasetSummary();
 	    }
 
-    function populateQwenDatasetSelect() {
-        const select = qwenTrainElements.datasetSelect;
-        if (!select) {
-            return;
+	    function populateQwenDatasetSelect() {
+	        const select = qwenTrainElements.datasetSelect;
+	        if (!select) {
+	            return;
         }
         select.innerHTML = "";
         if (!qwenDatasetState.items.length) {
@@ -2017,16 +2177,17 @@ const sam3TrainState = {
             option.textContent = "No cached datasets";
             select.appendChild(option);
             select.disabled = true;
-	        } else {
-	            qwenDatasetState.items.forEach((entry) => {
-	                const option = document.createElement("option");
-	                option.value = entry.id;
-                option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images)`;
-                select.appendChild(option);
-            });
-            if (!qwenDatasetState.selectedId || !qwenDatasetState.items.some((entry) => entry.id === qwenDatasetState.selectedId)) {
-                qwenDatasetState.selectedId = qwenDatasetState.items[0].id;
-            }
+		        } else {
+		            qwenDatasetState.items.forEach((entry) => {
+		                const option = document.createElement("option");
+		                option.value = entry.id;
+		                const status = entry.qwen_ready ? "Qwen ready" : "needs Qwen build";
+	                option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images, ${status})`;
+	                select.appendChild(option);
+	            });
+	            if (!qwenDatasetState.selectedId || !qwenDatasetState.items.some((entry) => entry.id === qwenDatasetState.selectedId)) {
+	                qwenDatasetState.selectedId = qwenDatasetState.items[0].id;
+	            }
 	            select.disabled = false;
 	            select.value = qwenDatasetState.selectedId;
 	        }
@@ -2036,28 +2197,30 @@ const sam3TrainState = {
 	        updateQwenDatasetSummary();
 	    }
 
-    async function loadQwenDatasetList(force = false) {
-        if (!force && qwenDatasetState.items.length) {
-            populateQwenDatasetSelect();
-            return qwenDatasetState.items;
-        }
-        try {
-            const resp = await fetch(`${API_ROOT}/qwen/datasets`);
-            if (!resp.ok) {
-                throw new Error(`HTTP ${resp.status}`);
-            }
-            const data = await resp.json();
-            qwenDatasetState.items = Array.isArray(data) ? data : [];
-            populateQwenDatasetSelect();
-            return qwenDatasetState.items;
-        } catch (error) {
-            console.error("Failed to load cached Qwen datasets", error);
-            if (qwenTrainElements.datasetSummary) {
-                qwenTrainElements.datasetSummary.textContent = `Unable to load cached datasets: ${error.message || error}`;
-            }
-            return [];
-        }
-    }
+	    async function loadQwenDatasetList(force = false) {
+	        if (!force && qwenDatasetState.items.length) {
+	            populateQwenDatasetSelect();
+	            return qwenDatasetState.items;
+	        }
+	        try {
+	            const resp = await fetch(`${API_ROOT}/datasets`);
+	            if (!resp.ok) {
+	                throw new Error(`HTTP ${resp.status}`);
+	            }
+	            const data = await resp.json();
+	            qwenDatasetState.items = Array.isArray(data)
+	                ? data.filter((d) => d && (d.yolo_ready || d.qwen_ready))
+	                : [];
+	            populateQwenDatasetSelect();
+	            return qwenDatasetState.items;
+	        } catch (error) {
+	            console.error("Failed to load cached Qwen datasets", error);
+	            if (qwenTrainElements.datasetSummary) {
+	                qwenTrainElements.datasetSummary.textContent = `Unable to load datasets: ${error.message || error}`;
+	            }
+	            return [];
+	        }
+	    }
 
     async function handleQwenDatasetDelete() {
         const entry = getSelectedQwenDataset();
@@ -5969,12 +6132,12 @@ async function cancelQwenDatasetUpload(jobId) {
     }
 }
 
-function buildQwenTrainingPayload(datasetRoot, datasetRunName) {
-    const payload = { dataset_root: datasetRoot };
-    const runName = qwenTrainElements.runNameInput?.value?.trim() || datasetRunName;
-    if (runName) {
-        payload.run_name = runName;
-    }
+	function buildQwenTrainingPayload(datasetId, datasetRunName) {
+	    const payload = { dataset_id: datasetId };
+	    const runName = qwenTrainElements.runNameInput?.value?.trim() || datasetRunName;
+	    if (runName) {
+	        payload.run_name = runName;
+	    }
     if (qwenTrainElements.randomSplit) {
         payload.random_split = !!qwenTrainElements.randomSplit.checked;
     }
@@ -6205,29 +6368,33 @@ async function renderQwenSamplePreview(sample) {
     }
 }
 
-	async function handleStartQwenTraining() {
-	    if (qwenTrainElements.startButton) {
-	        qwenTrainElements.startButton.disabled = true;
-	    }
-	    try {
-	        const cachedEntry = getSelectedQwenDataset();
-	        if (!cachedEntry) {
-	            setQwenTrainMessage("Select a cached dataset (create one in Dataset Management first).", "error");
-	            if (qwenTrainElements.startButton) {
-	                qwenTrainElements.startButton.disabled = false;
-	            }
-	            return;
-	        }
-	        const datasetInfo = {
-	            dataset_root: cachedEntry.dataset_root,
-	            run_name: qwenTrainElements.runNameInput?.value?.trim() || cachedEntry.id,
-	        };
-	        setQwenTrainMessage("Starting training job…");
-	        const payload = buildQwenTrainingPayload(datasetInfo.dataset_root, datasetInfo.run_name);
-        const resp = await fetch(`${API_ROOT}/qwen/train/jobs`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+		async function handleStartQwenTraining() {
+		    if (qwenTrainElements.startButton) {
+		        qwenTrainElements.startButton.disabled = true;
+		    }
+		    try {
+		        const cachedEntry = getSelectedQwenDataset();
+		        if (!cachedEntry) {
+		            setQwenTrainMessage("Select a dataset (manage them in Dataset Management first).", "error");
+		            if (qwenTrainElements.startButton) {
+		                qwenTrainElements.startButton.disabled = false;
+		            }
+		            return;
+		        }
+		        if (!cachedEntry.qwen_ready) {
+		            setQwenTrainMessage("Selected dataset needs Qwen annotations. Go to Dataset Management and click “Build Qwen”.", "error");
+		            return;
+		        }
+		        const datasetInfo = {
+		            dataset_id: cachedEntry.id,
+		            run_name: qwenTrainElements.runNameInput?.value?.trim() || cachedEntry.id,
+		        };
+		        setQwenTrainMessage("Starting training job…");
+		        const payload = buildQwenTrainingPayload(datasetInfo.dataset_id, datasetInfo.run_name);
+	        const resp = await fetch(`${API_ROOT}/qwen/train/jobs`, {
+	            method: "POST",
+	            headers: { "Content-Type": "application/json" },
+	            body: JSON.stringify(payload),
         });
         if (!resp.ok) {
             const detail = await resp.text();

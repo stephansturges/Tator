@@ -60,6 +60,7 @@ def test_persist_agent_recipe_preserves_schema_v2_steps(tmp_path, monkeypatch):
     recipe = {
         "schema_version": 2,
         "mode": "sam3_steps",
+        "optimizer": {"algorithm": "sam3_steps_v2", "version": 1},
         "steps": [{"prompt": "car", "seed_threshold": 0.05}],
     }
     saved = localinferenceapi._persist_agent_recipe(
@@ -76,6 +77,7 @@ def test_persist_agent_recipe_preserves_schema_v2_steps(tmp_path, monkeypatch):
     )
     assert saved["recipe"]["mode"] == "sam3_steps"
     assert saved["recipe"]["steps"][0]["prompt"] == "car"
+    assert saved["recipe"]["optimizer"]["algorithm"] == "sam3_steps_v2"
 
 
 def test_import_agent_recipe_zip_preserves_top_level_params(tmp_path, monkeypatch):
@@ -93,7 +95,12 @@ def test_import_agent_recipe_zip_preserves_top_level_params(tmp_path, monkeypatc
         "label": "imported",
         "created_at": 0.0,
         "params": {"seed_threshold": 0.33, "dedupe_iou": 0.77},
-        "recipe": {"schema_version": 2, "mode": "sam3_steps", "steps": [{"prompt": "car", "seed_threshold": 0.05}]},
+        "recipe": {
+            "schema_version": 2,
+            "mode": "sam3_steps",
+            "optimizer": {"algorithm": "sam3_steps_v2", "version": 1, "val_split_hash": "abc123"},
+            "steps": [{"prompt": "car", "seed_threshold": 0.05}],
+        },
     }
 
     import json
@@ -109,3 +116,4 @@ def test_import_agent_recipe_zip_preserves_top_level_params(tmp_path, monkeypatc
     assert persisted["recipe"]["steps"][0]["prompt"] == "car"
     assert persisted["params"]["seed_threshold"] == 0.33
     assert persisted["params"]["dedupe_iou"] == 0.77
+    assert persisted["recipe"]["optimizer"]["val_split_hash"] == "abc123"

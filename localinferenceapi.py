@@ -4920,6 +4920,12 @@ def _persist_agent_recipe(
             mode_out = "sam3_steps"
         elif is_greedy:
             mode_out = mode_out or "sam3_greedy"
+        optimizer_raw: Optional[Dict[str, Any]] = None
+        for src in (recipe_body, recipe):
+            if isinstance(src, dict) and isinstance(src.get("optimizer"), dict):
+                optimizer_raw = src.get("optimizer")  # type: ignore[assignment]
+                break
+        optimizer_clean: Optional[Dict[str, Any]] = dict(optimizer_raw) if isinstance(optimizer_raw, dict) else None
         payload = {
             "id": recipe_id,
             "dataset_id": dataset_id,
@@ -4939,6 +4945,7 @@ def _persist_agent_recipe(
                 "steps": portable_steps,
                 "negatives": portable_negatives,
                 "clip_head": clip_head_cfg_clean,
+                "optimizer": optimizer_clean,
                 "summary": recipe_body.get("summary") or recipe.get("summary"),
             },
         }
@@ -15980,6 +15987,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             f"Prepared split with {len(train_ids)} train / {len(val_ids)} val images "
             f"(cached={split.get('_cached', False)})"
         )
+        val_split_hash = "unknown"
+        try:
+            val_split_hash = hashlib.sha256(",".join(str(i) for i in val_ids).encode("utf-8")).hexdigest()[:12]
+        except Exception:
+            val_split_hash = "unknown"
         if payload.test_mode:
             _log(f"Test mode enabled (train_limit={payload.test_train_limit}, val_limit={payload.test_val_limit})")
         job.progress = 0.05
@@ -16423,9 +16435,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             payload=eval_payload,
                         )
 
+                        tier1_info: Optional[Dict[str, Any]] = None
                         summary: Dict[str, Any]
                         if clip_head is not None and head_target_index is not None:
-                            tier1_info: Optional[Dict[str, Any]] = None
                             if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
                                 job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
                                 job.updated_at = time.time()
@@ -16492,9 +16504,35 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                     tuned_max_seeds = int(step_list[0].get("max_visual_seeds"))
                             except Exception:
                                 tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                        optimizer = {
+                            "algorithm": "sam3_steps_v2",
+                            "version": 1,
+                            "created_at": float(time.time()),
+                            "split_seed": int(eval_payload.split_seed),
+                            "val_percent": float(eval_payload.val_percent),
+                            "reuse_split": bool(eval_payload.reuse_split),
+                            "val_split_hash": str(val_split_hash),
+                            "val_images": int(len(val_ids)),
+                            "target_precision": float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0),
+                            "max_steps_per_recipe": int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
+                            "seed_threshold": {
+                                "base": float(eval_payload.seed_threshold),
+                                "strategy": "curve_candidates",
+                                "max_candidates_per_prompt": 6,
+                            },
+                            "tier1": tier1_info
+                            if isinstance(tier1_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(getattr(eval_payload, "steps_optimize_tier1", False)),
+                                "eval_cap": int(getattr(eval_payload, "steps_optimize_tier1_eval_cap", 0) or 0),
+                                "max_trials": int(getattr(eval_payload, "steps_optimize_tier1_max_trials", 0) or 0),
+                            },
+                        }
                         recipes_by_class[cid] = {
                             "schema_version": 2,
                             "mode": "sam3_steps",
+                            "optimizer": optimizer,
                             "text_prompts": list(prompts_for_class),
                             "steps": step_list,
                             "params": {
@@ -16659,6 +16697,23 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             else:
                 recipe = {
                     "mode": "sam3_greedy",
+                    "optimizer": {
+                        "algorithm": f"sam3_{effective_search_mode}",
+                        "version": 1,
+                        "created_at": float(time.time()),
+                        "split_seed": int(eval_payload.split_seed),
+                        "val_percent": float(eval_payload.val_percent),
+                        "reuse_split": bool(eval_payload.reuse_split),
+                        "val_split_hash": str(val_split_hash),
+                        "val_images": int(len(val_ids)),
+                        "target_precision": float(getattr(payload, "clip_head_target_precision", 0.0) or 0.0),
+                        "params": {
+                            "seed_threshold": float(tuned_seed_thr),
+                            "expand_threshold": float(tuned_expand_thr),
+                            "max_visual_seeds": int(tuned_max_seeds),
+                            "similarity_score": float(tuned_sim),
+                        },
+                    },
                     "text_prompts": prompts_for_class,
                     "positives": positives,
                     "negatives": negatives,

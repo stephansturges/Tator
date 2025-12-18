@@ -6187,15 +6187,29 @@ def _apply_agent_recipe_to_image(
     for src in (recipe.get("params"), recipe_body.get("params")):
         if isinstance(src, dict):
             params_combined.update(src)
+    recipe_mode: Literal["sam3_steps", "sam3_greedy", "legacy_steps"] = (
+        _classify_agent_recipe_mode(recipe_body) if isinstance(recipe_body, dict) else "sam3_greedy"
+    )
     # New-format fields (fallback to legacy step-based recipes for portability/back-compat).
     text_prompts_raw = recipe_body.get("text_prompts")
     positives_raw = recipe_body.get("positives")
     negatives_raw = recipe_body.get("negatives")
-    steps = _normalize_agent_recipe_steps(recipe_body.get("steps") or [])
-    if not isinstance(text_prompts_raw, list) or not text_prompts_raw:
-        text_prompts_raw = [s.get("prompt") for s in steps if (s.get("type") or "text") == "text" and s.get("prompt")]
-    if not isinstance(positives_raw, list) or not positives_raw:
-        positives_raw = [s.get("exemplar") for s in steps if s.get("exemplar")]
+    legacy_steps: List[Dict[str, Any]] = []
+    steps_v2: List[Dict[str, Any]] = []
+    if recipe_mode == "sam3_steps":
+        raw_steps = recipe_body.get("steps")
+        if isinstance(raw_steps, list):
+            steps_v2 = [s for s in raw_steps if isinstance(s, dict)]
+    else:
+        legacy_steps = _normalize_agent_recipe_steps(recipe_body.get("steps") or [])
+        if not isinstance(text_prompts_raw, list) or not text_prompts_raw:
+            text_prompts_raw = [
+                s.get("prompt")
+                for s in legacy_steps
+                if (s.get("type") or "text") == "text" and s.get("prompt")
+            ]
+        if not isinstance(positives_raw, list) or not positives_raw:
+            positives_raw = [s.get("exemplar") for s in legacy_steps if s.get("exemplar")]
     if not isinstance(negatives_raw, list):
         negatives_raw = []
 
@@ -6473,77 +6487,50 @@ def _apply_agent_recipe_to_image(
         score = pos - max(0.0, neg_strength) * neg
         return pos, neg, score
 
-    # 1) Seed with text prompts at low threshold.
-    seed_dets: List[QwenDetection] = []
-    for p in text_prompts:
-        if not p:
-            continue
-        _reset_prompts()
-        try:
-            dets = _run_sam3_text_inference(
-                pil_img,
-                p,
-                seed_threshold,
-                mask_threshold,
-                max_results,
-                min_size=min_size if min_size > 0 else None,
-                simplify_epsilon=simplify_epsilon,
-                processor_override=processor,
-                state=state,
-            )
-        except Exception:
-            continue
-        seed_dets.extend(dets or [])
-
-    if not seed_dets:
-        _add_warning("no_results")
-        return []
-
-    # Dedupe seed candidates aggressively before CLIP scoring.
-    seed_dets = _dedupe_qwen_detections_iou(seed_dets, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=seed_dedupe_iou)
-
-    # 2) CLIP-filter seed candidates and select a diverse subset to expand.
-    seed_boxes_xywh: List[Tuple[float, float, float, float]] = []
-    seed_crops: List[Image.Image] = []
-    seed_keep_refs: List[QwenDetection] = []
-    for det in seed_dets:
-        bbox_xyxy = _bbox_to_xyxy_pixels(det.bbox or [], pil_img.width, pil_img.height)
-        if bbox_xyxy is None:
-            continue
-        x1, y1, x2, y2 = bbox_xyxy
-        if x2 <= x1 or y2 <= y1:
-            continue
-        try:
-            crop = pil_img.crop((x1, y1, x2, y2))
-        except Exception:
-            continue
-        seed_crops.append(crop)
-        seed_boxes_xywh.append((float(x1), float(y1), float(x2 - x1), float(y2 - y1)))
-        seed_keep_refs.append(det)
-    need_seed_feats = bool(seed_crops) and (use_clip_guard or clip_head_active)
     clip_model_override: Optional[str] = None
     if isinstance(clip_head, dict):
         raw_clip_model = clip_head.get("clip_model")
         if isinstance(raw_clip_model, str) and raw_clip_model.strip():
             clip_model_override = raw_clip_model.strip()
-    feats = (
-        _clip_encode_pil_batch(seed_crops, clip_model_override=clip_model_override)
-        if need_seed_feats
-        else None
-    )
-    # IMPORTANT: max_visual_seeds should NOT cap how many detections we keep.
-    # We keep all filtered seed detections, and use max_visual_seeds only to bound visual expansion/refinement.
-    kept_seed_idx_all: List[int] = []
-    expand_seed_idx: List[int] = []
-    if feats is not None and feats.size:
-        keep_mask = np.ones((feats.shape[0],), dtype=bool)
-        scores_for_diverse: Optional[np.ndarray] = None
+
+    def _final_clip_filter(
+        dets_in: List[QwenDetection],
+        *,
+        sim_floor: float,
+        head_min_prob: float,
+        head_margin: float,
+    ) -> List[QwenDetection]:
+        if not dets_in:
+            return []
+        if not ((use_clip_guard and ex_mat is not None) or clip_head_active):
+            return dets_in
+        dets_in = _dedupe_qwen_detections_iou(
+            dets_in, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou
+        )
+        det_crops: List[Image.Image] = []
+        det_refs: List[QwenDetection] = []
+        for det in dets_in:
+            bbox_xyxy = _bbox_to_xyxy_pixels(det.bbox or [], pil_img.width, pil_img.height)
+            if bbox_xyxy is None:
+                continue
+            x1, y1, x2, y2 = bbox_xyxy
+            if x2 <= x1 or y2 <= y1:
+                continue
+            try:
+                det_crops.append(pil_img.crop((x1, y1, x2, y2)))
+            except Exception:
+                continue
+            det_refs.append(det)
+        det_feats = _clip_encode_pil_batch(det_crops, clip_model_override=clip_model_override) if det_crops else None
+        if det_feats is None or det_feats.size == 0:
+            _add_warning("clip_unavailable")
+            return dets_in
+        keep_mask = np.ones((det_feats.shape[0],), dtype=bool)
         if use_clip_guard and ex_mat is not None:
-            pos_s, _, score_s = _clip_score(feats)
-            keep_mask &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
-            scores_for_diverse = score_s
-        if clip_head_active and isinstance(clip_head, dict) and clip_head_target_index is not None:
-            proba = _clip_head_predict_proba(feats, clip_head)
+            pos_s, _, score_s = _clip_score(det_feats)
+            keep_mask &= (pos_s >= float(sim_floor)) & (score_s >= 0.0)
+        if clip_head_active and clip_head_target_index is not None and isinstance(clip_head, dict):
+            proba = _clip_head_predict_proba(det_feats, clip_head)
             if proba is not None:
                 t_idx = int(clip_head_target_index)
                 try:
@@ -6554,7 +6541,7 @@ def _apply_agent_recipe_to_image(
                         p_other = np.max(masked, axis=1)
                     else:
                         p_other = np.zeros_like(p_target)
-                    for det_obj, p_t, p_o in zip(seed_keep_refs, p_target.tolist(), p_other.tolist()):
+                    for det_obj, p_t, p_o in zip(det_refs, p_target.tolist(), p_other.tolist()):
                         det_obj.clip_head_prob = float(p_t)
                         det_obj.clip_head_margin = float(p_t - p_o)
                 except Exception:
@@ -6562,75 +6549,213 @@ def _apply_agent_recipe_to_image(
                 head_keep = _clip_head_keep_mask(
                     proba,
                     target_index=t_idx,
-                    min_prob=float(clip_head_min_prob),
-                    margin=float(clip_head_margin),
+                    min_prob=float(head_min_prob),
+                    margin=float(head_margin),
                 )
                 if head_keep is not None:
                     keep_mask &= head_keep
-                scores_for_diverse = proba[:, t_idx]
-        kept_seed_idx_all = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
-        if not kept_seed_idx_all:
+        dets_out = [d for d, ok in zip(det_refs, keep_mask.tolist()) if ok]
+        if len(dets_out) < len(det_refs):
+            _add_warning("clip_fp_filtered")
+        if det_refs and not dets_out:
             _add_warning("clip_filtered_all")
-            return []
-        if max_visual_seeds > 0:
-            kept_feats = feats[kept_seed_idx_all]
-            kept_scores = scores_for_diverse[kept_seed_idx_all] if scores_for_diverse is not None else None
-            diverse_local = _select_diverse_indices(
-                kept_feats,
-                k=min(int(max_visual_seeds), len(kept_seed_idx_all)),
-                scores=kept_scores,
-            )
-            expand_seed_idx = [kept_seed_idx_all[i] for i in diverse_local]
-    else:
-        # No CLIP features available: keep all seeds, but only expand from a small top-score subset to bound runtime.
-        kept_seed_idx_all = list(range(len(seed_keep_refs)))
-        if max_visual_seeds > 0:
-            ranked = sorted(
-                range(len(seed_keep_refs)),
-                key=lambda i: (seed_keep_refs[i].score if seed_keep_refs[i].score is not None else 0.0),
-                reverse=True,
-            )
-            expand_seed_idx = ranked[: max(0, min(int(max_visual_seeds), len(ranked)))]
+        return dets_out
 
-    kept_seed_dets: List[QwenDetection] = [seed_keep_refs[i] for i in kept_seed_idx_all if 0 <= i < len(seed_keep_refs)]
-    if not kept_seed_dets:
-        _add_warning("no_results")
-        return []
+    if recipe_mode == "sam3_steps":
+        filtered_final: List[QwenDetection] = []
 
-    # 3) Visual expansion from each chosen seed.
-    expanded: List[QwenDetection] = []
-    for i in expand_seed_idx:
-        if i < 0 or i >= len(seed_boxes_xywh):
-            continue
-        _reset_prompts()
-        try:
-            dets = _run_sam3_visual_inference(
-                pil_img,
-                seed_boxes_xywh[i],
-                expand_threshold,
-                mask_threshold,
-                max_results,
-                min_size=min_size if min_size > 0 else None,
+        def _step_float(step: Dict[str, Any], key: str, default: float) -> float:
+            raw = step.get(key)
+            if raw is None:
+                return default
+            try:
+                return float(raw)
+            except Exception:
+                return default
+
+        def _step_int(step: Dict[str, Any], key: str, default: int) -> int:
+            raw = step.get(key)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except Exception:
+                return default
+
+        for _, step in enumerate(steps_v2):
+            if step.get("enabled") is False:
+                continue
+            step_prompts_raw: List[str] = []
+            if isinstance(step.get("prompts"), list):
+                step_prompts_raw.extend([str(p) for p in step.get("prompts") or [] if str(p).strip()])
+            if isinstance(step.get("prompt"), str) and step.get("prompt").strip():
+                step_prompts_raw.insert(0, str(step.get("prompt")).strip())
+            step_prompts = _sanitize_prompts(step_prompts_raw)
+            if not step_prompts:
+                continue
+
+            step_seed_thr = max(0.0, min(1.0, _step_float(step, "seed_threshold", seed_threshold)))
+            step_expand_thr = max(0.0, min(1.0, _step_float(step, "expand_threshold", expand_threshold)))
+            step_max_seeds = max(0, min(500, _step_int(step, "max_visual_seeds", max_visual_seeds)))
+            step_seed_iou = max(0.0, min(1.0, _step_float(step, "seed_dedupe_iou", seed_dedupe_iou)))
+            step_out_iou = max(0.0, min(1.0, _step_float(step, "dedupe_iou", out_dedupe_iou)))
+            step_max_results = max(1, min(5000, _step_int(step, "max_results", max_results)))
+
+            clip_seed_cfg = step.get("clip_seed") if isinstance(step.get("clip_seed"), dict) else {}
+            clip_final_cfg = step.get("clip_final") if isinstance(step.get("clip_final"), dict) else {}
+
+            seed_sim_floor = 0.0
+            if clip_seed_cfg.get("similarity_floor") is not None:
+                try:
+                    seed_sim_floor = float(clip_seed_cfg.get("similarity_floor"))
+                except Exception:
+                    seed_sim_floor = 0.0
+            seed_sim_floor = max(0.0, min(1.0, seed_sim_floor))
+
+            # Default seed head gate is permissive to avoid wiping out all seeds.
+            seed_head_min = 0.0
+            if clip_seed_cfg.get("min_prob") is not None:
+                try:
+                    seed_head_min = float(clip_seed_cfg.get("min_prob"))
+                except Exception:
+                    seed_head_min = 0.0
+            seed_head_min = max(0.0, min(1.0, seed_head_min))
+            seed_head_margin = 0.0
+            if clip_seed_cfg.get("margin") is not None:
+                try:
+                    seed_head_margin = float(clip_seed_cfg.get("margin"))
+                except Exception:
+                    seed_head_margin = 0.0
+            seed_head_margin = max(0.0, min(1.0, seed_head_margin))
+
+            final_sim_floor = float(similarity_floor)
+            if clip_final_cfg.get("similarity_floor") is not None:
+                try:
+                    final_sim_floor = max(final_sim_floor, float(clip_final_cfg.get("similarity_floor")))
+                except Exception:
+                    pass
+            final_sim_floor = max(0.0, min(1.0, final_sim_floor))
+
+            final_head_min = float(clip_head_min_prob)
+            if clip_final_cfg.get("min_prob") is not None:
+                try:
+                    final_head_min = max(final_head_min, float(clip_final_cfg.get("min_prob")))
+                except Exception:
+                    pass
+            final_head_min = max(0.0, min(1.0, final_head_min))
+            final_head_margin = float(clip_head_margin)
+            if clip_final_cfg.get("margin") is not None:
+                try:
+                    final_head_margin = max(final_head_margin, float(clip_final_cfg.get("margin")))
+                except Exception:
+                    pass
+            final_head_margin = max(0.0, min(1.0, final_head_margin))
+
+            use_crop_bank = bool(use_clip_guard and ex_mat is not None)
+            use_head = bool(clip_head_active and clip_head_target_index is not None)
+
+            dets_step = _infer_sam3_greedy_recipe_on_image(
+                pil_img=pil_img,
+                processor=processor,
+                text_prompts=step_prompts,
+                exemplar_embeddings=ex_mat if use_crop_bank else None,
+                negative_embeddings=neg_mat if (use_crop_bank and use_negatives and neg_mat is not None) else None,
+                seed_threshold=step_seed_thr,
+                expand_threshold=step_expand_thr,
+                max_visual_seeds=step_max_seeds,
+                seed_dedupe_iou=step_seed_iou,
+                out_dedupe_iou=step_out_iou,
+                mask_threshold=mask_threshold,
+                min_size=min_size,
                 simplify_epsilon=simplify_epsilon,
-                processor_override=processor,
+                max_results=step_max_results,
+                negative_strength=float(neg_strength),
+                similarity_floor=float(seed_sim_floor),
+                clip_head=clip_head if use_head else None,
+                clip_head_target_index=int(clip_head_target_index) if use_head else None,
+                clip_head_min_prob=float(seed_head_min),
+                clip_head_margin=float(seed_head_margin),
                 state=state,
             )
-        except Exception:
-            continue
-        expanded.extend(dets or [])
+            if not dets_step and (use_crop_bank or use_head):
+                # Fallback: if CLIP gating wipes everything out, re-run without CLIP so we can still expand,
+                # then rely on the final CLIP filter (cleanliness gate) to suppress FPs.
+                _add_warning("clip_filtered_all")
+                dets_step = _infer_sam3_greedy_recipe_on_image(
+                    pil_img=pil_img,
+                    processor=processor,
+                    text_prompts=step_prompts,
+                    exemplar_embeddings=None,
+                    negative_embeddings=None,
+                    seed_threshold=step_seed_thr,
+                    expand_threshold=step_expand_thr,
+                    max_visual_seeds=step_max_seeds,
+                    seed_dedupe_iou=step_seed_iou,
+                    out_dedupe_iou=step_out_iou,
+                    mask_threshold=mask_threshold,
+                    min_size=min_size,
+                    simplify_epsilon=simplify_epsilon,
+                    max_results=step_max_results,
+                    negative_strength=0.0,
+                    similarity_floor=0.0,
+                    clip_head=None,
+                    clip_head_target_index=None,
+                    clip_head_min_prob=0.0,
+                    clip_head_margin=0.0,
+                    state=state,
+                )
+            if not dets_step:
+                continue
 
-    combined = [*kept_seed_dets, *expanded]
-    if not combined:
-        _add_warning("no_results")
-        return []
+            dets_step = _final_clip_filter(
+                dets_step,
+                sim_floor=final_sim_floor,
+                head_min_prob=final_head_min,
+                head_margin=final_head_margin,
+            )
+            filtered_final.extend(dets_step)
 
-    # 4) CLIP FP-guard over final detections (pos/neg crop banks).
-    filtered_final: List[QwenDetection]
-    if (use_clip_guard and ex_mat is not None) or clip_head_active:
-        combined = _dedupe_qwen_detections_iou(combined, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)
-        det_crops: List[Image.Image] = []
-        det_refs: List[QwenDetection] = []
-        for det in combined:
+        if not filtered_final:
+            _add_warning("no_results")
+            return []
+        filtered_final = _dedupe_qwen_detections_iou(
+            filtered_final, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou
+        )
+    else:
+        # 1) Seed with text prompts at low threshold.
+        seed_dets: List[QwenDetection] = []
+        for p in text_prompts:
+            if not p:
+                continue
+            _reset_prompts()
+            try:
+                dets = _run_sam3_text_inference(
+                    pil_img,
+                    p,
+                    seed_threshold,
+                    mask_threshold,
+                    max_results,
+                    min_size=min_size if min_size > 0 else None,
+                    simplify_epsilon=simplify_epsilon,
+                    processor_override=processor,
+                    state=state,
+                )
+            except Exception:
+                continue
+            seed_dets.extend(dets or [])
+
+        if not seed_dets:
+            _add_warning("no_results")
+            return []
+
+        # Dedupe seed candidates aggressively before CLIP scoring.
+        seed_dets = _dedupe_qwen_detections_iou(seed_dets, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=seed_dedupe_iou)
+
+        # 2) CLIP-filter seed candidates and select a diverse subset to expand.
+        seed_boxes_xywh: List[Tuple[float, float, float, float]] = []
+        seed_crops: List[Image.Image] = []
+        seed_keep_refs: List[QwenDetection] = []
+        for det in seed_dets:
             bbox_xyxy = _bbox_to_xyxy_pixels(det.bbox or [], pil_img.width, pil_img.height)
             if bbox_xyxy is None:
                 continue
@@ -6641,21 +6766,28 @@ def _apply_agent_recipe_to_image(
                 crop = pil_img.crop((x1, y1, x2, y2))
             except Exception:
                 continue
-            det_crops.append(crop)
-            det_refs.append(det)
-        det_feats = (
-            _clip_encode_pil_batch(det_crops, clip_model_override=clip_model_override) if det_crops else None
+            seed_crops.append(crop)
+            seed_boxes_xywh.append((float(x1), float(y1), float(x2 - x1), float(y2 - y1)))
+            seed_keep_refs.append(det)
+        need_seed_feats = bool(seed_crops) and (use_clip_guard or clip_head_active)
+        feats = (
+            _clip_encode_pil_batch(seed_crops, clip_model_override=clip_model_override)
+            if need_seed_feats
+            else None
         )
-        if det_feats is None or det_feats.size == 0:
-            filtered_final = combined
-            _add_warning("clip_unavailable")
-        else:
-            keep_mask = np.ones((det_feats.shape[0],), dtype=bool)
+        # IMPORTANT: max_visual_seeds should NOT cap how many detections we keep.
+        # We keep all filtered seed detections, and use max_visual_seeds only to bound visual expansion/refinement.
+        kept_seed_idx_all: List[int] = []
+        expand_seed_idx: List[int] = []
+        if feats is not None and feats.size:
+            keep_mask = np.ones((feats.shape[0],), dtype=bool)
+            scores_for_diverse: Optional[np.ndarray] = None
             if use_clip_guard and ex_mat is not None:
-                pos_s, _, score_s = _clip_score(det_feats)
+                pos_s, _, score_s = _clip_score(feats)
                 keep_mask &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
-            if clip_head_active and clip_head_target_index is not None:
-                proba = _clip_head_predict_proba(det_feats, clip_head) if isinstance(clip_head, dict) else None
+                scores_for_diverse = score_s
+            if clip_head_active and isinstance(clip_head, dict) and clip_head_target_index is not None:
+                proba = _clip_head_predict_proba(feats, clip_head)
                 if proba is not None:
                     t_idx = int(clip_head_target_index)
                     try:
@@ -6666,7 +6798,7 @@ def _apply_agent_recipe_to_image(
                             p_other = np.max(masked, axis=1)
                         else:
                             p_other = np.zeros_like(p_target)
-                        for det_obj, p_t, p_o in zip(det_refs, p_target.tolist(), p_other.tolist()):
+                        for det_obj, p_t, p_o in zip(seed_keep_refs, p_target.tolist(), p_other.tolist()):
                             det_obj.clip_head_prob = float(p_t)
                             det_obj.clip_head_margin = float(p_t - p_o)
                     except Exception:
@@ -6679,13 +6811,70 @@ def _apply_agent_recipe_to_image(
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
-            filtered_final = [d for d, ok in zip(det_refs, keep_mask.tolist()) if ok]
-            if len(filtered_final) < len(det_refs):
-                _add_warning("clip_fp_filtered")
-            if det_refs and not filtered_final:
+                    scores_for_diverse = proba[:, t_idx]
+            kept_seed_idx_all = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
+            if not kept_seed_idx_all:
                 _add_warning("clip_filtered_all")
-    else:
-        filtered_final = combined
+                return []
+            if max_visual_seeds > 0:
+                kept_feats = feats[kept_seed_idx_all]
+                kept_scores = scores_for_diverse[kept_seed_idx_all] if scores_for_diverse is not None else None
+                diverse_local = _select_diverse_indices(
+                    kept_feats,
+                    k=min(int(max_visual_seeds), len(kept_seed_idx_all)),
+                    scores=kept_scores,
+                )
+                expand_seed_idx = [kept_seed_idx_all[i] for i in diverse_local]
+        else:
+            # No CLIP features available: keep all seeds, but only expand from a small top-score subset to bound runtime.
+            kept_seed_idx_all = list(range(len(seed_keep_refs)))
+            if max_visual_seeds > 0:
+                ranked = sorted(
+                    range(len(seed_keep_refs)),
+                    key=lambda i: (seed_keep_refs[i].score if seed_keep_refs[i].score is not None else 0.0),
+                    reverse=True,
+                )
+                expand_seed_idx = ranked[: max(0, min(int(max_visual_seeds), len(ranked)))]
+
+        kept_seed_dets: List[QwenDetection] = [seed_keep_refs[i] for i in kept_seed_idx_all if 0 <= i < len(seed_keep_refs)]
+        if not kept_seed_dets:
+            _add_warning("no_results")
+            return []
+
+        # 3) Visual expansion from each chosen seed.
+        expanded: List[QwenDetection] = []
+        for i in expand_seed_idx:
+            if i < 0 or i >= len(seed_boxes_xywh):
+                continue
+            _reset_prompts()
+            try:
+                dets = _run_sam3_visual_inference(
+                    pil_img,
+                    seed_boxes_xywh[i],
+                    expand_threshold,
+                    mask_threshold,
+                    max_results,
+                    min_size=min_size if min_size > 0 else None,
+                    simplify_epsilon=simplify_epsilon,
+                    processor_override=processor,
+                    state=state,
+                )
+            except Exception:
+                continue
+            expanded.extend(dets or [])
+
+        combined = [*kept_seed_dets, *expanded]
+        if not combined:
+            _add_warning("no_results")
+            return []
+
+        # 4) CLIP FP-guard over final detections (pos/neg crop banks).
+        filtered_final = _final_clip_filter(
+            combined,
+            sim_floor=float(similarity_floor),
+            head_min_prob=float(clip_head_min_prob),
+            head_margin=float(clip_head_margin),
+        )
 
     # 5) Final dedupe + class assignment.
     final = _dedupe_qwen_detections_iou(filtered_final, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)

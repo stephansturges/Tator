@@ -4254,12 +4254,123 @@ def _normalize_agent_recipe_steps(steps: List[Dict[str, Any]]) -> List[Dict[str,
     return normalized
 
 
+def _parse_agent_recipe_schema_version(recipe_obj: Dict[str, Any]) -> Optional[int]:
+    raw = recipe_obj.get("schema_version")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _classify_agent_recipe_mode(recipe_obj: Dict[str, Any]) -> Literal["sam3_steps", "sam3_greedy", "legacy_steps"]:
+    """
+    Classify an agent recipe into one of:
+    - sam3_steps: explicit multi-step recipe (schema_version=2 or mode=sam3_steps)
+    - sam3_greedy: prompt-bank + crop-bank / head recipe (legacy "greedy" semantics)
+    - legacy_steps: older prompt-recipe style "steps" recipes (threshold per prompt/exemplar)
+    """
+    schema_version = _parse_agent_recipe_schema_version(recipe_obj)
+    mode_raw = recipe_obj.get("mode")
+    mode = mode_raw.strip() if isinstance(mode_raw, str) else None
+    if mode == "sam3_steps" or schema_version == 2:
+        return "sam3_steps"
+    if mode == "sam3_greedy":
+        return "sam3_greedy"
+    # Back-compat: older greedy recipes may omit mode, but include prompt/crop bank fields.
+    if isinstance(recipe_obj.get("text_prompts"), list) or isinstance(recipe_obj.get("positives"), list):
+        return "sam3_greedy"
+    return "legacy_steps"
+
+
+def _normalize_agent_recipe_execution_plan(recipe_obj: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize an agent recipe into a lightweight execution plan.
+
+    This is intentionally shallow and does not change behavior by itself; it exists so future
+    inference/mining code paths can share a single normalization step.
+    """
+    mode = _classify_agent_recipe_mode(recipe_obj)
+    schema_version = _parse_agent_recipe_schema_version(recipe_obj)
+    return {"mode": mode, "schema_version": schema_version, "recipe": recipe_obj}
+
+
 def _validate_agent_recipe_structure(recipe_obj: Dict[str, Any]) -> None:
     """Lightweight schema guard to avoid accepting malformed recipes."""
     if not isinstance(recipe_obj, dict):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+    mode = _classify_agent_recipe_mode(recipe_obj)
+
+    if mode == "sam3_steps":
+        # Schema v2 (step-based) recipe: explicit steps. May optionally embed crop banks / clip head.
+        steps = recipe_obj.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        for step in steps:
+            if not isinstance(step, dict):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+            if "enabled" in step and not isinstance(step.get("enabled"), bool):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+            prompt = step.get("prompt")
+            prompts = step.get("prompts")
+            if prompt is not None and not isinstance(prompt, str):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+            if prompts is not None:
+                if not isinstance(prompts, list) or any(not isinstance(p, str) for p in prompts):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+            has_any_prompt = bool((isinstance(prompt, str) and prompt.strip()) or (isinstance(prompts, list) and any(str(p).strip() for p in prompts)))
+            if not has_any_prompt:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+
+            # Optional numeric fields (kept permissive; more detailed validation happens in execution code).
+            for key in (
+                "seed_threshold",
+                "expand_threshold",
+                "mask_threshold",
+                "seed_dedupe_iou",
+                "step_dedupe_iou",
+                "dedupe_iou",
+            ):
+                if key not in step or step.get(key) is None:
+                    continue
+                try:
+                    v = float(step.get(key))
+                except Exception:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+                if math.isnan(v) or v < 0.0 or v > 1.0:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+            for key in ("max_visual_seeds", "expand_max_results", "max_results"):
+                if key not in step or step.get(key) is None:
+                    continue
+                try:
+                    iv = int(step.get(key))
+                except Exception:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+                if iv < 0:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+
+            for clip_key in ("clip_seed", "clip_final"):
+                if clip_key not in step or step.get(clip_key) is None:
+                    continue
+                if not isinstance(step.get(clip_key), dict):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        positives = recipe_obj.get("positives")
+        negatives = recipe_obj.get("negatives")
+        if positives is not None and not isinstance(positives, list):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        if negatives is not None and not isinstance(negatives, list):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        clip_head = recipe_obj.get("clip_head")
+        if clip_head is not None and not isinstance(clip_head, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        params = recipe_obj.get("params")
+        if params is not None and not isinstance(params, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        return
+
     # New greedy recipe format: prompt bank + positive/negative crop banks.
-    if recipe_obj.get("mode") == "sam3_greedy" or isinstance(recipe_obj.get("text_prompts"), list) or isinstance(recipe_obj.get("positives"), list):
+    if mode == "sam3_greedy":
         text_prompts = recipe_obj.get("text_prompts")
         positives = recipe_obj.get("positives")
         negatives = recipe_obj.get("negatives")

@@ -7031,10 +7031,20 @@ def _build_clip_head_sweep_grid(
     if not auto_tune:
         return [base_min], [base_mar], target_precision
 
-    min_probs = [round(i * 0.05, 3) for i in range(0, 20)]  # 0.00..0.95
-    min_probs.extend([0.975, 0.99])
-    min_probs.append(base_min)
-    min_probs = sorted({float(max(0.0, min(1.0, p))) for p in min_probs})
+    # IMPORTANT: For some classes, head probabilities cluster very close to 0 (especially when crops are small).
+    # A coarse 0.05 grid can miss the useful operating region entirely, making auto-tune look “broken”.
+    min_probs_raw: List[float] = []
+    # Very low thresholds (logistic heads often need these).
+    min_probs_raw.extend([0.0, 0.001, 0.002, 0.005])
+    # Dense sweep near zero.
+    min_probs_raw.extend([round(i * 0.01, 3) for i in range(0, 11)])  # 0.00..0.10
+    # Coarser sweep above 0.10.
+    min_probs_raw.extend([round(i * 0.05, 3) for i in range(3, 20)])  # 0.15..0.95
+    # Extra high-end points.
+    min_probs_raw.extend([0.975, 0.99])
+    # Always include the user-provided seed/default.
+    min_probs_raw.append(base_min)
+    min_probs = sorted({float(max(0.0, min(1.0, p))) for p in min_probs_raw})
 
     margins = [0.0, 0.05, 0.1, 0.2]
     margins.append(base_mar)
@@ -14469,10 +14479,32 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 try:
                     tuned_min_prob = summary.get("clip_head_min_prob")
                     tuned_margin = summary.get("clip_head_margin")
+                    tuned_precision = summary.get("precision")
+                    tuned_recall = summary.get("recall")
+                    meets_target = summary.get("clip_head_meets_target_precision")
                     if tuned_min_prob is not None:
+                        suffix = ""
+                        try:
+                            if isinstance(meets_target, bool):
+                                suffix = " (meets target)" if meets_target else " (missed target)"
+                        except Exception:
+                            suffix = ""
+                        pr_txt = ""
+                        try:
+                            if tuned_precision is not None:
+                                pr_txt = f" precision={float(tuned_precision):.3f}"
+                        except Exception:
+                            pr_txt = ""
+                        rec_txt = ""
+                        try:
+                            if tuned_recall is not None:
+                                rec_txt = f" recall={float(tuned_recall):.3f}"
+                        except Exception:
+                            rec_txt = ""
                         _log(
                             f"CLIP head tuned for {name}: min_prob={float(tuned_min_prob):.3f} "
                             f"margin={float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin):.3f}"
+                            f"{pr_txt}{rec_txt}{suffix}"
                         )
                 except Exception:
                     pass

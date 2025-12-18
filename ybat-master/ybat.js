@@ -12921,23 +12921,30 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            } else if (negatives.length) {
 	                configBits.push(`negatives=${negatives.length || 0} (disabled)`);
 	            }
-	            if (recipe.clip_head) {
-	                const head = recipe.clip_head || {};
-	                const headClasses = Array.isArray(head.classes) ? head.classes : [];
-	                const nClasses = headClasses.length ? headClasses.length : null;
-	                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
-	                const margin = Number.isFinite(head.margin) ? head.margin : null;
-	                const autoTuned = !!head.auto_tuned;
-	                const targetPrecision = Number.isFinite(head.target_precision) ? head.target_precision : null;
-	                const parts = ["pretrained CLIP head"];
-	                const headIdx = findClipHeadTargetIndex(headClasses, cls.name || recipe.class_name || "");
-	                if (nClasses) parts.push(`${nClasses} classes`);
-	                if (headIdx !== null) parts.push(`head idx ${headIdx}`);
-	                if (minProb !== null) parts.push(`p≥${minProb}`);
-	                if (margin !== null && margin > 0) parts.push(`Δ≥${margin}`);
-	                if (autoTuned && targetPrecision !== null) parts.push(`tune prec≥${targetPrecision}`);
-	                configBits.push(parts.join(" "));
-	            }
+		            if (recipe.clip_head) {
+		                const head = recipe.clip_head || {};
+		                const headClasses = Array.isArray(head.classes) ? head.classes : [];
+		                const nClasses = headClasses.length ? headClasses.length : null;
+		                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
+		                const margin = Number.isFinite(head.margin) ? head.margin : null;
+		                const autoTuned = !!head.auto_tuned;
+		                const targetPrecision = Number.isFinite(head.target_precision) ? head.target_precision : null;
+		                const meetsTarget =
+		                    typeof summary.clip_head_meets_target_precision === "boolean"
+		                        ? summary.clip_head_meets_target_precision
+		                        : null;
+		                const parts = ["pretrained CLIP head"];
+		                const headIdx = findClipHeadTargetIndex(headClasses, cls.name || recipe.class_name || "");
+		                if (nClasses) parts.push(`${nClasses} classes`);
+		                if (headIdx !== null) parts.push(`head idx ${headIdx}`);
+		                if (minProb !== null) parts.push(`p≥${minProb}`);
+		                if (margin !== null && margin > 0) parts.push(`Δ≥${margin}`);
+		                if (autoTuned && targetPrecision !== null) {
+		                    const suffix = meetsTarget === false ? " (missed)" : meetsTarget === true ? " (met)" : "";
+		                    parts.push(`tune prec≥${targetPrecision}${suffix}`);
+		                }
+		                configBits.push(parts.join(" "));
+		            }
 	            if (typeof params.seed_threshold === "number") configBits.push(`seed thr ${params.seed_threshold}`);
 	            if (typeof params.expand_threshold === "number") configBits.push(`expand thr ${params.expand_threshold}`);
 	            if (typeof params.max_visual_seeds === "number") configBits.push(`seeds ${params.max_visual_seeds}`);

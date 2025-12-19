@@ -1441,12 +1441,25 @@ const sam3TrainState = {
 	        reuseSplit: null,
 	        workersPerGpu: null,
 	        searchMode: null,
-	        stepsOptions: null,
-	        stepsMaxSteps: null,
-	        stepsMaxSeedsPerStep: null,
-	        stepsTier1Optimize: null,
-	        stepsTier1EvalCap: null,
-	        stepsTier1MaxTrials: null,
+		        stepsOptions: null,
+		        stepsMaxSteps: null,
+		        stepsMaxSeedsPerStep: null,
+		        stepsGlobalPreset: null,
+		        stepsBudgetBadge: null,
+		        stepsBudgetText: null,
+		        stepsBudgetFill: null,
+		        stepsGlobalEvalCap1: null,
+		        stepsGlobalEvalCap2: null,
+		        stepsGlobalEvalCap3: null,
+		        stepsGlobalMaxTrials: null,
+		        stepsGlobalKeepRatio: null,
+		        stepsGlobalRounds: null,
+		        stepsGlobalMutationsPerRound: null,
+		        stepsGlobalEnableOrdering: null,
+		        stepsGlobalEnableMaxResults: null,
+		        stepsTier1Optimize: null,
+		        stepsTier1EvalCap: null,
+		        stepsTier1MaxTrials: null,
 	        stepsTier2Optimize: null,
 	        stepsTier2EvalCap: null,
 	        stepsTier2MaxTrials: null,
@@ -13462,18 +13475,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     agentState.datasetsById[opt.value] = entry;
                 }
             });
-            if (list.length) {
-                agentElements.datasetSelect.selectedIndex = 0;
-                const first = list[0];
-                const parts = [];
-                if (first.source) parts.push(first.source);
-                if (first.image_count) parts.push(`${first.image_count} images`);
-                agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
-                prefillExtraPrompts();
-            } else {
-                agentElements.datasetSummary.textContent = "No datasets found.";
-                if (agentElements.extraPrompts) agentElements.extraPrompts.value = "{}";
-            }
+	            if (list.length) {
+	                agentElements.datasetSelect.selectedIndex = 0;
+	                const first = list[0];
+	                const parts = [];
+	                if (first.source) parts.push(first.source);
+	                if (first.image_count) parts.push(`${first.image_count} images`);
+	                agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
+	                prefillExtraPrompts();
+	                updateAgentStepsComputeEstimate();
+	            } else {
+	                agentElements.datasetSummary.textContent = "No datasets found.";
+	                if (agentElements.extraPrompts) agentElements.extraPrompts.value = "{}";
+	                updateAgentStepsComputeEstimate();
+	            }
         } catch (err) {
             console.error("Agent datasets load failed", err);
             agentElements.datasetSummary.textContent = `Failed: ${err.message || err}`;
@@ -13591,16 +13606,221 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "3";
 	                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "40";
 	            }
-	        } finally {
-	            agentStepsGlobalPresetLock = false;
-	        }
-	    }
+		        } finally {
+		            agentStepsGlobalPresetLock = false;
+		        }
+		        updateAgentStepsComputeEstimate();
+		    }
 
-	    function syncAgentStepsOptimizationControls() {
-	        const mode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "steps";
-	        const isSteps = mode === "steps";
-	        const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
-	        const allowGlobal = isSteps && hasHead;
+		    function formatCompactCount(value) {
+		        if (!Number.isFinite(value)) {
+		            return "—";
+		        }
+		        const abs = Math.abs(value);
+		        const sign = value < 0 ? "-" : "";
+		        const fmt = (num, suffix) => {
+		            const digits = num >= 100 ? 0 : num >= 10 ? 1 : 2;
+		            const txt = num
+		                .toFixed(digits)
+		                .replace(/\.0+$/, "")
+		                .replace(/(\.\d*[1-9])0+$/, "$1");
+		            return `${sign}${txt}${suffix}`;
+		        };
+		        if (abs >= 1e9) return fmt(abs / 1e9, "B");
+		        if (abs >= 1e6) return fmt(abs / 1e6, "M");
+		        if (abs >= 1e3) return fmt(abs / 1e3, "k");
+		        return `${sign}${Math.round(abs)}`;
+		    }
+
+		    function parseAgentClassIdList(raw) {
+		        const text = String(raw || "").trim();
+		        if (!text) return null;
+		        const tokens = text
+		            .split(/[^0-9]+/g)
+		            .map((v) => v.trim())
+		            .filter(Boolean);
+		        const ids = [];
+		        const seen = new Set();
+		        tokens.forEach((tok) => {
+		            const n = parseInt(tok, 10);
+		            if (!Number.isFinite(n)) return;
+		            if (seen.has(n)) return;
+		            seen.add(n);
+		            ids.push(n);
+		        });
+		        return ids.length ? ids : null;
+		    }
+
+			    function estimateAgentGlobalOptimizerImageEvals({ valImages, evalCaps, keepRatio, rounds, maxTrials, mutationsPerRound }) {
+			        const parsed = [];
+			        for (const cap of evalCaps || []) {
+			            const b = parseInt(String(cap || "").trim(), 10);
+			            if (!Number.isFinite(b) || b <= 0) continue;
+			            parsed.push(b);
+			        }
+			        const budgets = Array.from(new Set(parsed)).sort((a, b) => a - b);
+			        if (!budgets.length) {
+			            return { imageEvals: 0, budgets: [], invalidBudgets: true };
+			        }
+
+		        const valN = Number.isFinite(valImages) && valImages > 0 ? Math.max(1, Math.floor(valImages)) : null;
+		        const keep = Number.isFinite(keepRatio) ? Math.max(0.0, Math.min(1.0, keepRatio)) : 0.5;
+		        const roundsI = Number.isFinite(rounds) ? Math.max(1, Math.floor(rounds)) : 1;
+		        const maxTrialsI = Number.isFinite(maxTrials) ? Math.max(1, Math.floor(maxTrials)) : 1;
+		        const mutationsI = Number.isFinite(mutationsPerRound) ? Math.max(1, Math.floor(mutationsPerRound)) : 1;
+
+		        let candidatesPerRound = 1;
+		        if (maxTrialsI > 1) {
+		            const maxMut = Math.max(1, Math.min(mutationsI, maxTrialsI - 1));
+		            candidatesPerRound = 1 + maxMut;
+		        }
+
+		        let total = 0;
+		        for (let r = 0; r < roundsI; r += 1) {
+		            let active = Math.max(1, candidatesPerRound);
+		            for (let s = 0; s < budgets.length; s += 1) {
+		                const budgetCap = budgets[s];
+		                const effBudget = valN !== null ? Math.min(budgetCap, valN) : budgetCap;
+		                total += active * effBudget;
+		                if (s < budgets.length - 1) {
+		                    active = Math.max(1, Math.ceil(active * keep));
+		                }
+		            }
+		        }
+			        return { imageEvals: total, budgets, invalidBudgets: false };
+			    }
+
+		    function updateAgentStepsComputeEstimate() {
+		        if (!agentElements.stepsBudgetText || !agentElements.stepsBudgetFill || !agentElements.stepsBudgetBadge) return;
+		        const meta = getAgentSelectedDatasetMeta();
+		        const isSteps = (agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "steps") === "steps";
+		        const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
+		        const preset = getAgentStepsGlobalPreset();
+		        const globalRequested = preset !== "off";
+		        const globalEnabled = !!(isSteps && hasHead && globalRequested);
+
+		        const testMode = !!(agentElements.testMode && agentElements.testMode.checked);
+		        const valPctRaw = readNumberInput(agentElements.valPercent, { integer: false });
+		        const valPct = Number.isFinite(valPctRaw) ? Math.max(5, Math.min(95, valPctRaw)) / 100 : 0.3;
+		        const totalImagesRaw = meta && meta.image_count !== undefined && meta.image_count !== null ? parseInt(meta.image_count, 10) : NaN;
+		        const totalImages = Number.isFinite(totalImagesRaw) && totalImagesRaw > 0 ? totalImagesRaw : null;
+		        const testValLimitRaw = readNumberInput(agentElements.valLimit, { integer: true });
+		        const testValLimit = Number.isFinite(testValLimitRaw) ? Math.max(1, Math.min(10000, testValLimitRaw)) : 10;
+		        const valImages = testMode ? testValLimit : totalImages !== null ? Math.max(1, Math.floor(totalImages * valPct)) : null;
+
+		        const stepsRaw = readNumberInput(agentElements.stepsMaxSteps, { integer: true });
+		        const steps = Number.isFinite(stepsRaw) ? Math.max(1, Math.min(50, stepsRaw)) : 6;
+		        const seedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
+		        const seeds = Number.isFinite(seedsRaw) ? Math.max(0, Math.min(500, seedsRaw)) : 5;
+		        const perImageUnits = steps * (1 + seeds);
+
+		        const classIds = parseAgentClassIdList(agentElements.classesInput ? agentElements.classesInput.value : "");
+		        const classCount =
+		            classIds && classIds.length
+		                ? classIds.length
+		                : meta && Array.isArray(meta.classes) && meta.classes.length
+		                  ? meta.classes.length
+		                  : null;
+
+		        if (valImages === null) {
+		            agentElements.stepsBudgetBadge.textContent = "—";
+		            agentElements.stepsBudgetBadge.style.background = "#e2e8f0";
+		            agentElements.stepsBudgetBadge.style.color = "#0f172a";
+		            agentElements.stepsBudgetText.textContent = "Select a dataset (or enable Test mode) to estimate compute.";
+		            agentElements.stepsBudgetFill.style.width = "0%";
+		            agentElements.stepsBudgetFill.style.background = "linear-gradient(90deg, #94a3b8 0%, #cbd5e1 100%)";
+		            return;
+		        }
+
+		        const baseUnitsPerClass = valImages * perImageUnits;
+
+		        const evalCap1 = readNumberInput(agentElements.stepsGlobalEvalCap1, { integer: true });
+		        const evalCap2 = readNumberInput(agentElements.stepsGlobalEvalCap2, { integer: true });
+		        const evalCap3 = readNumberInput(agentElements.stepsGlobalEvalCap3, { integer: true });
+		        const maxTrials = readNumberInput(agentElements.stepsGlobalMaxTrials, { integer: true });
+		        const keepRatio = readNumberInput(agentElements.stepsGlobalKeepRatio, { integer: false });
+		        const rounds = readNumberInput(agentElements.stepsGlobalRounds, { integer: true });
+		        const mutations = readNumberInput(agentElements.stepsGlobalMutationsPerRound, { integer: true });
+
+		        const globalEstimate = globalEnabled
+		            ? estimateAgentGlobalOptimizerImageEvals({
+		                  valImages,
+		                  evalCaps: [evalCap1, evalCap2, evalCap3],
+		                  keepRatio,
+		                  rounds,
+		                  maxTrials,
+		                  mutationsPerRound: mutations,
+		              })
+		            : { imageEvals: 0, budgets: [], invalidBudgets: false };
+
+		        const globalUnitsPerClass = globalEnabled && !globalEstimate.invalidBudgets ? globalEstimate.imageEvals * perImageUnits : 0;
+		        const totalUnitsPerClass = baseUnitsPerClass + globalUnitsPerClass;
+		        const totalUnitsAllClasses = classCount !== null ? totalUnitsPerClass * classCount : null;
+		        const displayUnits = totalUnitsAllClasses !== null ? totalUnitsAllClasses : totalUnitsPerClass;
+
+		        const pct = Math.max(0, Math.min(100, 15 * Math.log10(displayUnits + 1)));
+		        agentElements.stepsBudgetFill.style.width = `${pct.toFixed(1)}%`;
+
+		        let badge = "Low";
+		        let badgeBg = "#dcfce7";
+		        let badgeFg = "#166534";
+		        let fillBg = "linear-gradient(90deg, #16a34a 0%, #86efac 100%)";
+			        if (globalEnabled && globalEstimate.invalidBudgets) {
+			            badge = "Invalid";
+			            badgeBg = "#fee2e2";
+			            badgeFg = "#991b1b";
+			            fillBg = "linear-gradient(90deg, #94a3b8 0%, #cbd5e1 100%)";
+		        } else if (pct >= 75) {
+		            badge = "Very high";
+		            badgeBg = "#fee2e2";
+		            badgeFg = "#991b1b";
+		            fillBg = "linear-gradient(90deg, #ef4444 0%, #fca5a5 100%)";
+		        } else if (pct >= 55) {
+		            badge = "High";
+		            badgeBg = "#ffedd5";
+		            badgeFg = "#9a3412";
+		            fillBg = "linear-gradient(90deg, #f97316 0%, #fdba74 100%)";
+		        } else if (pct >= 35) {
+		            badge = "Medium";
+		            badgeBg = "#fef9c3";
+		            badgeFg = "#854d0e";
+		            fillBg = "linear-gradient(90deg, #eab308 0%, #fde047 100%)";
+		        }
+		        agentElements.stepsBudgetBadge.textContent = badge;
+		        agentElements.stepsBudgetBadge.style.background = badgeBg;
+		        agentElements.stepsBudgetBadge.style.color = badgeFg;
+		        agentElements.stepsBudgetFill.style.background = fillBg;
+
+		        const lines = [];
+		        lines.push(`Val images: ${valImages} • steps: ${steps} • seeds/step: ${seeds}`);
+			        const globalLine = globalRequested
+			            ? globalEnabled
+			                ? globalEstimate.invalidBudgets
+			                    ? "Global optimizer: invalid Stage caps."
+			                    : `Global optimizer: +${formatCompactCount(globalUnitsPerClass)} work (per class)`
+			                : !isSteps
+			                  ? "Global optimizer: only available in Multi-step mode."
+			                  : !hasHead
+			                    ? "Global optimizer: requires a pretrained CLIP head."
+		                    : "Global optimizer: off"
+		            : "Global optimizer: off";
+		        lines.push(globalLine);
+		        lines.push(
+		            `Work (per class): ${formatCompactCount(totalUnitsPerClass)} (base ${formatCompactCount(baseUnitsPerClass)} + global ${formatCompactCount(
+		                globalUnitsPerClass
+		            )})`
+		        );
+		        if (totalUnitsAllClasses !== null) {
+		            lines.push(`All classes (~${classCount}): ${formatCompactCount(totalUnitsAllClasses)} work`);
+		        }
+		        agentElements.stepsBudgetText.textContent = lines.join("\n");
+		    }
+
+		    function syncAgentStepsOptimizationControls() {
+		        const mode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "steps";
+		        const isSteps = mode === "steps";
+		        const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
+		        const allowGlobal = isSteps && hasHead;
 	        const reason = !isSteps ? "Only available in Multi-step mode." : !hasHead ? "Requires a pretrained CLIP head." : "";
 	        const preset = getAgentStepsGlobalPreset();
 	        const globalEnabled = !!(allowGlobal && preset !== "off");
@@ -13652,10 +13872,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             agentElements.stepsRefinePromptSubset.title = globalEnabled ? "Disabled because Global optimization is enabled." : refineReason;
             if (globalEnabled) agentElements.stepsRefinePromptSubset.checked = false;
         }
-        const refineEnabled = !!(allowRefine && agentElements.stepsRefinePromptSubset && agentElements.stepsRefinePromptSubset.checked);
-        if (agentElements.stepsRefineMaxIters) agentElements.stepsRefineMaxIters.disabled = !refineEnabled;
-        if (agentElements.stepsRefineTopK) agentElements.stepsRefineTopK.disabled = !refineEnabled;
-    }
+	        const refineEnabled = !!(allowRefine && agentElements.stepsRefinePromptSubset && agentElements.stepsRefinePromptSubset.checked);
+	        if (agentElements.stepsRefineMaxIters) agentElements.stepsRefineMaxIters.disabled = !refineEnabled;
+	        if (agentElements.stepsRefineTopK) agentElements.stepsRefineTopK.disabled = !refineEnabled;
+	        updateAgentStepsComputeEstimate();
+	    }
 
     async function loadAgentClipClassifiers() {
         if (!agentElements.clipHeadSelect) return;
@@ -14244,13 +14465,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.reuseSplit = document.getElementById("agentReuseSplit");
 	        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
 	        agentElements.searchMode = document.getElementById("agentSearchMode");
-		        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
-		        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
-		        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
-		        agentElements.stepsGlobalPreset = document.getElementById("agentStepsGlobalPreset");
-		        agentElements.stepsGlobalEvalCap1 = document.getElementById("agentStepsGlobalEvalCap1");
-		        agentElements.stepsGlobalEvalCap2 = document.getElementById("agentStepsGlobalEvalCap2");
-		        agentElements.stepsGlobalEvalCap3 = document.getElementById("agentStepsGlobalEvalCap3");
+			        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
+			        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
+			        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
+			        agentElements.stepsGlobalPreset = document.getElementById("agentStepsGlobalPreset");
+			        agentElements.stepsBudgetBadge = document.getElementById("agentStepsBudgetBadge");
+			        agentElements.stepsBudgetText = document.getElementById("agentStepsBudgetText");
+			        agentElements.stepsBudgetFill = document.getElementById("agentStepsBudgetFill");
+			        agentElements.stepsGlobalEvalCap1 = document.getElementById("agentStepsGlobalEvalCap1");
+			        agentElements.stepsGlobalEvalCap2 = document.getElementById("agentStepsGlobalEvalCap2");
+			        agentElements.stepsGlobalEvalCap3 = document.getElementById("agentStepsGlobalEvalCap3");
 	        agentElements.stepsGlobalMaxTrials = document.getElementById("agentStepsGlobalMaxTrials");
 	        agentElements.stepsGlobalKeepRatio = document.getElementById("agentStepsGlobalKeepRatio");
 	        agentElements.stepsGlobalRounds = document.getElementById("agentStepsGlobalRounds");
@@ -14332,32 +14556,44 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.clipGuard) agentElements.clipGuard.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
 	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
-	        if (agentElements.stepsGlobalPreset) {
-	            agentElements.stepsGlobalPreset.addEventListener("change", () => {
-	                applyAgentStepsGlobalPreset(agentElements.stepsGlobalPreset.value);
-	                syncAgentStepsOptimizationControls();
-	            });
-	        }
-	        [
-	            agentElements.stepsGlobalEvalCap1,
-	            agentElements.stepsGlobalEvalCap2,
-	            agentElements.stepsGlobalEvalCap3,
+		        if (agentElements.stepsGlobalPreset) {
+		            agentElements.stepsGlobalPreset.addEventListener("change", () => {
+		                applyAgentStepsGlobalPreset(agentElements.stepsGlobalPreset.value);
+		                syncAgentStepsOptimizationControls();
+		            });
+		        }
+		        const markCustomAndUpdateBudget = () => {
+		            markAgentStepsGlobalPresetCustom();
+		            updateAgentStepsComputeEstimate();
+		        };
+		        const updateBudget = () => updateAgentStepsComputeEstimate();
+		        [
+		            agentElements.stepsGlobalEvalCap1,
+		            agentElements.stepsGlobalEvalCap2,
+		            agentElements.stepsGlobalEvalCap3,
 	            agentElements.stepsGlobalMaxTrials,
 	            agentElements.stepsGlobalKeepRatio,
 	            agentElements.stepsGlobalRounds,
-	            agentElements.stepsGlobalMutationsPerRound,
-	        ].forEach((el) => {
-	            if (!el) return;
-	            el.addEventListener("input", markAgentStepsGlobalPresetCustom);
-	        });
-	        [agentElements.stepsGlobalEnableOrdering, agentElements.stepsGlobalEnableMaxResults].forEach((el) => {
-	            if (!el) return;
-	            el.addEventListener("change", markAgentStepsGlobalPresetCustom);
-	        });
-	        if (agentElements.stepsTier1Optimize) agentElements.stepsTier1Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
-	        if (agentElements.stepsTier2Optimize) agentElements.stepsTier2Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
-	        if (agentElements.stepsRefinePromptSubset)
-	            agentElements.stepsRefinePromptSubset.addEventListener("change", syncAgentStepsOptimizationControls);
+		            agentElements.stepsGlobalMutationsPerRound,
+		        ].forEach((el) => {
+		            if (!el) return;
+		            el.addEventListener("input", markCustomAndUpdateBudget);
+		        });
+		        [agentElements.stepsGlobalEnableOrdering, agentElements.stepsGlobalEnableMaxResults].forEach((el) => {
+		            if (!el) return;
+		            el.addEventListener("change", markCustomAndUpdateBudget);
+		        });
+		        if (agentElements.stepsMaxSteps) agentElements.stepsMaxSteps.addEventListener("input", updateBudget);
+		        if (agentElements.stepsMaxSeedsPerStep) agentElements.stepsMaxSeedsPerStep.addEventListener("input", updateBudget);
+		        if (agentElements.valPercent) agentElements.valPercent.addEventListener("input", updateBudget);
+		        if (agentElements.testMode) agentElements.testMode.addEventListener("change", updateBudget);
+		        if (agentElements.trainLimit) agentElements.trainLimit.addEventListener("input", updateBudget);
+		        if (agentElements.valLimit) agentElements.valLimit.addEventListener("input", updateBudget);
+		        if (agentElements.classesInput) agentElements.classesInput.addEventListener("input", updateBudget);
+		        if (agentElements.stepsTier1Optimize) agentElements.stepsTier1Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
+		        if (agentElements.stepsTier2Optimize) agentElements.stepsTier2Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
+		        if (agentElements.stepsRefinePromptSubset)
+		            agentElements.stepsRefinePromptSubset.addEventListener("change", syncAgentStepsOptimizationControls);
         const syncPrecisionLabel = () => {
             if (!agentElements.clipHeadTargetPrecisionValue) return;
             const val = agentElements.clipHeadTargetPrecision ? parseFloat(agentElements.clipHeadTargetPrecision.value) : NaN;
@@ -14398,14 +14634,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.datasetRefresh) {
             agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
         }
-	        if (agentElements.datasetSelect) {
-	            agentElements.datasetSelect.addEventListener("change", () => {
-	                updateAgentDatasetSummary();
-	                fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
-	                prefillExtraPrompts();
-	                refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
-	            });
-	        }
+		        if (agentElements.datasetSelect) {
+		            agentElements.datasetSelect.addEventListener("change", () => {
+		                updateAgentDatasetSummary();
+		                updateAgentStepsComputeEstimate();
+		                fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
+		                prefillExtraPrompts();
+		                refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
+		            });
+		        }
         if (agentElements.purgeCacheBtn) {
             agentElements.purgeCacheBtn.addEventListener("click", () => purgeAgentCache().catch((err) => console.error("Agent cache purge failed", err)));
         }

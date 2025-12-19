@@ -1089,14 +1089,26 @@
 							                                                <div class="training-help" style="margin-top: 6px; color: #64748b;">
 							                                                    Global optimizer runs a small “tournament” (successive halving): try many candidates quickly → keep the best → retest on more images → repeat.
 							                                                </div>
-							                                                <div class="training-help" style="margin-top: 6px; color: #64748b;">
-							                                                    Tip: changing any global optimizer fields below will switch “Search budget” to Custom.
-							                                                </div>
-							                                            </div>
-							                                        </div>
-							                                        <div class="training-grid" style="margin-top: 10px;">
-							                                            <div>
-							                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
+								                                                <div class="training-help" style="margin-top: 6px; color: #64748b;">
+								                                                    Tip: changing any global optimizer fields below will switch “Search budget” to Custom.
+								                                                </div>
+								                                                <div class="training-help" style="margin-top: 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
+								                                                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+								                                                        <div style="font-weight: 700; color: #0f172a;">
+								                                                            Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). This updates live as you change settings.&#10;&#10;What it tracks: validation images evaluated (Val split) × recipe steps × seeds/step, plus any extra from the Global optimizer (successive halving across Stages 1–3 for each mutation round).&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content, but this helps you see how cost grows when you increase steps, seeds/step, or pick Best.">?</span>
+								                                                        </div>
+								                                                        <span id="agentStepsBudgetBadge" class="badge">…</span>
+								                                                    </div>
+								                                                    <div id="agentStepsBudgetText" class="training-help" style="margin-top: 6px; color: #475569; white-space: pre-wrap;">…</div>
+								                                                    <div class="training-progress" style="margin-top: 8px;">
+								                                                        <div id="agentStepsBudgetFill" class="training-progress-fill"></div>
+								                                                    </div>
+								                                                </div>
+								                                            </div>
+								                                        </div>
+								                                        <div class="training-grid" style="margin-top: 10px;">
+								                                            <div>
+								                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
 					                                                <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
 					                                            </div>
 					                                            <div>

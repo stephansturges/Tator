@@ -919,9 +919,9 @@
             </div>
 	            <div class="tab-panel" id="tabAgentMining" data-tab-panel="agent-mining">
 	                <div class="training-wrapper two-col">
-	                    <section class="training-form-section">
-	                        <h2>SAM3 Recipe Mining</h2>
-	                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
+		                    <section class="training-form-section">
+		                        <h2>SAM3 Recipe Mining</h2>
+		                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
 	                        <details class="training-card" style="margin-bottom: 12px;">
 	                            <summary>How recipe mining works (click to expand)</summary>
 	                            <div class="training-card__body">
@@ -1030,15 +1030,15 @@
 		                            </details>
 		                            </div>
 		                        </details>
-	                        <div class="training-field">
-	                            <label>Dataset</label>
-	                            <div class="sam3-dataset-row">
-	                                <select id="agentDatasetSelect"></select>
-	                                <button type="button" class="training-button" id="agentDatasetRefresh">Refresh</button>
-	                            </div>
-                            <div class="training-help" id="agentDatasetSummary">Pick a converted SAM3/Qwen dataset.</div>
-		                        </div>
-			                        <div class="training-grid">
+		                        <div class="training-field">
+		                            <label for="agentDatasetSelect">Dataset<span class="help-icon" title="Choose the dataset to mine recipes from.&#10;Datasets are created/converted in the Dataset Management tab.">?</span></label>
+		                            <div class="sam3-dataset-row">
+		                                <select id="agentDatasetSelect"></select>
+		                                <button type="button" class="training-button" id="agentDatasetRefresh">Refresh</button>
+		                            </div>
+	                            <div class="training-help" id="agentDatasetSummary">Pick a converted SAM3/Qwen dataset.</div>
+			                        </div>
+				                        <div class="training-grid">
 			                            <div>
 			                                <label for="agentValPercent">Val %<span class="help-icon" title="How many images are held out for evaluation.&#10;We split your dataset into Train and Val.&#10;Mining uses Train; scoring uses Val.&#10;Higher = more reliable scores (slower).&#10;Lower = faster but noisier scores.">?</span></label>
 			                                <input type="number" id="agentValPercent" min="5" max="95" value="30" title="How many images are held out to test the recipe. Example: 30 means we test on 30% of images." />
@@ -1047,22 +1047,30 @@
 			                                <label for="agentSplitSeed">Split seed<span class="help-icon" title="Random seed for the train/val split.&#10;Same seed = same split (repeatable).&#10;Change it if you want a different random split.&#10;Default is 42.">?</span></label>
 			                                <input type="number" id="agentSplitSeed" value="42" title="Same seed = same train/val split. Change it if you want a different random split." />
 			                            </div>
-			                            <div class="training-field training-field--inline">
-			                                <label for="agentReuseSplit">Reuse cached split<span class="help-icon" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">?</span></label>
-			                                <input type="checkbox" id="agentReuseSplit" checked />
-			                            </div>
-				                            <div>
-				                                <label for="agentIouThreshold">Match overlap (Eval IoU)<span class="help-icon" title="Used only for scoring (evaluation), not for running the recipe.&#10;IoU = how much the predicted box overlaps the ground-truth box (0–1).&#10;0.5 ≈ “at least about half overlap”.&#10;Higher = stricter scoring (coverage may look lower).">?</span></label>
-				                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" />
+				                            <div class="training-field training-field--inline">
+				                                <label for="agentReuseSplit">Reuse cached split<span class="help-icon" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">?</span></label>
+				                                <input type="checkbox" id="agentReuseSplit" checked />
+				                            </div>
+				                            <div class="training-field training-field--inline">
+				                                <label for="agentReuseCache">Reuse cached SAM results<span class="help-icon" title="Speeds up repeated runs by reusing cached SAM3 prompt evaluations and expansions when possible.&#10;Turn off if you changed the SAM3 prompt model/checkpoint and want to be extra safe.&#10;Use “Purge cache” to free disk space.">?</span></label>
+				                                <input type="checkbox" id="agentReuseCache" checked />
 				                            </div>
 					                            <div>
-					                                <label for="agentWorkersPerGpu">Predictors per GPU<span class="help-icon" title="How many SAM3 workers to run per GPU during mining.&#10;1 = one worker per GPU (safest).&#10;Higher can speed up mining if you have VRAM headroom, but uses more GPU memory and can trigger CUDA OOM.">?</span></label>
-					                                <input type="number" id="agentWorkersPerGpu" min="1" max="8" value="1" />
+					                                <label for="agentIouThreshold">Match overlap (Eval IoU)<span class="help-icon" title="Used only for scoring (evaluation), not for running the recipe.&#10;IoU = how much the predicted box overlaps the ground-truth box (0–1).&#10;0.5 ≈ “at least about half overlap”.&#10;Higher = stricter scoring (coverage may look lower).">?</span></label>
+					                                <input type="number" id="agentIouThreshold" step="0.05" min="0" max="1" value="0.5" />
 					                            </div>
-					                            <div>
-					                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Recipe mining now always uses Multi-step: it builds a chain of prompt steps and tunes CLIP head thresholds for your cleanliness target.&#10;Legacy modes are deprecated and are no longer exposed in the UI.">?</span></label>
-					                                <select id="agentSearchMode">
-					                                    <option value="steps" selected>Multi-step (precision-first)</option>
+						                            <div>
+						                                <label for="agentWorkersPerGpu">Predictors per GPU<span class="help-icon" title="How many SAM3 workers to run per GPU during mining.&#10;1 = one worker per GPU (safest).&#10;Higher can speed up mining if you have VRAM headroom, but uses more GPU memory and can trigger CUDA OOM.">?</span></label>
+						                                <input type="number" id="agentWorkersPerGpu" min="1" max="8" value="1" />
+						                            </div>
+						                            <div>
+						                                <label for="agentMaxWorkers">Max predictors total (optional)<span class="help-icon" title="Optional cap on total parallel SAM3 workers across all GPUs.&#10;Leave blank to use all available GPUs with your “Predictors per GPU” setting.&#10;Lower values reduce VRAM usage and can make the UI more responsive.">?</span></label>
+						                                <input type="number" id="agentMaxWorkers" min="1" max="256" placeholder="auto" />
+						                            </div>
+						                            <div>
+						                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Recipe mining now always uses Multi-step: it builds a chain of prompt steps and tunes CLIP head thresholds for your cleanliness target.&#10;Legacy modes are deprecated and are no longer exposed in the UI.">?</span></label>
+						                                <select id="agentSearchMode">
+						                                    <option value="steps" selected>Multi-step (precision-first)</option>
 					                                </select>
 					                            </div>
 					                        </div>
@@ -1132,11 +1140,11 @@
 					                                                <input type="number" id="agentStepsGlobalEvalCap3" min="1" max="50000" value="1000" />
 					                                            </div>
 					                                        </div>
-					                                        <div class="training-grid" style="margin-top: 10px;">
-					                                            <div>
-					                                                <label for="agentStepsGlobalMaxTrials">Max trials<span class="help-icon" title="Max candidate recipe configs evaluated per class (per stage).&#10;Higher = more thorough, slower.&#10;Typical: 16–64.">?</span></label>
-					                                                <input type="number" id="agentStepsGlobalMaxTrials" min="1" max="4096" value="36" />
-					                                            </div>
+						                                        <div class="training-grid" style="margin-top: 10px;">
+						                                            <div>
+						                                                <label for="agentStepsGlobalMaxTrials">Max trials<span class="help-icon" title="Max candidate recipe configs evaluated per class (per stage).&#10;Higher = more thorough, slower.&#10;Typical: 16–64.">?</span></label>
+						                                                <input type="number" id="agentStepsGlobalMaxTrials" min="1" max="4096" value="36" />
+						                                            </div>
 					                                            <div>
 					                                                <label for="agentStepsGlobalKeepRatio">Keep ratio<span class="help-icon" title="Successive-halving prune ratio per stage.&#10;0.5 keeps the top half.&#10;Lower = more aggressive pruning (faster, riskier).">?</span></label>
 					                                                <input type="number" id="agentStepsGlobalKeepRatio" step="0.05" min="0.1" max="0.9" value="0.5" />
@@ -1145,11 +1153,15 @@
 					                                                <label for="agentStepsGlobalRounds">Rounds<span class="help-icon" title="How many mutation rounds to run.&#10;More rounds = more chances to improve, slower.&#10;Typical: 1–3.">?</span></label>
 					                                                <input type="number" id="agentStepsGlobalRounds" min="1" max="20" value="2" />
 					                                            </div>
-					                                            <div>
-					                                                <label for="agentStepsGlobalMutationsPerRound">Mutations/round<span class="help-icon" title="How many small candidate changes we generate around the current best recipe each round.&#10;Higher = more thorough, slower.&#10;Typical: 12–40.">?</span></label>
-					                                                <input type="number" id="agentStepsGlobalMutationsPerRound" min="1" max="10000" value="24" />
-					                                            </div>
-					                                        </div>
+						                                            <div>
+						                                                <label for="agentStepsGlobalMutationsPerRound">Mutations/round<span class="help-icon" title="How many small candidate changes we generate around the current best recipe each round.&#10;Higher = more thorough, slower.&#10;Typical: 12–40.">?</span></label>
+						                                                <input type="number" id="agentStepsGlobalMutationsPerRound" min="1" max="10000" value="24" />
+						                                            </div>
+						                                            <div>
+						                                                <label for="agentStepsGlobalMaxStepsMutated">Max steps changed/mutation<span class="help-icon" title="How many recipe steps we are allowed to modify in a single optimizer mutation.&#10;Lower = smaller, safer tweaks (more stable).&#10;Higher = explores bigger changes per trial (can improve results, but less predictable).&#10;Typical: 1–3.">?</span></label>
+						                                                <input type="number" id="agentStepsGlobalMaxStepsMutated" min="1" max="10" value="2" />
+						                                            </div>
+						                                        </div>
 					                                        <div class="training-grid" style="margin-top: 10px;">
 					                                            <div class="training-field training-field--inline">
 					                                                <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional. Step ordering usually has a minor effect, but can matter when Max dets/image is small.">
@@ -1238,37 +1250,10 @@
 					                                </details>
 					                            </div>
 					                        </div>
-					                        <div id="agentBeamOptions" class="training-card" style="display: none; margin-bottom: 12px;">
-					                            <div class="training-card__body">
-					                                <div class="training-message warn" style="margin-bottom: 10px;">Beam search is slower than Greedy because it runs many trial evaluations. Use Test mode first.</div>
-					                                <div class="training-grid">
-					                                    <div>
-					                                        <label for="agentBeamWidth">Beam width (k)<span class="help-icon" title="How many best parameter settings we keep each round.&#10;Higher = more thorough, slower.">?</span></label>
-					                                        <input type="number" id="agentBeamWidth" min="1" max="16" value="4" />
-					                                    </div>
-					                                    <div>
-					                                        <label for="agentBeamRounds">Beam rounds<span class="help-icon" title="How many refinement rounds to run.&#10;More rounds = slower, can find better settings.">?</span></label>
-					                                        <input type="number" id="agentBeamRounds" min="1" max="10" value="3" />
-					                                    </div>
-					                                    <div>
-					                                        <label for="agentBeamMinImprove">Min improvement (ε)<span class="help-icon" title="Early-stop threshold. If the score improves by less than this, we stop searching.&#10;Smaller = more thorough, slower.">?</span></label>
-					                                        <input type="number" id="agentBeamMinImprove" step="0.001" min="0" max="1" value="0.005" />
-					                                    </div>
-					                                    <div>
-					                                        <label for="agentBeamEvalCap">Beam eval cap (images)<span class="help-icon" title="How many validation images to use during the search.&#10;Lower = faster but noisier. Higher = slower but more reliable.">?</span></label>
-					                                        <input type="number" id="agentBeamEvalCap" min="1" value="48" />
-					                                    </div>
-					                                    <div class="training-field training-field--inline">
-					                                        <label for="agentBeamReuseCache">Reuse trial evals<span class="help-icon" title="Skip repeating identical trial parameters within this run.">?</span></label>
-					                                        <input type="checkbox" id="agentBeamReuseCache" checked />
-					                                    </div>
-					                                </div>
-					                            </div>
-					                        </div>
-					                        <div class="training-grid">
-					                            <div>
-					                                <label for="agentSeedThreshold">Seed text threshold<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
-					                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" />
+						                        <div class="training-grid">
+						                            <div>
+						                                <label for="agentSeedThreshold">Seed text threshold<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
+						                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" />
 			                            </div>
 			                            <div>
 			                                <label for="agentExpandThreshold">Expand threshold<span class="help-icon" title="Second pass (optional): after choosing seed boxes, we run a refine/expand pass from those boxes.&#10;This threshold controls how strict that refine pass is.&#10;Higher = fewer but cleaner results.">?</span></label>

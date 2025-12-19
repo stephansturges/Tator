@@ -13099,7 +13099,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    if (Number.isFinite(globalOpt.max_trials)) bits.push(`trials: ${Number(globalOpt.max_trials)}`);
 	                    if (Number.isFinite(globalOpt.rounds)) bits.push(`rounds: ${Number(globalOpt.rounds)}`);
 	                    if (Number.isFinite(globalOpt.mutations_per_round))
-	                        bits.push(`mutations/round: ${Number(globalOpt.mutations_per_round)}`);
+	                        bits.push(`variants/round: ${Number(globalOpt.mutations_per_round)}`);
 	                    if (globalOpt.enable_ordering) bits.push("order: on");
 	                    if (globalOpt.enable_max_results) bits.push("max dets: tuned");
 	                    if (globalOpt.selected_mutation && typeof globalOpt.selected_mutation === "object") {
@@ -13636,16 +13636,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentStepsGlobalPresetLock = true;
 	        try {
 	            agentElements.stepsGlobalPreset.value = key;
-		            if (key === "fast") {
-		                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "25";
-		                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "100";
-		                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "300";
-		                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "16";
-		                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
-		                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "1";
-		                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "12";
-		                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "1";
-		            } else if (key === "balanced") {
+			            if (key === "fast") {
+			                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "25";
+			                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "100";
+			                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "300";
+			                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "16";
+			                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.4";
+			                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "1";
+			                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "12";
+			                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "1";
+			            } else if (key === "balanced") {
 		                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "50";
 		                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "200";
 		                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "1000";
@@ -13654,16 +13654,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "2";
 		                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "24";
 		                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "2";
-		            } else if (key === "best") {
-		                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "100";
-		                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "500";
-		                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "2000";
-		                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "64";
-		                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
-		                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "3";
-		                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "40";
-		                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "3";
-		            }
+			            } else if (key === "best") {
+			                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "100";
+			                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "500";
+			                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "2000";
+			                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "64";
+			                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.6";
+			                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "3";
+			                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "40";
+			                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "3";
+			            }
 		        } finally {
 		            agentStepsGlobalPresetLock = false;
 		        }
@@ -13849,25 +13849,46 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        agentElements.stepsBudgetBadge.style.color = badgeFg;
 		        agentElements.stepsBudgetFill.style.background = fillBg;
 
-		        const lines = [];
-		        lines.push(`Val images: ${valImages} • steps: ${steps} • seeds/step: ${seeds}`);
-			        const globalLine = globalRequested
-			            ? globalEnabled
-			                ? globalEstimate.invalidBudgets
-			                    ? "Global optimizer: invalid Stage caps."
-			                    : `Global optimizer: +${formatCompactCount(globalUnitsPerClass)} work (per class)`
-			                : !isSteps
-			                  ? "Global optimizer: only available in Multi-step mode."
-			                  : !hasHead
-			                    ? "Global optimizer: requires a pretrained CLIP head."
-		                    : "Global optimizer: off"
-		            : "Global optimizer: off";
-		        lines.push(globalLine);
-		        lines.push(
-		            `Work (per class): ${formatCompactCount(totalUnitsPerClass)} (base ${formatCompactCount(baseUnitsPerClass)} + global ${formatCompactCount(
-		                globalUnitsPerClass
-		            )})`
-		        );
+			        const lines = [];
+			        lines.push(`Val images: ${valImages} • steps: ${steps} • seeds/step: ${seeds}`);
+				        const globalLine = globalRequested
+				            ? globalEnabled
+				                ? globalEstimate.invalidBudgets
+				                    ? "Global optimizer: invalid Stage caps."
+				                    : `Global optimizer: +${formatCompactCount(globalUnitsPerClass)} work (per class)`
+				                : !isSteps
+				                  ? "Global optimizer: only available in Multi-step mode."
+				                  : !hasHead
+				                    ? "Global optimizer: requires a pretrained CLIP head."
+			                    : "Global optimizer: off"
+			            : "Global optimizer: off";
+			        lines.push(globalLine);
+			        if (globalRequested) {
+			            const breadthBits = [];
+			            breadthBits.push(`trials=${Number.isFinite(maxTrials) ? Math.max(1, Math.floor(maxTrials)) : "?"}`);
+			            breadthBits.push(`rounds=${Number.isFinite(rounds) ? Math.max(1, Math.floor(rounds)) : "?"}`);
+			            breadthBits.push(`variants/round=${Number.isFinite(mutations) ? Math.max(1, Math.floor(mutations)) : "?"}`);
+			            const maxStepsMutated = readNumberInput(agentElements.stepsGlobalMaxStepsMutated, { integer: true });
+			            breadthBits.push(`max step changes=${Number.isFinite(maxStepsMutated) ? Math.max(1, Math.floor(maxStepsMutated)) : "?"}`);
+			            lines.push(`Breadth: ${breadthBits.join(" • ")}`);
+
+			            if (globalEstimate.invalidBudgets) {
+			                lines.push("Depth: invalid stage caps");
+			            } else {
+			                const depthBits = [];
+			                const cap1 = Number.isFinite(evalCap1) ? Math.max(1, Math.floor(evalCap1)) : "?";
+			                const cap2 = Number.isFinite(evalCap2) ? Math.max(1, Math.floor(evalCap2)) : "?";
+			                const cap3 = Number.isFinite(evalCap3) ? Math.max(1, Math.floor(evalCap3)) : "?";
+			                depthBits.push(`caps=[${cap1}, ${cap2}, ${cap3}]`);
+			                depthBits.push(`keep=${Number.isFinite(keepRatio) ? Math.max(0.1, Math.min(0.9, keepRatio)).toFixed(2) : "?"}`);
+			                lines.push(`Depth: ${depthBits.join(" • ")}`);
+			            }
+			        }
+			        lines.push(
+			            `Work (per class): ${formatCompactCount(totalUnitsPerClass)} (base ${formatCompactCount(baseUnitsPerClass)} + global ${formatCompactCount(
+			                globalUnitsPerClass
+			            )})`
+			        );
 		        if (totalUnitsAllClasses !== null) {
 		            lines.push(`All classes (~${classCount}): ${formatCompactCount(totalUnitsAllClasses)} work`);
 		        }

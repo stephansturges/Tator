@@ -1432,10 +1432,10 @@ const sam3TrainState = {
         results: null,
         message: null,
     };
-	    const agentElements = {
-	        datasetSelect: null,
-	        datasetRefresh: null,
-	        datasetSummary: null,
+		    const agentElements = {
+		        datasetSelect: null,
+		        datasetRefresh: null,
+		        datasetSummary: null,
 	        valPercent: null,
 	        splitSeed: null,
 	        reuseSplit: null,
@@ -1474,17 +1474,19 @@ const sam3TrainState = {
 	        beamMinImprove: null,
 	        beamEvalCap: null,
 	        beamReuseCache: null,
-	        iouThreshold: null,
-	        seedThreshold: null,
-	        expandThreshold: null,
-	        maxVisualSeeds: null,
-        seedDedupeIou: null,
-        dedupeIou: null,
-        maskThreshold: null,
-        similarityScore: null,
-        maxResults: null,
-        minSize: null,
-        simplifyEps: null,
+		        iouThreshold: null,
+		        seedThreshold: null,
+		        expandThreshold: null,
+		        maxVisualSeeds: null,
+		        maxVisualSeedsField: null,
+	        seedDedupeIou: null,
+	        dedupeIou: null,
+	        maskThreshold: null,
+	        similarityScore: null,
+	        similarityScoreField: null,
+	        maxResults: null,
+	        minSize: null,
+	        simplifyEps: null,
         exemplars: null,
         exemplarPoolMode: null,
         exemplarPoolValue: null,
@@ -14558,10 +14560,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.seedThreshold = document.getElementById("agentSeedThreshold");
 	        agentElements.expandThreshold = document.getElementById("agentExpandThreshold");
 	        agentElements.maxVisualSeeds = document.getElementById("agentMaxVisualSeeds");
+	        agentElements.maxVisualSeedsField = document.getElementById("agentMaxVisualSeedsField");
 	        agentElements.seedDedupeIou = document.getElementById("agentSeedDedupeIou");
 	        agentElements.dedupeIou = document.getElementById("agentDedupeIou");
 	        agentElements.maskThreshold = document.getElementById("agentMaskThreshold");
 	        agentElements.similarityScore = document.getElementById("agentSimilarityScore");
+	        agentElements.similarityScoreField = document.getElementById("agentSimilarityScoreField");
 	        agentElements.maxResults = document.getElementById("agentMaxResults");
 	        agentElements.minSize = document.getElementById("agentMinSize");
 	        agentElements.simplifyEps = document.getElementById("agentSimplifyEps");
@@ -14676,14 +14680,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        applyAgentStepsGlobalPreset(getAgentStepsGlobalPreset());
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
-	        const syncSearchModeUi = () => {
-	            const mode = agentElements.searchMode ? agentElements.searchMode.value : "steps";
-	            const isBeam = mode === "beam";
-	            const isSteps = mode === "steps";
-	            if (agentElements.beamOptions) agentElements.beamOptions.style.display = isBeam ? "block" : "none";
-	            if (agentElements.stepsOptions) agentElements.stepsOptions.style.display = isSteps ? "block" : "none";
-	            syncAgentStepsOptimizationControls();
-	        };
+		        const syncSearchModeUi = () => {
+		            const mode = agentElements.searchMode ? agentElements.searchMode.value : "steps";
+		            const isBeam = mode === "beam";
+		            const isSteps = mode === "steps";
+		            if (agentElements.beamOptions) agentElements.beamOptions.style.display = isBeam ? "block" : "none";
+		            if (agentElements.stepsOptions) agentElements.stepsOptions.style.display = isSteps ? "block" : "none";
+		            // These legacy knobs are not used for schema-v2 multi-step mining.
+		            if (agentElements.maxVisualSeedsField) agentElements.maxVisualSeedsField.style.display = isSteps ? "none" : "";
+		            if (agentElements.similarityScoreField) agentElements.similarityScoreField.style.display = isSteps ? "none" : "";
+		            syncAgentStepsOptimizationControls();
+		        };
 	        if (agentElements.searchMode) agentElements.searchMode.addEventListener("change", syncSearchModeUi);
 	        syncSearchModeUi();
 	        stopAgentPoll();

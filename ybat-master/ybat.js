@@ -1432,19 +1432,21 @@ const sam3TrainState = {
         results: null,
         message: null,
     };
-		    const agentElements = {
-		        datasetSelect: null,
-		        datasetRefresh: null,
-		        datasetSummary: null,
-	        valPercent: null,
-	        splitSeed: null,
-	        reuseSplit: null,
-	        workersPerGpu: null,
-	        searchMode: null,
-		        stepsOptions: null,
-		        stepsMaxSteps: null,
-		        stepsMaxSeedsPerStep: null,
-		        stepsGlobalPreset: null,
+			    const agentElements = {
+			        datasetSelect: null,
+			        datasetRefresh: null,
+			        datasetSummary: null,
+		        valPercent: null,
+		        splitSeed: null,
+		        reuseSplit: null,
+		        reuseCache: null,
+		        workersPerGpu: null,
+		        maxWorkers: null,
+		        searchMode: null,
+			        stepsOptions: null,
+			        stepsMaxSteps: null,
+			        stepsMaxSeedsPerStep: null,
+			        stepsGlobalPreset: null,
 		        stepsBudgetBadge: null,
 		        stepsBudgetText: null,
 		        stepsBudgetFill: null,
@@ -1452,11 +1454,12 @@ const sam3TrainState = {
 		        stepsGlobalEvalCap2: null,
 		        stepsGlobalEvalCap3: null,
 		        stepsGlobalMaxTrials: null,
-		        stepsGlobalKeepRatio: null,
-		        stepsGlobalRounds: null,
-		        stepsGlobalMutationsPerRound: null,
-		        stepsGlobalEnableOrdering: null,
-		        stepsGlobalEnableMaxResults: null,
+			        stepsGlobalKeepRatio: null,
+			        stepsGlobalRounds: null,
+			        stepsGlobalMutationsPerRound: null,
+			        stepsGlobalMaxStepsMutated: null,
+			        stepsGlobalEnableOrdering: null,
+			        stepsGlobalEnableMaxResults: null,
 		        stepsTier1Optimize: null,
 		        stepsTier1EvalCap: null,
 		        stepsTier1MaxTrials: null,
@@ -1466,15 +1469,9 @@ const sam3TrainState = {
 	        stepsRefinePromptSubset: null,
 	        stepsRefineMaxIters: null,
 	        stepsRefineTopK: null,
-	        stepsSeedEvalFloor: null,
-	        stepsSeedEvalMaxResults: null,
-	        beamOptions: null,
-	        beamWidth: null,
-	        beamRounds: null,
-	        beamMinImprove: null,
-	        beamEvalCap: null,
-	        beamReuseCache: null,
-		        iouThreshold: null,
+		        stepsSeedEvalFloor: null,
+		        stepsSeedEvalMaxResults: null,
+			        iouThreshold: null,
 		        seedThreshold: null,
 		        expandThreshold: null,
 		        maxVisualSeeds: null,
@@ -13639,31 +13636,34 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentStepsGlobalPresetLock = true;
 	        try {
 	            agentElements.stepsGlobalPreset.value = key;
-	            if (key === "fast") {
-	                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "25";
-	                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "100";
-	                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "300";
-	                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "16";
-	                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
-	                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "1";
-	                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "12";
-	            } else if (key === "balanced") {
-	                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "50";
-	                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "200";
-	                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "1000";
-	                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "36";
-	                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
-	                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "2";
-	                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "24";
-	            } else if (key === "best") {
-	                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "100";
-	                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "500";
-	                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "2000";
-	                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "64";
-	                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
-	                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "3";
-	                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "40";
-	            }
+		            if (key === "fast") {
+		                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "25";
+		                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "100";
+		                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "300";
+		                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "16";
+		                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
+		                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "1";
+		                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "12";
+		                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "1";
+		            } else if (key === "balanced") {
+		                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "50";
+		                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "200";
+		                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "1000";
+		                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "36";
+		                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
+		                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "2";
+		                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "24";
+		                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "2";
+		            } else if (key === "best") {
+		                if (agentElements.stepsGlobalEvalCap1) agentElements.stepsGlobalEvalCap1.value = "100";
+		                if (agentElements.stepsGlobalEvalCap2) agentElements.stepsGlobalEvalCap2.value = "500";
+		                if (agentElements.stepsGlobalEvalCap3) agentElements.stepsGlobalEvalCap3.value = "2000";
+		                if (agentElements.stepsGlobalMaxTrials) agentElements.stepsGlobalMaxTrials.value = "64";
+		                if (agentElements.stepsGlobalKeepRatio) agentElements.stepsGlobalKeepRatio.value = "0.5";
+		                if (agentElements.stepsGlobalRounds) agentElements.stepsGlobalRounds.value = "3";
+		                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "40";
+		                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "3";
+		            }
 		        } finally {
 		            agentStepsGlobalPresetLock = false;
 		        }
@@ -13887,17 +13887,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            agentElements.stepsGlobalPreset.title = !isSteps ? "Only available in Multi-step mode." : "";
 	        }
 
-	        const globalFields = [
-	            agentElements.stepsGlobalEvalCap1,
-	            agentElements.stepsGlobalEvalCap2,
-	            agentElements.stepsGlobalEvalCap3,
-            agentElements.stepsGlobalMaxTrials,
-            agentElements.stepsGlobalKeepRatio,
-            agentElements.stepsGlobalRounds,
-            agentElements.stepsGlobalMutationsPerRound,
-	            agentElements.stepsGlobalEnableOrdering,
-	            agentElements.stepsGlobalEnableMaxResults,
-	        ];
+		        const globalFields = [
+		            agentElements.stepsGlobalEvalCap1,
+		            agentElements.stepsGlobalEvalCap2,
+		            agentElements.stepsGlobalEvalCap3,
+	            agentElements.stepsGlobalMaxTrials,
+	            agentElements.stepsGlobalKeepRatio,
+	            agentElements.stepsGlobalRounds,
+	            agentElements.stepsGlobalMutationsPerRound,
+	            agentElements.stepsGlobalMaxStepsMutated,
+		            agentElements.stepsGlobalEnableOrdering,
+		            agentElements.stepsGlobalEnableMaxResults,
+		        ];
 	        globalFields.forEach((el) => {
 	            if (!el) return;
 	            el.disabled = !globalEnabled;
@@ -14034,28 +14035,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-		    function parseAgentPayload() {
-		        const datasetId = agentElements.datasetSelect?.value;
-		        if (!datasetId) {
-		            setAgentStatus("Select a dataset.", "warn");
-		            return null;
-		        }
+			    function parseAgentPayload() {
+			        const datasetId = agentElements.datasetSelect?.value;
+			        if (!datasetId) {
+			            setAgentStatus("Select a dataset.", "warn");
+			            return null;
+			        }
 
-		        const rawSearchMode = agentElements.searchMode ? String(agentElements.searchMode.value || "").trim() : "steps";
-		        const searchMode = ["greedy", "beam", "steps"].includes(rawSearchMode) ? rawSearchMode : "steps";
-		        const beamWidthRaw = readNumberInput(agentElements.beamWidth, { integer: true });
-		        const beamWidth = Number.isFinite(beamWidthRaw) ? Math.max(1, Math.min(16, beamWidthRaw)) : 4;
-		        const beamRoundsRaw = readNumberInput(agentElements.beamRounds, { integer: true });
-		        const beamRounds = Number.isFinite(beamRoundsRaw) ? Math.max(1, Math.min(10, beamRoundsRaw)) : 3;
-	        const beamMinImproveRaw = readNumberInput(agentElements.beamMinImprove, { integer: false });
-	        const beamMinImprove = Number.isFinite(beamMinImproveRaw) ? Math.max(0, Math.min(1, beamMinImproveRaw)) : 0.005;
-		        const beamEvalCapRaw = readNumberInput(agentElements.beamEvalCap, { integer: true });
-		        const beamEvalCap = Number.isFinite(beamEvalCapRaw) ? Math.max(1, Math.min(50000, beamEvalCapRaw)) : 48;
-		        const beamReuseCache = !!(agentElements.beamReuseCache && agentElements.beamReuseCache.checked);
-		        const stepsMaxStepsRaw = readNumberInput(agentElements.stepsMaxSteps, { integer: true });
-		        const stepsMaxSteps = Number.isFinite(stepsMaxStepsRaw) ? Math.max(1, Math.min(50, stepsMaxStepsRaw)) : 6;
-		        const stepsMaxSeedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
-		        const stepsMaxSeedsPerStep = Number.isFinite(stepsMaxSeedsRaw) ? Math.max(0, Math.min(500, stepsMaxSeedsRaw)) : 5;
+			        const searchMode = "steps";
+			        const stepsMaxStepsRaw = readNumberInput(agentElements.stepsMaxSteps, { integer: true });
+			        const stepsMaxSteps = Number.isFinite(stepsMaxStepsRaw) ? Math.max(1, Math.min(50, stepsMaxStepsRaw)) : 6;
+			        const stepsMaxSeedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
+			        const stepsMaxSeedsPerStep = Number.isFinite(stepsMaxSeedsRaw) ? Math.max(0, Math.min(500, stepsMaxSeedsRaw)) : 5;
 			        const stepsGlobalPreset = getAgentStepsGlobalPreset();
 			        const stepsGlobalOptimizeRaw = stepsGlobalPreset !== "off";
 		        const stepsGlobalCap1Raw = readNumberInput(agentElements.stepsGlobalEvalCap1, { integer: true });
@@ -14073,24 +14064,31 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        const stepsGlobalKeepRatio = Number.isFinite(stepsGlobalKeepRatioRaw)
 		            ? Math.max(0.1, Math.min(0.9, stepsGlobalKeepRatioRaw))
 		            : 0.5;
-		        const stepsGlobalRoundsRaw = readNumberInput(agentElements.stepsGlobalRounds, { integer: true });
-		        const stepsGlobalRounds = Number.isFinite(stepsGlobalRoundsRaw) ? Math.max(1, Math.min(20, stepsGlobalRoundsRaw)) : 2;
-		        const stepsGlobalMutationsRaw = readNumberInput(agentElements.stepsGlobalMutationsPerRound, { integer: true });
-		        const stepsGlobalMutationsPerRound = Number.isFinite(stepsGlobalMutationsRaw)
-		            ? Math.max(1, Math.min(10000, stepsGlobalMutationsRaw))
-		            : 24;
-		        const stepsGlobalEnableOrdering = !!(agentElements.stepsGlobalEnableOrdering && agentElements.stepsGlobalEnableOrdering.checked);
-		        const stepsGlobalEnableMaxResults = !!(agentElements.stepsGlobalEnableMaxResults && agentElements.stepsGlobalEnableMaxResults.checked);
+			        const stepsGlobalRoundsRaw = readNumberInput(agentElements.stepsGlobalRounds, { integer: true });
+			        const stepsGlobalRounds = Number.isFinite(stepsGlobalRoundsRaw) ? Math.max(1, Math.min(20, stepsGlobalRoundsRaw)) : 2;
+			        const stepsGlobalMutationsRaw = readNumberInput(agentElements.stepsGlobalMutationsPerRound, { integer: true });
+			        const stepsGlobalMutationsPerRound = Number.isFinite(stepsGlobalMutationsRaw)
+			            ? Math.max(1, Math.min(10000, stepsGlobalMutationsRaw))
+			            : 24;
+			        const stepsGlobalMaxStepsMutatedRaw = readNumberInput(agentElements.stepsGlobalMaxStepsMutated, { integer: true });
+			        const stepsGlobalMaxStepsMutated = Number.isFinite(stepsGlobalMaxStepsMutatedRaw)
+			            ? Math.max(1, Math.min(10, stepsGlobalMaxStepsMutatedRaw))
+			            : 2;
+			        const stepsGlobalEnableOrdering = !!(agentElements.stepsGlobalEnableOrdering && agentElements.stepsGlobalEnableOrdering.checked);
+			        const stepsGlobalEnableMaxResults = !!(agentElements.stepsGlobalEnableMaxResults && agentElements.stepsGlobalEnableMaxResults.checked);
 
-	        const valPctRaw = readNumberInput(agentElements.valPercent, { integer: false });
-	        const valPercent = Number.isFinite(valPctRaw) ? Math.max(5, Math.min(95, valPctRaw)) / 100 : 0.3;
-	        const splitSeed = readNumberInput(agentElements.splitSeed, { integer: true });
-	        const reuseSplit = !!(agentElements.reuseSplit && agentElements.reuseSplit.checked);
-	        const workersPerGpuRaw = readNumberInput(agentElements.workersPerGpu, { integer: true });
-	        const workersPerGpu = Number.isFinite(workersPerGpuRaw) ? Math.max(1, Math.min(8, workersPerGpuRaw)) : 1;
+		        const valPctRaw = readNumberInput(agentElements.valPercent, { integer: false });
+		        const valPercent = Number.isFinite(valPctRaw) ? Math.max(5, Math.min(95, valPctRaw)) / 100 : 0.3;
+		        const splitSeed = readNumberInput(agentElements.splitSeed, { integer: true });
+		        const reuseSplit = !!(agentElements.reuseSplit && agentElements.reuseSplit.checked);
+		        const reuseCache = agentElements.reuseCache ? !!agentElements.reuseCache.checked : true;
+		        const workersPerGpuRaw = readNumberInput(agentElements.workersPerGpu, { integer: true });
+		        const workersPerGpu = Number.isFinite(workersPerGpuRaw) ? Math.max(1, Math.min(8, workersPerGpuRaw)) : 1;
+		        const maxWorkersRaw = readNumberInput(agentElements.maxWorkers, { integer: true });
+		        const maxWorkers = Number.isFinite(maxWorkersRaw) ? Math.max(1, Math.min(256, maxWorkersRaw)) : null;
 
-	        const iouThresholdRaw = readNumberInput(agentElements.iouThreshold, { integer: false });
-	        const iouThreshold = Number.isFinite(iouThresholdRaw) ? Math.max(0, Math.min(1, iouThresholdRaw)) : 0.5;
+		        const iouThresholdRaw = readNumberInput(agentElements.iouThreshold, { integer: false });
+		        const iouThreshold = Number.isFinite(iouThresholdRaw) ? Math.max(0, Math.min(1, iouThresholdRaw)) : 0.5;
 
 	        const seedThrRaw = readNumberInput(agentElements.seedThreshold, { integer: false });
 	        const seedThreshold = Number.isFinite(seedThrRaw) ? Math.max(0, Math.min(1, seedThrRaw)) : 0.05;
@@ -14236,40 +14234,38 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        const testTrainLimitRaw = readNumberInput(agentElements.trainLimit, { integer: true });
 		        const testValLimitRaw = readNumberInput(agentElements.valLimit, { integer: true });
 
-		        return {
-		            dataset_id: datasetId,
-		            search_mode: searchMode,
-		            steps_max_steps_per_recipe: stepsMaxSteps,
-		            steps_max_visual_seeds_per_step: stepsMaxSeedsPerStep,
-		            steps_optimize_global: stepsOptimizeGlobal,
-		            steps_optimize_global_eval_caps: stepsGlobalEvalCaps,
-		            steps_optimize_global_max_trials: stepsGlobalMaxTrials,
-		            steps_optimize_global_keep_ratio: stepsGlobalKeepRatio,
-		            steps_optimize_global_rounds: stepsGlobalRounds,
-		            steps_optimize_global_mutations_per_round: stepsGlobalMutationsPerRound,
-		            steps_optimize_global_enable_max_results: stepsGlobalEnableMaxResults,
-		            steps_optimize_global_enable_ordering: stepsGlobalEnableOrdering,
-		            steps_seed_eval_floor: stepsSeedEvalFloor,
-		            steps_seed_eval_max_results: stepsSeedEvalMaxResults,
-		            steps_optimize_tier1: stepsOptimizeTier1,
+			        return {
+			            dataset_id: datasetId,
+			            search_mode: searchMode,
+			            steps_max_steps_per_recipe: stepsMaxSteps,
+			            steps_max_visual_seeds_per_step: stepsMaxSeedsPerStep,
+			            steps_optimize_global: stepsOptimizeGlobal,
+			            steps_optimize_global_eval_caps: stepsGlobalEvalCaps,
+			            steps_optimize_global_max_trials: stepsGlobalMaxTrials,
+			            steps_optimize_global_keep_ratio: stepsGlobalKeepRatio,
+			            steps_optimize_global_rounds: stepsGlobalRounds,
+			            steps_optimize_global_mutations_per_round: stepsGlobalMutationsPerRound,
+			            steps_optimize_global_max_steps_mutated: stepsGlobalMaxStepsMutated,
+			            steps_optimize_global_enable_max_results: stepsGlobalEnableMaxResults,
+			            steps_optimize_global_enable_ordering: stepsGlobalEnableOrdering,
+			            steps_seed_eval_floor: stepsSeedEvalFloor,
+			            steps_seed_eval_max_results: stepsSeedEvalMaxResults,
+			            steps_optimize_tier1: stepsOptimizeTier1,
 		            steps_optimize_tier1_eval_cap: stepsTier1EvalCap,
 		            steps_optimize_tier1_max_trials: stepsTier1MaxTrials,
 		            steps_optimize_tier2: stepsOptimizeTier2,
 		            steps_optimize_tier2_eval_cap: stepsTier2EvalCap,
-		            steps_optimize_tier2_max_trials: stepsTier2MaxTrials,
-		            steps_refine_prompt_subset: stepsEnableRefine,
-		            steps_refine_prompt_subset_max_iters: stepsRefineMaxIters,
-		            steps_refine_prompt_subset_top_k: stepsRefineTopK,
-		            beam_width: beamWidth,
-		            beam_rounds: beamRounds,
-		            beam_min_improve: beamMinImprove,
-		            beam_eval_cap: beamEvalCap,
-	            reuse_cache: beamReuseCache,
-	            val_percent: valPercent,
-	            split_seed: Number.isFinite(splitSeed) ? splitSeed : 42,
-	            reuse_split: reuseSplit,
-	            max_workers_per_device: workersPerGpu,
-	            iou_threshold: iouThreshold,
+			            steps_optimize_tier2_max_trials: stepsTier2MaxTrials,
+			            steps_refine_prompt_subset: stepsEnableRefine,
+			            steps_refine_prompt_subset_max_iters: stepsRefineMaxIters,
+			            steps_refine_prompt_subset_top_k: stepsRefineTopK,
+		            reuse_cache: reuseCache,
+		            val_percent: valPercent,
+		            split_seed: Number.isFinite(splitSeed) ? splitSeed : 42,
+		            reuse_split: reuseSplit,
+		            max_workers_per_device: workersPerGpu,
+		            max_workers: maxWorkers,
+		            iou_threshold: iouThreshold,
 
 	            prompt_llm_max_prompts: promptMaxPrompts,
 	            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
@@ -14514,15 +14510,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	    }
 
-	    function initAgentMiningUi() {
-	        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
-	        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
-	        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
-	        agentElements.valPercent = document.getElementById("agentValPercent");
-	        agentElements.splitSeed = document.getElementById("agentSplitSeed");
-	        agentElements.reuseSplit = document.getElementById("agentReuseSplit");
-	        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
-	        agentElements.searchMode = document.getElementById("agentSearchMode");
+		    function initAgentMiningUi() {
+		        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
+		        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
+		        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
+		        agentElements.valPercent = document.getElementById("agentValPercent");
+		        agentElements.splitSeed = document.getElementById("agentSplitSeed");
+		        agentElements.reuseSplit = document.getElementById("agentReuseSplit");
+		        agentElements.reuseCache = document.getElementById("agentReuseCache");
+		        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
+		        agentElements.maxWorkers = document.getElementById("agentMaxWorkers");
+		        agentElements.searchMode = document.getElementById("agentSearchMode");
 			        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
 			        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
 			        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
@@ -14534,11 +14532,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			        agentElements.stepsGlobalEvalCap2 = document.getElementById("agentStepsGlobalEvalCap2");
 			        agentElements.stepsGlobalEvalCap3 = document.getElementById("agentStepsGlobalEvalCap3");
 	        agentElements.stepsGlobalMaxTrials = document.getElementById("agentStepsGlobalMaxTrials");
-	        agentElements.stepsGlobalKeepRatio = document.getElementById("agentStepsGlobalKeepRatio");
-	        agentElements.stepsGlobalRounds = document.getElementById("agentStepsGlobalRounds");
-	        agentElements.stepsGlobalMutationsPerRound = document.getElementById("agentStepsGlobalMutationsPerRound");
-	        agentElements.stepsGlobalEnableOrdering = document.getElementById("agentStepsGlobalEnableOrdering");
-	        agentElements.stepsGlobalEnableMaxResults = document.getElementById("agentStepsGlobalEnableMaxResults");
+		        agentElements.stepsGlobalKeepRatio = document.getElementById("agentStepsGlobalKeepRatio");
+		        agentElements.stepsGlobalRounds = document.getElementById("agentStepsGlobalRounds");
+		        agentElements.stepsGlobalMutationsPerRound = document.getElementById("agentStepsGlobalMutationsPerRound");
+		        agentElements.stepsGlobalMaxStepsMutated = document.getElementById("agentStepsGlobalMaxStepsMutated");
+		        agentElements.stepsGlobalEnableOrdering = document.getElementById("agentStepsGlobalEnableOrdering");
+		        agentElements.stepsGlobalEnableMaxResults = document.getElementById("agentStepsGlobalEnableMaxResults");
 	        agentElements.stepsTier1Optimize = document.getElementById("agentStepsTier1Optimize");
 	        agentElements.stepsTier1EvalCap = document.getElementById("agentStepsTier1EvalCap");
 	        agentElements.stepsTier1MaxTrials = document.getElementById("agentStepsTier1MaxTrials");
@@ -14547,16 +14546,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.stepsTier2MaxTrials = document.getElementById("agentStepsTier2MaxTrials");
 	        agentElements.stepsRefinePromptSubset = document.getElementById("agentStepsRefinePromptSubset");
 	        agentElements.stepsRefineMaxIters = document.getElementById("agentStepsRefineMaxIters");
-	        agentElements.stepsRefineTopK = document.getElementById("agentStepsRefineTopK");
-	        agentElements.stepsSeedEvalFloor = document.getElementById("agentStepsSeedEvalFloor");
-	        agentElements.stepsSeedEvalMaxResults = document.getElementById("agentStepsSeedEvalMaxResults");
-	        agentElements.beamOptions = document.getElementById("agentBeamOptions");
-	        agentElements.beamWidth = document.getElementById("agentBeamWidth");
-	        agentElements.beamRounds = document.getElementById("agentBeamRounds");
-	        agentElements.beamMinImprove = document.getElementById("agentBeamMinImprove");
-	        agentElements.beamEvalCap = document.getElementById("agentBeamEvalCap");
-	        agentElements.beamReuseCache = document.getElementById("agentBeamReuseCache");
-	        agentElements.iouThreshold = document.getElementById("agentIouThreshold");
+		        agentElements.stepsRefineTopK = document.getElementById("agentStepsRefineTopK");
+		        agentElements.stepsSeedEvalFloor = document.getElementById("agentStepsSeedEvalFloor");
+		        agentElements.stepsSeedEvalMaxResults = document.getElementById("agentStepsSeedEvalMaxResults");
+		        agentElements.iouThreshold = document.getElementById("agentIouThreshold");
 	        agentElements.seedThreshold = document.getElementById("agentSeedThreshold");
 	        agentElements.expandThreshold = document.getElementById("agentExpandThreshold");
 	        agentElements.maxVisualSeeds = document.getElementById("agentMaxVisualSeeds");
@@ -14627,18 +14620,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            updateAgentStepsComputeEstimate();
 		        };
 		        const updateBudget = () => updateAgentStepsComputeEstimate();
-		        [
-		            agentElements.stepsGlobalEvalCap1,
-		            agentElements.stepsGlobalEvalCap2,
-		            agentElements.stepsGlobalEvalCap3,
-	            agentElements.stepsGlobalMaxTrials,
-	            agentElements.stepsGlobalKeepRatio,
-	            agentElements.stepsGlobalRounds,
-		            agentElements.stepsGlobalMutationsPerRound,
-		        ].forEach((el) => {
-		            if (!el) return;
-		            el.addEventListener("input", markCustomAndUpdateBudget);
-		        });
+			        [
+			            agentElements.stepsGlobalEvalCap1,
+			            agentElements.stepsGlobalEvalCap2,
+			            agentElements.stepsGlobalEvalCap3,
+		            agentElements.stepsGlobalMaxTrials,
+		            agentElements.stepsGlobalKeepRatio,
+		            agentElements.stepsGlobalRounds,
+			            agentElements.stepsGlobalMutationsPerRound,
+			            agentElements.stepsGlobalMaxStepsMutated,
+			        ].forEach((el) => {
+			            if (!el) return;
+			            el.addEventListener("input", markCustomAndUpdateBudget);
+			        });
 		        [agentElements.stepsGlobalEnableOrdering, agentElements.stepsGlobalEnableMaxResults].forEach((el) => {
 		            if (!el) return;
 		            el.addEventListener("change", markCustomAndUpdateBudget);
@@ -14680,17 +14674,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        applyAgentStepsGlobalPreset(getAgentStepsGlobalPreset());
 	        syncAgentClipHeadControls();
 	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
-		        const syncSearchModeUi = () => {
-		            const mode = agentElements.searchMode ? agentElements.searchMode.value : "steps";
-		            const isBeam = mode === "beam";
-		            const isSteps = mode === "steps";
-		            if (agentElements.beamOptions) agentElements.beamOptions.style.display = isBeam ? "block" : "none";
-		            if (agentElements.stepsOptions) agentElements.stepsOptions.style.display = isSteps ? "block" : "none";
-		            // These legacy knobs are not used for schema-v2 multi-step mining.
-		            if (agentElements.maxVisualSeedsField) agentElements.maxVisualSeedsField.style.display = isSteps ? "none" : "";
-		            if (agentElements.similarityScoreField) agentElements.similarityScoreField.style.display = isSteps ? "none" : "";
-		            syncAgentStepsOptimizationControls();
-		        };
+			        const syncSearchModeUi = () => {
+			            const mode = agentElements.searchMode ? agentElements.searchMode.value : "steps";
+			            const isSteps = mode === "steps";
+			            if (agentElements.stepsOptions) agentElements.stepsOptions.style.display = isSteps ? "block" : "none";
+			            // These legacy knobs are not used for schema-v2 multi-step mining.
+			            if (agentElements.maxVisualSeedsField) agentElements.maxVisualSeedsField.style.display = isSteps ? "none" : "";
+			            if (agentElements.similarityScoreField) agentElements.similarityScoreField.style.display = isSteps ? "none" : "";
+			            syncAgentStepsOptimizationControls();
+			        };
 	        if (agentElements.searchMode) agentElements.searchMode.addEventListener("change", syncSearchModeUi);
 	        syncSearchModeUi();
 	        stopAgentPoll();

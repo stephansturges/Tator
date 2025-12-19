@@ -978,38 +978,47 @@
 	                                        </ul>
 	                                    </div>
 
-	                                    <div style="font-weight: 600; margin: 12px 0 6px;">Multi-step tuning modes (what to enable)</div>
-	                                    <div class="training-help">
-	                                        <ul style="margin: 6px 0 0 18px;">
-		                                            <li><strong>Default (no extra tuning):</strong> seed curves → prompt/step selection (set-cover heuristic) → full pipeline → CLIP head thresholds tuned for your cleanliness.</li>
-	                                            <li><strong>Refine prompt subset:</strong> fast seed-stage local search that can add/drop/swap steps (no extra SAM runs). Use when the selected prompts look “obviously wrong”.</li>
-	                                            <li><strong>Tier‑1:</strong> bounded search over <code>expand_threshold</code> + <code>seeds/step</code> (applied across all steps). Good first knob-search if Global is off.</li>
-	                                            <li><strong>Tier‑2:</strong> bounded search over <code>seed_dedupe_iou</code> + <code>dedupe_iou</code> (applied across all steps). Helps duplicates/FPs.</li>
-	                                            <li><strong>Global optimizer (best quality):</strong> successive-halving search over full recipe configs (prompt subset + per-step knobs). This is slower but matches the “multi-knob” vision.</li>
-	                                        </ul>
-	                                    </div>
-
-	                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer: what knobs it can change</div>
+		                                    <div style="font-weight: 600; margin: 12px 0 6px;">Multi-step tuning modes (what to enable)</div>
 		                                    <div class="training-help">
-		                                        A candidate is a full per-class recipe config (ordered steps + per-step knobs). Each mutation changes one thing at a time:
 		                                        <ul style="margin: 6px 0 0 18px;">
-		                                            <li><strong>Prompt subset:</strong> add / drop / swap a step’s prompt.</li>
-		                                            <li><strong>Per-step seed threshold:</strong> picks alternative operating points from the prompt’s seed-threshold curve.</li>
-		                                            <li><strong>Per-step expand threshold</strong> and <strong>per-step seeds/step</strong>.</li>
-		                                            <li><strong>Per-step de-dupe IoUs:</strong> seed de-dupe and output de-dupe.</li>
-		                                            <li><strong>Optional:</strong> step order (adjacent swaps) and per-step max dets/image.</li>
+			                                            <li><strong>Default (no extra tuning):</strong> seed curves → greedy prompt selection → full pipeline → CLIP thresholds tuned to match your cleanliness.</li>
+		                                            <li><strong>Refine prompt subset:</strong> quick “try a few swaps” pass (seed-stage only; no extra full SAM runs). Use when the chosen prompts look “obviously wrong”.</li>
+		                                            <li><strong>Tier‑1:</strong> small search over <code>expand_threshold</code> + <code>seeds/step</code> (shared across steps). Good first knob search if Global is off.</li>
+		                                            <li><strong>Tier‑2:</strong> small search over de‑dupe overlaps (IoU) (shared across steps). Helps duplicates / false positives.</li>
+		                                            <li><strong>Global optimizer (best quality):</strong> tries many full recipe variants and keeps the best (slowest, most thorough).</li>
 		                                        </ul>
-		                                        Each candidate is evaluated by running the <em>real</em> steps pipeline on a deterministic subset of validation images, then sweeping CLIP-head thresholds to hit your cleanliness target.
 		                                    </div>
 
-		                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer controls (what they mean)</div>
-		                                    <div class="training-help">
-		                                        <ul style="margin: 6px 0 0 18px;">
-		                                            <li><strong>Stage‑1/2/3 eval cap:</strong> how many validation images we use per stage (bigger = more reliable, slower). Stages are successive‑halving budgets.</li>
+			                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer: what knobs it can change</div>
+				                                    <div class="training-help">
+				                                        A <strong>trial</strong> is a full per-class recipe (ordered steps + per-step settings). We create new trials by making small changes to the current best:
+				                                        <ul style="margin: 6px 0 0 18px;">
+				                                            <li><strong>Prompt subset:</strong> add / drop / swap a step’s prompt.</li>
+			                                            <li><strong>Per-step seed threshold:</strong> how strict the text prompt must be before a box becomes a seed.</li>
+			                                            <li><strong>Per-step expand threshold</strong> and <strong>seeds per image</strong> (how many seeds we expand).</li>
+			                                            <li><strong>Per-step de-dupe overlap (IoU):</strong> seed de-dupe and output de-dupe.</li>
+			                                            <li><strong>Optional:</strong> step order and per-step max dets/image.</li>
+				                                        </ul>
+				                                        Each trial is scored by running the <em>real</em> steps pipeline on the same (repeatable) subset of validation images, then sweeping CLIP thresholds to match your cleanliness target.
+				                                    </div>
+
+			                                    <div style="font-weight: 600; margin: 12px 0 6px;">Breadth vs depth (simple mental model)</div>
+			                                    <div class="training-help">
+			                                        <ul style="margin: 6px 0 0 18px;">
+			                                            <li><strong>Breadth (“exploration”):</strong> try more recipe ideas. Increase when results feel “stuck”.</li>
+			                                            <li><strong>Depth (“reliability”):</strong> test each idea on more validation (test) images. Increase when results feel noisy or unstable.</li>
+			                                            <li><strong>Rule of thumb:</strong> if you raise breadth a lot, add some depth too.</li>
+			                                        </ul>
+			                                    </div>
+
+			                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer controls (what they mean)</div>
+			                                    <div class="training-help">
+			                                        <ul style="margin: 6px 0 0 18px;">
+		                                            <li><strong>Stage‑1/2/3 eval cap:</strong> how many validation images we use per stage (bigger = more reliable, slower). Stage‑1 ranks quickly; Stage‑2/3 re-test the best candidates.</li>
 		                                            <li><strong>Max trials:</strong> how many candidate recipe configs we consider per round (higher = more thorough, slower).</li>
 		                                            <li><strong>Keep ratio:</strong> how aggressively we prune candidates each stage (0.5 keeps the top half).</li>
-		                                            <li><strong>Rounds</strong> + <strong>Mutations/round:</strong> how long we keep exploring around the current best recipe.</li>
-		                                            <li><strong>Tune step order</strong> / <strong>Tune max dets/image:</strong> optional extra dimensions the optimizer is allowed to mutate.</li>
+		                                            <li><strong>Rounds</strong> + <strong>Variants per round:</strong> how long we keep exploring around the current best recipe.</li>
+		                                            <li><strong>Tune step order</strong> / <strong>Tune max dets/image:</strong> optional extra dimensions the optimizer is allowed to change.</li>
 		                                        </ul>
 		                                    </div>
 
@@ -1018,10 +1027,10 @@
 		                                        <ul style="margin: 6px 0 0 18px;">
 	                                            <li><strong>Cleaner / fewer FPs:</strong> raise “Recipe cleanliness”. Expect lower coverage.</li>
 	                                            <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Seed curve floor (lets per-step thresholds go below the base).</li>
-	                                            <li><strong>More thorough search:</strong> set “Search budget” to Balanced/Best and increase Max trials / Rounds / Mutations per round (slower).</li>
-	                                            <li><strong>Faster runs:</strong> use Test mode first; lower Stage‑3 eval cap; lower Max trials.</li>
-	                                        </ul>
-	                                    </div>
+	                                            <li><strong>More thorough search:</strong> set “Search budget” to Balanced/Best and increase Max trials / Rounds / Variants per round (slower).</li>
+		                                            <li><strong>Faster runs:</strong> use Test mode first; lower Stage‑3 eval cap; lower Max trials.</li>
+		                                        </ul>
+		                                    </div>
 
 	                                    <div style="margin-top: 12px; color: #64748b;">
 	                                        Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
@@ -1091,7 +1100,7 @@
 						                                    <div class="training-subsection__title">Search budget</div>
 						                                    <div class="training-grid" style="margin-top: 4px;">
 						                                        <div>
-						                                            <label for="agentStepsGlobalPreset">Global optimizer budget<span class="help-icon" title="Controls the Global optimizer budget.&#10;&#10;Off: no global optimizer (fastest).&#10;Fast/Balanced/Best: enables the global optimizer and sets reasonable defaults.&#10;Custom: keep your current numbers.&#10;&#10;How it works (successive halving): we start with N candidate recipes, test them quickly on a small number of images (Stage‑1), keep only the best fraction, then retest survivors on more images (Stage‑2/3) to pick a winner.">?</span></label>
+							                                            <label for="agentStepsGlobalPreset">Global optimizer preset<span class="help-icon" title="Sets a good starting point for the Global optimizer.&#10;&#10;Off: no global optimizer (fastest).&#10;Fast/Balanced/Best: enable the optimizer and set both:&#10;- Breadth (how many recipe ideas we try)&#10;- Depth (how carefully we score each idea)&#10;Custom: keep your current numbers.&#10;&#10;How it works (successive halving): start with many candidates → test quickly on Stage‑1 images → keep the best fraction → retest on Stage‑2/3 to pick a winner.">?</span></label>
 						                                            <select id="agentStepsGlobalPreset">
 						                                                <option value="off" selected>Off (fastest)</option>
 						                                                <option value="fast">Fast</option>
@@ -1099,9 +1108,9 @@
 						                                                <option value="best">Best (slowest)</option>
 						                                                <option value="custom">Custom</option>
 						                                            </select>
-						                                            <div class="training-help" style="margin-top: 6px; color: #64748b;">
-						                                                Global optimizer runs a small “tournament” (successive halving): try many candidates quickly → keep the best → retest on more images → repeat.
-						                                            </div>
+							                                            <div class="training-help" style="margin-top: 6px; color: #64748b;">
+							                                                Global optimizer runs a small “tournament” (successive halving). Use <strong>Breadth</strong> to explore more ideas and <strong>Depth</strong> to make comparisons more reliable.
+							                                            </div>
 						                                            <div class="training-help" style="margin-top: 6px; color: #64748b;">
 						                                                Tip: changing any advanced optimizer fields below will switch “Search budget” to Custom.
 						                                            </div>
@@ -1110,7 +1119,7 @@
 						                                    <div class="training-help" style="margin-top: 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
 						                                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
 						                                            <div style="font-weight: 700; color: #0f172a;">
-						                                                Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). This updates live as you change settings.&#10;&#10;What it tracks: validation images evaluated (Val split) × recipe steps × seeds/step, plus any extra from the Global optimizer (successive halving across Stages 1–3 for each mutation round).&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content, but this helps you see how cost grows when you increase steps, seeds/step, or pick Best.">?</span>
+							                                                Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). Updates live as you change settings.&#10;&#10;What it tracks: Val images × (steps × (1 + seeds/step)), plus extra work from the Global optimizer.&#10;&#10;Global optimizer cost grows with:&#10;- Breadth (trials, rounds, variants/round, max step changes)&#10;- Depth (stage eval caps, keep ratio)&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content. Use this to see how cost scales as you turn knobs.">?</span>
 						                                            </div>
 						                                            <span id="agentStepsBudgetBadge" class="badge">…</span>
 						                                        </div>
@@ -1119,66 +1128,81 @@
 						                                            <div id="agentStepsBudgetFill" class="training-progress-fill"></div>
 						                                        </div>
 						                                    </div>
-						                                    <div class="training-help" style="margin-top: 8px; color: #64748b;">
-						                                        Advanced (below): stage caps, trials, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
-						                                    </div>
+							                                    <div class="training-help" style="margin-top: 8px; color: #64748b;">
+							                                        Advanced (below): Global optimizer breadth/depth knobs, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
+							                                    </div>
 						                                </div>
-								                                <details class="training-help" style="margin-top: 10px;">
-								                                    <summary style="cursor: pointer;">Advanced optimization (click to expand)</summary>
-								                                    <div class="training-help" style="margin-top: 8px;">
-									                                        <div class="training-grid" style="margin-top: 10px;">
-									                                            <div>
-									                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
-						                                                <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
-					                                            </div>
-					                                            <div>
-					                                                <label for="agentStepsGlobalEvalCap2">Stage‑2 eval cap<span class="help-icon" title="How many validation images we use for the second stage.&#10;Typical: 100–500.">?</span></label>
-					                                                <input type="number" id="agentStepsGlobalEvalCap2" min="1" max="50000" value="200" />
-					                                            </div>
-					                                            <div>
-					                                                <label for="agentStepsGlobalEvalCap3">Stage‑3 eval cap<span class="help-icon" title="How many validation images we use for the final stage.&#10;Typical: 500–2000.&#10;If your val split is smaller, we automatically use the full val split.">?</span></label>
-					                                                <input type="number" id="agentStepsGlobalEvalCap3" min="1" max="50000" value="1000" />
-					                                            </div>
-					                                        </div>
-						                                        <div class="training-grid" style="margin-top: 10px;">
-						                                            <div>
-						                                                <label for="agentStepsGlobalMaxTrials">Max trials<span class="help-icon" title="Max candidate recipe configs evaluated per class (per stage).&#10;Higher = more thorough, slower.&#10;Typical: 16–64.">?</span></label>
-						                                                <input type="number" id="agentStepsGlobalMaxTrials" min="1" max="4096" value="36" />
+									                                <details class="training-help" style="margin-top: 10px;">
+									                                    <summary style="cursor: pointer;">Advanced optimization (click to expand)</summary>
+									                                    <div class="training-help" style="margin-top: 8px;">
+						                                        <div style="font-weight: 600; margin-top: 10px;">Global optimizer (successive halving)</div>
+						                                        <div class="training-help" style="margin-top: 6px; color: #475569;">
+						                                            Tune it with two levers:
+						                                            <strong>Breadth</strong> = try more recipe ideas • <strong>Depth</strong> = score each idea more carefully.
+						                                        </div>
+						                                        <div class="two-col-grid" style="margin-top: 10px;">
+						                                            <div class="training-subsection">
+						                                                <div class="training-subsection__title">Breadth (exploration)</div>
+						                                                <div class="training-help">Try more candidates. Helpful when results plateau or prompts look “obviously wrong”.</div>
+						                                                <div class="training-grid" style="margin-top: 8px;">
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalMaxTrials">Max trials<span class="help-icon" title="Breadth.&#10;How many candidate recipes we test in Stage‑1 (per class).&#10;Higher = explores more ideas (slower).&#10;Typical: 16–64.">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalMaxTrials" min="1" max="4096" value="36" />
+						                                                    </div>
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalRounds">Rounds<span class="help-icon" title="Breadth.&#10;How many times we repeat the tournament around the current best recipe.&#10;More rounds = more chances to improve (slower).&#10;Typical: 1–3.">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalRounds" min="1" max="20" value="2" />
+						                                                    </div>
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalMutationsPerRound">Variants per round<span class="help-icon" title="Breadth.&#10;How many new recipe variants we generate around the current best per round.&#10;Higher = explores more tweaks (slower).&#10;Typical: 12–40.">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalMutationsPerRound" min="1" max="10000" value="24" />
+						                                                    </div>
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalMaxStepsMutated">Max steps changed per variant<span class="help-icon" title="Breadth.&#10;How big each candidate change is allowed to be.&#10;1 = tiny, stable tweaks; 2–3 = coordinated changes (more powerful, less predictable).">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalMaxStepsMutated" min="1" max="10" value="2" />
+						                                                    </div>
+						                                                </div>
+						                                                <div class="training-help" style="margin-top: 10px;">
+						                                                    <div class="training-field training-field--inline">
+						                                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Breadth (optional). Allows the optimizer to swap step order. Usually small effect, but can matter when Max dets/image is small.">
+						                                                            <input type="checkbox" id="agentStepsGlobalEnableOrdering" />
+						                                                            Tune step order
+						                                                        </label>
+						                                                    </div>
+						                                                    <div class="training-field training-field--inline">
+						                                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Breadth (optional). Allows the optimizer to tune per-step Max dets/image. Can reduce false positives, but can also miss objects and change runtime.">
+						                                                            <input type="checkbox" id="agentStepsGlobalEnableMaxResults" />
+						                                                            Tune max dets/image
+						                                                        </label>
+						                                                    </div>
+						                                                </div>
 						                                            </div>
-					                                            <div>
-					                                                <label for="agentStepsGlobalKeepRatio">Keep ratio<span class="help-icon" title="Successive-halving prune ratio per stage.&#10;0.5 keeps the top half.&#10;Lower = more aggressive pruning (faster, riskier).">?</span></label>
-					                                                <input type="number" id="agentStepsGlobalKeepRatio" step="0.05" min="0.1" max="0.9" value="0.5" />
-					                                            </div>
-					                                            <div>
-					                                                <label for="agentStepsGlobalRounds">Rounds<span class="help-icon" title="How many mutation rounds to run.&#10;More rounds = more chances to improve, slower.&#10;Typical: 1–3.">?</span></label>
-					                                                <input type="number" id="agentStepsGlobalRounds" min="1" max="20" value="2" />
-					                                            </div>
-						                                            <div>
-						                                                <label for="agentStepsGlobalMutationsPerRound">Mutations/round<span class="help-icon" title="How many small candidate changes we generate around the current best recipe each round.&#10;Higher = more thorough, slower.&#10;Typical: 12–40.">?</span></label>
-						                                                <input type="number" id="agentStepsGlobalMutationsPerRound" min="1" max="10000" value="24" />
-						                                            </div>
-						                                            <div>
-						                                                <label for="agentStepsGlobalMaxStepsMutated">Max steps changed/mutation<span class="help-icon" title="How many recipe steps we are allowed to modify in a single optimizer mutation.&#10;Lower = smaller, safer tweaks (more stable).&#10;Higher = explores bigger changes per trial (can improve results, but less predictable).&#10;Typical: 1–3.">?</span></label>
-						                                                <input type="number" id="agentStepsGlobalMaxStepsMutated" min="1" max="10" value="2" />
+						                                            <div class="training-subsection">
+						                                                <div class="training-subsection__title">Depth (evaluation reliability)</div>
+						                                                <div class="training-help">Score candidates on more validation images and prune less aggressively.</div>
+						                                                <div class="training-grid" style="margin-top: 8px;">
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="Depth.&#10;How many validation images we use for the first (fast) ranking stage.&#10;Low = fast but noisy rankings.&#10;Typical: 25–100.">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
+						                                                    </div>
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalEvalCap2">Stage‑2 eval cap<span class="help-icon" title="Depth.&#10;How many validation images we use for the second stage.&#10;Higher = more reliable (slower).&#10;Typical: 100–500.">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalEvalCap2" min="1" max="50000" value="200" />
+						                                                    </div>
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalEvalCap3">Stage‑3 eval cap<span class="help-icon" title="Depth.&#10;How many validation images we use for the final stage.&#10;Typical: 500–2000.&#10;If your val split is smaller, we automatically use the full val split.">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalEvalCap3" min="1" max="50000" value="1000" />
+						                                                    </div>
+						                                                    <div>
+						                                                        <label for="agentStepsGlobalKeepRatio">Keep ratio<span class="help-icon" title="Depth.&#10;How many candidates survive each stage. 0.5 keeps the top half.&#10;Higher = safer (less likely to prune a good candidate early), slower.&#10;Lower = faster, riskier.">?</span></label>
+						                                                        <input type="number" id="agentStepsGlobalKeepRatio" step="0.05" min="0.1" max="0.9" value="0.5" />
+						                                                    </div>
+						                                                </div>
 						                                            </div>
 						                                        </div>
-					                                        <div class="training-grid" style="margin-top: 10px;">
-					                                            <div class="training-field training-field--inline">
-					                                                <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional. Step ordering usually has a minor effect, but can matter when Max dets/image is small.">
-					                                                    <input type="checkbox" id="agentStepsGlobalEnableOrdering" />
-					                                                    Tune step order
-					                                                </label>
-					                                            </div>
-					                                            <div class="training-field training-field--inline">
-					                                                <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional. Tune per-step max dets/image. This can reduce false positives, but can also miss objects and can change runtime.">
-					                                                    <input type="checkbox" id="agentStepsGlobalEnableMaxResults" />
-					                                                    Tune max dets/image
-					                                                </label>
-					                                            </div>
-					                                        </div>
-					                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
-						                                            Note: When “Search budget” is not Off, Tier‑1 and Tier‑2 toggles are ignored.
-					                                        </div>
+						                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
+							                                            Note: When “Search budget” is not Off, Tier‑1 and Tier‑2 toggles are ignored.
+						                                        </div>
 					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
 					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate settings to improve coverage at your cleanliness target.&#10;This tunes the recipe’s expand threshold + seeds per step.&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
 					                                            <input type="checkbox" id="agentStepsTier1Optimize" />

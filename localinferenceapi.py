@@ -4695,6 +4695,14 @@ def _persist_agent_recipe(
                     "min_prob": float(max(0.0, min(1.0, min_prob))),
                     "margin": float(max(0.0, min(1.0, margin))),
                 }
+                if clip_head_cfg_raw:
+                    if clip_head_cfg_raw.get("auto_tuned") is not None:
+                        clip_head_cfg_clean["auto_tuned"] = bool(clip_head_cfg_raw.get("auto_tuned"))
+                    if clip_head_cfg_raw.get("target_precision") is not None:
+                        try:
+                            clip_head_cfg_clean["target_precision"] = float(clip_head_cfg_raw.get("target_precision"))
+                        except Exception:
+                            pass
             try:
                 total = 0
                 if clip_dir.exists():
@@ -5805,6 +5813,38 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
                 solver_used = str(raw_solver).strip()
         except Exception:
             solver_used = None
+    # Back-compat: older classifier uploads may not have the .meta.pkl sidecar (which records clip_model).
+    # Infer clip backbone from embedding dim when possible, otherwise fall back to the active global CLIP model.
+    embedding_dim = 0
+    try:
+        embedding_dim = int(coef.shape[1]) if hasattr(coef, "shape") else 0
+    except Exception:
+        embedding_dim = 0
+    if not clip_model_used:
+        inferred: Optional[str] = None
+        if embedding_dim == 768:
+            inferred = "ViT-L/14"
+        elif embedding_dim == 512:
+            active = str(clip_model_name or "").strip() or DEFAULT_CLIP_MODEL
+            if active in {"ViT-B/32", "ViT-B/16"}:
+                inferred = active
+            else:
+                inferred = DEFAULT_CLIP_MODEL
+        if inferred:
+            clip_model_used = inferred
+    if clip_model_used:
+        try:
+            expected_dim = {"ViT-B/32": 512, "ViT-B/16": 512, "ViT-L/14": 768}.get(str(clip_model_used))
+            if expected_dim and embedding_dim and int(expected_dim) != int(embedding_dim):
+                logger.warning(
+                    "CLIP head %s embedding dim %s mismatches clip_model=%s (expected %s); head probabilities may be unavailable.",
+                    classifier_path.name,
+                    embedding_dim,
+                    clip_model_used,
+                    expected_dim,
+                )
+        except Exception:
+            pass
     multi_class_used = None
     try:
         raw_multi = getattr(clf_obj, "multi_class", None)
@@ -6023,11 +6063,35 @@ def _load_clip_head_artifacts(
     except Exception:
         margin_val = None
 
+    clip_model_val: Optional[str] = None
+    try:
+        raw = meta.get("clip_model")
+        if isinstance(raw, str) and raw.strip():
+            clip_model_val = raw.strip()
+    except Exception:
+        clip_model_val = None
+    if not clip_model_val and coef.ndim == 2:
+        inferred: Optional[str] = None
+        emb_dim = 0
+        try:
+            emb_dim = int(coef.shape[1])
+        except Exception:
+            emb_dim = 0
+        if emb_dim == 768:
+            inferred = "ViT-L/14"
+        elif emb_dim == 512:
+            active = str(clip_model_name or "").strip() or DEFAULT_CLIP_MODEL
+            if active in {"ViT-B/32", "ViT-B/16"}:
+                inferred = active
+            else:
+                inferred = DEFAULT_CLIP_MODEL
+        clip_model_val = inferred
+
     return {
         "classes": classes,
         "coef": coef,
         "intercept": intercept,
-        "clip_model": meta.get("clip_model"),
+        "clip_model": clip_model_val,
         "proba_mode": proba_mode,
         "min_prob": min_prob_val,
         "margin": margin_val,
@@ -6589,6 +6653,8 @@ def _apply_agent_recipe_to_image(
                 )
                 if head_keep is not None:
                     keep_mask &= head_keep
+            else:
+                _add_warning("clip_head_unavailable")
         dets_out = [d for d, ok in zip(det_refs, keep_mask.tolist()) if ok]
         if len(dets_out) < len(det_refs):
             _add_warning("clip_fp_filtered")
@@ -17477,13 +17543,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         f"seed min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
                     )
                 else:
-                    head_mode_bits = f"(fixed thresholds: min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
+                    head_mode_bits = (
+                        f"(fixed thresholds: min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
+                    )
             except Exception:
                 head_mode_bits = ""
+            clip_name = clip_head.get("clip_model") if isinstance(clip_head, dict) else None
+            clip_name_str = str(clip_name).strip() if isinstance(clip_name, str) and clip_name.strip() else "unknown"
             _log(
                 "Pretrained CLIP head enabled: "
                 f"{clip_head_path.name} "
-                f"(classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
+                f"(clip={clip_name_str}, classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
                 f"{head_mode_bits}"
             )
             _log("CLIP head mode: example crops / CLIP similarity / negative crops are ignored (head-only filtering).")

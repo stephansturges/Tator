@@ -1432,23 +1432,25 @@ const sam3TrainState = {
         results: null,
         message: null,
     };
-			    const agentElements = {
-			        datasetSelect: null,
-			        datasetRefresh: null,
-			        datasetSummary: null,
-		        valPercent: null,
-		        splitSeed: null,
+				    const agentElements = {
+				        datasetSelect: null,
+				        datasetRefresh: null,
+				        datasetSummary: null,
+			        valPercent: null,
+			        splitSeed: null,
 		        reuseSplit: null,
 		        reuseCache: null,
-		        workersPerGpu: null,
-		        maxWorkers: null,
-		        searchMode: null,
-			        stepsOptions: null,
-			        stepsMaxSteps: null,
-			        stepsMaxSeedsPerStep: null,
-			        stepsGlobalPreset: null,
-		        stepsBudgetBadge: null,
-		        stepsBudgetText: null,
+			        workersPerGpu: null,
+				        maxWorkers: null,
+				        searchMode: null,
+				        stepsOptions: null,
+				        howItWorksDetails: null,
+				        stepsAdvancedDetails: null,
+				        stepsMaxSteps: null,
+				        stepsMaxSeedsPerStep: null,
+				        stepsGlobalPreset: null,
+			        stepsBudgetBadge: null,
+			        stepsBudgetText: null,
 		        stepsBudgetFill: null,
 		        stepsGlobalEvalCap1: null,
 		        stepsGlobalEvalCap2: null,
@@ -13629,11 +13631,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	    }
 
-	    function applyAgentStepsGlobalPreset(presetRaw) {
-	        if (!agentElements.stepsGlobalPreset) return;
-	        const preset = String(presetRaw || "").trim().toLowerCase();
-	        const key = ["off", "fast", "balanced", "best", "custom"].includes(preset) ? preset : "off";
-	        agentStepsGlobalPresetLock = true;
+		    function applyAgentStepsGlobalPreset(presetRaw) {
+		        if (!agentElements.stepsGlobalPreset) return;
+		        const preset = String(presetRaw || "").trim().toLowerCase();
+		        const key = ["off", "fast", "balanced", "best", "custom"].includes(preset) ? preset : "off";
+		        agentStepsGlobalPresetLock = true;
 	        try {
 	            agentElements.stepsGlobalPreset.value = key;
 			            if (key === "fast") {
@@ -13664,11 +13666,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			                if (agentElements.stepsGlobalMutationsPerRound) agentElements.stepsGlobalMutationsPerRound.value = "40";
 			                if (agentElements.stepsGlobalMaxStepsMutated) agentElements.stepsGlobalMaxStepsMutated.value = "3";
 			            }
-		        } finally {
-		            agentStepsGlobalPresetLock = false;
-		        }
-		        updateAgentStepsComputeEstimate();
-		    }
+			        } finally {
+			            agentStepsGlobalPresetLock = false;
+			        }
+			        if (agentElements.stepsAdvancedDetails) {
+			            agentElements.stepsAdvancedDetails.open = key !== "off";
+			        }
+			        updateAgentStepsComputeEstimate();
+			    }
 
 		    function formatCompactCount(value) {
 		        if (!Number.isFinite(value)) {
@@ -14531,22 +14536,24 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        }
 	    }
 
-		    function initAgentMiningUi() {
-		        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
+			    function initAgentMiningUi() {
+			        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
 		        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
 		        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
 		        agentElements.valPercent = document.getElementById("agentValPercent");
 		        agentElements.splitSeed = document.getElementById("agentSplitSeed");
 		        agentElements.reuseSplit = document.getElementById("agentReuseSplit");
 		        agentElements.reuseCache = document.getElementById("agentReuseCache");
-		        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
-		        agentElements.maxWorkers = document.getElementById("agentMaxWorkers");
-		        agentElements.searchMode = document.getElementById("agentSearchMode");
-			        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
-			        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
-			        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
-			        agentElements.stepsGlobalPreset = document.getElementById("agentStepsGlobalPreset");
-			        agentElements.stepsBudgetBadge = document.getElementById("agentStepsBudgetBadge");
+			        agentElements.workersPerGpu = document.getElementById("agentWorkersPerGpu");
+			        agentElements.maxWorkers = document.getElementById("agentMaxWorkers");
+				        agentElements.searchMode = document.getElementById("agentSearchMode");
+				        agentElements.stepsOptions = document.getElementById("agentStepsOptions");
+				        agentElements.howItWorksDetails = document.getElementById("agentMiningHowItWorks");
+				        agentElements.stepsAdvancedDetails = document.getElementById("agentStepsAdvancedDetails");
+				        agentElements.stepsMaxSteps = document.getElementById("agentStepsMaxSteps");
+				        agentElements.stepsMaxSeedsPerStep = document.getElementById("agentStepsMaxSeedsPerStep");
+				        agentElements.stepsGlobalPreset = document.getElementById("agentStepsGlobalPreset");
+				        agentElements.stepsBudgetBadge = document.getElementById("agentStepsBudgetBadge");
 			        agentElements.stepsBudgetText = document.getElementById("agentStepsBudgetText");
 			        agentElements.stepsBudgetFill = document.getElementById("agentStepsBudgetFill");
 			        agentElements.stepsGlobalEvalCap1 = document.getElementById("agentStepsGlobalEvalCap1");
@@ -14688,13 +14695,36 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.clipHeadTargetPrecision) {
             agentElements.clipHeadTargetPrecision.addEventListener("input", syncPrecisionLabel);
         }
-        if (agentElements.clipHeadAllowLowPrecision) {
-            agentElements.clipHeadAllowLowPrecision.addEventListener("change", updatePrecisionTargetRange);
-        }
-        updatePrecisionTargetRange();
-	        applyAgentStepsGlobalPreset(getAgentStepsGlobalPreset());
-	        syncAgentClipHeadControls();
-	        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
+	        if (agentElements.clipHeadAllowLowPrecision) {
+	            agentElements.clipHeadAllowLowPrecision.addEventListener("change", updatePrecisionTargetRange);
+	        }
+	        updatePrecisionTargetRange();
+	        if (agentElements.howItWorksDetails) {
+	            const key = "tator.agentMining.howItWorksOpen";
+	            let open = null;
+	            try {
+	                const raw = window.localStorage ? window.localStorage.getItem(key) : null;
+	                if (raw === "1") open = true;
+	                if (raw === "0") open = false;
+	            } catch (_err) {
+	                open = null;
+	            }
+	            if (open === null) {
+	                open = true;
+	            }
+	            agentElements.howItWorksDetails.open = !!open;
+	            agentElements.howItWorksDetails.addEventListener("toggle", () => {
+	                try {
+	                    if (!window.localStorage) return;
+	                    window.localStorage.setItem(key, agentElements.howItWorksDetails.open ? "1" : "0");
+	                } catch (_err) {
+	                    // ignore
+	                }
+	            });
+	        }
+		        applyAgentStepsGlobalPreset(getAgentStepsGlobalPreset());
+		        syncAgentClipHeadControls();
+		        loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier load failed", err));
 			        const syncSearchModeUi = () => {
 			            const mode = agentElements.searchMode ? agentElements.searchMode.value : "steps";
 			            const isSteps = mode === "steps";

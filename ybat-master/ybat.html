@@ -922,9 +922,9 @@
 		                    <section class="training-form-section">
 		                        <h2>SAM3 Recipe Mining</h2>
 		                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
-	                        <details class="training-card" style="margin-bottom: 12px;">
-	                            <summary>How recipe mining works (click to expand)</summary>
-	                            <div class="training-card__body">
+		                        <details id="agentMiningHowItWorks" class="training-card" style="margin-bottom: 12px;">
+		                            <summary>How recipe mining works (click to expand)</summary>
+		                            <div class="training-card__body">
 	                                <div class="training-help">
 	                                    <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
 	                                </div>
@@ -1132,13 +1132,16 @@
 							                                        Advanced (below): Global optimizer breadth/depth knobs, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
 							                                    </div>
 						                                </div>
-									                                <details class="training-help" style="margin-top: 10px;">
-									                                    <summary style="cursor: pointer;">Advanced optimization (click to expand)</summary>
-									                                    <div class="training-help" style="margin-top: 8px;">
-						                                        <div style="font-weight: 600; margin-top: 10px;">Global optimizer (successive halving)</div>
-						                                        <div class="training-help" style="margin-top: 6px; color: #475569;">
-						                                            Tune it with two levers:
-						                                            <strong>Breadth</strong> = try more recipe ideas • <strong>Depth</strong> = score each idea more carefully.
+										                                <details id="agentStepsAdvancedDetails" class="training-card" style="margin-top: 12px;">
+										                                    <summary>Advanced optimization (click to expand)</summary>
+										                                    <div class="training-card__body">
+										                                        <div class="training-help" style="color: #475569; margin-bottom: 10px;">
+										                                            Optional knobs for Global optimizer breadth/depth, Tier‑1/Tier‑2 tuning, prompt subset refinement, and seed-curve floors.
+										                                        </div>
+							                                        <div style="font-weight: 600; margin-top: 10px;">Global optimizer (successive halving)</div>
+							                                        <div class="training-help" style="margin-top: 6px; color: #475569;">
+							                                            Tune it with two levers:
+							                                            <strong>Breadth</strong> = try more recipe ideas • <strong>Depth</strong> = score each idea more carefully.
 						                                        </div>
 						                                        <div class="two-col-grid" style="margin-top: 10px;">
 						                                            <div class="training-subsection">
@@ -1270,8 +1273,8 @@
 					                                                </div>
 					                                            </div>
 					                                        </div>
-					                                    </div>
-					                                </details>
+						                                    </div>
+						                                </details>
 					                            </div>
 					                        </div>
 						                        <div class="training-grid">

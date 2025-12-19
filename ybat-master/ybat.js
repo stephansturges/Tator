@@ -12943,16 +12943,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            body.innerHTML = `<div class="training-help">GT train/val: ${cls.train_gt || 0}/${cls.val_gt || 0}</div>`;
 
 		            const configBits = [];
-	            if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
-	                configBits.push(`CLIP filter on (sim ≥ ${params.similarity_score ?? 0.25})`);
-	            } else {
-	                configBits.push("CLIP filter off");
-	            }
-	            if (params.use_negative_exemplars || recipe.use_negative_exemplars) {
-	                configBits.push(`negatives=${negatives.length || 0} (λ ${params.negative_strength ?? 0})`);
-	            } else if (negatives.length) {
-	                configBits.push(`negatives=${negatives.length || 0} (disabled)`);
-	            }
+		            const hasClipHead = !!recipe.clip_head;
+		            if (hasClipHead) {
+		                configBits.push("Crop-bank CLIP filter: ignored");
+		            } else if (params.use_clip_fp_guard || recipe.use_clip_fp_guard) {
+		                configBits.push(`Crop-bank CLIP filter on (sim ≥ ${params.similarity_score ?? 0.25})`);
+		            } else {
+		                configBits.push("Crop-bank CLIP filter off");
+		            }
+		            if (params.use_negative_exemplars || recipe.use_negative_exemplars) {
+		                configBits.push(`negatives=${negatives.length || 0} (λ ${params.negative_strength ?? 0})`);
+		            } else if (negatives.length) {
+		                configBits.push(`negatives=${negatives.length || 0} (disabled)`);
+		            }
 		            if (recipe.clip_head) {
 		                const head = recipe.clip_head || {};
 		                const headClasses = Array.isArray(head.classes) ? head.classes : [];
@@ -12983,25 +12986,25 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		            if (configBits.length) {
 		                const meta = document.createElement("div");
 		                meta.className = "training-help";
-		                let promptBits = `Prompts: ${prompts.length}`;
-		                if (isStepRecipeV2) {
-		                    const uniq = new Set();
-		                    steps.forEach((step) => {
-		                        if (!step || typeof step !== "object") return;
+			                let promptBits = `Prompts: ${prompts.length}`;
+			                if (isStepRecipeV2) {
+			                    const uniq = new Set();
+			                    steps.forEach((step) => {
+			                        if (!step || typeof step !== "object") return;
 		                        const p = typeof step.prompt === "string" ? step.prompt.trim() : "";
 		                        if (p) uniq.add(p.toLowerCase());
 		                        if (Array.isArray(step.prompts)) {
 		                            step.prompts.forEach((raw) => {
 		                                const s = typeof raw === "string" ? raw.trim() : "";
-		                                if (s) uniq.add(s.toLowerCase());
-		                            });
-		                        }
-		                    });
-		                    promptBits = `Steps: ${steps.length} • Prompts: ${uniq.size}`;
-		                }
-		                meta.textContent = `${promptBits} • +crops: ${positives.length} • -crops: ${negatives.length} • ${configBits.join(" • ")}`;
-		                body.appendChild(meta);
-		            }
+			                                if (s) uniq.add(s.toLowerCase());
+			                            });
+			                        }
+			                    });
+			                    promptBits = `Steps: ${steps.length} • Step prompts: ${uniq.size} • Prompt pool: ${prompts.length}`;
+			                }
+			                meta.textContent = `${promptBits} • +crops: ${positives.length} • -crops: ${negatives.length} • ${configBits.join(" • ")}`;
+			                body.appendChild(meta);
+			            }
 
 	            if (isStepRecipeV2) {
 	                const headMinProb =
@@ -13022,10 +13025,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    Number.isFinite(headMargin) ||
 	                    typeof meetsTarget === "boolean";
 
-	                if (hasCleanlinessInfo) {
-	                    const block = document.createElement("div");
-	                    block.className = "training-subsection";
-	                    const title = document.createElement("div");
+		                if (hasCleanlinessInfo) {
+		                    const block = document.createElement("div");
+		                    block.className = "training-subsection";
+		                    const title = document.createElement("div");
 	                    title.className = "training-subsection__title";
 	                    title.textContent = "Cleanliness tuning";
 	                    block.appendChild(title);
@@ -13043,11 +13046,42 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                        if (headBits.length) bits.push(`CLIP head: ${headBits.join(" ")}`);
 	                    }
 	                    const line = document.createElement("div");
-	                    line.className = "training-help";
-	                    line.textContent = bits.join(" • ");
-	                    block.appendChild(line);
-	                    body.appendChild(block);
-	                }
+		                    line.className = "training-help";
+		                    line.textContent = bits.join(" • ");
+		                    block.appendChild(line);
+		                    if (meetsTarget === false) {
+		                        const hint = document.createElement("div");
+		                        hint.className = "training-help";
+		                        hint.textContent =
+		                            "Tip: if this misses, enable Tier‑1 or the Global optimizer to tune the step knobs (expand + seeds/step + IoUs); CLIP thresholds alone may not remove FPs introduced by visual expansion.";
+		                        block.appendChild(hint);
+		                    }
+		                    const debugObj = summary.debug && typeof summary.debug === "object" ? summary.debug : null;
+		                    if (meetsTarget === false && debugObj) {
+		                        const debugDetails = document.createElement("details");
+		                        debugDetails.className = "training-help";
+		                        debugDetails.open = false;
+		                        const debugSummary = document.createElement("summary");
+		                        debugSummary.textContent = "Debug";
+		                        debugSummary.style.cursor = "pointer";
+		                        debugDetails.appendChild(debugSummary);
+		                        const debugBits = [];
+		                        const baseDets = Number.isFinite(debugObj.base_dets) ? Number(debugObj.base_dets) : null;
+		                        const withProb = Number.isFinite(debugObj.with_prob) ? Number(debugObj.with_prob) : null;
+		                        const probMin = Number.isFinite(debugObj.prob_min) ? Number(debugObj.prob_min) : null;
+		                        const probMax = Number.isFinite(debugObj.prob_max) ? Number(debugObj.prob_max) : null;
+		                        if (baseDets !== null && withProb !== null) debugBits.push(`Head probs: ${withProb}/${baseDets}`);
+		                        if (probMin !== null && probMax !== null) {
+		                            debugBits.push(`prob range: ${probMin.toFixed(6)}..${probMax.toFixed(6)}`);
+		                        }
+		                        const debugLine = document.createElement("div");
+		                        debugLine.className = "training-help";
+		                        debugLine.textContent = debugBits.join(" • ") || "No debug stats.";
+		                        debugDetails.appendChild(debugLine);
+		                        block.appendChild(debugDetails);
+		                    }
+		                    body.appendChild(block);
+		                }
 
 	                const globalOpt =
 	                    summary.global_optimizer && typeof summary.global_optimizer === "object" ? summary.global_optimizer : null;
@@ -13170,14 +13204,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    body.appendChild(block);
 	                }
 
-	                const seedStats = Array.isArray(summary.seed_prompt_stats) ? summary.seed_prompt_stats : [];
-	                if (seedStats.length) {
-	                    const block = document.createElement("div");
-	                    block.className = "training-subsection";
-	                    const title = document.createElement("div");
-	                    title.className = "training-subsection__title";
-	                    title.textContent = `Seed prompt stats (${seedStats.length})`;
-	                    block.appendChild(title);
+		                const seedStats = Array.isArray(summary.seed_prompt_stats) ? summary.seed_prompt_stats : [];
+		                if (seedStats.length) {
+		                    const block = document.createElement("div");
+		                    block.className = "training-subsection";
+		                    const title = document.createElement("div");
+		                    title.className = "training-subsection__title";
+		                    title.textContent = `Seed prompt stats (selected steps) (${seedStats.length})`;
+		                    block.appendChild(title);
 
 	                    const table = document.createElement("table");
 	                    table.className = "training-table";
@@ -13211,13 +13245,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                }
 	            }
 
-	            if (prompts.length) {
-	                const block = document.createElement("div");
-	                block.className = "training-subsection";
-	                const title = document.createElement("div");
-	                title.className = "training-subsection__title";
-	                title.textContent = `Selected text prompts (${prompts.length})`;
-	                block.appendChild(title);
+		            if (prompts.length) {
+		                const block = document.createElement("div");
+		                block.className = "training-subsection";
+		                const title = document.createElement("div");
+		                title.className = "training-subsection__title";
+		                title.textContent = `Prompt pool (${prompts.length})`;
+		                block.appendChild(title);
+		                if (isStepRecipeV2) {
+		                    const help = document.createElement("div");
+		                    help.className = "training-help";
+		                    help.textContent =
+		                        "These are the prompts considered during mining. The optimizer chooses a smaller subset to use as recipe steps.";
+		                    block.appendChild(help);
+		                }
 
 	                const table = document.createElement("table");
 	                table.className = "training-table";
@@ -13284,21 +13325,36 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                body.appendChild(table);
 		            }
 
-		            if (isStepRecipeV2 && steps.length) {
-		                const block = document.createElement("div");
-		                block.className = "training-subsection";
-		                const title = document.createElement("div");
-		                title.className = "training-subsection__title";
-		                title.textContent = `Recipe steps (${steps.length})`;
-		                block.appendChild(title);
+			            if (isStepRecipeV2 && steps.length) {
+			                const block = document.createElement("div");
+			                block.className = "training-subsection";
+			                const title = document.createElement("div");
+			                title.className = "training-subsection__title";
+			                title.textContent = `Recipe steps (${steps.length})`;
+			                block.appendChild(title);
+			                const help = document.createElement("div");
+			                help.className = "training-help";
+			                help.textContent =
+			                    "Each step runs: text seeds → pick diverse seeds → SAM3 visual expansion → de-dupe. CLIP-head cleanliness thresholds (above) are applied after steps and during final merge.";
+			                block.appendChild(help);
 
-		                const table = document.createElement("table");
-		                table.className = "training-table";
-		                table.innerHTML = `
-		                    <thead>
-		                        <tr><th>#</th><th>Prompt(s)</th><th>Seed thr</th><th>Expand thr</th><th>Seeds</th><th>Seed IoU</th><th>Out IoU</th><th>Seed CLIP</th><th>Final CLIP</th></tr>
-		                    </thead>
-		                `;
+			                const table = document.createElement("table");
+			                table.className = "training-table";
+			                table.innerHTML = `
+			                    <thead>
+			                        <tr>
+			                            <th>#</th>
+			                            <th title="Text prompt(s) used for the seed (text) stage.">Prompt(s)</th>
+			                            <th title="Minimum SAM3 text score for a seed box. Higher = fewer seeds, typically cleaner but can miss objects.">Seed thr</th>
+			                            <th title="SAM3 visual expansion threshold (similarity prompt). Higher = stricter expansion, fewer boxes.">Expand thr</th>
+			                            <th title="Max number of seed boxes per image used for visual expansion (picked to be diverse). 0 disables visual expansion.">Seeds</th>
+			                            <th title="Seed de-dupe IoU (remove near-duplicate seed boxes).">Seed IoU</th>
+			                            <th title="Output de-dupe IoU (remove near-duplicate final boxes).">Out IoU</th>
+			                            <th title="Optional per-step CLIP gating during seed selection (advanced). Empty means no extra gate.">Seed CLIP</th>
+			                            <th title="Optional per-step extra CLIP gating after expansion (advanced). Empty means only the recipe’s baked-in CLIP-head cleanliness filter applies.">Final CLIP</th>
+			                        </tr>
+			                    </thead>
+			                `;
 		                const tbody = document.createElement("tbody");
 
 		                function formatClipCfg(cfg) {

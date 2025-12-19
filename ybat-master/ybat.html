@@ -922,19 +922,20 @@
 	                    <section class="training-form-section">
 	                        <h2>SAM3 Recipe Mining</h2>
 	                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
-	                        <div class="training-message info" style="margin-bottom: 12px;">
-	                            <div style="font-weight: 600; margin-bottom: 6px;">How recipe mining works (read this first)</div>
-	                            <div class="training-help">
-	                                <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
-	                            </div>
-	                            <details class="training-help" open style="margin-top: 8px;">
-	                                <summary style="cursor: pointer; font-weight: 600;">Full flow + how to tune it</summary>
-	                                <div class="training-help" style="margin-top: 10px;">
+	                        <details class="training-card" style="margin-bottom: 12px;">
+	                            <summary>How recipe mining works (click to expand)</summary>
+	                            <div class="training-card__body">
+	                                <div class="training-help">
+	                                    <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
+	                                </div>
+	                                <details class="training-help" open style="margin-top: 10px;">
+	                                    <summary style="cursor: pointer; font-weight: 600;">Full flow + how to tune it</summary>
+	                                    <div class="training-help" style="margin-top: 10px;">
 	                                    <div style="font-weight: 600; margin-bottom: 6px;">High-level flow</div>
 	                                    <pre class="training-help" style="white-space: pre; overflow-x: auto; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">Dataset (YOLO/COCO) + trained CLIP head
-        │
-        ├─ Split images (Train/Val)  [repeatable by seed]
-        │
+	        │
+	        ├─ Split images (Train/Val)  [repeatable by seed]
+	        │
         ├─ Build prompt list per class
         │    - class name + your extra prompts
         │    - optional GPT prompt expansion
@@ -958,9 +959,13 @@
         │    - crop each detection and score with the pretrained CLIP head
         │    - auto-tune min prob + (optional) margin to hit your “cleanliness” target
         │
-        └─ Save portable recipe zip
-             - recipe.json (schema v2, multi-step)
-             - clip_head/head.npz + meta.json (embedded head + tuned thresholds)</pre>
+	        └─ Save portable recipe zip
+	             - recipe.json (schema v2, multi-step)
+	             - clip_head/head.npz + meta.json (embedded head + tuned thresholds)</pre>
+	
+	                                    <div class="training-help" style="margin-top: 10px;">
+	                                        <strong>Why recipes may look “text-only”:</strong> in schema‑v2, the “similarity prompt” is SAM3’s <em>visual</em> stage (seed boxes → expand similar masks/boxes). The recipe stores the <em>text</em> prompts + thresholds; it does <em>not</em> need a fixed crop-bank of exemplars because seeds are chosen per image at inference time.
+	                                    </div>
 
 	                                    <div style="font-weight: 600; margin: 12px 0 6px;">What we optimize for (“cleanliness”)</div>
 	                                    <div class="training-help">
@@ -1021,9 +1026,10 @@
 	                                    <div style="margin-top: 12px; color: #64748b;">
 	                                        Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
 	                                    </div>
-	                                </div>
-	                            </details>
-	                        </div>
+		                                </div>
+		                            </details>
+		                            </div>
+		                        </details>
 	                        <div class="training-field">
 	                            <label>Dataset</label>
 	                            <div class="sam3-dataset-row">

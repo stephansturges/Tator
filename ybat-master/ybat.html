@@ -1066,56 +1066,62 @@
 					                                </select>
 					                            </div>
 					                        </div>
-					                        <div id="agentStepsOptions" class="training-card" style="display: none; margin-bottom: 12px;">
-					                            <div class="training-card__body">
-						                                <div class="training-message info" style="margin-bottom: 10px;">Multi-step mode builds a recipe as a chain of prompt steps (usually one per prompt), runs the full step pipeline (seed → expand → de-dupe), then tunes CLIP head thresholds to hit your cleanliness target. For best quality, set “Search budget” to Balanced/Best below. <em>(screenshot coming)</em></div>
-					                                <div class="training-grid">
-					                                    <div>
-					                                        <label for="agentStepsMaxSteps">Max recipe steps<span class="help-icon" title="How many prompt steps we are allowed to select for a class.&#10;More steps can increase coverage but costs more compute and can add false positives.&#10;A good starting point is 4–8.">?</span></label>
-					                                        <input type="number" id="agentStepsMaxSteps" min="1" max="50" value="6" />
+						                        <div id="agentStepsOptions" class="training-card" style="display: none; margin-bottom: 12px;">
+						                            <div class="training-card__body">
+							                                <div class="training-help" style="margin-bottom: 10px; color: #475569;">Need a refresher? Open <strong>How recipe mining works</strong> above.</div>
+						                                <div class="training-grid">
+						                                    <div>
+						                                        <label for="agentStepsMaxSteps">Max recipe steps<span class="help-icon" title="How many prompt steps we are allowed to select for a class.&#10;More steps can increase coverage but costs more compute and can add false positives.&#10;A good starting point is 4–8.">?</span></label>
+						                                        <input type="number" id="agentStepsMaxSteps" min="1" max="50" value="6" />
 					                                    </div>
 					                                    <div>
 					                                        <label for="agentStepsMaxSeedsPerStep">Visual seeds per step<span class="help-icon" title="Per step and per image, how many seed detections we expand with SAM3 visual prompting.&#10;Higher can improve coverage on diverse objects, but is slower.&#10;Typical: 3–8.">?</span></label>
-					                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="5" />
-					                                    </div>
-					                                </div>
-							                                <details class="training-help" style="margin-top: 10px;">
-							                                    <summary style="cursor: pointer;">Advanced optimization</summary>
-							                                    <div class="training-help" style="margin-top: 8px;">
-							                                        <div class="training-grid" style="margin-top: 4px;">
-							                                            <div>
-							                                                <label for="agentStepsGlobalPreset">Search budget<span class="help-icon" title="Controls the Global optimizer budget.&#10;&#10;Off: no global optimizer (fastest).&#10;Fast/Balanced/Best: enables the global optimizer and sets reasonable defaults.&#10;Custom: keep your current numbers.&#10;&#10;How it works (successive halving): we start with N candidate recipes, test them quickly on a small number of images (Stage‑1), keep only the best fraction, then retest survivors on more images (Stage‑2/3) to pick a winner.">?</span></label>
-							                                                <select id="agentStepsGlobalPreset">
-							                                                    <option value="off" selected>Off (fastest)</option>
-							                                                    <option value="fast">Fast</option>
-							                                                    <option value="balanced">Balanced (recommended)</option>
-							                                                    <option value="best">Best (slowest)</option>
-							                                                    <option value="custom">Custom</option>
-							                                                </select>
-							                                                <div class="training-help" style="margin-top: 6px; color: #64748b;">
-							                                                    Global optimizer runs a small “tournament” (successive halving): try many candidates quickly → keep the best → retest on more images → repeat.
-							                                                </div>
-								                                                <div class="training-help" style="margin-top: 6px; color: #64748b;">
-								                                                    Tip: changing any global optimizer fields below will switch “Search budget” to Custom.
-								                                                </div>
-								                                                <div class="training-help" style="margin-top: 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
-								                                                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
-								                                                        <div style="font-weight: 700; color: #0f172a;">
-								                                                            Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). This updates live as you change settings.&#10;&#10;What it tracks: validation images evaluated (Val split) × recipe steps × seeds/step, plus any extra from the Global optimizer (successive halving across Stages 1–3 for each mutation round).&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content, but this helps you see how cost grows when you increase steps, seeds/step, or pick Best.">?</span>
-								                                                        </div>
-								                                                        <span id="agentStepsBudgetBadge" class="badge">…</span>
-								                                                    </div>
-								                                                    <div id="agentStepsBudgetText" class="training-help" style="margin-top: 6px; color: #475569; white-space: pre-wrap;">…</div>
-								                                                    <div class="training-progress" style="margin-top: 8px;">
-								                                                        <div id="agentStepsBudgetFill" class="training-progress-fill"></div>
-								                                                    </div>
-								                                                </div>
-								                                            </div>
-								                                        </div>
-								                                        <div class="training-grid" style="margin-top: 10px;">
-								                                            <div>
-								                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
-					                                                <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
+						                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="5" />
+						                                    </div>
+						                                </div>
+						                                <div class="training-subsection" style="margin-top: 10px;">
+						                                    <div class="training-subsection__title">Search budget</div>
+						                                    <div class="training-grid" style="margin-top: 4px;">
+						                                        <div>
+						                                            <label for="agentStepsGlobalPreset">Global optimizer budget<span class="help-icon" title="Controls the Global optimizer budget.&#10;&#10;Off: no global optimizer (fastest).&#10;Fast/Balanced/Best: enables the global optimizer and sets reasonable defaults.&#10;Custom: keep your current numbers.&#10;&#10;How it works (successive halving): we start with N candidate recipes, test them quickly on a small number of images (Stage‑1), keep only the best fraction, then retest survivors on more images (Stage‑2/3) to pick a winner.">?</span></label>
+						                                            <select id="agentStepsGlobalPreset">
+						                                                <option value="off" selected>Off (fastest)</option>
+						                                                <option value="fast">Fast</option>
+						                                                <option value="balanced">Balanced (recommended)</option>
+						                                                <option value="best">Best (slowest)</option>
+						                                                <option value="custom">Custom</option>
+						                                            </select>
+						                                            <div class="training-help" style="margin-top: 6px; color: #64748b;">
+						                                                Global optimizer runs a small “tournament” (successive halving): try many candidates quickly → keep the best → retest on more images → repeat.
+						                                            </div>
+						                                            <div class="training-help" style="margin-top: 6px; color: #64748b;">
+						                                                Tip: changing any advanced optimizer fields below will switch “Search budget” to Custom.
+						                                            </div>
+						                                        </div>
+						                                    </div>
+						                                    <div class="training-help" style="margin-top: 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
+						                                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+						                                            <div style="font-weight: 700; color: #0f172a;">
+						                                                Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). This updates live as you change settings.&#10;&#10;What it tracks: validation images evaluated (Val split) × recipe steps × seeds/step, plus any extra from the Global optimizer (successive halving across Stages 1–3 for each mutation round).&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content, but this helps you see how cost grows when you increase steps, seeds/step, or pick Best.">?</span>
+						                                            </div>
+						                                            <span id="agentStepsBudgetBadge" class="badge">…</span>
+						                                        </div>
+						                                        <div id="agentStepsBudgetText" class="training-help" style="margin-top: 6px; color: #475569; white-space: pre-wrap;">…</div>
+						                                        <div class="training-progress" style="margin-top: 8px;">
+						                                            <div id="agentStepsBudgetFill" class="training-progress-fill"></div>
+						                                        </div>
+						                                    </div>
+						                                    <div class="training-help" style="margin-top: 8px; color: #64748b;">
+						                                        Advanced (below): stage caps, trials, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
+						                                    </div>
+						                                </div>
+								                                <details class="training-help" style="margin-top: 10px;">
+								                                    <summary style="cursor: pointer;">Advanced optimization (click to expand)</summary>
+								                                    <div class="training-help" style="margin-top: 8px;">
+									                                        <div class="training-grid" style="margin-top: 10px;">
+									                                            <div>
+									                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
+						                                                <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
 					                                            </div>
 					                                            <div>
 					                                                <label for="agentStepsGlobalEvalCap2">Stage‑2 eval cap<span class="help-icon" title="How many validation images we use for the second stage.&#10;Typical: 100–500.">?</span></label>
@@ -1268,10 +1274,10 @@
 			                                <label for="agentExpandThreshold">Expand threshold<span class="help-icon" title="Second pass (optional): after choosing seed boxes, we run a refine/expand pass from those boxes.&#10;This threshold controls how strict that refine pass is.&#10;Higher = fewer but cleaner results.">?</span></label>
 			                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.3" />
 			                            </div>
-			                            <div>
-			                                <label for="agentMaxVisualSeeds">Max visual seeds<span class="help-icon" title="How many seed boxes per image we select for the refine/expand pass.&#10;0 = skip refine/expand (only use seed text detections).&#10;Higher = more compute; can increase coverage on hard objects.">?</span></label>
-			                                <input type="number" id="agentMaxVisualSeeds" min="0" value="25" />
-			                            </div>
+				                            <div id="agentMaxVisualSeedsField">
+				                                <label for="agentMaxVisualSeeds">Max visual seeds<span class="help-icon" title="How many seed boxes per image we select for the refine/expand pass.&#10;0 = skip refine/expand (only use seed text detections).&#10;Higher = more compute; can increase coverage on hard objects.">?</span></label>
+				                                <input type="number" id="agentMaxVisualSeeds" min="0" value="25" />
+				                            </div>
 			                            <div>
 			                                <label for="agentSeedDedupeIou">Seed de-dupe overlap (IoU)<span class="help-icon" title="After the seed text pass, we remove near-duplicate seed boxes.&#10;If two seed boxes overlap more than this IoU, we keep one.&#10;Higher (e.g., 0.9) only removes almost-identical boxes.&#10;Lower removes more overlaps (can collapse crowded scenes).">?</span></label>
 			                                <input type="number" id="agentSeedDedupeIou" step="0.05" min="0" max="1" value="0.9" />
@@ -1280,10 +1286,10 @@
 			                                <label for="agentDedupeIou">Output de-dupe overlap (IoU)<span class="help-icon" title="Final de-duplication across all detections the recipe outputs.&#10;If two output boxes overlap more than this IoU, we keep the best one.&#10;Lower = more aggressive de-dup (fewer duplicates; may drop close objects).&#10;Higher = allows more overlaps (risk duplicate labels).">?</span></label>
 			                                <input type="number" id="agentDedupeIou" step="0.05" min="0" max="1" value="0.5" />
 			                            </div>
-			                            <div>
-			                                <label for="agentSimilarityScore">Image similarity filter (CLIP)<span class="help-icon" title="Crop-bank mode only.&#10;For each candidate box, we crop the image and compare it to saved example crops using CLIP.&#10;We keep boxes with similarity ≥ this number.&#10;Higher = stricter (fewer false positives, can miss true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-			                                <input type="number" id="agentSimilarityScore" step="0.01" min="0" max="1" value="0.25" />
-			                            </div>
+				                            <div id="agentSimilarityScoreField">
+				                                <label for="agentSimilarityScore">Image similarity filter (CLIP)<span class="help-icon" title="Crop-bank mode only.&#10;For each candidate box, we crop the image and compare it to saved example crops using CLIP.&#10;We keep boxes with similarity ≥ this number.&#10;Higher = stricter (fewer false positives, can miss true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
+				                                <input type="number" id="agentSimilarityScore" step="0.01" min="0" max="1" value="0.25" />
+				                            </div>
 			                        </div>
 			                        <div class="training-grid">
 			                            <div>

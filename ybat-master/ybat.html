@@ -1013,7 +1013,7 @@
 		                                        <ul style="margin: 6px 0 0 18px;">
 	                                            <li><strong>Cleaner / fewer FPs:</strong> raise “Recipe cleanliness”. Expect lower coverage.</li>
 	                                            <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Seed curve floor (lets per-step thresholds go below the base).</li>
-	                                            <li><strong>More thorough search:</strong> enable Global optimization and increase Max trials / Rounds / Mutations per round (slower).</li>
+	                                            <li><strong>More thorough search:</strong> set “Search budget” to Balanced/Best and increase Max trials / Rounds / Mutations per round (slower).</li>
 	                                            <li><strong>Faster runs:</strong> use Test mode first; lower Stage‑3 eval cap; lower Max trials.</li>
 	                                        </ul>
 	                                    </div>
@@ -1062,7 +1062,7 @@
 					                        </div>
 					                        <div id="agentStepsOptions" class="training-card" style="display: none; margin-bottom: 12px;">
 					                            <div class="training-card__body">
-					                                <div class="training-message info" style="margin-bottom: 10px;">Multi-step mode builds a recipe as a chain of prompt steps (usually one per prompt), runs the full step pipeline (seed → expand → de-dupe), then tunes CLIP head thresholds to hit your cleanliness target. For best quality, enable Global optimization below. <em>(screenshot coming)</em></div>
+						                                <div class="training-message info" style="margin-bottom: 10px;">Multi-step mode builds a recipe as a chain of prompt steps (usually one per prompt), runs the full step pipeline (seed → expand → de-dupe), then tunes CLIP head thresholds to hit your cleanliness target. For best quality, set “Search budget” to Balanced/Best below. <em>(screenshot coming)</em></div>
 					                                <div class="training-grid">
 					                                    <div>
 					                                        <label for="agentStepsMaxSteps">Max recipe steps<span class="help-icon" title="How many prompt steps we are allowed to select for a class.&#10;More steps can increase coverage but costs more compute and can add false positives.&#10;A good starting point is 4–8.">?</span></label>
@@ -1073,16 +1073,30 @@
 					                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="5" />
 					                                    </div>
 					                                </div>
-					                                <details class="training-help" style="margin-top: 10px;">
-					                                    <summary style="cursor: pointer;">Advanced optimization</summary>
-					                                    <div class="training-help" style="margin-top: 8px;">
-					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;Enable a budgeted global optimizer that jointly searches the full recipe configuration (prompt subset + per-step knobs).&#10;&#10;Objective: maximize coverage while meeting your Recipe cleanliness (precision target). If the target cannot be met, it maximizes precision first.&#10;&#10;How it works: successive halving (multi-stage budgets). Each candidate runs the real steps pipeline, then we sweep CLIP-head thresholds to meet cleanliness.&#10;&#10;Runtime: roughly scales with (trials × sum(stage caps) × rounds).&#10;Requires a pretrained CLIP head.&#10;Tip: use Test mode first.">
-					                                            <input type="checkbox" id="agentStepsGlobalOptimize" />
-					                                            Global optimization (slow, best quality)
-					                                        </label>
-					                                        <div class="training-grid" style="margin-top: 10px;">
-					                                            <div>
-					                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
+							                                <details class="training-help" style="margin-top: 10px;">
+							                                    <summary style="cursor: pointer;">Advanced optimization</summary>
+							                                    <div class="training-help" style="margin-top: 8px;">
+							                                        <div class="training-grid" style="margin-top: 4px;">
+							                                            <div>
+							                                                <label for="agentStepsGlobalPreset">Search budget<span class="help-icon" title="Controls the Global optimizer budget.&#10;&#10;Off: no global optimizer (fastest).&#10;Fast/Balanced/Best: enables the global optimizer and sets reasonable defaults.&#10;Custom: keep your current numbers.&#10;&#10;How it works (successive halving): we start with N candidate recipes, test them quickly on a small number of images (Stage‑1), keep only the best fraction, then retest survivors on more images (Stage‑2/3) to pick a winner.">?</span></label>
+							                                                <select id="agentStepsGlobalPreset">
+							                                                    <option value="off" selected>Off (fastest)</option>
+							                                                    <option value="fast">Fast</option>
+							                                                    <option value="balanced">Balanced (recommended)</option>
+							                                                    <option value="best">Best (slowest)</option>
+							                                                    <option value="custom">Custom</option>
+							                                                </select>
+							                                                <div class="training-help" style="margin-top: 6px; color: #64748b;">
+							                                                    Global optimizer runs a small “tournament” (successive halving): try many candidates quickly → keep the best → retest on more images → repeat.
+							                                                </div>
+							                                                <div class="training-help" style="margin-top: 6px; color: #64748b;">
+							                                                    Tip: changing any global optimizer fields below will switch “Search budget” to Custom.
+							                                                </div>
+							                                            </div>
+							                                        </div>
+							                                        <div class="training-grid" style="margin-top: 10px;">
+							                                            <div>
+							                                                <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="How many validation images we use for the first (fast) ranking stage.&#10;Typical: 25–100.">?</span></label>
 					                                                <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
 					                                            </div>
 					                                            <div>
@@ -1127,7 +1141,7 @@
 					                                            </div>
 					                                        </div>
 					                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
-					                                            Note: When Global optimization is enabled, Tier‑1 and Tier‑2 toggles are ignored.
+						                                            Note: When “Search budget” is not Off, Tier‑1 and Tier‑2 toggles are ignored.
 					                                        </div>
 					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
 					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate settings to improve coverage at your cleanliness target.&#10;This tunes the recipe’s expand threshold + seeds per step.&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">

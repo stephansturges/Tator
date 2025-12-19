@@ -14710,7 +14710,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                open = null;
 	            }
 	            if (open === null) {
-	                open = true;
+	                open = false;
 	            }
 	            agentElements.howItWorksDetails.open = !!open;
 	            agentElements.howItWorksDetails.addEventListener("toggle", () => {

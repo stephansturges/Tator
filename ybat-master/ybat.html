@@ -925,17 +925,16 @@
 			                        <div class="training-help" style="color: #b91c1c; font-weight: 600;">Recipe mining UI build: 2025-12-20 (flat layout)</div>
 			                        <div id="agentMiningHowItWorks" style="margin-bottom: 12px; display: block !important; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
 			                            <div style="font-weight: 700; margin-bottom: 6px;">How recipe mining works</div>
-		                                <div class="training-help">
-		                                    <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
-		                                </div>
-			                                <div class="training-help" style="margin-top: 10px;">
-			                                    <div style="font-weight: 600;">Full flow + how to tune it</div>
-			                                    <div class="training-help" style="margin-top: 10px;">
-			                                    <div style="font-weight: 600; margin-bottom: 6px;">High-level flow</div>
-	                                    <pre class="training-help" style="white-space: pre; overflow-x: auto; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">Dataset (YOLO/COCO) + trained CLIP head
-	        │
-	        ├─ Split images (Train/Val)  [repeatable by seed]
-	        │
+			                            <div class="training-help">
+			                                <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
+			                            </div>
+			                            <div class="training-help" style="margin-top: 10px;">
+			                                <div style="font-weight: 600;">Full flow + how to tune it</div>
+			                                <div style="font-weight: 600; margin: 10px 0 6px;">High-level flow</div>
+			                                <pre class="training-help" style="white-space: pre; overflow-x: auto; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">Dataset (YOLO/COCO) + trained CLIP head
+        │
+        ├─ Split images (Train/Val)  [repeatable by seed]
+        │
         ├─ Build prompt list per class
         │    - class name + your extra prompts
         │    - optional GPT prompt expansion
@@ -959,83 +958,67 @@
         │    - crop each detection and score with the pretrained CLIP head
         │    - auto-tune min prob + (optional) margin to hit your “cleanliness” target
         │
-	        └─ Save portable recipe zip
-	             - recipe.json (schema v2, multi-step)
-	             - clip_head/head.npz + meta.json (embedded head + tuned thresholds)</pre>
-	
-	                                    <div class="training-help" style="margin-top: 10px;">
-	                                        <strong>Why recipes may look “text-only”:</strong> in schema‑v2, the “similarity prompt” is SAM3’s <em>visual</em> stage (seed boxes → expand similar masks/boxes). The recipe stores the <em>text</em> prompts + thresholds; it does <em>not</em> need a fixed crop-bank of exemplars because seeds are chosen per image at inference time.
-	                                    </div>
-
-	                                    <div style="font-weight: 600; margin: 12px 0 6px;">What we optimize for (“cleanliness”)</div>
-	                                    <div class="training-help">
-	                                        We optimize to <strong>maximize coverage</strong> (find as many GT objects as possible) while meeting your <strong>precision target</strong>:
-	                                        <ul style="margin: 6px 0 0 18px;">
-	                                            <li><strong>Match</strong> = a detection overlaps an unmatched GT box for that class with IoU ≥ “Eval IoU”.</li>
-	                                            <li><strong>Precision</strong> = matches / (matches + false positives). Higher = fewer wrong boxes.</li>
-	                                            <li><strong>Coverage</strong> = matches / GT count. Higher = finds more objects.</li>
-	                                            <li><strong>Duplicates</strong> = extra detections on the same GT object (tracked separately).</li>
-	                                        </ul>
-	                                    </div>
-
-		                                    <div style="font-weight: 600; margin: 12px 0 6px;">Multi-step tuning modes (what to enable)</div>
-		                                    <div class="training-help">
-		                                        <ul style="margin: 6px 0 0 18px;">
-			                                            <li><strong>Default (no extra tuning):</strong> seed curves → greedy prompt selection → full pipeline → CLIP thresholds tuned to match your cleanliness.</li>
-		                                            <li><strong>Refine prompt subset:</strong> quick “try a few swaps” pass (seed-stage only; no extra full SAM runs). Use when the chosen prompts look “obviously wrong”.</li>
-		                                            <li><strong>Tier‑1:</strong> small search over <code>expand_threshold</code> + <code>seeds/step</code> (shared across steps). Good first knob search if Global is off.</li>
-		                                            <li><strong>Tier‑2:</strong> small search over de‑dupe overlaps (IoU) (shared across steps). Helps duplicates / false positives.</li>
-		                                            <li><strong>Global optimizer (best quality):</strong> tries many full recipe variants and keeps the best (slowest, most thorough).</li>
-		                                        </ul>
-		                                    </div>
-
-			                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer: what knobs it can change</div>
-				                                    <div class="training-help">
-				                                        A <strong>trial</strong> is a full per-class recipe (ordered steps + per-step settings). We create new trials by making small changes to the current best:
-				                                        <ul style="margin: 6px 0 0 18px;">
-				                                            <li><strong>Prompt subset:</strong> add / drop / swap a step’s prompt.</li>
-			                                            <li><strong>Per-step seed threshold:</strong> how strict the text prompt must be before a box becomes a seed.</li>
-			                                            <li><strong>Per-step expand threshold</strong> and <strong>seeds per image</strong> (how many seeds we expand).</li>
-			                                            <li><strong>Per-step de-dupe overlap (IoU):</strong> seed de-dupe and output de-dupe.</li>
-			                                            <li><strong>Optional:</strong> step order and per-step max dets/image.</li>
-				                                        </ul>
-				                                        Each trial is scored by running the <em>real</em> steps pipeline on the same (repeatable) subset of validation images, then sweeping CLIP thresholds to match your cleanliness target.
-				                                    </div>
-
-			                                    <div style="font-weight: 600; margin: 12px 0 6px;">Breadth vs depth (simple mental model)</div>
-			                                    <div class="training-help">
-			                                        <ul style="margin: 6px 0 0 18px;">
-			                                            <li><strong>Breadth (“exploration”):</strong> try more recipe ideas. Increase when results feel “stuck”.</li>
-			                                            <li><strong>Depth (“reliability”):</strong> test each idea on more validation (test) images. Increase when results feel noisy or unstable.</li>
-			                                            <li><strong>Rule of thumb:</strong> if you raise breadth a lot, add some depth too.</li>
-			                                        </ul>
-			                                    </div>
-
-			                                    <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer controls (what they mean)</div>
-			                                    <div class="training-help">
-			                                        <ul style="margin: 6px 0 0 18px;">
-		                                            <li><strong>Stage‑1/2/3 eval cap:</strong> how many validation images we use per stage (bigger = more reliable, slower). Stage‑1 ranks quickly; Stage‑2/3 re-test the best candidates.</li>
-		                                            <li><strong>Max trials:</strong> how many candidate recipe configs we consider per round (higher = more thorough, slower).</li>
-		                                            <li><strong>Keep ratio:</strong> how aggressively we prune candidates each stage (0.5 keeps the top half).</li>
-		                                            <li><strong>Rounds</strong> + <strong>Variants per round:</strong> how long we keep exploring around the current best recipe.</li>
-		                                            <li><strong>Tune step order</strong> / <strong>Tune max dets/image:</strong> optional extra dimensions the optimizer is allowed to change.</li>
-		                                        </ul>
-		                                    </div>
-
-		                                    <div style="font-weight: 600; margin: 12px 0 6px;">How to influence results (practical)</div>
-		                                    <div class="training-help">
-		                                        <ul style="margin: 6px 0 0 18px;">
-	                                            <li><strong>Cleaner / fewer FPs:</strong> raise “Recipe cleanliness”. Expect lower coverage.</li>
-	                                            <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Seed curve floor (lets per-step thresholds go below the base).</li>
-	                                            <li><strong>More thorough search:</strong> set “Search budget” to Balanced/Best and increase Max trials / Rounds / Variants per round (slower).</li>
-		                                            <li><strong>Faster runs:</strong> use Test mode first; lower Stage‑3 eval cap; lower Max trials.</li>
-		                                        </ul>
-		                                    </div>
-
-			                                    <div style="margin-top: 12px; color: #64748b;">
-		                                        Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
-		                                    </div>
+        └─ Save portable recipe zip
+             - recipe.json (schema v2, multi-step)
+             - clip_head/head.npz + meta.json (embedded head + tuned thresholds)</pre>
+			                                <div style="margin-top: 10px;">
+			                                    <strong>Why recipes may look “text-only”:</strong> in schema‑v2, the “similarity prompt” is SAM3’s <em>visual</em> stage (seed boxes → expand similar masks/boxes). The recipe stores the <em>text</em> prompts + thresholds; it does <em>not</em> need a fixed crop-bank of exemplars because seeds are chosen per image at inference time.
 			                                </div>
+			                                <div style="font-weight: 600; margin: 12px 0 6px;">What we optimize for (“cleanliness”)</div>
+			                                <div>
+			                                    We optimize to <strong>maximize coverage</strong> (find as many GT objects as possible) while meeting your <strong>precision target</strong>:
+			                                    <ul style="margin: 6px 0 0 18px;">
+			                                        <li><strong>Match</strong> = a detection overlaps an unmatched GT box for that class with IoU ≥ “Eval IoU”.</li>
+			                                        <li><strong>Precision</strong> = matches / (matches + false positives). Higher = fewer wrong boxes.</li>
+			                                        <li><strong>Coverage</strong> = matches / GT count. Higher = finds more objects.</li>
+			                                        <li><strong>Duplicates</strong> = extra detections on the same GT object (tracked separately).</li>
+			                                    </ul>
+			                                </div>
+			                                <div style="font-weight: 600; margin: 12px 0 6px;">Multi-step tuning modes (what to enable)</div>
+			                                <ul style="margin: 6px 0 0 18px;">
+			                                    <li><strong>Default (no extra tuning):</strong> seed curves → greedy prompt selection → full pipeline → CLIP thresholds tuned to match your cleanliness.</li>
+			                                    <li><strong>Refine prompt subset:</strong> quick “try a few swaps” pass (seed-stage only; no extra full SAM runs). Use when the chosen prompts look “obviously wrong”.</li>
+			                                    <li><strong>Tier‑1:</strong> small search over <code>expand_threshold</code> + <code>seeds/step</code> (shared across steps). Good first knob search if Global is off.</li>
+			                                    <li><strong>Tier‑2:</strong> small search over de‑dupe overlaps (IoU) (shared across steps). Helps duplicates / false positives.</li>
+			                                    <li><strong>Global optimizer (best quality):</strong> tries many full recipe variants and keeps the best (slowest, most thorough).</li>
+			                                </ul>
+			                                <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer: what knobs it can change</div>
+			                                <div>
+			                                    A <strong>trial</strong> is a full per-class recipe (ordered steps + per-step settings). We create new trials by making small changes to the current best:
+			                                    <ul style="margin: 6px 0 0 18px;">
+			                                        <li><strong>Prompt subset:</strong> add / drop / swap a step’s prompt.</li>
+			                                        <li><strong>Per-step seed threshold:</strong> how strict the text prompt must be before a box becomes a seed.</li>
+			                                        <li><strong>Per-step expand threshold</strong> and <strong>seeds per image</strong> (how many seeds we expand).</li>
+			                                        <li><strong>Per-step de-dupe overlap (IoU):</strong> seed de-dupe and output de-dupe.</li>
+			                                        <li><strong>Optional:</strong> step order and per-step max dets/image.</li>
+			                                    </ul>
+			                                    Each trial is scored by running the <em>real</em> steps pipeline on the same (repeatable) subset of validation images, then sweeping CLIP thresholds to match your cleanliness target.
+			                                </div>
+			                                <div style="font-weight: 600; margin: 12px 0 6px;">Breadth vs depth (simple mental model)</div>
+			                                <ul style="margin: 6px 0 0 18px;">
+			                                    <li><strong>Breadth (“exploration”):</strong> try more recipe ideas. Increase when results feel “stuck”.</li>
+			                                    <li><strong>Depth (“reliability”):</strong> test each idea on more validation (test) images. Increase when results feel noisy or unstable.</li>
+			                                    <li><strong>Rule of thumb:</strong> if you raise breadth a lot, add some depth too.</li>
+			                                </ul>
+			                                <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer controls (what they mean)</div>
+			                                <ul style="margin: 6px 0 0 18px;">
+			                                    <li><strong>Stage‑1/2/3 eval cap:</strong> how many validation images we use per stage (bigger = more reliable, slower). Stage‑1 ranks quickly; Stage‑2/3 re-test the best candidates.</li>
+			                                    <li><strong>Max trials:</strong> how many candidate recipe configs we consider per round (higher = more thorough, slower).</li>
+			                                    <li><strong>Keep ratio:</strong> how aggressively we prune candidates each stage (0.5 keeps the top half).</li>
+			                                    <li><strong>Rounds</strong> + <strong>Variants per round:</strong> how long we keep exploring around the current best recipe.</li>
+			                                    <li><strong>Tune step order</strong> / <strong>Tune max dets/image:</strong> optional extra dimensions the optimizer is allowed to change.</li>
+			                                </ul>
+			                                <div style="font-weight: 600; margin: 12px 0 6px;">How to influence results (practical)</div>
+			                                <ul style="margin: 6px 0 0 18px;">
+			                                    <li><strong>Cleaner / fewer FPs:</strong> raise “Recipe cleanliness”. Expect lower coverage.</li>
+			                                    <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Seed curve floor (lets per-step thresholds go below the base).</li>
+			                                    <li><strong>More thorough search:</strong> set “Search budget” to Balanced/Best and increase Max trials / Rounds / Variants per round (slower).</li>
+			                                    <li><strong>Faster runs:</strong> use Test mode first; lower Stage‑3 eval cap; lower Max trials.</li>
+			                                </ul>
+			                                <div style="margin-top: 12px; color: #64748b;">
+			                                    Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
+			                                </div>
+			                            </div>
 			                        </div>
 		                        <div class="training-field">
 		                            <label for="agentDatasetSelect">Dataset<span class="help-icon" title="Choose the dataset to mine recipes from.&#10;Datasets are created/converted in the Dataset Management tab.">?</span></label>
@@ -1130,6 +1113,7 @@
 							                                        Advanced (below): Global optimizer breadth/depth knobs, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
 							                                    </div>
 						                                </div>
+						                            </div>
 											                                <div id="agentStepsAdvancedDetails" style="margin-top: 12px; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff;">
 											                                    <div style="font-weight: 700; margin-bottom: 6px;">Advanced optimization</div>
 											                                        <div class="training-help" style="color: #475569; margin-bottom: 10px;">
@@ -1270,10 +1254,7 @@
 					                                                </div>
 					                                            </div>
 					                                        </div>
-											                                    </div>
 											                                </div>
-					                            </div>
-					                        </div>
 						                        <div class="training-grid">
 						                            <div>
 						                                <label for="agentSeedThreshold">Seed text threshold<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>

@@ -13669,7 +13669,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			        } finally {
 			            agentStepsGlobalPresetLock = false;
 			        }
-			        if (agentElements.stepsAdvancedDetails) {
+			        if (agentElements.stepsAdvancedDetails && agentElements.stepsAdvancedDetails.tagName === "DETAILS") {
 			            agentElements.stepsAdvancedDetails.open = key !== "off";
 			        }
 			        updateAgentStepsComputeEstimate();
@@ -14699,7 +14699,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            agentElements.clipHeadAllowLowPrecision.addEventListener("change", updatePrecisionTargetRange);
 	        }
 	        updatePrecisionTargetRange();
-	        if (agentElements.howItWorksDetails) {
+	        if (agentElements.howItWorksDetails && agentElements.howItWorksDetails.tagName === "DETAILS") {
 	            const key = "tator.agentMining.howItWorksOpen";
 	            let open = null;
 	            try {

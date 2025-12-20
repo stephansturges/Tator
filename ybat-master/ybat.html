@@ -921,17 +921,20 @@
 	                <div class="training-wrapper two-col">
 		                    <section class="training-form-section">
 		                        <h2>SAM3 Recipe Mining</h2>
-		                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
-			                        <details id="agentMiningHowItWorks" class="training-card" style="margin-bottom: 12px; display: block !important;">
-		                            <summary>How recipe mining works (click to expand)</summary>
-		                            <div class="training-card__body">
-	                                <div class="training-help">
-	                                    <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
-	                                </div>
-		                                <details class="training-help" style="margin-top: 10px;">
-		                                    <summary style="cursor: pointer; font-weight: 600;">Full flow + how to tune it</summary>
-		                                    <div class="training-help" style="margin-top: 10px;">
-		                                    <div style="font-weight: 600; margin-bottom: 6px;">High-level flow</div>
+			                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
+			                        <div class="training-help" style="color: #b91c1c; font-weight: 600;">Recipe mining UI build: 2025-12-20 (flat layout)</div>
+			                        <div id="agentMiningHowItWorks" class="training-card" style="margin-bottom: 12px; display: block !important;">
+			                            <div class="training-card__header">
+			                                <div class="training-card__title">How recipe mining works</div>
+			                            </div>
+			                            <div class="training-card__body">
+		                                <div class="training-help">
+		                                    <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
+		                                </div>
+			                                <div class="training-help" style="margin-top: 10px;">
+			                                    <div style="font-weight: 600;">Full flow + how to tune it</div>
+			                                    <div class="training-help" style="margin-top: 10px;">
+			                                    <div style="font-weight: 600; margin-bottom: 6px;">High-level flow</div>
 	                                    <pre class="training-help" style="white-space: pre; overflow-x: auto; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">Dataset (YOLO/COCO) + trained CLIP head
 	        │
 	        ├─ Split images (Train/Val)  [repeatable by seed]
@@ -1035,10 +1038,10 @@
 	                                    <div style="margin-top: 12px; color: #64748b;">
 	                                        Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
 	                                    </div>
-		                                </div>
-		                            </details>
-		                            </div>
-		                        </details>
+			                                </div>
+			                            </div>
+			                            </div>
+			                        </div>
 		                        <div class="training-field">
 		                            <label for="agentDatasetSelect">Dataset<span class="help-icon" title="Choose the dataset to mine recipes from.&#10;Datasets are created/converted in the Dataset Management tab.">?</span></label>
 		                            <div class="sam3-dataset-row">
@@ -1084,7 +1087,10 @@
 					                            </div>
 					                        </div>
 							                        <div id="agentStepsOptions" class="training-card" style="margin-bottom: 12px; display: block !important;">
-						                            <div class="training-card__body">
+							                            <div class="training-card__header">
+							                                <div class="training-card__title">Recipe search settings</div>
+							                            </div>
+							                            <div class="training-card__body">
 							                                <div class="training-help" style="margin-bottom: 10px; color: #475569;">Need a refresher? Open <strong>How recipe mining works</strong> above.</div>
 						                                <div class="training-grid">
 						                                    <div>
@@ -1132,9 +1138,11 @@
 							                                        Advanced (below): Global optimizer breadth/depth knobs, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
 							                                    </div>
 						                                </div>
-										                                <details id="agentStepsAdvancedDetails" class="training-card" style="margin-top: 12px;">
-										                                    <summary>Advanced optimization (click to expand)</summary>
-										                                    <div class="training-card__body">
+											                                <div id="agentStepsAdvancedDetails" class="training-card" style="margin-top: 12px;">
+											                                    <div class="training-card__header">
+											                                        <div class="training-card__title">Advanced optimization</div>
+											                                    </div>
+											                                    <div class="training-card__body">
 										                                        <div class="training-help" style="color: #475569; margin-bottom: 10px;">
 										                                            Optional knobs for Global optimizer breadth/depth, Tier‑1/Tier‑2 tuning, prompt subset refinement, and seed-curve floors.
 										                                        </div>
@@ -1273,8 +1281,8 @@
 					                                                </div>
 					                                            </div>
 					                                        </div>
-						                                    </div>
-						                                </details>
+											                                    </div>
+											                                </div>
 					                            </div>
 					                        </div>
 						                        <div class="training-grid">

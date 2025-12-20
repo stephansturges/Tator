@@ -5741,6 +5741,76 @@ def _clip_encode_pil_batch(
     return None
 
 
+def _clip_encode_text_batch(
+    texts: Sequence[str],
+    *,
+    device_override: Optional[str] = None,
+    clip_model_override: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    """Encode a batch of text prompts with raw CLIP, returning (N, D) float32 normalized embeddings."""
+    if not texts:
+        return None
+    prompt_list = [str(t).strip() for t in texts if str(t).strip()]
+    if not prompt_list:
+        return None
+    preferred = str(device_override or "").strip() if device_override is not None else ""
+    attempt_devices: List[str] = []
+    if preferred:
+        attempt_devices.append(preferred)
+    global_device = str(device)
+    if global_device and global_device not in attempt_devices:
+        attempt_devices.append(global_device)
+    if "cpu" not in attempt_devices:
+        attempt_devices.append("cpu")
+
+    batch_size = 64
+    try:
+        raw = os.environ.get("AGENT_CLIP_BATCH_SIZE")
+        if raw is not None and str(raw).strip():
+            batch_size = max(1, int(raw))
+    except Exception:
+        batch_size = 64
+    batch_size = max(1, min(int(batch_size), 512))
+
+    last_error: Optional[BaseException] = None
+    for dev in attempt_devices:
+        model, _preprocess, lock, target_device = _ensure_agent_clip_backbone_for_device(
+            str(dev),
+            model_name_override=clip_model_override,
+        )
+        if model is None or clip is None:
+            continue
+        try:
+            chunks: List[torch.Tensor] = []
+            with lock:
+                for start in range(0, len(prompt_list), batch_size):
+                    batch = prompt_list[start : start + batch_size]
+                    tokens = clip.tokenize(batch, truncate=True).to(target_device)
+                    with torch.no_grad():
+                        feats = model.encode_text(tokens)
+                    chunks.append(feats.to(dtype=torch.float32, device="cpu"))
+            if not chunks:
+                continue
+            feats_all = torch.cat(chunks, dim=0)
+            feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
+            return feats_all.cpu().numpy()
+        except torch.cuda.OutOfMemoryError as exc:
+            last_error = exc
+            if torch.cuda.is_available() and str(target_device).startswith("cuda"):
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        logger.debug("CLIP text encode failed (fallbacks exhausted): %s", last_error)
+    return None
+
+
 def _resolve_agent_clip_classifier_path(path_str: Optional[str]) -> Optional[Path]:
     if not path_str:
         return None
@@ -9012,6 +9082,7 @@ def _select_steps_from_seed_prompt_stats(
     max_steps: int,
     target_precision: Optional[float] = None,
     max_candidates_per_prompt: int = 6,
+    early_stop: Optional[Dict[str, Any]] = None,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
@@ -9033,6 +9104,7 @@ def _select_steps_from_seed_prompt_stats(
         target_precision_f = max(0.0, min(1.0, target_precision_f))
 
     candidates: List[Dict[str, Any]] = []
+    total_gt_keys: set[int] = set()
     for cand in prompt_stats:
         if not isinstance(cand, dict):
             continue
@@ -9092,6 +9164,8 @@ def _select_steps_from_seed_prompt_stats(
                 if isinstance(covered, set):
                     matched_keys = covered
 
+            total_gt_keys |= matched_keys
+
             try:
                 matches = int(point.get("matches") or 0) or len(matched_keys)
             except Exception:
@@ -9122,6 +9196,14 @@ def _select_steps_from_seed_prompt_stats(
     selected: List[Dict[str, Any]] = []
     selected_prompts: set[str] = set()
     remaining = candidates[:]
+    early_cfg = early_stop or {"enabled": False}
+    new_matches_history: List[int] = []
+    total_gt = len(total_gt_keys)
+    early_enabled = bool(early_cfg.get("enabled"))
+    early_min_steps = int(early_cfg.get("min_steps") or 0)
+    early_window = int(early_cfg.get("window") or 1)
+    early_increment = float(early_cfg.get("min_increment") or 0.0)
+    early_precision_floor = early_cfg.get("precision_floor")
     while remaining and len(selected) < max_steps_i:
         best: Optional[Dict[str, Any]] = None
         best_key: Optional[Tuple[int, int, float, int]] = None
@@ -9144,10 +9226,23 @@ def _select_steps_from_seed_prompt_stats(
                 best = cand
         if best is None:
             break
+        if early_enabled and target_precision_f is not None and early_precision_floor is not None:
+            if len(selected) >= early_min_steps and float(best.get("precision") or 0.0) < float(early_precision_floor):
+                if log_fn:
+                    try:
+                        log_fn(
+                            f"[steps] early-stop: best candidate precision {float(best.get('precision') or 0.0):.3f} "
+                            f"below target-{float(early_cfg.get('precision_margin') or 0.0):.2f}"
+                        )
+                    except Exception:
+                        pass
+                break
         selected.append(best)
         covered_all |= best.get("matched_keys")
         selected_prompts.add(str(best.get("prompt") or "").strip())
         remaining = [c for c in remaining if str(c.get("prompt") or "").strip() not in selected_prompts]
+        if best_key is not None:
+            new_matches_history.append(int(best_key[1]))
         if log_fn:
             try:
                 log_fn(
@@ -9157,6 +9252,20 @@ def _select_steps_from_seed_prompt_stats(
                 )
             except Exception:
                 pass
+        if early_enabled and total_gt > 0 and len(selected) >= early_min_steps and early_window > 0:
+            window = new_matches_history[-early_window:]
+            if window:
+                frac = float(sum(window)) / float(total_gt)
+                if frac < float(early_increment):
+                    if log_fn:
+                        try:
+                            log_fn(
+                                f"[steps] early-stop: coverage gain {frac * 100:.2f}% over last {len(window)} step(s) "
+                                f"(threshold {float(early_increment) * 100:.2f}%)"
+                            )
+                        except Exception:
+                            pass
+                    break
     return selected
 
 
@@ -9602,7 +9711,7 @@ def _mine_seed_prompt_stats_image_first(
                     pass
             if log_fn and log_every > 0 and processed % log_every == 0:
                 try:
-                    log_fn(f"[steps] Seed eval: processed {processed}/{total_images} val images for class_id {cat_id}")
+                    log_fn(f"[steps] Seed eval: processed {processed}/{total_images} sample images for class_id {cat_id}")
                 except Exception:
                     pass
 
@@ -9793,6 +9902,199 @@ def _mine_seed_prompt_stats_image_first(
             }
         )
     return out
+
+
+def _resolve_steps_early_stop_config(payload: "AgentMiningRequest", *, target_precision: Optional[float]) -> Dict[str, Any]:
+    enabled = bool(getattr(payload, "steps_early_stop", False))
+    mode = str(getattr(payload, "steps_early_stop_mode", "balanced") or "balanced").lower().strip()
+    if mode not in {"conservative", "balanced", "aggressive"}:
+        mode = "balanced"
+    mode_map = {
+        "conservative": {"min_steps": 4, "window": 3, "min_increment": 0.002, "precision_margin": 0.15},
+        "balanced": {"min_steps": 3, "window": 2, "min_increment": 0.005, "precision_margin": 0.1},
+        "aggressive": {"min_steps": 2, "window": 2, "min_increment": 0.01, "precision_margin": 0.05},
+    }
+    cfg = mode_map[mode]
+    precision_floor = None
+    if target_precision is not None:
+        try:
+            precision_floor = max(0.0, min(1.0, float(target_precision) - float(cfg["precision_margin"])))
+        except Exception:
+            precision_floor = None
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "min_steps": int(cfg["min_steps"]),
+        "window": int(cfg["window"]),
+        "min_increment": float(cfg["min_increment"]),
+        "precision_floor": precision_floor,
+        "precision_margin": float(cfg["precision_margin"]),
+    }
+
+
+def _resolve_steps_prompt_prefilter_config(payload: "AgentMiningRequest") -> Dict[str, Any]:
+    enabled = bool(getattr(payload, "steps_prompt_prefilter", False))
+    mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower().strip()
+    if mode not in {"conservative", "balanced", "aggressive"}:
+        mode = "balanced"
+    mode_map = {
+        "conservative": {"sample_size": 20, "keep_ratio": 0.6},
+        "balanced": {"sample_size": 40, "keep_ratio": 0.4},
+        "aggressive": {"sample_size": 80, "keep_ratio": 0.25},
+    }
+    cfg = mode_map[mode]
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "sample_size": int(cfg["sample_size"]),
+        "keep_ratio": float(cfg["keep_ratio"]),
+    }
+
+
+def _collect_clip_prefilter_crops(
+    *,
+    cat_id: int,
+    eval_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    sample_size: int,
+    seed: int,
+) -> List[Image.Image]:
+    candidates: List[Tuple[int, List[float]]] = []
+    eval_set = set(int(i) for i in eval_ids)
+    for img_id, cat_map in gt_by_image_cat.items():
+        if int(img_id) not in eval_set:
+            continue
+        bboxes = cat_map.get(int(cat_id)) or []
+        for bbox in bboxes:
+            if not bbox or len(bbox) < 4:
+                continue
+            candidates.append((int(img_id), list(bbox)))
+    if not candidates:
+        return []
+    rng = random.Random(int(seed))
+    rng.shuffle(candidates)
+    sample_size = max(1, int(sample_size))
+    picks = candidates[: min(sample_size, len(candidates))]
+    crops: List[Image.Image] = []
+    image_cache: Dict[int, Image.Image] = {}
+    for img_id, bbox in picks:
+        info = images.get(int(img_id)) or {}
+        path = info.get("path")
+        if not path:
+            continue
+        pil_img = image_cache.get(int(img_id))
+        if pil_img is None:
+            try:
+                pil_img = Image.open(path).convert("RGB")
+            except Exception:
+                continue
+            image_cache[int(img_id)] = pil_img
+        try:
+            x0, y0, w, h = bbox[:4]
+            x1 = int(max(0.0, float(x0)))
+            y1 = int(max(0.0, float(y0)))
+            x2 = int(min(float(pil_img.width), float(x0) + float(w)))
+            y2 = int(min(float(pil_img.height), float(y0) + float(h)))
+        except Exception:
+            continue
+        if x2 <= x1 or y2 <= y1:
+            continue
+        try:
+            crops.append(pil_img.crop((x1, y1, x2, y2)))
+        except Exception:
+            continue
+    return crops
+
+
+def _prefilter_prompts_with_clip(
+    prompts: Sequence[str],
+    *,
+    keep_prompts: Sequence[str],
+    cat_id: int,
+    class_name: str,
+    eval_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    clip_model_name: Optional[str],
+    sample_size: int,
+    keep_ratio: float,
+    seed: int,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List[str]:
+    prompt_list: List[str] = []
+    seen: set[str] = set()
+    for p in prompts:
+        key = str(p).strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        prompt_list.append(key)
+    if not prompt_list:
+        return []
+
+    keep_set = {str(p).strip().lower() for p in keep_prompts if str(p).strip()}
+    extra_indices = [idx for idx, p in enumerate(prompt_list) if p.lower() not in keep_set]
+    if not extra_indices:
+        return prompt_list
+
+    crops = _collect_clip_prefilter_crops(
+        cat_id=cat_id,
+        eval_ids=eval_ids,
+        images=images,
+        gt_by_image_cat=gt_by_image_cat,
+        sample_size=sample_size,
+        seed=seed,
+    )
+    if not crops:
+        if log_fn:
+            try:
+                log_fn(f"[steps] CLIP prefilter skipped for {class_name}: no GT crops in sample.")
+            except Exception:
+                pass
+        return prompt_list
+
+    img_emb = _clip_encode_pil_batch(crops, clip_model_override=clip_model_name)
+    text_emb = _clip_encode_text_batch(prompt_list, clip_model_override=clip_model_name)
+    if img_emb is None or text_emb is None:
+        if log_fn:
+            try:
+                log_fn(f"[steps] CLIP prefilter skipped for {class_name}: CLIP embeddings unavailable.")
+            except Exception:
+                pass
+        return prompt_list
+
+    try:
+        sims = np.matmul(text_emb, img_emb.T)
+        scores = sims.max(axis=1) if sims.size else np.zeros(len(prompt_list), dtype=np.float32)
+    except Exception:
+        if log_fn:
+            try:
+                log_fn(f"[steps] CLIP prefilter skipped for {class_name}: similarity computation failed.")
+            except Exception:
+                pass
+        return prompt_list
+
+    keep_ratio = max(0.05, min(float(keep_ratio), 1.0))
+    extra_count = len(extra_indices)
+    keep_count = max(1, int(round(extra_count * keep_ratio)))
+    keep_count = min(extra_count, keep_count)
+    ranked = sorted(extra_indices, key=lambda i: float(scores[i]), reverse=True)
+    kept_extra = set(ranked[:keep_count])
+
+    filtered = [p for idx, p in enumerate(prompt_list) if idx in kept_extra or p.lower() in keep_set]
+    if log_fn:
+        try:
+            log_fn(
+                f"[steps] CLIP prefilter {class_name}: kept {len(filtered)}/{len(prompt_list)} prompts "
+                f"(base {len(prompt_list) - extra_count} + filtered {len(kept_extra)})"
+            )
+        except Exception:
+            pass
+    return filtered
 
 
 def _normalize_steps_for_head_tuning(
@@ -11671,29 +11973,25 @@ def _detections_to_eval_cache(
     return by_image
 
 
-def _load_agent_mining_split(dataset_id: str) -> Optional[Dict[str, Any]]:
-    split_path = _agent_mining_meta_dir(dataset_id) / "split.json"
-    if not split_path.exists():
+def _load_agent_mining_sample(dataset_id: str) -> Optional[Dict[str, Any]]:
+    sample_path = _agent_mining_meta_dir(dataset_id) / "sample.json"
+    if not sample_path.exists():
         return None
     try:
-        with split_path.open("r", encoding="utf-8") as fp:
+        with sample_path.open("r", encoding="utf-8") as fp:
             data = json.load(fp)
-            data["_path"] = str(split_path)
+            data["_path"] = str(sample_path)
             return data
     except Exception:
         return None
 
 
-def _ensure_agent_mining_split(
+def _ensure_agent_mining_sample(
     dataset_id: str,
     dataset_root: Path,
     *,
-    val_percent: float,
+    sample_size: int,
     seed: int,
-    reuse_split: bool,
-    test_mode: bool,
-    train_limit: Optional[int] = None,
-    val_limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     coco, _, images = _load_coco_index(dataset_root)
     categories = coco.get("categories") or []
@@ -11701,79 +11999,46 @@ def _ensure_agent_mining_split(
     image_ids = [int(img.get("id", idx)) for idx, img in enumerate(coco.get("images") or []) if "id" in img or idx >= 0]
     if not image_ids:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_images")
-    # Always rebuild split deterministically; ignore any baked-in splits.
     dir_signature = _compute_dir_signature(dataset_root)
-    if reuse_split and not test_mode:
-        cached = _load_agent_mining_split(dataset_id)
-        cached_seed = cached.get("seed") if cached else None
+    sample_size = max(1, int(sample_size))
+    cached = _load_agent_mining_sample(dataset_id)
+    if cached:
+        cached_seed = cached.get("seed")
+        cached_size = cached.get("sample_size")
         if (
-            cached
-            and cached_seed is not None
+            cached_seed is not None
+            and cached_size is not None
             and cached.get("signature") == dir_signature
             and cached.get("dataset_signature") == dataset_signature
-            and abs(cached.get("val_percent", val_percent) - val_percent) < 1e-6
             and int(cached_seed) == int(seed)
+            and int(cached_size) == int(sample_size)
         ):
             return {**cached, "_cached": True}
     rng = random.Random(seed)
     rng.shuffle(image_ids)
     total = len(image_ids)
-    if test_mode:
-        # In test mode, honor explicit limits (with sensible defaults) and ignore cached splits.
-        if val_limit is None or val_limit <= 0:
-            val_limit = 10
-        if train_limit is None or train_limit <= 0:
-            train_limit = 10
-        if val_limit + train_limit >= total:
-            # If requested caps exceed dataset size, split deterministically: reserve val_limit (or half) and the rest train.
-            val_take = min(val_limit, max(1, total // 2))
-            val_ids = image_ids[:val_take]
-            train_ids = image_ids[val_take: min(total, val_take + train_limit)]
-        else:
-            val_ids = image_ids[: min(val_limit, total)]
-            train_ids = image_ids[min(val_limit, total) : min(val_limit + train_limit, total)]
+    if sample_size >= total:
+        sample_ids = list(image_ids)
     else:
-        if val_limit is not None and val_limit <= 0:
-            val_limit = 1
-        val_count = int(total * val_percent)
-        if val_count <= 0:
-            val_count = 1 if total > 1 else 0
-        if val_count >= total:
-            val_count = max(1, total - 1)
-        val_ids = image_ids[:val_count]
-        train_ids = image_ids[val_count:]
-        if train_limit is not None and train_limit > 0:
-            train_ids = train_ids[:train_limit]
-        if val_limit is not None and val_limit > 0:
-            val_ids = val_ids[:val_limit]
-    if not train_ids and val_ids:
-        train_ids, val_ids = val_ids, []
-    if not train_ids or not val_ids:
-        raise HTTPException(
-            status_code=HTTP_412_PRECONDITION_FAILED,
-            detail=f"agent_split_empty:{len(train_ids)}:{len(val_ids)}",
-        )
-    split = {
-        "train": train_ids,
-        "val": val_ids,
-        "val_percent": val_percent,
-        "seed": seed,
-        "total_images": total,
+        sample_ids = image_ids[:sample_size]
+    if not sample_ids:
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_sample_empty")
+    sample = {
+        "sample_ids": sample_ids,
+        "sample_size": int(sample_size),
+        "seed": int(seed),
+        "total_images": int(total),
         "signature": dir_signature,
         "dataset_signature": dataset_signature,
         "created_at": time.time(),
-        "test_mode": bool(test_mode),
-        "train_limit": train_limit,
-        "val_limit": val_limit,
     }
-    if not test_mode:
-        split_path = _agent_mining_meta_dir(dataset_id) / "split.json"
-        try:
-            with split_path.open("w", encoding="utf-8") as fp:
-                json.dump(split, fp)
-        except Exception:
-            logger.exception("Failed to persist agent mining split to %s", split_path)
-    return {**split, "_cached": False}
+    sample_path = _agent_mining_meta_dir(dataset_id) / "sample.json"
+    try:
+        with sample_path.open("w", encoding="utf-8") as fp:
+            json.dump(sample, fp)
+    except Exception:
+        logger.exception("Failed to persist agent mining sample to %s", sample_path)
+    return {**sample, "_cached": False}
 
 
 def _agent_mining_cache_key(
@@ -13046,149 +13311,6 @@ def _clip_fp_filter_detections(
     if len(filtered) < len(detections):
         warnings.append("clip_fp_filtered")
     return filtered if filtered else detections, warnings
-
-
-def _sample_agent_mining_exemplars(
-    cat_id: int,
-    train_ids: Sequence[int],
-    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
-    images: Dict[int, Dict[str, Any]],
-    *,
-    limit: int,
-    seed: int,
-    candidate_mode: Literal["percent", "count"] = "percent",
-    candidate_value: int = 25,
-    use_clip_selection: bool = True,
-    cluster: bool = False,
-) -> Tuple[List[Dict[str, Any]], Dict[str, np.ndarray], List[str], Dict[str, Any]]:
-    """
-    Sample exemplars for a class. Caps the candidate pool, optionally embeds with CLIP, and
-    selects a diverse set via k-center. Returns (exemplars, exemplar_embeddings, warnings, stats).
-    """
-    if limit <= 0:
-        return [], {}, [], {"candidates": 0, "embedded": 0, "selected": 0, "mode": candidate_mode, "value": candidate_value}
-    rng = random.Random(seed + cat_id)
-    candidates: List[Tuple[int, List[float]]] = []
-    for img_id in train_ids:
-        anns = gt_by_image_cat.get(img_id, {}).get(cat_id)
-        if not anns:
-            continue
-        for bbox in anns:
-            candidates.append((img_id, list(map(float, bbox[:4]))))
-    total_candidates = len(candidates)
-    if not candidates:
-        return [], {}, ["no_candidates"], {"candidates": 0, "embedded": 0, "selected": 0, "mode": candidate_mode, "value": candidate_value}
-
-    if candidate_mode == "percent":
-        candidate_value = max(1, min(100, candidate_value))
-        pool_cap = max(1, int(math.ceil(total_candidates * (candidate_value / 100.0))))
-    else:
-        pool_cap = max(1, min(candidate_value, total_candidates))
-
-    rng.shuffle(candidates)
-    pool = candidates[:pool_cap]
-    pool_entries: List[Dict[str, Any]] = []
-    for img_id, bbox in pool:
-        try:
-            x, y, w, h = bbox
-            area = max(0.0, w * h)
-        except Exception:
-            x = y = w = h = 0.0
-            area = 0.0
-        img_info = images.get(img_id, {})
-        embed_id = f"{img_id}:{x:.2f},{y:.2f},{w:.2f},{h:.2f}"
-        pool_entries.append(
-            {
-                "image_id": img_id,
-                "file_name": img_info.get("file_name"),
-                "path": str(img_info.get("path") or ""),
-                "bbox": [x, y, w, h],
-                "area": area,
-                "embed_id": embed_id,
-            }
-        )
-
-    selection_target = limit * 3 if cluster else limit
-    warnings: List[str] = []
-    exemplar_embeddings: Dict[str, np.ndarray] = {}
-    selected: List[Dict[str, Any]] = []
-
-    def _select_k_center(regions: List[Dict[str, Any]], embeds: Dict[str, np.ndarray], k: int) -> List[Dict[str, Any]]:
-        if k <= 0 or not regions or not embeds:
-            return []
-        keyed = [(r, embeds.get(r.get("embed_id", ""))) for r in regions if r.get("embed_id") in embeds]
-        keyed = [(r, e) for r, e in keyed if e is not None]
-        if not keyed:
-            return []
-        vecs = np.stack([e for _, e in keyed])
-        areas = np.array([float(r.get("area", 0.0)) for r, _ in keyed])
-        start_idx = int(np.argmax(areas))
-        selected_indices = [start_idx]
-        dists = np.ones(len(keyed), dtype=np.float32)
-        dists *= np.inf
-        dists = np.minimum(dists, 1.0 - (vecs @ vecs[start_idx]))
-        while len(selected_indices) < min(k, len(keyed)):
-            next_idx = int(np.argmax(dists))
-            if not np.isfinite(dists[next_idx]):
-                break
-            selected_indices.append(next_idx)
-            dists = np.minimum(dists, 1.0 - (vecs @ vecs[next_idx]))
-        return [keyed[i][0] for i in selected_indices]
-
-    embedded_count = 0
-    if use_clip_selection and pool_entries:
-        exemplar_embeddings, clip_warn = _clip_embed_regions(pool_entries, images, max_regions=len(pool_entries))
-        warnings.extend(clip_warn)
-        embedded_count = len(exemplar_embeddings)
-        selected = _select_k_center(pool_entries, exemplar_embeddings, selection_target)
-
-    if not selected:
-        step = max(1, len(pool_entries) // selection_target) if selection_target > 0 else 1
-        selected = pool_entries[::step][:selection_target]
-        if not exemplar_embeddings and use_clip_selection:
-            warnings.append("clip_selection_fallback_random")
-
-    if cluster and len(selected) > limit:
-        if exemplar_embeddings:
-            selected = _k_center_select(selected, exemplar_embeddings, limit)
-        else:
-            selected = _cluster_agent_mining_exemplars(selected, max_items=limit, seed=seed + cat_id + 17)
-    if len(selected) > limit:
-        selected = selected[:limit]
-
-    if exemplar_embeddings:
-        selected_ids = {ex.get("embed_id") for ex in selected if ex.get("embed_id")}
-        exemplar_embeddings = {k: v for k, v in exemplar_embeddings.items() if k in selected_ids}
-    stats = {
-        "candidates": total_candidates,
-        "pool": len(pool_entries),
-        "embedded": embedded_count,
-        "selected": len(selected),
-        "mode": candidate_mode,
-        "value": candidate_value,
-    }
-    return selected, exemplar_embeddings, warnings, stats
-
-
-def _cluster_agent_mining_exemplars(
-    exemplars: List[Dict[str, Any]],
-    *,
-    max_items: int,
-    seed: int,
-) -> List[Dict[str, Any]]:
-    """Placeholder clustering: down-sample exemplars evenly when clustering is requested."""
-    if max_items <= 0 or len(exemplars) <= max_items:
-        return exemplars
-    rng = random.Random(seed)
-    exemplars = exemplars[:]
-    rng.shuffle(exemplars)
-    step = max(1, len(exemplars) // max_items)
-    clustered: List[Dict[str, Any]] = []
-    for idx in range(0, len(exemplars), step):
-        clustered.append(exemplars[idx])
-        if len(clustered) >= max_items:
-            break
-    return clustered
 
 
 def _k_center_select(regions: List[Dict[str, Any]], embeds: Dict[str, np.ndarray], k: int) -> List[Dict[str, Any]]:
@@ -15045,18 +15167,16 @@ class PromptRecipeExpandRequest(BaseModel):
 class AgentMiningRequest(BaseModel):
     dataset_id: str
     classes: Optional[List[int]] = None
-    val_percent: float = Field(0.3, ge=0.05, le=0.95)
+    eval_image_count: int = Field(
+        100,
+        ge=1,
+        le=50_000,
+        description="How many images to sample for mining and scoring (smaller = faster, larger = more reliable).",
+    )
     split_seed: int = 42
-    reuse_split: bool = True
 
-    # Search strategy:
-    # - steps: multi-step recipe mining (schema v2) driven by seed-prompt set-cover + CLIP head tuning
-    # - greedy/beam: legacy (deprecated; no longer used by the web UI)
-    search_mode: Literal["greedy", "beam", "steps"] = "steps"
-    beam_width: int = Field(4, ge=1, le=16)
-    beam_rounds: int = Field(3, ge=1, le=10)
-    beam_min_improve: float = Field(0.005, ge=0.0, le=1.0)
-    beam_eval_cap: int = Field(48, ge=1, le=50_000)
+    # Search strategy: steps-only (schema v2).
+    search_mode: Literal["steps"] = "steps"
     reuse_cache: bool = True
 
     # Multi-step ("steps") mining knobs.
@@ -15084,7 +15204,7 @@ class AgentMiningRequest(BaseModel):
         200,
         ge=10,
         le=50_000,
-        description="Max number of validation images used during Tier-1 tuning stages (search_mode='steps').",
+        description="Max number of sampled images used during Tier-1 tuning stages (search_mode='steps').",
     )
     steps_optimize_tier1_max_trials: int = Field(
         9,
@@ -15111,6 +15231,34 @@ class AgentMiningRequest(BaseModel):
             "of seed-stage detections returned per prompt per image (safety valve). If unset, uses `max_results`."
         ),
     )
+    steps_early_stop: bool = Field(
+        True,
+        description=(
+            "When search_mode='steps', enable early-stop heuristics that stop adding more prompt steps when "
+            "coverage saturates or candidates are far below the cleanliness target (faster, may miss rare cases)."
+        ),
+    )
+    steps_early_stop_mode: Literal["conservative", "balanced", "aggressive"] = Field(
+        "balanced",
+        description=(
+            "Early-stop strictness: conservative keeps searching longer, aggressive stops sooner. "
+            "Balanced is a good default."
+        ),
+    )
+    steps_prompt_prefilter: bool = Field(
+        True,
+        description=(
+            "When search_mode='steps', use CLIP similarity to prefilter weak prompts before running SAM3. "
+            "This speeds up mining by reducing prompt evals (recommended)."
+        ),
+    )
+    steps_prompt_prefilter_mode: Literal["conservative", "balanced", "aggressive"] = Field(
+        "balanced",
+        description=(
+            "CLIP prompt prefilter strength: conservative keeps more prompts, aggressive keeps fewer (faster). "
+            "Balanced is a good default."
+        ),
+    )
     steps_optimize_tier2: bool = Field(
         False,
         description=(
@@ -15122,7 +15270,7 @@ class AgentMiningRequest(BaseModel):
         200,
         ge=10,
         le=50_000,
-        description="Max number of validation images used during Tier-2 tuning stages (search_mode='steps').",
+        description="Max number of sampled images used during Tier-2 tuning stages (search_mode='steps').",
     )
     steps_optimize_tier2_max_trials: int = Field(
         12,
@@ -15160,9 +15308,9 @@ class AgentMiningRequest(BaseModel):
     steps_optimize_global_eval_caps: List[int] = Field(
         default_factory=lambda: [50, 200, 1000],
         description=(
-            "When steps_optimize_global is enabled, validation image caps for successive-halving stages. "
-            "Example: [50, 200, 1000] means candidates are first ranked on 50 val images, then the best subset is "
-            "re-ranked on 200, then finalized on up to 1000 (or the full val split if smaller)."
+            "When steps_optimize_global is enabled, sampled-image caps for successive-halving stages. "
+            "Example: [50, 200, 1000] means candidates are first ranked on 50 sampled images, then the best subset is "
+            "re-ranked on 200, then finalized on up to 1000 (or the full sample if smaller)."
         ),
     )
     steps_optimize_global_max_trials: int = Field(
@@ -15239,7 +15387,7 @@ class AgentMiningRequest(BaseModel):
     clip_head_auto_tune: bool = Field(
         True,
         description=(
-            "When using a pretrained CLIP head, auto-tune per-class min_prob/margin on the validation split "
+            "When using a pretrained CLIP head, auto-tune per-class min_prob/margin on the sampled images "
             "(recommended). If disabled, uses the fixed min_prob/margin values above."
         ),
     )
@@ -15249,20 +15397,9 @@ class AgentMiningRequest(BaseModel):
         le=1.0,
         description=(
             "When auto-tuning a pretrained CLIP head, prefer thresholds that reach this target precision on "
-            "the validation split (higher = fewer false positives, lower recall)."
+            "the sampled images (higher = fewer false positives, lower recall)."
         ),
     )
-
-    # Exemplar (crop bank) selection.
-    positives_per_class: int = Field(20, ge=0, le=500)
-    cluster_exemplars: bool = True
-    exemplar_candidate_mode: Literal["percent", "count"] = "percent"
-    exemplar_candidate_value: int = Field(25, ge=1, le=10_000)
-
-    # Cross-class negatives (crop bank) used for CLIP rejection.
-    use_negative_exemplars: bool = True
-    max_negatives_per_class: int = Field(25, ge=0, le=256)
-    negative_strength: float = Field(0.5, ge=0.0, le=5.0)
 
     # Greedy SAM3 recipe parameters.
     seed_threshold: float = Field(0.05, ge=0.0, le=1.0)
@@ -15276,14 +15413,8 @@ class AgentMiningRequest(BaseModel):
     min_size: int = Field(0, ge=0, le=10_000)
     simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
 
-    # Always-on guardrails in this mode.
-    use_clip_fp_guard: bool = True
-
     # Evaluation / debug.
     iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
-    test_mode: bool = False
-    test_train_limit: int = Field(10, ge=1, le=10_000)
-    test_val_limit: int = Field(10, ge=1, le=10_000)
 
 
 def _expand_prompts_with_prompt_llm(
@@ -16376,1042 +16507,20 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         job.updated_at = time.time()
 
 
-def _run_agent_mining_job_legacy(job: AgentMiningJob, payload: AgentMiningRequest) -> None:
-    with AGENT_MINING_JOBS_LOCK:
-        AGENT_MINING_JOBS[job.job_id] = job
-    job.status = "running"
-    job.message = "Preparing dataset split…"
-    job.request = payload.dict()
-    job.updated_at = time.time()
-    mining_pool: Optional[_Sam3MiningPool] = None
-    try:
-        # Clean up stale caches before starting heavy work.
-        _enforce_agent_mining_cache_limits(AGENT_MINING_DET_CACHE_ROOT, allow_when_running=False)
-        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
-        job.logs.append({"ts": time.time(), "msg": f"Dataset resolved at {dataset_root}"})
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        # Log received test settings to diagnose splits.
-        job.logs.append(
-            {
-                "ts": time.time(),
-                "msg": (
-                    f"Request: test_mode={payload.test_mode} "
-                    f"train_limit={payload.test_train_limit} val_limit={payload.test_val_limit} "
-                    f"val_percent={payload.val_percent:.3f} ({payload.val_percent * 100:.1f}%) "
-                    f"split_seed={payload.split_seed}"
-                ),
-            }
-        )
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        split = _ensure_agent_mining_split(
-            payload.dataset_id,
-            dataset_root,
-            val_percent=payload.val_percent,
-            seed=payload.split_seed,
-            reuse_split=payload.reuse_split,
-            test_mode=payload.test_mode,
-            train_limit=payload.test_train_limit if payload.test_mode else None,
-            val_limit=payload.test_val_limit if payload.test_mode else None,
-        )
-        job.logs.append(
-            {
-                "ts": time.time(),
-                "msg": (
-                    f"Split built (cached={split.get('_cached', False)}): "
-                    f"train={len(split.get('train', []))} val={len(split.get('val', []))} "
-                    f"test_mode={payload.test_mode} seed={payload.split_seed} val%={payload.val_percent:.3f}"
-                ),
-            }
-        )
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        job.progress = 0.05
-        job.updated_at = time.time()
-        cache_context = "|".join(
-            [
-                str(split.get("dataset_signature") or split.get("signature") or ""),
-                f"seed={payload.split_seed}",
-                f"val={payload.val_percent:.6f}",
-                f"test={payload.test_mode}",
-                f"trcap={payload.test_train_limit if payload.test_mode else ''}",
-                f"vacap={payload.test_val_limit if payload.test_mode else ''}",
-            ]
-        )
-        job.logs.append(
-            {
-                "ts": time.time(),
-                "msg": (
-                    f"Split { 'reused from cache' if split.get('_cached') else 'built fresh' } "
-                    f"(seed={payload.split_seed}, val%={payload.val_percent * 100:.1f}%, "
-                    f"reuse_split={payload.reuse_split})"
-                ),
-            }
-        )
-        job.logs.append(
-            {
-                "ts": time.time(),
-                "msg": f"Prepared split with {len(split.get('train') or [])} train / {len(split.get('val') or [])} val images",
-            }
-        )
-        if payload.test_mode:
-            job.logs.append(
-                {
-                    "ts": time.time(),
-                    "msg": f"Test mode enabled (train_limit={payload.test_train_limit}, val_limit={payload.test_val_limit})",
-                }
-            )
-        job.logs.append(
-            {
-                "ts": time.time(),
-                "msg": (
-                    f"Config: mode={payload.search_mode} thresholds={payload.thresholds} mask_thr={payload.mask_threshold} "
-                    f"min_size={payload.min_size} simplify={payload.simplify_epsilon} max_results={payload.max_results} "
-                    f"clip_guard={payload.use_clip_fp_guard} neg_exemplars={payload.use_negative_exemplars} "
-                    f"neg_strength={payload.negative_strength} adaptive_thr={payload.adaptive_threshold_search} "
-                    f"adaptive_sim={payload.adaptive_similarity_search} cross_cleanup={payload.cross_class_cleanup} "
-                    f"beam(k={payload.beam_width}, rounds={payload.beam_rounds}, eps={payload.beam_min_improve}, "
-                    f"cap={payload.beam_eval_cap}, reuse_cache={payload.reuse_cache})"
-                ),
-            }
-        )
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        if job.cancel_event.is_set():
-            job.status = "cancelled"
-            job.message = "Cancelled"
-            job.updated_at = time.time()
-            return
-
-        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
-        categories = coco.get("categories") or []
-        cat_filter: Optional[set[int]] = None
-        if payload.classes:
-            try:
-                cat_filter = {int(c) for c in payload.classes}
-            except Exception:
-                cat_filter = None
-        selected_cats: List[Dict[str, Any]] = []
-        train_ids = list(split.get("train") or [])
-        val_ids = list(split.get("val") or [])
-        train_id_set = set(train_ids)
-        val_id_set = set(val_ids)
-        job.logs.append({"ts": time.time(), "msg": f"Loaded COCO with {len(categories)} categories"})
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        job.updated_at = time.time()
-
-        cache_dir = _agent_mining_cache_dir(payload.dataset_id)
-        thresholds = [t for t in (payload.thresholds or []) if isinstance(t, (int, float))]
-        if not thresholds:
-            thresholds = [0.3]
-        thresholds = [float(max(0.0, min(1.0, t))) for t in thresholds]
-        if payload.search_mode == "grid" and payload.adaptive_threshold_search:
-            thresholds = _expand_midpoints(thresholds, fine_step=0.05, clamp=(0.0, 1.0), limit=24)
-        sim_scores_global = [s for s in (payload.similarity_scores or []) if isinstance(s, (int, float))]
-        if not sim_scores_global:
-            sim_scores_global = [payload.similarity_score]
-        sim_scores_global = [float(max(0.0, min(1.0, s))) for s in sim_scores_global]
-        if payload.search_mode == "grid" and payload.adaptive_similarity_search:
-            sim_scores_global = _expand_midpoints(sim_scores_global, fine_step=0.05, clamp=(0.0, 1.0), limit=24)
-
-        # Precompute prompts (including GPT-OSS expansions) before loading SAM3.
-        prepared_prompts: Dict[int, List[str]] = {}
-        raw_hints = payload.class_hints or {}
-        normalized_hints: Dict[int, str] = {}
-        name_to_id: Dict[str, int] = {}
-        name_collisions: List[str] = []
-        for idx, cat in enumerate(categories):
-            try:
-                cid = int(cat.get("id", idx))
-            except Exception:
-                cid = idx
-            key = str(cat.get("name", "")).strip().lower()
-            if key in name_to_id and name_to_id[key] != cid:
-                name_collisions.append(key)
-            name_to_id[key] = cid
-        if name_collisions:
-            job.logs.append({"ts": time.time(), "msg": f"Duplicate class names detected (normalized): {', '.join(sorted(set(name_collisions)))}"})
-            if len(job.logs) > MAX_JOB_LOGS:
-                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        for key, note in raw_hints.items():
-            if not note or not isinstance(note, str):
-                continue
-            note_clean = note.strip()
-            if not note_clean:
-                continue
-            class_id_val: Optional[int] = None
-            try:
-                class_id_val = int(key)
-            except Exception:
-                class_id_val = None
-            if class_id_val is None:
-                name_key = str(key).strip().lower()
-                class_id_val = name_to_id.get(name_key)
-            if class_id_val is None:
-                continue
-            normalized_hints[class_id_val] = note_clean
-        for idx, cat in enumerate(categories):
-            try:
-                cat_id = int(cat.get("id", idx))
-            except Exception:
-                continue
-            if cat_filter and cat_id not in cat_filter:
-                continue
-            cat_name = str(cat.get("name", f"class_{cat_id}"))
-            hint_used = normalized_hints.get(cat_id)
-            prompts_for_cat = (payload.text_prompts_by_class or {}).get(cat_id)
-            if not prompts_for_cat:
-                prompts_for_cat = [cat_name]
-                if payload.auto_mine_prompts and payload.qwen_max_prompts > 0:
-                    def _log_qwen(msg: str) -> None:
-                        job.logs.append({"ts": time.time(), "msg": msg})
-                        if len(job.logs) > MAX_JOB_LOGS:
-                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                    extra_prompts = _expand_prompts_with_prompt_llm(
-                        cat_name,
-                        prompts_for_cat,
-                        payload.qwen_max_prompts,
-                        log_fn=_log_qwen,
-                        max_new_tokens=payload.prompt_max_new_tokens,
-                        reasoning=payload.prompt_reasoning,
-                    )
-                    if len(extra_prompts) > payload.qwen_max_prompts:
-                        extra_prompts = extra_prompts[: payload.qwen_max_prompts]
-                    extra_prompts = _refine_prompts_with_qwen(extra_prompts)
-                    merged = []
-                    seen_prompts = set()
-                    for entry in [*prompts_for_cat, *extra_prompts]:
-                        key = entry.lower().strip()
-                        if key in seen_prompts:
-                            continue
-                        seen_prompts.add(key)
-                        merged.append(entry)
-                    prompts_for_cat = merged
-            else:
-                prompts_for_cat = _refine_prompts_with_qwen(prompts_for_cat)
-            prepared_prompts[cat_id] = prompts_for_cat
-            if hint_used:
-                job.logs.append({"ts": time.time(), "msg": f"Class hint applied for {cat_name}: {hint_used}"})
-                if len(job.logs) > MAX_JOB_LOGS:
-                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-
-        try:
-            _unload_prompt_llm_runtime()
-            job.logs.append({"ts": time.time(), "msg": "Prompt LLM unloaded to free memory before SAM3 init"})
-            if len(job.logs) > MAX_JOB_LOGS:
-                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-            job.progress = max(job.progress, 0.1)
-            job.updated_at = time.time()
-        except Exception:
-            pass
-
-        base_devices = _resolve_sam3_mining_devices()
-        expanded_devices: List[torch.device] = []
-        per_dev_cap = max(1, payload.max_workers_per_device or 1)
-        for dev in base_devices:
-            expanded_devices.extend([dev] * per_dev_cap)
-        if payload.max_workers and payload.max_workers > 0:
-            mining_devices = expanded_devices[: payload.max_workers]
-        else:
-            mining_devices = expanded_devices
-        if not mining_devices:
-            raise RuntimeError("sam3_mining_no_devices")
-        try:
-            mining_pool = _Sam3MiningPool(mining_devices)
-        except Exception as exc:  # noqa: BLE001
-            job.status = "failed"
-            job.error = str(exc)
-            job.message = "SAM3 mining init failed"
-            job.updated_at = time.time()
-            return
-        try:
-            device_labels = ", ".join(str(w.device) for w in mining_pool.workers)
-        except Exception:
-            device_labels = str(mining_devices)
-        used_requested = len(mining_pool.workers)
-        requested = len(mining_devices)
-        log_msg = f"Using {used_requested} SAM3 worker(s): {device_labels}"
-        if payload.max_workers and requested > payload.max_workers:
-            log_msg += f" (capped at {payload.max_workers} max_workers)"
-        elif used_requested != requested:
-            log_msg += f" (requested {requested}, some devices invalid or unavailable)"
-        if payload.max_workers_per_device and payload.max_workers_per_device > 1:
-            log_msg += f"; up to {payload.max_workers_per_device} worker(s) per device"
-        job.logs.append({"ts": time.time(), "msg": log_msg})
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-
-        class_entries: List[Dict[str, Any]] = []
-        global_candidates: List[Dict[str, Any]] = []
-        for idx, cat in enumerate(categories):
-            try:
-                cat_id = int(cat.get("id", idx))
-            except Exception:
-                continue
-            if cat_filter and cat_id not in cat_filter:
-                continue
-            cat_name = str(cat.get("name", f"class_{cat_id}"))
-            job.message = f"Class {idx + 1}/{len(categories)}: {cat_name} (prep)"
-            job.logs.append({"ts": time.time(), "msg": f"Preparing class {cat_name} ({idx + 1}/{len(categories)})"})
-            if len(job.logs) > MAX_JOB_LOGS:
-                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-            train_gt = 0
-            val_gt = 0
-            for img_id, cat_map in gt_by_image_cat.items():
-                bboxes = cat_map.get(cat_id)
-                if not bboxes:
-                    continue
-                count = len(bboxes)
-                if img_id in train_id_set:
-                    train_gt += count
-                elif img_id in val_id_set:
-                    val_gt += count
-            sample_cap = payload.exemplar_per_class
-            exemplars, exemplar_embeddings, clip_exemplar_warnings, exemplar_stats = _sample_agent_mining_exemplars(
-                cat_id,
-                train_ids,
-                gt_by_image_cat,
-                images,
-                limit=sample_cap,
-                seed=payload.split_seed,
-                candidate_mode=payload.exemplar_candidate_mode,
-                candidate_value=payload.exemplar_candidate_value,
-                use_clip_selection=True,
-                cluster=payload.cluster_exemplars,
-            )
-            # If FP guard is enabled but embeddings were not produced (e.g., CLIP unavailable), try embedding selected exemplars.
-            if payload.use_clip_fp_guard and exemplars and not exemplar_embeddings:
-                exemplar_embeddings, clip_exemplar_warnings = _clip_embed_regions(
-                    exemplars,
-                    images,
-                    max_regions=max(16, payload.exemplar_per_class * 2),
-                )
-            # Log exemplar selection stats.
-            try:
-                job.logs.append(
-                    {
-                        "ts": time.time(),
-                        "msg": (
-                            f"Exemplars for {cat_name}: {exemplar_stats.get('candidates', 0)} candidates "
-                            f"-> pool {exemplar_stats.get('pool', 0)} ({payload.exemplar_candidate_mode}="
-                            f"{payload.exemplar_candidate_value}), embedded {exemplar_stats.get('embedded', 0)}, "
-                            f"selected {len(exemplars)}"
-                        ),
-                    }
-                )
-                if len(job.logs) > MAX_JOB_LOGS:
-                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-            except Exception:
-                pass
-            if payload.use_clip_fp_guard:
-                job.logs.append(
-                    {
-                        "ts": time.time(),
-                        "msg": f"CLIP guard embedded {len(exemplar_embeddings)} exemplars for {cat_name}; warnings: {len(clip_exemplar_warnings)}",
-                    }
-                )
-                if len(job.logs) > MAX_JOB_LOGS:
-                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-            # Negative exemplars from other classes.
-            negatives: List[Dict[str, Any]] = []
-            negative_embeddings: Dict[str, np.ndarray] = {}
-            negative_stats: Dict[str, Any] = {"candidates": 0, "pool": 0, "embedded": 0, "selected": 0}
-            negative_warnings: List[str] = []
-            if payload.use_negative_exemplars and payload.max_negatives_per_class > 0:
-                neg_candidates: List[Dict[str, Any]] = []
-                for img_id in train_ids:
-                    cat_map = gt_by_image_cat.get(img_id, {})
-                    for other_cat, boxes in cat_map.items():
-                        if other_cat == cat_id:
-                            continue
-                        for bbox in boxes:
-                            try:
-                                x, y, w, h = map(float, bbox[:4])
-                                area = max(0.0, w * h)
-                            except Exception:
-                                x = y = w = h = 0.0
-                                area = 0.0
-                            img_info = images.get(img_id, {})
-                            embed_id = f"{img_id}:{x:.2f},{y:.2f},{w:.2f},{h:.2f}"
-                            neg_candidates.append(
-                                {
-                                    "image_id": img_id,
-                                    "file_name": img_info.get("file_name"),
-                                    "path": str(img_info.get("path") or ""),
-                                    "bbox": [x, y, w, h],
-                                    "area": area,
-                                    "embed_id": embed_id,
-                                }
-                            )
-                negative_stats["candidates"] = len(neg_candidates)
-                if neg_candidates:
-                    if payload.exemplar_candidate_mode == "percent":
-                        pct = max(1, min(100, payload.exemplar_candidate_value))
-                        pool_cap = max(1, int(math.ceil(len(neg_candidates) * (pct / 100.0))))
-                    else:
-                        pool_cap = max(1, min(payload.exemplar_candidate_value, len(neg_candidates)))
-                    rng = random.Random(payload.split_seed + cat_id + 999)
-                    rng.shuffle(neg_candidates)
-                    pool = neg_candidates[:pool_cap]
-                    negative_stats["pool"] = len(pool)
-                    negative_embeddings, negative_warnings = _clip_embed_regions(pool, images, max_regions=len(pool))
-                    negative_stats["embedded"] = len(negative_embeddings)
-                    negatives = _k_center_select(pool, negative_embeddings, payload.max_negatives_per_class)
-                    if negative_embeddings and negatives:
-                        sel_ids = {n.get("embed_id") for n in negatives if n.get("embed_id")}
-                        negative_embeddings = {k: v for k, v in negative_embeddings.items() if k in sel_ids}
-                    negative_stats["selected"] = len(negatives)
-                    if not negatives and not negative_embeddings:
-                        negative_warnings.append("negatives_empty")
-                else:
-                    negative_warnings.append("negatives_empty")
-            if payload.use_negative_exemplars:
-                try:
-                    job.logs.append(
-                        {
-                            "ts": time.time(),
-                            "msg": (
-                                f"Negatives for {cat_name}: {negative_stats.get('candidates', 0)} candidates "
-                                f"-> pool {negative_stats.get('pool', 0)}, embedded {negative_stats.get('embedded', 0)}, "
-                                f"selected {negative_stats.get('selected', 0)}"
-                            ),
-                        }
-                    )
-                    if len(job.logs) > MAX_JOB_LOGS:
-                        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                except Exception:
-                    pass
-            text_prompts = prepared_prompts.get(cat_id) or [cat_name]
-            try:
-                preview_prompts = ", ".join(text_prompts) if text_prompts else "(none)"
-                job.logs.append(
-                    {
-                        "ts": time.time(),
-                        "msg": f"Prompt list for {cat_name}: {preview_prompts}",
-                    }
-                )
-                if len(job.logs) > MAX_JOB_LOGS:
-                    job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-            except Exception:
-                pass
-            job.logs.append(
-                {
-                    "ts": time.time(),
-                    "msg": f"Evaluating {len(text_prompts)} text prompt(s) x {len(thresholds)} thresholds and {len(exemplars)} exemplar(s) for {cat_name}",
-                }
-            )
-            entry = {
-                "id": cat_id,
-                "name": cat_name,
-                "train_gt": train_gt,
-                "val_gt": val_gt,
-                "exemplars": exemplars,
-                "clip_warnings": clip_exemplar_warnings,
-                "exemplar_embeddings": exemplar_embeddings,
-                "negatives": negatives,
-                "negative_embeddings": negative_embeddings,
-                "negative_warnings": negative_warnings,
-                "text_prompts": text_prompts,
-            }
-            class_entries.append(entry)
-            selected_cats.append(
-                {
-                    "id": cat_id,
-                    "name": cat_name,
-                    "train_gt": train_gt,
-                    "val_gt": val_gt,
-                    "exemplars": exemplars,
-                    "clip_warnings": clip_exemplar_warnings,
-                }
-            )
-            class_candidates: List[Dict[str, Any]] = []
-            for prompt_text in text_prompts:
-                cid = f"class{cat_id}::text::{prompt_text}"
-                cand = {"id": cid, "type": "text", "prompt": prompt_text, "class_id": cat_id}
-                class_candidates.append(cand)
-                global_candidates.append(cand)
-            for ex_idx, ex in enumerate(exemplars):
-                cid = f"class{cat_id}::visual::{ex_idx}"
-                ex_vec = None
-                try:
-                    embed_id = ex.get("embed_id") if isinstance(ex, dict) else None
-                    if embed_id:
-                        ex_vec = exemplar_embeddings.get(embed_id)
-                except Exception:
-                    ex_vec = None
-                cand = {
-                    "id": cid,
-                    "type": "visual",
-                    "visual_ref": ex,
-                    "class_id": cat_id,
-                    # Used to seed visual prompting when evaluating/applying this step.
-                    # Visual steps are always seeded from a text prompt on the *current* image.
-                    "seed_prompt": cat_name,
-                    "exemplar_vec": ex_vec,
-                }
-                class_candidates.append(cand)
-                global_candidates.append(cand)
-            entry["candidates"] = class_candidates
-            if job.cancel_event.is_set():
-                job.status = "cancelled"
-                job.message = "Cancelled"
-                job.updated_at = time.time()
-                return
-
-        total_images = len(val_ids)
-        if total_images == 0 and train_ids:
-            # Fallback: carve a slice out of train for validation (keep splits disjoint).
-            fallback = max(1, min(len(train_ids), payload.test_val_limit if payload.test_mode else 50))
-            val_ids = train_ids[:fallback]
-            train_ids = train_ids[fallback:]
-            train_id_set = set(train_ids)
-            val_id_set = set(val_ids)
-            total_images = len(val_ids)
-            job.logs.append(
-                {
-                    "ts": time.time(),
-                    "msg": f"Val split empty; moved {total_images} image(s) from train to val for scoring.",
-                }
-            )
-        job.logs.append(
-            {
-                "ts": time.time(),
-                "msg": (
-                    f"Starting global image-first sweep: {total_images} val images, "
-                    f"{len(global_candidates)} candidates x {len(thresholds)} thresholds"
-                ),
-            }
-        )
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-
-        progress_every_global = max(1, total_images // 20) if total_images else 1
-
-        def _global_progress(done: int) -> None:
-            if job.cancel_event.is_set():
-                return
-            if done == 1 or done == total_images or done % progress_every_global == 0:
-                try:
-                    pct = (done / total_images) if total_images else 0.0
-                    job.progress = min(1.0, 0.1 + 0.6 * pct)
-                    job.logs.append(
-                        {
-                            "ts": time.time(),
-                            "msg": f"Processed {done}/{total_images} val images (global) for all candidates",
-                        }
-                    )
-                    if len(job.logs) > MAX_JOB_LOGS:
-                        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                    job.updated_at = time.time()
-                except Exception:
-                    pass
-
-        det_cache, det_stats_global = _collect_agent_mining_detections_image_first(
-            candidates=global_candidates,
-            thresholds=thresholds,
-            # Detections are cached independent of CLIP similarity floors; floors are applied during scoring.
-            similarity_scores=None,
-            images=images,
-            image_ids=val_ids,
-            mask_threshold=payload.mask_threshold,
-            min_size=payload.min_size,
-            simplify=payload.simplify_epsilon,
-            max_results=payload.max_results,
-            cache_dir=cache_dir,
-            pool=mining_pool,
-            use_cache=payload.reuse_cache,
-            cancel_event=job.cancel_event,
-            progress_callback=_global_progress,
-            cache_context=cache_context,
-        )
-        job.logs.append(
-            {
-                "ts": time.time(),
-                "msg": (
-                    f"SAM3 global mining ran image-first on {det_stats_global.get('images')} val images for "
-                    f"{det_stats_global.get('candidates')} candidates x {det_stats_global.get('thresholds')} thresholds "
-                    f"(cached {det_stats_global.get('cached_pairs')} pairs, executed {det_stats_global.get('executed_pairs')} "
-                    f"with {det_stats_global.get('executed_pairs_with_dets')} yielding detections)"
-                ),
-            }
-        )
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        job.progress = max(job.progress, 0.7)
-
-        for idx, entry in enumerate(class_entries):
-            cat_id = entry["id"]
-            cat_name = entry["name"]
-            exemplars = entry["exemplars"]
-            exemplar_embeddings = entry.get("exemplar_embeddings") or {}
-            negative_embeddings = entry.get("negative_embeddings") or {}
-            negatives = entry.get("negatives") or []
-            text_prompts = entry["text_prompts"]
-            class_candidates = entry["candidates"]
-            job.message = f"Class {idx + 1}/{len(class_entries)}: {cat_name} (eval prompts)"
-            gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, cat_id)
-            gt_index_val = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in val_id_set}
-            per_image_gt_val = {img_id: per_image_gt_all.get(img_id, 0) for img_id in val_ids}
-            all_gt_keys_val: set[str] = set()
-            for entries in gt_index_val.values():
-                for key, _ in entries:
-                    all_gt_keys_val.add(key)
-            other_gt_index_val: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]] = {}
-            if payload.cross_class_cleanup:
-                for img_id, cat_map in gt_by_image_cat.items():
-                    if img_id not in val_id_set:
-                        continue
-                    other_entries: List[Tuple[str, Tuple[float, float, float, float]]] = []
-                    for other_cat, boxes in cat_map.items():
-                        if other_cat == cat_id:
-                            continue
-                        for idx_box, bbox in enumerate(boxes or []):
-                            try:
-                                other_entries.append((f"{other_cat}:{idx_box}", _xywh_to_xyxy(bbox)))
-                            except Exception:
-                                continue
-                    if other_entries:
-                        other_gt_index_val[img_id] = other_entries
-            # Optional FP-derived negatives (single-run) for this class, before filtering
-            fp_negatives: List[Dict[str, Any]] = []
-            fp_negative_embeddings: Dict[str, np.ndarray] = {}
-            fp_negative_warnings: List[str] = []
-            if payload.use_negative_exemplars and payload.use_fp_negatives and payload.max_fp_negatives > 0:
-                fp_candidates: List[Tuple[float, Dict[str, Any]]] = []
-                for cand in class_candidates:
-                    for thr in thresholds:
-                        task_cache = det_cache.get(cand.get("id"), {}) or {}
-                        dets_by_sim = task_cache.get(thr, {}) if isinstance(task_cache, dict) else {}
-                        if isinstance(dets_by_sim, dict):
-                            det_list = next(iter(dets_by_sim.values()), []) or []
-                        elif isinstance(dets_by_sim, list):
-                            det_list = dets_by_sim
-                        else:
-                            det_list = []
-                        for det in det_list:
-                            try:
-                                lbl = det.get("label")
-                                if lbl is not None and int(lbl) == int(cat_id):
-                                    continue
-                            except Exception:
-                                pass
-                            score = float(det.get("score", 0.0)) if det.get("score") is not None else 0.0
-                            fp_candidates.append((score, det))
-                fp_candidates.sort(key=lambda t: t[0], reverse=True)
-                fp_candidates = fp_candidates[: max(0, payload.max_fp_negatives * 3)]
-                fp_pool: List[Dict[str, Any]] = []
-                for _, det in fp_candidates:
-                    bbox = det.get("bbox")
-                    if not bbox or len(bbox) < 4:
-                        continue
-                    try:
-                        x, y, w, h = map(float, bbox[:4])
-                        area = max(0.0, w * h)
-                    except Exception:
-                        x = y = w = h = 0.0
-                        area = 0.0
-                    img_id = det.get("image_id")
-                    img_info = images.get(int(img_id)) if img_id is not None else {}
-                    embed_id = f"fp:{img_id}:{x:.2f},{y:.2f},{w:.2f},{h:.2f}"
-                    fp_pool.append(
-                        {
-                            "image_id": img_id,
-                            "file_name": img_info.get("file_name"),
-                            "path": str(img_info.get("path") or ""),
-                            "bbox": [x, y, w, h],
-                            "area": area,
-                            "embed_id": embed_id,
-                        }
-                    )
-                if fp_pool:
-                    fp_pool = fp_pool[: max(1, min(len(fp_pool), payload.max_fp_negatives * 3))]
-                    fp_negative_embeddings, fp_negative_warnings = _clip_embed_regions(fp_pool, images, max_regions=len(fp_pool))
-                    fp_negatives = _k_center_select(fp_pool, fp_negative_embeddings, payload.max_fp_negatives)
-                    if fp_negative_embeddings and fp_negatives:
-                        sel_ids = {n.get("embed_id") for n in fp_negatives if n.get("embed_id")}
-                        fp_negative_embeddings = {k: v for k, v in fp_negative_embeddings.items() if k in sel_ids}
-                    try:
-                        job.logs.append(
-                            {
-                                "ts": time.time(),
-                                "msg": (
-                                    f"FP negatives for {cat_name}: pool {len(fp_pool)} embedded {len(fp_negative_embeddings)} "
-                                    f"selected {len(fp_negatives)}"
-                                ),
-                            }
-                        )
-                        if len(job.logs) > MAX_JOB_LOGS:
-                            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                    except Exception:
-                        pass
-
-            combined_neg_embeddings = {}
-            if payload.use_negative_exemplars:
-                combined_neg_embeddings.update(negative_embeddings)
-                combined_neg_embeddings.update(fp_negative_embeddings)
-            combined_negatives = negatives + fp_negatives if payload.use_negative_exemplars else []
-
-            eval_candidates: List[Dict[str, Any]] = []
-            text_prompt_count = len(text_prompts or [])
-            thresholds_count = len(thresholds or [])
-            visual_candidate_count = len(exemplars) * thresholds_count
-            sim_scores = [float(s) for s in sim_scores_global if s is not None]
-            if not sim_scores:
-                sim_scores = [payload.similarity_score]
-
-            def _fetch_dets(task_cache: Dict[float, Any], thr: float, sim: Optional[float]) -> List[Dict[str, Any]]:
-                dets_by_sim = task_cache.get(thr, {})
-                if isinstance(dets_by_sim, list):
-                    dets_by_sim = {sim_scores[0] if sim_scores else None: dets_by_sim}
-                dets = dets_by_sim.get(sim)
-                if dets is None and dets_by_sim:
-                    dets = next(iter(dets_by_sim.values()))
-                if dets is None and task_cache:
-                    try:
-                        base_thr = min(task_cache.keys())
-                        base_map = task_cache.get(base_thr, {})
-                        if isinstance(base_map, list):
-                            base_list = base_map
-                        else:
-                            base_list = (
-                                base_map.get(sim)
-                                or (next(iter(base_map.values())) if base_map else [])
-                                or []
-                            )
-                        dets = [d for d in base_list if (d.get("score") or 0.0) >= thr]
-                    except Exception:
-                        dets = []
-                if dets is None:
-                    dets = []
-                return dets
-
-            def _score_combo(
-                cand: Dict[str, Any],
-                thr: float,
-                sim: Optional[float],
-                task_cache: Dict[float, Any],
-            ) -> Optional[Dict[str, Any]]:
-                dets = _fetch_dets(task_cache, thr, sim)
-                fp_warnings: List[str] = []
-                if payload.use_clip_fp_guard and exemplar_embeddings:
-                    dets, fp_warnings = _clip_fp_filter_detections(
-                        dets,
-                        exemplar_embeddings=exemplar_embeddings,
-                        negative_embeddings=combined_neg_embeddings if payload.use_negative_exemplars else None,
-                        negative_strength=payload.negative_strength if payload.use_negative_exemplars else 0.0,
-                        images=images,
-                        similarity_floor=sim if sim is not None else 0.0,
-                    )
-                cache_map = _detections_to_eval_cache(dets, images)
-                metrics = _evaluate_prompt_candidate(
-                    cand.get("prompt") if cand.get("type") == "text" else f"exemplar_{cand.get('id', '').split('::')[-1]}",
-                    thr,
-                    cat_id=cat_id,
-                    image_ids=val_ids,
-                    gt_index=gt_index_val,
-                    other_gt_index=other_gt_index_val if payload.cross_class_cleanup else None,
-                    images=images,
-                    iou_threshold=0.5,
-                    max_dets=payload.max_results,
-                    image_cache={},
-                    cached_detections=cache_map,
-                )
-                metrics["type"] = cand.get("type")
-                metrics["candidate_id"] = cand.get("id")
-                metrics["similarity_score"] = sim
-                if cand.get("type") == "visual":
-                    metrics["exemplar"] = {
-                        "image_id": cand.get("visual_ref", {}).get("image_id"),
-                        "bbox": cand.get("visual_ref", {}).get("bbox"),
-                        "file_name": cand.get("visual_ref", {}).get("file_name"),
-                    }
-                    if cand.get("seed_prompt"):
-                        metrics["seed_prompt"] = cand.get("seed_prompt")
-                metrics["detections"] = len(dets)
-                if fp_warnings:
-                    metrics["warnings"] = fp_warnings
-                return metrics
-
-            if payload.search_mode == "grid":
-                for cand in class_candidates:
-                    task_id = cand.get("id")
-                    cand_type = cand.get("type")
-                    label = cand.get("prompt") if cand_type == "text" else f"exemplar_{task_id.split('::')[-1]}"
-                    task_cache = det_cache.get(task_id, {})
-                    for thr in thresholds:
-                        for sim in sim_scores:
-                            metrics = _score_combo(cand, thr, sim, task_cache)
-                            if metrics:
-                                metrics["prompt"] = label
-                                eval_candidates.append(metrics)
-            else:  # beam
-                beam_k = max(1, min(payload.beam_width, 16))
-                max_rounds = max(1, min(payload.beam_rounds, 10))
-                min_improve = max(0.0, min(payload.beam_min_improve, 1.0))
-                eval_cap = max(beam_k, min(payload.beam_eval_cap, 200))
-                delta_thr = 0.1
-                delta_sim = 0.05
-
-                def _clamp01(val: float) -> float:
-                    return max(0.0, min(1.0, val))
-
-                for cand in class_candidates:
-                    task_cache = det_cache.get(cand.get("id"), {})
-                    seeds = []
-                    for thr in thresholds:
-                        for sim in sim_scores:
-                            seeds.append((_clamp01(float(thr)), _clamp01(float(sim))))
-                    if not seeds:
-                        seeds = [(0.3, sim_scores[0] if sim_scores else 0.25)]
-                    evaluated: Dict[Tuple[float, float], Dict[str, Any]] = {}
-                    best_score = -1.0
-                    proposals = list(dict.fromkeys(seeds))  # preserve order, unique
-                    rounds_done = 0
-                    while proposals and rounds_done < max_rounds and len(evaluated) < eval_cap:
-                        new_metrics: List[Dict[str, Any]] = []
-                        for thr, sim in proposals:
-                            if len(evaluated) >= eval_cap:
-                                break
-                            key = (round(thr, 4), round(sim, 4))
-                            if key in evaluated:
-                                continue
-                            metric = _score_combo(cand, thr, sim, task_cache)
-                            if metric:
-                                metric["prompt"] = metric.get("prompt") or (cand.get("prompt") or "")
-                                evaluated[key] = metric
-                                new_metrics.append(metric)
-                        if not evaluated:
-                            break
-                        scored = sorted(evaluated.values(), key=lambda m: m.get("score", 0.0), reverse=True)
-                        if scored:
-                            improvement = scored[0].get("score", 0.0) - best_score
-                            best_score = scored[0].get("score", 0.0)
-                        else:
-                            improvement = 0.0
-                        top = scored[:beam_k] if scored else []
-                        if improvement < min_improve:
-                            break
-                        rounds_done += 1
-                        delta_thr *= 0.5
-                        delta_sim *= 0.5
-                        next_props: List[Tuple[float, float]] = []
-                        for m in top:
-                            base_thr = float(m.get("threshold", thresholds[0] if thresholds else 0.3))
-                            base_sim = m.get("similarity_score")
-                            try:
-                                base_sim = float(base_sim) if base_sim is not None else 0.0
-                            except Exception:
-                                base_sim = 0.0
-                            for dt in (-delta_thr, 0.0, delta_thr):
-                                for ds in (-delta_sim, 0.0, delta_sim):
-                                    thr_new = _clamp01(base_thr + dt)
-                                    sim_new = _clamp01(base_sim + ds)
-                                    key_new = (round(thr_new, 4), round(sim_new, 4))
-                                    if key_new in evaluated:
-                                        continue
-                                    # diversity: require change
-                                    if abs(thr_new - base_thr) < 1e-4 and abs(sim_new - base_sim) < 1e-4:
-                                        continue
-                                    next_props.append((thr_new, sim_new))
-                        proposals = list(dict.fromkeys(next_props))
-                    if evaluated:
-                        best = max(evaluated.values(), key=lambda m: m.get("score", 0.0))
-                        eval_candidates.append(best)
-                        try:
-                            thr_best = best.get("threshold")
-                            sim_best = best.get("similarity_score")
-                            score_best = best.get("score")
-                            thr_txt = f"{float(thr_best):.3f}" if thr_best is not None else "n/a"
-                            sim_txt = f"{float(sim_best):.3f}" if sim_best is not None else "n/a"
-                            score_txt = f"{float(score_best):.3f}" if score_best is not None else "n/a"
-                            job.logs.append(
-                                {
-                                    "ts": time.time(),
-                                    "msg": (
-                                        f"Beam for {cand.get('id')}: evals={len(evaluated)} "
-                                        f"best_thr={thr_txt} sim={sim_txt} score={score_txt}"
-                                    ),
-                                }
-                            )
-                            if len(job.logs) > MAX_JOB_LOGS:
-                                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-                        except Exception:
-                            pass
-
-            recipe: Optional[Dict[str, Any]] = None
-            coverage_by_image: Optional[List[Dict[str, Any]]] = None
-            if eval_candidates and all_gt_keys_val:
-                recipe, coverage_by_image = _build_prompt_recipe(
-                    eval_candidates,
-                    all_gt_keys_val,
-                    per_image_gt_val,
-                    images,
-                    val_ids,
-                    gt_index_val,
-                )
-                if recipe:
-                    recipe["use_negative_exemplars"] = bool(payload.use_negative_exemplars)
-                    recipe["negative_strength"] = float(payload.negative_strength) if payload.use_negative_exemplars else 0.0
-                    recipe["negatives"] = combined_negatives if payload.use_negative_exemplars else []
-                    meta_map: Dict[Tuple[str, float, Optional[float]], Dict[str, Any]] = {}
-                    for cand in eval_candidates:
-                        try:
-                            key = (cand.get("prompt"), float(cand.get("threshold")), cand.get("similarity_score"))
-                        except Exception:
-                            continue
-                        meta_map[key] = {
-                            "type": cand.get("type"),
-                            "exemplar": cand.get("exemplar"),
-                            "warnings": cand.get("warnings"),
-                            "similarity_score": cand.get("similarity_score"),
-                            "seed_prompt": cand.get("seed_prompt"),
-                        }
-                    for step in recipe.get("steps", []):
-                        key = (step.get("prompt"), float(step.get("threshold", 0)), step.get("similarity_score"))
-                        # Try fallback without sim if not found
-                        meta = meta_map.get(key) or meta_map.get((step.get("prompt"), float(step.get("threshold", 0)), None))
-                        if meta:
-                            step.update({k: v for k, v in meta.items() if v is not None})
-                            if meta.get("candidate_id"):
-                                step["candidate_id"] = meta.get("candidate_id")
-                    summary_block = recipe.get("summary") or {}
-                    fp_total = summary_block.get("fps") or 0
-                    best_steps = recipe.get("steps") or []
-                    best_labels = []
-                    for s in best_steps:
-                        if s.get("type") == "visual" and s.get("exemplar"):
-                            ex = s.get("exemplar") or {}
-                            best_labels.append(f"exemplar img {ex.get('image_id')} thr {s.get('threshold')}")
-                        else:
-                            best_labels.append(f"{s.get('prompt')} thr {s.get('threshold')}")
-                    explanation = (
-                        f"Tested {text_prompt_count} text prompt(s) x {thresholds_count} thresholds and {len(exemplars)} exemplar(s) "
-                        f"({len(eval_candidates)} total candidates). "
-                    )
-                    if best_labels:
-                        explanation += f"Kept {len(best_steps)} step(s): {', '.join(best_labels)}."
-                    else:
-                        explanation += "No steps kept."
-                    if summary_block:
-                        covered = summary_block.get("covered")
-                        total_gt = summary_block.get("total_gt")
-                        cov_rate = summary_block.get("coverage_rate")
-                        cov_txt = ""
-                        if cov_rate is not None:
-                            try:
-                                cov_txt = f"{cov_rate * 100:.1f}%"
-                            except Exception:
-                                cov_txt = ""
-                        explanation += f" Coverage {covered}/{total_gt} ({cov_txt}), FPs {fp_total}."
-                    recipe["explanation"] = explanation
-            selected_cats[idx]["candidates"] = eval_candidates
-            selected_cats[idx]["recipe"] = recipe
-            selected_cats[idx]["coverage_by_image"] = coverage_by_image
-            selected_cats[idx]["meta"] = {
-                "text_prompts": text_prompt_count,
-                "thresholds": thresholds_count,
-                "exemplars": len(exemplars),
-                "visual_candidates": visual_candidate_count,
-                "total_candidates": len(eval_candidates),
-            }
-            if not recipe or not recipe.get("steps"):
-                selected_cats[idx]["no_recipe_reason"] = "no_candidate_gain"
-            job.progress = 0.7 + 0.3 * ((idx + 1) / max(1, len(class_entries)))
-            summary = (recipe or {}).get("summary") or {}
-            covered = summary.get("covered")
-            total_gt = summary.get("total_gt")
-            coverage_rate = summary.get("coverage_rate")
-            fps = summary.get("fps")
-            cov_pct_str = ""
-            if coverage_rate is not None:
-                try:
-                    cov_pct_str = f"{coverage_rate * 100:.1f}%"
-                except Exception:
-                    cov_pct_str = ""
-            job.message = f"Class {idx + 1}/{len(class_entries)}: {cat_name} complete ({len(eval_candidates)} candidates)"
-            job.logs.append(
-                {
-                    "ts": time.time(),
-                    "msg": (
-                        f"Class {cat_name} complete with {len(eval_candidates)} candidates; "
-                        f"recipe steps: {len(recipe.get('steps', [])) if recipe else 0}; "
-                        f"text_prompts={len(text_prompts or [])} exemplars={len(exemplars or [])}; "
-                        f"coverage={covered}/{total_gt} ({cov_pct_str}) fps={fps}"
-                    ),
-                }
-            )
-            if len(job.logs) > MAX_JOB_LOGS:
-                job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-            job.updated_at = time.time()
-
-        job.progress = max(job.progress, 0.99)
-        job.updated_at = time.time()
-        job.logs.append({"ts": time.time(), "msg": f"Prepared {len(selected_cats)} classes with exemplar seeds"})
-        if len(job.logs) > MAX_JOB_LOGS:
-            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-        if job.cancel_event.is_set():
-            job.status = "cancelled"
-            job.message = "Cancelled"
-            job.updated_at = time.time()
-            return
-        job.result = {
-            "dataset_id": payload.dataset_id,
-            "split": split,
-            "config": payload.dict(),
-            "status": "completed",
-            "classes": selected_cats,
-            "note": "Agent mining completed with splits, exemplars, and baseline candidate evals.",
-        }
-        try:
-            coverages = []
-            for cls in selected_cats:
-                summary = (cls.get("recipe") or {}).get("summary") or {}
-                rate = summary.get("coverage_rate")
-                if rate is not None:
-                    coverages.append(rate)
-            if coverages:
-                avg_cov = sum(coverages) / len(coverages)
-                job.logs.append(
-                    {
-                        "ts": time.time(),
-                        "msg": f"Job summary: avg coverage {avg_cov * 100:.1f}% across {len(coverages)} classes",
-                    }
-                )
-        except Exception:
-            pass
-        job.status = "completed"
-        job.message = "Split and exemplars ready"
-        job.progress = 1.0
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Agent mining job %s failed", job.job_id)
-        job.status = "failed"
-        job.error = str(exc)
-        job.message = "Failed"
-    finally:
-        try:
-            if mining_pool is not None:
-                mining_pool.close()
-        except Exception:
-            pass
-        job.updated_at = time.time()
-
-
 def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> None:
     """
-    SAM3 Recipe Mining (sam3_greedy mode).
+    SAM3 Recipe Mining (steps mode).
 
-    Builds one recipe per class using:
+    Builds schema-v2 multi-step recipes using:
     - prompt bank (text prompts)
-    - a pretrained CLIP head (required) for filtering + cleanliness tuning
+    - pretrained CLIP head (required) for filtering + cleanliness tuning
 
-    Then evaluates the full greedy recipe pipeline on the validation split.
+    Then evaluates the full steps pipeline on a deterministic sample of images.
     """
     with AGENT_MINING_JOBS_LOCK:
         AGENT_MINING_JOBS[job.job_id] = job
     job.status = "running"
-    job.message = "Preparing dataset split…"
+    job.message = "Preparing image sample…"
     job.request = payload.dict()
     job.updated_at = time.time()
 
@@ -17434,37 +16543,25 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         _log(f"Dataset resolved at {dataset_root}")
         _log(
             "Request: "
-            f"test_mode={payload.test_mode} "
-            f"train_limit={payload.test_train_limit} val_limit={payload.test_val_limit} "
-            f"val_percent={payload.val_percent:.3f} ({payload.val_percent * 100:.1f}%) "
-            f"split_seed={payload.split_seed}"
+            f"eval_images={payload.eval_image_count} "
+            f"sample_seed={payload.split_seed}"
         )
 
-        split = _ensure_agent_mining_split(
+        sample = _ensure_agent_mining_sample(
             payload.dataset_id,
             dataset_root,
-            val_percent=payload.val_percent,
+            sample_size=payload.eval_image_count,
             seed=payload.split_seed,
-            reuse_split=payload.reuse_split,
-            test_mode=payload.test_mode,
-            train_limit=payload.test_train_limit if payload.test_mode else None,
-            val_limit=payload.test_val_limit if payload.test_mode else None,
         )
-        train_ids = [int(i) for i in (split.get("train") or [])]
-        val_ids = [int(i) for i in (split.get("val") or [])]
-        if not train_ids or not val_ids:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_empty_split")
-        _log(
-            f"Prepared split with {len(train_ids)} train / {len(val_ids)} val images "
-            f"(cached={split.get('_cached', False)})"
-        )
-        val_split_hash = "unknown"
+        eval_ids = [int(i) for i in (sample.get("sample_ids") or [])]
+        if not eval_ids:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_empty_sample")
+        _log(f"Prepared sample with {len(eval_ids)} images (cached={sample.get('_cached', False)})")
+        sample_hash = "unknown"
         try:
-            val_split_hash = hashlib.sha256(",".join(str(i) for i in val_ids).encode("utf-8")).hexdigest()[:12]
+            sample_hash = hashlib.sha256(",".join(str(i) for i in eval_ids).encode("utf-8")).hexdigest()[:12]
         except Exception:
-            val_split_hash = "unknown"
-        if payload.test_mode:
-            _log(f"Test mode enabled (train_limit={payload.test_train_limit}, val_limit={payload.test_val_limit})")
+            sample_hash = "unknown"
         job.progress = 0.05
 
         coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
@@ -17492,38 +16589,13 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if not selected_categories:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_classes_selected")
 
-        # Web UI only exposes schema-v2 multi-step mining now; keep legacy modes for API back-compat
-        # but force the effective mode to steps so we never generate the old recipe style.
-        effective_search_mode = "steps"
-        if payload.search_mode != "steps":
-            _log(f"Requested search_mode={payload.search_mode} is deprecated; forcing steps.")
-
         _log(
             "Config: "
-            + f"mode={payload.search_mode}"
-            + (
-                f" (effective={effective_search_mode}) "
-                if effective_search_mode != payload.search_mode
-                else " "
-            )
-            + f"seed_thr={payload.seed_threshold} expand_thr={payload.expand_threshold} sim_floor={payload.similarity_score} "
-            + f"pos_crops={payload.positives_per_class} "
-            + f"neg_crops={payload.max_negatives_per_class if payload.use_negative_exemplars else 0} "
-            + f"neg_strength={payload.negative_strength} "
-            + f"max_seeds={payload.max_visual_seeds} seed_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
+            + f"seed_thr={payload.seed_threshold} expand_thr={payload.expand_threshold} "
+            + f"seed_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
             + f"mask_thr={payload.mask_threshold} max_results={payload.max_results} iou_eval={payload.iou_threshold} "
-            + f"cluster_exemplars={payload.cluster_exemplars} llm_prompts={payload.prompt_llm_max_prompts} "
-            + f"workers_per_gpu={getattr(payload, 'max_workers_per_device', 1)}"
-            + (
-                f" steps(max_steps={int(payload.steps_max_steps_per_recipe)}, seeds/step={int(payload.steps_max_visual_seeds_per_step)})"
-                if effective_search_mode == "steps"
-                else ""
-            )
-            + (
-                f" beam(k={payload.beam_width}, rounds={payload.beam_rounds}, eps={payload.beam_min_improve}, cap={payload.beam_eval_cap})"
-                if effective_search_mode == "beam"
-                else ""
-            )
+            + f"llm_prompts={payload.prompt_llm_max_prompts} workers_per_gpu={getattr(payload, 'max_workers_per_device', 1)} "
+            + f"steps(max_steps={int(payload.steps_max_steps_per_recipe)}, seeds/step={int(payload.steps_max_visual_seeds_per_step)})"
         )
 
         # Pretrained CLIP head (LogReg) is required for Agent Mining (recipe mining).
@@ -17531,35 +16603,27 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if clip_head_path is None:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
         clip_head = _load_clip_head_from_classifier(clip_head_path)
-        clip_head_enabled = bool(isinstance(clip_head, dict))
-        if not clip_head_enabled:
+        if not isinstance(clip_head, dict):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
-        if clip_head_path is not None:
+        head_mode_bits = ""
+        try:
+            if bool(getattr(payload, "clip_head_auto_tune", True)):
+                head_mode_bits = (
+                    f"(auto-tune: target_precision={float(getattr(payload, 'clip_head_target_precision', 0.9)):.2f}; "
+                    f"seed min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
+                )
+            else:
+                head_mode_bits = f"(fixed thresholds: min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
+        except Exception:
             head_mode_bits = ""
-            try:
-                if bool(getattr(payload, "clip_head_auto_tune", True)):
-                    head_mode_bits = (
-                        f"(auto-tune: target_precision={float(getattr(payload, 'clip_head_target_precision', 0.9)):.2f}; "
-                        f"seed min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
-                    )
-                else:
-                    head_mode_bits = (
-                        f"(fixed thresholds: min_prob={payload.clip_head_min_prob} margin={payload.clip_head_margin})"
-                    )
-            except Exception:
-                head_mode_bits = ""
-            clip_name = clip_head.get("clip_model") if isinstance(clip_head, dict) else None
-            clip_name_str = str(clip_name).strip() if isinstance(clip_name, str) and clip_name.strip() else "unknown"
-            _log(
-                "Pretrained CLIP head enabled: "
-                f"{clip_head_path.name} "
-                f"(clip={clip_name_str}, classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
-                f"{head_mode_bits}"
-            )
-            _log("CLIP head mode: example crops / CLIP similarity / negative crops are ignored (head-only filtering).")
-
-        # Crop-bank mode (raw CLIP similarity) is deprecated; CLIP head is required for recipe mining.
-        crop_banks_enabled = False
+        clip_name = clip_head.get("clip_model") if isinstance(clip_head, dict) else None
+        clip_name_str = str(clip_name).strip() if isinstance(clip_name, str) and clip_name.strip() else "unknown"
+        _log(
+            "Pretrained CLIP head enabled: "
+            f"{clip_head_path.name} "
+            f"(clip={clip_name_str}, classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
+            f"{head_mode_bits}"
+        )
 
         # Prompt mining (GPT-OSS) per class.
         base_prompts_all: List[str] = []
@@ -17572,6 +16636,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         base_prompts_all = _sanitize_prompts(base_prompts_all)
         if base_prompts_all:
             _log(f"Base prompts (all classes): {', '.join(base_prompts_all)}")
+
+        prefilter_cfg = _resolve_steps_prompt_prefilter_config(payload)
+        clip_model_for_prefilter: Optional[str] = None
+        if isinstance(clip_head, dict):
+            raw_model = clip_head.get("clip_model")
+            if isinstance(raw_model, str) and raw_model.strip():
+                clip_model_for_prefilter = raw_model.strip()
+        if prefilter_cfg.get("enabled"):
+            _log(
+                "CLIP prompt prefilter enabled: "
+                f"mode={prefilter_cfg.get('mode')} sample_size={prefilter_cfg.get('sample_size')} "
+                f"keep_ratio={float(prefilter_cfg.get('keep_ratio') or 0.0):.2f}"
+            )
 
         prepared_prompts: Dict[int, List[str]] = {}
         for cid, name in selected_categories:
@@ -17610,6 +16687,22 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     continue
                 seen.add(key)
                 merged.append(str(p))
+            base_keep = _sanitize_prompts([*base, *base_prompts_all])
+            if prefilter_cfg.get("enabled"):
+                merged = _prefilter_prompts_with_clip(
+                    merged,
+                    keep_prompts=base_keep,
+                    cat_id=int(cid),
+                    class_name=str(name),
+                    eval_ids=eval_ids,
+                    images=images,
+                    gt_by_image_cat=gt_by_image_cat,
+                    clip_model_name=clip_model_for_prefilter,
+                    sample_size=int(prefilter_cfg.get("sample_size") or 0),
+                    keep_ratio=float(prefilter_cfg.get("keep_ratio") or 0.0),
+                    seed=int(payload.split_seed) + int(cid),
+                    log_fn=_log,
+                )
             prepared_prompts[cid] = merged or base
             _log(f"Prompt list for {name}: {', '.join(prepared_prompts[cid])}")
 
@@ -17620,173 +16713,24 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             pass
         job.progress = max(job.progress, 0.07)
 
-        train_set = set(train_ids)
-        val_set = set(val_ids)
+        eval_set = set(eval_ids)
         class_entries: List[Dict[str, Any]] = []
         total_classes = len(selected_categories)
-        _log(f"Building crop banks for {total_classes} class(es)…")
+        _log(f"Preparing {total_classes} class(es)…")
 
         for class_idx, (cid, name) in enumerate(selected_categories, start=1):
             if _cancelled():
                 break
-            job.message = f"Mining {name} ({class_idx}/{total_classes})"
+            job.message = f"Preparing {name} ({class_idx}/{total_classes})"
             job.updated_at = time.time()
 
-            # Count GTs in split.
-            train_gt = 0
-            val_gt = 0
+            eval_gt = 0
             for img_id, cat_map in gt_by_image_cat.items():
                 bboxes = cat_map.get(cid)
                 if not bboxes:
                     continue
-                count = len(bboxes)
-                if img_id in train_set:
-                    train_gt += count
-                elif img_id in val_set:
-                    val_gt += count
-
-            positives_target = max(0, int(payload.positives_per_class)) if crop_banks_enabled else 0
-            use_clip = bool(crop_banks_enabled and positives_target > 0)
-            positives: List[Dict[str, Any]] = []
-            pos_embeddings: Dict[str, np.ndarray] = {}
-            pos_warnings: List[str] = []
-            pool: List[Dict[str, Any]] = []
-
-            if positives_target > 0:
-                # Positive crop bank from train GTs.
-                pos_candidates: List[Dict[str, Any]] = []
-                for img_id in train_ids:
-                    boxes = (gt_by_image_cat.get(img_id) or {}).get(cid) or []
-                    for b_idx, bbox in enumerate(boxes):
-                        if not bbox or len(bbox) < 4:
-                            continue
-                        try:
-                            x, y, w, h = map(float, bbox[:4])
-                        except Exception:
-                            continue
-                        area = max(0.0, w) * max(0.0, h)
-                        embed_id = f"pos:{cid}:{img_id}:{b_idx}"
-                        pos_candidates.append(
-                            {
-                                "id": embed_id,
-                                "image_id": int(img_id),
-                                "bbox": [x, y, w, h],
-                                "area": area,
-                                "embed_id": embed_id,
-                            }
-                        )
-                rng = random.Random(payload.split_seed + cid)
-                rng.shuffle(pos_candidates)
-                if payload.exemplar_candidate_mode == "percent":
-                    pct = max(1, min(100, int(payload.exemplar_candidate_value)))
-                    pool_cap = max(1, int(math.ceil(len(pos_candidates) * (pct / 100.0)))) if pos_candidates else 0
-                else:
-                    pool_cap = max(1, min(int(payload.exemplar_candidate_value), len(pos_candidates))) if pos_candidates else 0
-                pool = pos_candidates[:pool_cap] if pool_cap else []
-
-            if positives_target > 0 and pool and use_clip:
-                if payload.cluster_exemplars and use_clip:
-                    # CLIP-diverse crop bank selection requires embeddings for the pool.
-                    pos_embeddings_all, pos_warnings = _clip_embed_regions(pool, images, max_regions=len(pool))
-                    positives = _k_center_select(pool, pos_embeddings_all, positives_target) or pool[:positives_target]
-                    sel_ids = {p.get("embed_id") for p in positives if p.get("embed_id")}
-                    pos_embeddings = {k: v for k, v in pos_embeddings_all.items() if k in sel_ids}
-                else:
-                    # Random-but-deterministic (due to rng shuffle) selection.
-                    positives = pool[:positives_target]
-                    if use_clip and positives:
-                        pos_embeddings, pos_warnings = _clip_embed_regions(positives, images, max_regions=len(positives))
-            if positives_target <= 0:
-                if clip_head_enabled:
-                    _log(f"Exemplars for {name}: skipped (CLIP head mode)")
-                elif not bool(payload.use_clip_fp_guard):
-                    _log(f"Exemplars for {name}: skipped (CLIP crop-bank disabled)")
-                else:
-                    _log(f"Exemplars for {name}: skipped (positives_per_class=0)")
-            else:
-                _log(
-                    f"Exemplars for {name}: {len(pos_candidates)} candidates -> pool {len(pool)}, "
-                    f"embedded {len(pos_embeddings)}, selected {len(positives)}"
-                )
-            for w in pos_warnings:
-                _log(f"CLIP warning for {name}: {w}")
-
-            neg_embeddings: Dict[str, np.ndarray] = {}
-            negatives: List[Dict[str, Any]] = []
-            if use_clip and payload.use_negative_exemplars and payload.max_negatives_per_class > 0:
-                neg_candidates: List[Dict[str, Any]] = []
-                for img_id in train_ids:
-                    by_cat = gt_by_image_cat.get(img_id) or {}
-                    for other_cid, boxes in by_cat.items():
-                        try:
-                            other_int = int(other_cid)
-                        except Exception:
-                            continue
-                        if other_int == cid:
-                            continue
-                        for b_idx, bbox in enumerate(boxes or []):
-                            if not bbox or len(bbox) < 4:
-                                continue
-                            try:
-                                x, y, w, h = map(float, bbox[:4])
-                            except Exception:
-                                continue
-                            area = max(0.0, w) * max(0.0, h)
-                            embed_id = f"neg:{cid}:{img_id}:{other_int}:{b_idx}"
-                            neg_candidates.append(
-                                {
-                                    "id": embed_id,
-                                    "image_id": int(img_id),
-                                    "bbox": [x, y, w, h],
-                                    "area": area,
-                                    "embed_id": embed_id,
-                                }
-                            )
-                rng_n = random.Random(payload.split_seed + cid + 999)
-                rng_n.shuffle(neg_candidates)
-                if payload.exemplar_candidate_mode == "percent":
-                    pct = max(1, min(100, int(payload.exemplar_candidate_value)))
-                    pool_cap_n = max(1, int(math.ceil(len(neg_candidates) * (pct / 100.0)))) if neg_candidates else 0
-                else:
-                    pool_cap_n = max(1, min(int(payload.exemplar_candidate_value), len(neg_candidates))) if neg_candidates else 0
-                pool_n = neg_candidates[:pool_cap_n] if pool_cap_n else []
-                neg_target = max(0, int(payload.max_negatives_per_class))
-                neg_warnings: List[str] = []
-                if neg_target > 0 and pool_n:
-                    if payload.cluster_exemplars:
-                        neg_embeddings_all, neg_warnings = _clip_embed_regions(pool_n, images, max_regions=len(pool_n))
-                        negatives = _k_center_select(pool_n, neg_embeddings_all, neg_target) or pool_n[:neg_target]
-                        sel_n_ids = {n.get("embed_id") for n in negatives if n.get("embed_id")}
-                        neg_embeddings = {k: v for k, v in neg_embeddings_all.items() if k in sel_n_ids}
-                    else:
-                        negatives = pool_n[:neg_target]
-                        if negatives:
-                            neg_embeddings, neg_warnings = _clip_embed_regions(negatives, images, max_regions=len(negatives))
-                _log(
-                    f"Negatives for {name}: {len(neg_candidates)} candidates -> pool {len(pool_n)}, "
-                    f"embedded {len(neg_embeddings)}, selected {len(negatives)}"
-                )
-                for w in neg_warnings:
-                    _log(f"CLIP warning (negatives) for {name}: {w}")
-            elif clip_head_enabled:
-                _log(f"Negatives for {name}: skipped (CLIP head mode)")
-            elif not use_clip and not crop_banks_enabled and bool(payload.use_negative_exemplars):
-                _log(f"Negatives for {name}: skipped (CLIP crop-bank disabled)")
-
-            ex_mat = None
-            if pos_embeddings:
-                try:
-                    ex_mat = np.stack(list(pos_embeddings.values())).astype(np.float32)
-                    ex_mat = ex_mat / (np.linalg.norm(ex_mat, axis=1, keepdims=True) + 1e-8)
-                except Exception:
-                    ex_mat = None
-            neg_mat = None
-            if neg_embeddings:
-                try:
-                    neg_mat = np.stack(list(neg_embeddings.values())).astype(np.float32)
-                    neg_mat = neg_mat / (np.linalg.norm(neg_mat, axis=1, keepdims=True) + 1e-8)
-                except Exception:
-                    neg_mat = None
+                if img_id in eval_set:
+                    eval_gt += len(bboxes)
 
             prompts_for_class = prepared_prompts.get(cid) or [name]
             head_target_index: Optional[int] = None
@@ -17799,31 +16743,25 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 {
                     "id": int(cid),
                     "name": name,
-                    "train_gt": train_gt,
-                    "val_gt": val_gt,
+                    "eval_gt": eval_gt,
                     "text_prompts": prompts_for_class,
-                    "positives": positives,
-                    "negatives": negatives,
-                    "exemplar_embeddings": ex_mat,
-                    "negative_embeddings": neg_mat,
                     "clip_head_target_index": head_target_index,
                 }
             )
 
-            # Building crop banks is "setup" work; keep this to ~10% so the remaining bar maps to validation eval.
             job.progress = max(job.progress, 0.07 + 0.03 * (class_idx / max(1, total_classes)))
             job.updated_at = time.time()
 
         eval_payload = payload
-        per_class_overrides: Optional[Dict[int, Dict[str, Any]]] = None
+        summaries: Dict[int, Dict[str, Any]] = {}
         recipes_by_class: Dict[int, Dict[str, Any]] = {}
         if _cancelled():
-            summaries: Dict[int, Dict[str, Any]] = {}
+            summaries = {}
         else:
-            job.message = "Evaluating recipes on validation split (global)…"
+            job.message = "Evaluating recipes on sample…"
             job.updated_at = time.time()
             job.progress = max(job.progress, 0.1)
-            eval_log_every = 50 if not payload.test_mode else 5
+            eval_log_every = 5 if len(eval_ids) <= 50 else 50
 
             def _on_eval_progress(done: int, total: int) -> None:
                 if total <= 0:
@@ -17832,119 +16770,121 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     return
                 frac = max(0.0, min(1.0, float(done) / float(total)))
                 job.progress = max(job.progress, 0.1 + 0.9 * frac)
-                job.message = f"Evaluating recipes: {done}/{total} val images"
+                job.message = f"Evaluating recipes: {done}/{total} sample images"
                 job.updated_at = time.time()
 
             eval_workers: Optional[List[_Sam3GreedyEvalWorker]] = None
             try:
                 eval_workers = _build_sam3_greedy_eval_workers(eval_payload, log_fn=_log)
-                if effective_search_mode == "beam" and not _cancelled():
-                    job.message = "Beam search: tuning parameters (slow)…"
+                total_classes = len(class_entries)
+                for class_idx, entry in enumerate(class_entries, start=1):
+                    if _cancelled():
+                        break
+                    cid = int(entry.get("id"))
+                    name = str(entry.get("name") or f"class_{cid}")
+                    prompts_for_class = entry.get("text_prompts") or [name]
+                    head_target_index = entry.get("clip_head_target_index")
+
+                    class_base = 0.1 + 0.9 * ((class_idx - 1) / max(1, total_classes))
+                    class_span = 0.9 * (1.0 / max(1, total_classes))
+                    seed_span = class_span * 0.45
+                    tune_span = class_span * 0.55
+
+                    def _mk_phase_cb(base: float, span: float, label: str) -> Callable[[int, int], None]:
+                        def _cb(done: int, total: int) -> None:
+                            if total <= 0:
+                                return
+                            frac = max(0.0, min(1.0, float(done) / float(total)))
+                            job.progress = max(job.progress, base + span * frac)
+                            job.message = f"{label} {done}/{total} ({name})"
+                            job.updated_at = time.time()
+
+                        return _cb
+
+                    job.message = f"[steps] Seed-evaluating prompts for {name} ({class_idx}/{total_classes})…"
                     job.updated_at = time.time()
-                    job.progress = max(job.progress, 0.12)
-                    eval_payload, per_class_overrides = _beam_tune_sam3_greedy_params(
-                        class_entries=class_entries,
-                        val_ids=val_ids,
+                    seed_stats = _mine_seed_prompt_stats_image_first(
+                        cat_id=cid,
+                        prompts=prompts_for_class,
+                        val_ids=eval_ids,
                         images=images,
                         gt_by_image_cat=gt_by_image_cat,
-                        payload=payload,
-                        clip_head=clip_head,
+                        payload=eval_payload,
                         workers=eval_workers,
+                        log_every=eval_log_every,
                         log_fn=_log,
                         cancel_event=job.cancel_event,
+                        progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Seed eval"),
                     )
-                    job.progress = max(job.progress, 0.18)
-                    job.message = "Evaluating recipes on validation split (global)…"
-                    job.updated_at = time.time()
-
-                if effective_search_mode == "steps":
-                    summaries = {}
-                    total_classes = len(class_entries)
-                    for class_idx, entry in enumerate(class_entries, start=1):
-                        if _cancelled():
-                            break
-                        cid = int(entry.get("id"))
-                        name = str(entry.get("name") or f"class_{cid}")
-                        prompts_for_class = entry.get("text_prompts") or [name]
-                        head_target_index = entry.get("clip_head_target_index")
-
-                        class_base = 0.1 + 0.9 * ((class_idx - 1) / max(1, total_classes))
-                        class_span = 0.9 * (1.0 / max(1, total_classes))
-                        seed_span = class_span * 0.45
-                        tune_span = class_span * 0.55
-
-                        def _mk_phase_cb(base: float, span: float, label: str) -> Callable[[int, int], None]:
-                            def _cb(done: int, total: int) -> None:
-                                if total <= 0:
-                                    return
-                                frac = max(0.0, min(1.0, float(done) / float(total)))
-                                job.progress = max(job.progress, base + span * frac)
-                                job.message = f"{label} {done}/{total} ({name})"
-                                job.updated_at = time.time()
-
-                            return _cb
-
-                        job.message = f"[steps] Seed-evaluating prompts for {name} ({class_idx}/{total_classes})…"
-                        job.updated_at = time.time()
-                        seed_stats = _mine_seed_prompt_stats_image_first(
-                            cat_id=cid,
-                            prompts=prompts_for_class,
-                            val_ids=val_ids,
-                            images=images,
-                            gt_by_image_cat=gt_by_image_cat,
-                            payload=eval_payload,
-                            workers=eval_workers,
-                            log_every=eval_log_every,
-                            log_fn=_log,
-                            cancel_event=job.cancel_event,
-                            progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Seed eval"),
+                    target_prec = (
+                        float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0)
+                        if (clip_head is not None and head_target_index is not None)
+                        else None
+                    )
+                    early_stop_cfg = _resolve_steps_early_stop_config(eval_payload, target_precision=target_prec)
+                    if early_stop_cfg.get("enabled"):
+                        _log(
+                            "Early-stop enabled: "
+                            f"mode={early_stop_cfg.get('mode')} min_steps={early_stop_cfg.get('min_steps')} "
+                            f"window={early_stop_cfg.get('window')} min_increment={float(early_stop_cfg.get('min_increment') or 0.0):.3f} "
+                            f"precision_margin={float(early_stop_cfg.get('precision_margin') or 0.0):.2f}"
                         )
-                        selected = _select_steps_from_seed_prompt_stats(
+                    selected = _select_steps_from_seed_prompt_stats(
+                        seed_stats,
+                        max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
+                        target_precision=target_prec,
+                        early_stop=early_stop_cfg,
+                        log_fn=_log,
+                    )
+                    refine_info: Optional[Dict[str, Any]] = None
+                    if bool(getattr(eval_payload, "steps_refine_prompt_subset", False)):
+                        selected, refine_info = _refine_steps_prompt_subset_seed_stage(
                             seed_stats,
+                            selected,
                             max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
-                            target_precision=(
-                                float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0)
-                                if (clip_head is not None and head_target_index is not None)
-                                else None
-                            ),
+                            target_precision=target_prec,
+                            max_iters=int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 6) or 6),
+                            top_k=int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 6) or 6),
+                            base_seed_threshold=float(eval_payload.seed_threshold),
                             log_fn=_log,
                         )
-                        refine_info: Optional[Dict[str, Any]] = None
-                        if bool(getattr(eval_payload, "steps_refine_prompt_subset", False)):
-                            selected, refine_info = _refine_steps_prompt_subset_seed_stage(
-                                seed_stats,
-                                selected,
-                                max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
-                                target_precision=(
-                                    float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0)
-                                    if (clip_head is not None and head_target_index is not None)
-                                    else None
-                                ),
-                                max_iters=int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 6) or 6),
-                                top_k=int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 6) or 6),
-                                base_seed_threshold=float(eval_payload.seed_threshold),
-                                log_fn=_log,
-                            )
-                        selected_prompts, step_list = _build_steps_recipe_step_list_from_selected_stats(
-                            selected,
-                            prompts_fallback=prompts_for_class,
-                            payload=eval_payload,
-                        )
+                    selected_prompts, step_list = _build_steps_recipe_step_list_from_selected_stats(
+                        selected,
+                        prompts_fallback=prompts_for_class,
+                        payload=eval_payload,
+                    )
 
-                        tier1_info: Optional[Dict[str, Any]] = None
-                        tier2_info: Optional[Dict[str, Any]] = None
-                        global_info: Optional[Dict[str, Any]] = None
-                        summary: Dict[str, Any]
-                        if clip_head is not None and head_target_index is not None:
-                            global_enabled = bool(getattr(eval_payload, "steps_optimize_global", False))
-                            if global_enabled:
-                                job.message = f"[steps] Global optimization for {name} ({class_idx}/{total_classes})…"
+                    tier1_info: Optional[Dict[str, Any]] = None
+                    tier2_info: Optional[Dict[str, Any]] = None
+                    global_info: Optional[Dict[str, Any]] = None
+                    summary: Dict[str, Any]
+                    if clip_head is not None and head_target_index is not None:
+                        global_enabled = bool(getattr(eval_payload, "steps_optimize_global", False))
+                        if global_enabled:
+                            job.message = f"[steps] Global optimization for {name} ({class_idx}/{total_classes})…"
+                            job.updated_at = time.time()
+                            step_list, global_info = _tune_steps_global_optimizer_image_first(
+                                cat_id=cid,
+                                steps=step_list,
+                                seed_stats=seed_stats,
+                                val_ids=eval_ids,
+                                images=images,
+                                gt_by_image_cat=gt_by_image_cat,
+                                payload=eval_payload,
+                                clip_head=clip_head,
+                                clip_head_target_index=int(head_target_index),
+                                workers=eval_workers,
+                                log_fn=_log,
+                                cancel_event=job.cancel_event,
+                            )
+                        else:
+                            if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
+                                job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
                                 job.updated_at = time.time()
-                                step_list, global_info = _tune_steps_global_optimizer_image_first(
+                                step_list, tier1_info = _tune_steps_tier1_knobs_image_first(
                                     cat_id=cid,
                                     steps=step_list,
-                                    seed_stats=seed_stats,
-                                    val_ids=val_ids,
+                                    val_ids=eval_ids,
                                     images=images,
                                     gt_by_image_cat=gt_by_image_cat,
                                     payload=eval_payload,
@@ -17954,236 +16894,198 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                     log_fn=_log,
                                     cancel_event=job.cancel_event,
                                 )
-                            else:
-                                if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
-                                    job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
-                                    job.updated_at = time.time()
-                                    step_list, tier1_info = _tune_steps_tier1_knobs_image_first(
-                                        cat_id=cid,
-                                        steps=step_list,
-                                        val_ids=val_ids,
-                                        images=images,
-                                        gt_by_image_cat=gt_by_image_cat,
-                                        payload=eval_payload,
-                                        clip_head=clip_head,
-                                        clip_head_target_index=int(head_target_index),
-                                        workers=eval_workers,
-                                        log_fn=_log,
-                                        cancel_event=job.cancel_event,
-                                    )
-                                if bool(getattr(eval_payload, "steps_optimize_tier2", False)):
-                                    job.message = f"[steps] Tier-2 tuning for {name} ({class_idx}/{total_classes})…"
-                                    job.updated_at = time.time()
-                                    step_list, tier2_info = _tune_steps_tier2_knobs_image_first(
-                                        cat_id=cid,
-                                        steps=step_list,
-                                        val_ids=val_ids,
-                                        images=images,
-                                        gt_by_image_cat=gt_by_image_cat,
-                                        payload=eval_payload,
-                                        clip_head=clip_head,
-                                        clip_head_target_index=int(head_target_index),
-                                        workers=eval_workers,
-                                        log_fn=_log,
-                                        cancel_event=job.cancel_event,
-                                    )
-                            job.message = f"[steps] Tuning CLIP head for {name} ({class_idx}/{total_classes})…"
-                            job.updated_at = time.time()
-                            summary = _tune_clip_head_for_selected_steps_image_first(
-                                cat_id=cid,
-                                steps=step_list,
-                                val_ids=val_ids,
-                                images=images,
-                                gt_by_image_cat=gt_by_image_cat,
-                                payload=eval_payload,
-                                clip_head=clip_head,
-                                clip_head_target_index=int(head_target_index),
-                                workers=eval_workers,
-                                log_every=eval_log_every,
-                                log_fn=_log,
-                                cancel_event=job.cancel_event,
-                                progress_callback=_mk_phase_cb(class_base + seed_span, tune_span, "[steps] Final tune"),
-                            )
-                            if tier1_info and isinstance(summary, dict):
-                                summary["tier1_tuning"] = tier1_info
-                            if tier2_info and isinstance(summary, dict):
-                                summary["tier2_tuning"] = tier2_info
-                            if global_info and isinstance(summary, dict):
-                                summary["global_optimizer"] = global_info
-                            if refine_info and isinstance(summary, dict):
-                                summary["prompt_subset_refinement"] = refine_info
-                        else:
-                            # No head available for this class: fall back to a trivial summary (no tuning).
-                            total_gt = 0
-                            for img_id in val_ids:
-                                total_gt += len((gt_by_image_cat.get(int(img_id)) or {}).get(int(cid)) or [])
-                            summary = {
-                                "gts": total_gt,
-                                "matches": 0,
-                                "fps": 0,
-                                "duplicates": 0,
-                                "preds": 0,
-                                "precision": 0.0,
-                                "recall": 0.0,
-                                "coverage_rate": 0.0,
-                                "det_rate": 0.0,
-                            }
-                            if refine_info:
-                                summary["prompt_subset_refinement"] = refine_info
-
-                        summaries[cid] = summary
-                        tuned_expand = float(eval_payload.expand_threshold)
-                        tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
-                        tuned_seed_iou = float(eval_payload.seed_dedupe_iou)
-                        tuned_out_iou = float(eval_payload.dedupe_iou)
-                        tuned_max_results = int(eval_payload.max_results)
-                        if step_list and isinstance(step_list[0], dict):
-                            try:
-                                if step_list[0].get("expand_threshold") is not None:
-                                    tuned_expand = float(step_list[0].get("expand_threshold"))
-                            except Exception:
-                                tuned_expand = float(eval_payload.expand_threshold)
-                            try:
-                                if step_list[0].get("max_visual_seeds") is not None:
-                                    tuned_max_seeds = int(step_list[0].get("max_visual_seeds"))
-                            except Exception:
-                                tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
-                            try:
-                                if step_list[0].get("seed_dedupe_iou") is not None:
-                                    tuned_seed_iou = float(step_list[0].get("seed_dedupe_iou"))
-                            except Exception:
-                                tuned_seed_iou = float(eval_payload.seed_dedupe_iou)
-                            try:
-                                if step_list[0].get("dedupe_iou") is not None:
-                                    tuned_out_iou = float(step_list[0].get("dedupe_iou"))
-                            except Exception:
-                                tuned_out_iou = float(eval_payload.dedupe_iou)
-                            try:
-                                if step_list[0].get("max_results") is not None:
-                                    tuned_max_results = int(step_list[0].get("max_results"))
-                            except Exception:
-                                tuned_max_results = int(eval_payload.max_results)
-                        optimizer = {
-                            "algorithm": "sam3_steps_v2",
-                            "version": 1,
-                            "created_at": float(time.time()),
-                            "split_seed": int(eval_payload.split_seed),
-                            "val_percent": float(eval_payload.val_percent),
-                            "reuse_split": bool(eval_payload.reuse_split),
-                            "val_split_hash": str(val_split_hash),
-                            "val_images": int(len(val_ids)),
-                            "target_precision": float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0),
-                            "max_steps_per_recipe": int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
-                            "seed_threshold": {
-                                "base": float(eval_payload.seed_threshold),
-                                "seed_eval_threshold": float(_compute_steps_seed_eval_threshold(eval_payload)),
-                                "seed_eval_max_results": int(_compute_steps_seed_eval_max_results(eval_payload)),
-                                "strategy": "curve_candidates",
-                                "max_candidates_per_prompt": 6,
-                            },
-                            "global_optimizer": global_info
-                            if isinstance(global_info, dict)
-                            else {
-                                "enabled": False,
-                                "requested": bool(getattr(eval_payload, "steps_optimize_global", False)),
-                                "eval_caps": list(getattr(eval_payload, "steps_optimize_global_eval_caps", []) or []),
-                                "max_trials": int(getattr(eval_payload, "steps_optimize_global_max_trials", 0) or 0),
-                                "keep_ratio": float(getattr(eval_payload, "steps_optimize_global_keep_ratio", 0.0) or 0.0),
-                                "rounds": int(getattr(eval_payload, "steps_optimize_global_rounds", 0) or 0),
-                                "mutations_per_round": int(getattr(eval_payload, "steps_optimize_global_mutations_per_round", 0) or 0),
-                                "enable_ordering": bool(getattr(eval_payload, "steps_optimize_global_enable_ordering", False)),
-                                "enable_max_results": bool(getattr(eval_payload, "steps_optimize_global_enable_max_results", False)),
-                            },
-                            "tier1": tier1_info
-                            if isinstance(tier1_info, dict)
-                            else {
-                                "enabled": False,
-                                "requested": bool(getattr(eval_payload, "steps_optimize_tier1", False)),
-                                "eval_cap": int(getattr(eval_payload, "steps_optimize_tier1_eval_cap", 0) or 0),
-                                "max_trials": int(getattr(eval_payload, "steps_optimize_tier1_max_trials", 0) or 0),
-                            },
-                            "tier2": tier2_info
-                            if isinstance(tier2_info, dict)
-                            else {
-                                "enabled": False,
-                                "requested": bool(getattr(eval_payload, "steps_optimize_tier2", False)),
-                                "eval_cap": int(getattr(eval_payload, "steps_optimize_tier2_eval_cap", 0) or 0),
-                                "max_trials": int(getattr(eval_payload, "steps_optimize_tier2_max_trials", 0) or 0),
-                            },
-                            "prompt_subset_refinement": refine_info
-                            if isinstance(refine_info, dict)
-                            else {
-                                "enabled": False,
-                                "requested": bool(getattr(eval_payload, "steps_refine_prompt_subset", False)),
-                                "max_iters": int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 0) or 0),
-                                "top_k": int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 0) or 0),
-                            },
+                            if bool(getattr(eval_payload, "steps_optimize_tier2", False)):
+                                job.message = f"[steps] Tier-2 tuning for {name} ({class_idx}/{total_classes})…"
+                                job.updated_at = time.time()
+                                step_list, tier2_info = _tune_steps_tier2_knobs_image_first(
+                                    cat_id=cid,
+                                    steps=step_list,
+                                    val_ids=eval_ids,
+                                    images=images,
+                                    gt_by_image_cat=gt_by_image_cat,
+                                    payload=eval_payload,
+                                    clip_head=clip_head,
+                                    clip_head_target_index=int(head_target_index),
+                                    workers=eval_workers,
+                                    log_fn=_log,
+                                    cancel_event=job.cancel_event,
+                                )
+                        job.message = f"[steps] Tuning CLIP head for {name} ({class_idx}/{total_classes})…"
+                        job.updated_at = time.time()
+                        summary = _tune_clip_head_for_selected_steps_image_first(
+                            cat_id=cid,
+                            steps=step_list,
+                            val_ids=eval_ids,
+                            images=images,
+                            gt_by_image_cat=gt_by_image_cat,
+                            payload=eval_payload,
+                            clip_head=clip_head,
+                            clip_head_target_index=int(head_target_index),
+                            workers=eval_workers,
+                            log_every=eval_log_every,
+                            log_fn=_log,
+                            cancel_event=job.cancel_event,
+                            progress_callback=_mk_phase_cb(class_base + seed_span, tune_span, "[steps] Final tune"),
+                        )
+                        if tier1_info and isinstance(summary, dict):
+                            summary["tier1_tuning"] = tier1_info
+                        if tier2_info and isinstance(summary, dict):
+                            summary["tier2_tuning"] = tier2_info
+                        if global_info and isinstance(summary, dict):
+                            summary["global_optimizer"] = global_info
+                        if refine_info and isinstance(summary, dict):
+                            summary["prompt_subset_refinement"] = refine_info
+                    else:
+                        total_gt = int(entry.get("eval_gt") or 0)
+                        summary = {
+                            "gts": total_gt,
+                            "matches": 0,
+                            "fps": 0,
+                            "duplicates": 0,
+                            "preds": 0,
+                            "precision": 0.0,
+                            "recall": 0.0,
+                            "coverage_rate": 0.0,
+                            "det_rate": 0.0,
                         }
-                        recipes_by_class[cid] = {
-                            "schema_version": 2,
-                            "mode": "sam3_steps",
-                            "optimizer": optimizer,
-                            "text_prompts": list(prompts_for_class),
-                            "steps": step_list,
-                            "params": {
-                                "use_clip_fp_guard": False,
-                                "use_negative_exemplars": False,
-                                "negative_strength": 0.0,
-                                "similarity_score": 0.0,
-                                "seed_threshold": float(eval_payload.seed_threshold),
-                                "expand_threshold": float(tuned_expand),
-                                "max_visual_seeds": int(tuned_max_seeds),
-                                "seed_dedupe_iou": float(tuned_seed_iou),
-                                "dedupe_iou": float(tuned_out_iou),
-                                "mask_threshold": float(eval_payload.mask_threshold),
-                                "min_size": int(eval_payload.min_size),
-                                "simplify_epsilon": float(eval_payload.simplify_epsilon),
-                                "max_results": int(tuned_max_results),
-                            },
-                            "summary": {
-                                **(summary or {}),
-	                                "seed_prompt_stats": [
-	                                    {
-	                                        "prompt": s.get("prompt"),
-	                                        "matches": int(s.get("matches") or 0),
-	                                        "fps": int(s.get("fps") or 0),
-	                                        "precision": float(s.get("precision") or 0.0),
-	                                        "selected_seed_threshold": float(
-	                                            s.get("selected_seed_threshold")
-	                                            if s.get("selected_seed_threshold") is not None
-	                                            else (s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold)
-	                                        ),
-	                                        "selected_seed_threshold_point": s.get("selected_seed_threshold_point"),
-	                                        "seed_threshold_base": float(s.get("seed_threshold_base") or eval_payload.seed_threshold),
-	                                        "seed_threshold_recommended": float(
-	                                            s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold
-	                                        ),
-	                                        "seed_threshold_base_point": s.get("seed_threshold_base_point"),
-	                                        "seed_threshold_recommended_point": s.get("seed_threshold_recommended_point"),
-	                                        "seed_threshold_curve": s.get("seed_threshold_curve") or [],
-	                                    }
-	                                    for s in selected
-	                                ],
-	                            },
-	                        }
-                    job.progress = max(job.progress, 0.98)
-                else:
-                    summaries = _evaluate_sam3_greedy_recipes_image_first(
-                        class_entries=class_entries,
-                        val_ids=val_ids,
-                        images=images,
-                        gt_by_image_cat=gt_by_image_cat,
-                        payload=eval_payload,
-                        per_class_overrides=per_class_overrides,
-                        clip_head=clip_head,
-                        cancel_event=job.cancel_event,
-                        log_every=eval_log_every,
-                        log_fn=_log,
-                        progress_callback=_on_eval_progress,
-                        workers=eval_workers,
-                        close_workers=False,
-                    )
-                    job.progress = max(job.progress, 0.98)
+                        if refine_info:
+                            summary["prompt_subset_refinement"] = refine_info
+
+                    summaries[cid] = summary
+                    tuned_expand = float(eval_payload.expand_threshold)
+                    tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                    tuned_seed_iou = float(eval_payload.seed_dedupe_iou)
+                    tuned_out_iou = float(eval_payload.dedupe_iou)
+                    tuned_max_results = int(eval_payload.max_results)
+                    if step_list and isinstance(step_list[0], dict):
+                        try:
+                            if step_list[0].get("expand_threshold") is not None:
+                                tuned_expand = float(step_list[0].get("expand_threshold"))
+                        except Exception:
+                            tuned_expand = float(eval_payload.expand_threshold)
+                        try:
+                            if step_list[0].get("max_visual_seeds") is not None:
+                                tuned_max_seeds = int(step_list[0].get("max_visual_seeds"))
+                        except Exception:
+                            tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                        try:
+                            if step_list[0].get("seed_dedupe_iou") is not None:
+                                tuned_seed_iou = float(step_list[0].get("seed_dedupe_iou"))
+                        except Exception:
+                            tuned_seed_iou = float(eval_payload.seed_dedupe_iou)
+                        try:
+                            if step_list[0].get("dedupe_iou") is not None:
+                                tuned_out_iou = float(step_list[0].get("dedupe_iou"))
+                        except Exception:
+                            tuned_out_iou = float(eval_payload.dedupe_iou)
+                        try:
+                            if step_list[0].get("max_results") is not None:
+                                tuned_max_results = int(step_list[0].get("max_results"))
+                        except Exception:
+                            tuned_max_results = int(eval_payload.max_results)
+                    optimizer = {
+                        "algorithm": "sam3_steps_v2",
+                        "version": 1,
+                        "created_at": float(time.time()),
+                        "sample_seed": int(eval_payload.split_seed),
+                        "sample_size": int(eval_payload.eval_image_count),
+                        "sample_hash": str(sample_hash),
+                        "sample_images": int(len(eval_ids)),
+                        "target_precision": float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0),
+                        "max_steps_per_recipe": int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
+                        "seed_threshold": {
+                            "base": float(eval_payload.seed_threshold),
+                            "seed_eval_threshold": float(_compute_steps_seed_eval_threshold(eval_payload)),
+                            "seed_eval_max_results": int(_compute_steps_seed_eval_max_results(eval_payload)),
+                            "strategy": "curve_candidates",
+                            "max_candidates_per_prompt": 6,
+                        },
+                        "global_optimizer": global_info
+                        if isinstance(global_info, dict)
+                        else {
+                            "enabled": False,
+                            "requested": bool(getattr(eval_payload, "steps_optimize_global", False)),
+                            "eval_caps": list(getattr(eval_payload, "steps_optimize_global_eval_caps", []) or []),
+                            "max_trials": int(getattr(eval_payload, "steps_optimize_global_max_trials", 0) or 0),
+                            "keep_ratio": float(getattr(eval_payload, "steps_optimize_global_keep_ratio", 0.0) or 0.0),
+                            "rounds": int(getattr(eval_payload, "steps_optimize_global_rounds", 0) or 0),
+                            "mutations_per_round": int(getattr(eval_payload, "steps_optimize_global_mutations_per_round", 0) or 0),
+                            "enable_ordering": bool(getattr(eval_payload, "steps_optimize_global_enable_ordering", False)),
+                            "enable_max_results": bool(getattr(eval_payload, "steps_optimize_global_enable_max_results", False)),
+                        },
+                        "tier1": tier1_info
+                        if isinstance(tier1_info, dict)
+                        else {
+                            "enabled": False,
+                            "requested": bool(getattr(eval_payload, "steps_optimize_tier1", False)),
+                            "eval_cap": int(getattr(eval_payload, "steps_optimize_tier1_eval_cap", 0) or 0),
+                            "max_trials": int(getattr(eval_payload, "steps_optimize_tier1_max_trials", 0) or 0),
+                        },
+                        "tier2": tier2_info
+                        if isinstance(tier2_info, dict)
+                        else {
+                            "enabled": False,
+                            "requested": bool(getattr(eval_payload, "steps_optimize_tier2", False)),
+                            "eval_cap": int(getattr(eval_payload, "steps_optimize_tier2_eval_cap", 0) or 0),
+                            "max_trials": int(getattr(eval_payload, "steps_optimize_tier2_max_trials", 0) or 0),
+                        },
+                        "prompt_subset_refinement": refine_info
+                        if isinstance(refine_info, dict)
+                        else {
+                            "enabled": False,
+                            "requested": bool(getattr(eval_payload, "steps_refine_prompt_subset", False)),
+                            "max_iters": int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 0) or 0),
+                            "top_k": int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 0) or 0),
+                        },
+                    }
+                    recipes_by_class[cid] = {
+                        "schema_version": 2,
+                        "mode": "sam3_steps",
+                        "optimizer": optimizer,
+                        "text_prompts": list(prompts_for_class),
+                        "steps": step_list,
+                        "params": {
+                            "use_clip_fp_guard": False,
+                            "use_negative_exemplars": False,
+                            "negative_strength": 0.0,
+                            "similarity_score": 0.0,
+                            "seed_threshold": float(eval_payload.seed_threshold),
+                            "expand_threshold": float(tuned_expand),
+                            "max_visual_seeds": int(tuned_max_seeds),
+                            "seed_dedupe_iou": float(tuned_seed_iou),
+                            "dedupe_iou": float(tuned_out_iou),
+                            "mask_threshold": float(eval_payload.mask_threshold),
+                            "min_size": int(eval_payload.min_size),
+                            "simplify_epsilon": float(eval_payload.simplify_epsilon),
+                            "max_results": int(tuned_max_results),
+                        },
+                        "summary": {
+                            **(summary or {}),
+                            "seed_prompt_stats": [
+                                {
+                                    "prompt": s.get("prompt"),
+                                    "matches": int(s.get("matches") or 0),
+                                    "fps": int(s.get("fps") or 0),
+                                    "precision": float(s.get("precision") or 0.0),
+                                    "selected_seed_threshold": float(
+                                        s.get("selected_seed_threshold")
+                                        if s.get("selected_seed_threshold") is not None
+                                        else (s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold)
+                                    ),
+                                    "selected_seed_threshold_point": s.get("selected_seed_threshold_point"),
+                                    "seed_threshold_base": float(s.get("seed_threshold_base") or eval_payload.seed_threshold),
+                                    "seed_threshold_recommended": float(
+                                        s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold
+                                    ),
+                                    "seed_threshold_base_point": s.get("seed_threshold_base_point"),
+                                    "seed_threshold_recommended_point": s.get("seed_threshold_recommended_point"),
+                                    "seed_threshold_curve": s.get("seed_threshold_curve") or [],
+                                }
+                                for s in selected
+                            ],
+                        },
+                    }
+                job.progress = max(job.progress, 0.98)
             finally:
                 if eval_workers:
                     for w in eval_workers:
@@ -18196,14 +17098,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         for entry in class_entries:
             cid = int(entry.get("id"))
             name = str(entry.get("name") or f"class_{cid}")
-            prompts_for_class = entry.get("text_prompts") or [name]
-            positives = entry.get("positives") or []
-            negatives = entry.get("negatives") or []
-            head_target_index = entry.get("clip_head_target_index")
             summary = summaries.get(cid)
             if summary is None:
                 summary = {
-                    "gts": int(entry.get("val_gt") or 0),
+                    "gts": int(entry.get("eval_gt") or 0),
                     "matches": 0,
                     "fps": 0,
                     "duplicates": 0,
@@ -18213,160 +17111,44 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     "coverage_rate": 0.0,
                     "det_rate": 0.0,
                 }
-
-            if clip_head is not None and head_target_index is not None and isinstance(summary, dict):
+            recipe = recipes_by_class.get(cid) or {}
+            if clip_head is not None and isinstance(recipe, dict):
                 try:
                     tuned_min_prob = summary.get("clip_head_min_prob")
                     tuned_margin = summary.get("clip_head_margin")
-                    tuned_precision = summary.get("precision")
-                    tuned_recall = summary.get("recall")
-                    meets_target = summary.get("clip_head_meets_target_precision")
-                    if tuned_min_prob is not None:
-                        suffix = ""
-                        try:
-                            if isinstance(meets_target, bool):
-                                suffix = " (meets target)" if meets_target else " (missed target)"
-                        except Exception:
-                            suffix = ""
-                        pr_txt = ""
-                        try:
-                            if tuned_precision is not None:
-                                pr_txt = f" precision={float(tuned_precision):.3f}"
-                        except Exception:
-                            pr_txt = ""
-                        rec_txt = ""
-                        try:
-                            if tuned_recall is not None:
-                                rec_txt = f" recall={float(tuned_recall):.3f}"
-                        except Exception:
-                            rec_txt = ""
-                        _log(
-                            f"CLIP head tuned for {name}: min_prob={float(tuned_min_prob):.3f} "
-                            f"margin={float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin):.3f}"
-                            f"{pr_txt}{rec_txt}{suffix}"
-                        )
+                    if tuned_min_prob is not None or tuned_margin is not None:
+                        recipe["_clip_head_classifier_path"] = str(clip_head_path)
+                    recipe["clip_head"] = {
+                        "artifact": "clip_head/head.npz",
+                        "clip_model": clip_head.get("clip_model"),
+                        "proba_mode": clip_head.get("proba_mode"),
+                        "classes": clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else [],
+                        "min_prob": float(tuned_min_prob) if tuned_min_prob is not None else float(payload.clip_head_min_prob),
+                        "margin": float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin),
+                        "auto_tuned": bool(getattr(payload, "clip_head_auto_tune", True)),
+                        "target_precision": float(getattr(payload, "clip_head_target_precision", 0.9)),
+                    }
                 except Exception:
                     pass
-
-            # Per-class tuned greedy params (beam search). Falls back to global payload values.
-            tuned_seed_thr = float(eval_payload.seed_threshold)
-            tuned_expand_thr = float(eval_payload.expand_threshold)
-            tuned_sim = float(eval_payload.similarity_score)
-            tuned_max_seeds = int(eval_payload.max_visual_seeds)
-            if per_class_overrides and isinstance(per_class_overrides, dict):
-                ov = per_class_overrides.get(int(cid))
-                if isinstance(ov, dict):
-                    try:
-                        if ov.get("seed_threshold") is not None:
-                            tuned_seed_thr = float(ov.get("seed_threshold"))
-                    except Exception:
-                        pass
-                    try:
-                        if ov.get("expand_threshold") is not None:
-                            tuned_expand_thr = float(ov.get("expand_threshold"))
-                    except Exception:
-                        pass
-                    try:
-                        if ov.get("similarity_score") is not None:
-                            tuned_sim = float(ov.get("similarity_score"))
-                    except Exception:
-                        pass
-                    try:
-                        if ov.get("max_visual_seeds") is not None:
-                            tuned_max_seeds = int(ov.get("max_visual_seeds"))
-                    except Exception:
-                        pass
-            tuned_seed_thr = float(max(0.0, min(1.0, tuned_seed_thr)))
-            tuned_expand_thr = float(max(0.0, min(1.0, tuned_expand_thr)))
-            tuned_sim = float(max(0.0, min(1.0, tuned_sim)))
-            tuned_max_seeds = max(0, int(tuned_max_seeds))
-
-            recipe: Dict[str, Any]
-            if effective_search_mode == "steps" and isinstance(recipes_by_class.get(int(cid)), dict):
-                recipe = dict(recipes_by_class.get(int(cid)) or {})
-            else:
-                recipe = {
-                    "mode": "sam3_greedy",
-                    "optimizer": {
-                        "algorithm": f"sam3_{effective_search_mode}",
-                        "version": 1,
-                        "created_at": float(time.time()),
-                        "split_seed": int(eval_payload.split_seed),
-                        "val_percent": float(eval_payload.val_percent),
-                        "reuse_split": bool(eval_payload.reuse_split),
-                        "val_split_hash": str(val_split_hash),
-                        "val_images": int(len(val_ids)),
-                        "target_precision": float(getattr(payload, "clip_head_target_precision", 0.0) or 0.0),
-                        "params": {
-                            "seed_threshold": float(tuned_seed_thr),
-                            "expand_threshold": float(tuned_expand_thr),
-                            "max_visual_seeds": int(tuned_max_seeds),
-                            "similarity_score": float(tuned_sim),
-                        },
-                    },
-                    "text_prompts": prompts_for_class,
-                    "positives": positives,
-                    "negatives": negatives,
-                    "params": {
-                        "use_clip_fp_guard": bool(crop_banks_enabled),
-                        "use_negative_exemplars": bool(crop_banks_enabled and payload.use_negative_exemplars and negatives),
-                        "negative_strength": float(payload.negative_strength) if crop_banks_enabled else 0.0,
-                        "similarity_score": float(tuned_sim) if crop_banks_enabled else 0.0,
-                        "seed_threshold": float(tuned_seed_thr),
-                        "expand_threshold": float(tuned_expand_thr),
-                        "max_visual_seeds": int(tuned_max_seeds),
-                        "seed_dedupe_iou": float(eval_payload.seed_dedupe_iou),
-                        "dedupe_iou": float(eval_payload.dedupe_iou),
-                        "mask_threshold": float(eval_payload.mask_threshold),
-                        "min_size": int(eval_payload.min_size),
-                        "simplify_epsilon": float(eval_payload.simplify_epsilon),
-                        "max_results": int(eval_payload.max_results),
-                    },
-                    "summary": summary,
-                }
-            if clip_head_path is not None and clip_head is not None and head_target_index is not None:
-                tuned_min_prob = summary.get("clip_head_min_prob") if isinstance(summary, dict) else None
-                tuned_margin = summary.get("clip_head_margin") if isinstance(summary, dict) else None
-                try:
-                    tuned_min_prob_f = float(tuned_min_prob) if tuned_min_prob is not None else float(payload.clip_head_min_prob)
-                except Exception:
-                    tuned_min_prob_f = float(payload.clip_head_min_prob)
-                try:
-                    tuned_margin_f = float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin)
-                except Exception:
-                    tuned_margin_f = float(payload.clip_head_margin)
-                recipe["_clip_head_classifier_path"] = str(clip_head_path)
-                recipe["clip_head"] = {
-                    "artifact": "clip_head/head.npz",
-                    "clip_model": clip_head.get("clip_model"),
-                    "proba_mode": clip_head.get("proba_mode"),
-                    "classes": clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else [],
-                    "min_prob": tuned_min_prob_f,
-                    "margin": tuned_margin_f,
-                    "auto_tuned": bool(getattr(payload, "clip_head_auto_tune", True)),
-                    "target_precision": float(getattr(payload, "clip_head_target_precision", 0.9)),
-                }
 
             results.append(
                 {
                     "id": cid,
                     "name": name,
-                    "train_gt": int(entry.get("train_gt") or 0),
-                    "val_gt": int(entry.get("val_gt") or 0),
+                    "eval_gt": int(entry.get("eval_gt") or 0),
                     "recipe": recipe,
                 }
             )
 
         job.result = {
             "dataset_id": payload.dataset_id,
-            "split": {"train": len(train_ids), "val": len(val_ids), "seed": payload.split_seed, "val_percent": payload.val_percent},
+            "sample": {
+                "count": len(eval_ids),
+                "seed": payload.split_seed,
+            },
             "classes": results,
-            "config": {**eval_payload.dict(), "per_class_overrides": per_class_overrides or {}},
-            "note": (
-                f"Agent mining completed (requested={payload.search_mode}, effective={effective_search_mode})."
-                if payload.search_mode != effective_search_mode
-                else f"Agent mining completed ({effective_search_mode} mode)."
-            ),
+            "config": eval_payload.dict(),
+            "note": "Agent mining completed (steps mode).",
         }
         if _cancelled():
             job.status = "cancelled"
@@ -18382,8 +17164,6 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.message = "Failed"
     finally:
         job.updated_at = time.time()
-
-
 def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     job_id = f"ph_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)

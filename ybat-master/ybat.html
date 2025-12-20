@@ -933,14 +933,14 @@
 			                                <div style="font-weight: 600; margin: 10px 0 6px;">High-level flow</div>
 			                                <pre class="training-help" style="white-space: pre; overflow-x: auto; padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">Dataset (YOLO/COCO) + trained CLIP head
         │
-        ├─ Split images (Train/Val)  [repeatable by seed]
+        ├─ Sample images (deterministic by seed)
         │
         ├─ Build prompt list per class
         │    - class name + your extra prompts
         │    - optional GPT prompt expansion
         │    - base prompts (e.g., “object”, “small object”)
         │
-        ├─ Seed-stage prompt eval (Val, text-only)
+        ├─ Seed-stage prompt eval (sample, text-only)
         │    - run SAM3 text inference per prompt
         │    - build a seed-threshold curve per prompt (coverage vs false positives)
         │
@@ -948,13 +948,13 @@
         │    - pick a short chain of prompt steps (usually 3–8)
         │    - each step has its own seed threshold (from the prompt curve)
         │
-        ├─ Run the full steps pipeline (Val)
+        ├─ Run the full steps pipeline (sample)
         │    - for each step:
         │        1) text seeds → pick diverse seeds
         │        2) expand with SAM3 “similarity prompt”
         │        3) de-dupe
         │
-        ├─ CLIP head gating (Val)
+        ├─ CLIP head gating (sample)
         │    - crop each detection and score with the pretrained CLIP head
         │    - auto-tune min prob + (optional) margin to hit your “cleanliness” target
         │
@@ -992,17 +992,17 @@
 			                                        <li><strong>Per-step de-dupe overlap (IoU):</strong> seed de-dupe and output de-dupe.</li>
 			                                        <li><strong>Optional:</strong> step order and per-step max dets/image.</li>
 			                                    </ul>
-			                                    Each trial is scored by running the <em>real</em> steps pipeline on the same (repeatable) subset of validation images, then sweeping CLIP thresholds to match your cleanliness target.
+			                                    Each trial is scored by running the <em>real</em> steps pipeline on the same (repeatable) subset of sampled images, then sweeping CLIP thresholds to match your cleanliness target.
 			                                </div>
 			                                <div style="font-weight: 600; margin: 12px 0 6px;">Breadth vs depth (simple mental model)</div>
 			                                <ul style="margin: 6px 0 0 18px;">
 			                                    <li><strong>Breadth (“exploration”):</strong> try more recipe ideas. Increase when results feel “stuck”.</li>
-			                                    <li><strong>Depth (“reliability”):</strong> test each idea on more validation (test) images. Increase when results feel noisy or unstable.</li>
+			                                    <li><strong>Depth (“reliability”):</strong> test each idea on more sampled images. Increase when results feel noisy or unstable.</li>
 			                                    <li><strong>Rule of thumb:</strong> if you raise breadth a lot, add some depth too.</li>
 			                                </ul>
 			                                <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer controls (what they mean)</div>
 			                                <ul style="margin: 6px 0 0 18px;">
-			                                    <li><strong>Stage‑1/2/3 eval cap:</strong> how many validation images we use per stage (bigger = more reliable, slower). Stage‑1 ranks quickly; Stage‑2/3 re-test the best candidates.</li>
+			                                    <li><strong>Stage‑1/2/3 eval cap:</strong> how many sampled images we use per stage (bigger = more reliable, slower). Stage‑1 ranks quickly; Stage‑2/3 re-test the best candidates.</li>
 			                                    <li><strong>Max trials:</strong> how many candidate recipe configs we consider per round (higher = more thorough, slower).</li>
 			                                    <li><strong>Keep ratio:</strong> how aggressively we prune candidates each stage (0.5 keeps the top half).</li>
 			                                    <li><strong>Rounds</strong> + <strong>Variants per round:</strong> how long we keep exploring around the current best recipe.</li>
@@ -1013,7 +1013,7 @@
 			                                    <li><strong>Cleaner / fewer FPs:</strong> raise “Recipe cleanliness”. Expect lower coverage.</li>
 			                                    <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Seed curve floor (lets per-step thresholds go below the base).</li>
 			                                    <li><strong>More thorough search:</strong> set “Search budget” to Balanced/Best and increase Max trials / Rounds / Variants per round (slower).</li>
-			                                    <li><strong>Faster runs:</strong> use Test mode first; lower Stage‑3 eval cap; lower Max trials.</li>
+			                                    <li><strong>Faster runs:</strong> reduce “Eval images”; lower Stage‑3 eval cap; lower Max trials.</li>
 			                                </ul>
 			                                <div style="margin-top: 12px; color: #64748b;">
 			                                    Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
@@ -1030,17 +1030,13 @@
 			                        </div>
 				                        <div class="training-grid">
 			                            <div>
-			                                <label for="agentValPercent">Val %<span class="help-icon" title="How many images are held out for evaluation.&#10;We split your dataset into Train and Val.&#10;Mining uses Train; scoring uses Val.&#10;Higher = more reliable scores (slower).&#10;Lower = faster but noisier scores.">?</span></label>
-			                                <input type="number" id="agentValPercent" min="5" max="95" value="30" title="How many images are held out to test the recipe. Example: 30 means we test on 30% of images." />
+			                                <label for="agentEvalImageCount">Eval images<span class="help-icon" title="How many images to sample for mining and scoring.&#10;Smaller = faster smoke test; larger = more reliable scores.&#10;We always sample deterministically from the seed.">?</span></label>
+			                                <input type="number" id="agentEvalImageCount" min="1" max="50000" value="100" title="Number of images to sample for mining + scoring." />
 			                            </div>
 			                            <div>
-			                                <label for="agentSplitSeed">Split seed<span class="help-icon" title="Random seed for the train/val split.&#10;Same seed = same split (repeatable).&#10;Change it if you want a different random split.&#10;Default is 42.">?</span></label>
-			                                <input type="number" id="agentSplitSeed" value="42" title="Same seed = same train/val split. Change it if you want a different random split." />
+			                                <label for="agentSplitSeed">Sample seed<span class="help-icon" title="Random seed for sampling evaluation images.&#10;Same seed = same sample (repeatable).&#10;Change it to try a different set of images.">?</span></label>
+			                                <input type="number" id="agentSplitSeed" value="42" title="Same seed = same sample. Change it if you want a different random sample." />
 			                            </div>
-				                            <div class="training-field training-field--inline">
-				                                <label for="agentReuseSplit">Reuse cached split<span class="help-icon" title="Reuse the cached train/val split for this dataset+seed. Turn off to rebuild the split (still deterministic).">?</span></label>
-				                                <input type="checkbox" id="agentReuseSplit" checked />
-				                            </div>
 				                            <div class="training-field training-field--inline">
 				                                <label for="agentReuseCache">Reuse cached SAM results<span class="help-icon" title="Speeds up repeated runs by reusing cached SAM3 prompt evaluations and expansions when possible.&#10;Turn off if you changed the SAM3 prompt model/checkpoint and want to be extra safe.&#10;Use “Purge cache” to free disk space.">?</span></label>
 				                                <input type="checkbox" id="agentReuseCache" checked />
@@ -1099,13 +1095,44 @@
 						                                    <div class="training-help" style="margin-top: 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
 						                                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
 						                                            <div style="font-weight: 700; color: #0f172a;">
-							                                                Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). Updates live as you change settings.&#10;&#10;What it tracks: Val images × (steps × (1 + seeds/step)), plus extra work from the Global optimizer.&#10;&#10;Global optimizer cost grows with:&#10;- Breadth (trials, rounds, variants/round, max step changes)&#10;- Depth (stage eval caps, keep ratio)&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content. Use this to see how cost scales as you turn knobs.">?</span>
+							                                                Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). Updates live as you change settings.&#10;&#10;What it tracks: Sample images × (steps × (1 + seeds/step)), plus extra work from the Global optimizer.&#10;&#10;Global optimizer cost grows with:&#10;- Breadth (trials, rounds, variants/round, max step changes)&#10;- Depth (stage eval caps, keep ratio)&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content. Use this to see how cost scales as you turn knobs.">?</span>
 						                                            </div>
 						                                            <span id="agentStepsBudgetBadge" class="badge">…</span>
 						                                        </div>
 						                                        <div id="agentStepsBudgetText" class="training-help" style="margin-top: 6px; color: #475569; white-space: pre-wrap;">…</div>
 						                                        <div class="training-progress" style="margin-top: 8px;">
 						                                            <div id="agentStepsBudgetFill" class="training-progress-fill"></div>
+						                                        </div>
+						                                    </div>
+						                                    <div class="training-subsection" style="margin-top: 12px;">
+						                                        <div class="training-subsection__title">Speed helpers</div>
+						                                        <div class="training-grid" style="margin-top: 8px;">
+						                                            <div>
+						                                                <label for="agentStepsEarlyStop">Early-stop<span class="help-icon" title="Stop adding prompt steps when coverage stalls or candidates are far below your cleanliness target.&#10;This can reduce runtime, but may miss rare edge cases.&#10;Balanced is a good default.">?</span></label>
+						                                                <div class="training-field training-field--inline" style="margin-bottom: 6px;">
+						                                                    <input type="checkbox" id="agentStepsEarlyStop" checked />
+						                                                    <span class="training-help">On</span>
+						                                                </div>
+						                                                <label for="agentStepsEarlyStopMode">Strictness<span class="help-icon" title="Conservative keeps searching longer; Aggressive stops sooner.">?</span></label>
+						                                                <select id="agentStepsEarlyStopMode">
+						                                                    <option value="conservative">Conservative</option>
+						                                                    <option value="balanced" selected>Balanced</option>
+						                                                    <option value="aggressive">Aggressive</option>
+						                                                </select>
+						                                            </div>
+						                                            <div>
+						                                                <label for="agentStepsPromptPrefilter">CLIP prompt prefilter<span class="help-icon" title="Use CLIP similarity to filter weak prompts before running SAM3.&#10;This can greatly reduce seed-eval time. Base prompts are always kept.">?</span></label>
+						                                                <div class="training-field training-field--inline" style="margin-bottom: 6px;">
+						                                                    <input type="checkbox" id="agentStepsPromptPrefilter" checked />
+						                                                    <span class="training-help">On</span>
+						                                                </div>
+						                                                <label for="agentStepsPromptPrefilterMode">Strength<span class="help-icon" title="Keep more prompts = slower but safer; keep fewer = faster but riskier.">?</span></label>
+						                                                <select id="agentStepsPromptPrefilterMode">
+						                                                    <option value="conservative">Keep more prompts</option>
+						                                                    <option value="balanced" selected>Balanced</option>
+						                                                    <option value="aggressive">Keep fewer prompts</option>
+						                                                </select>
+						                                            </div>
 						                                        </div>
 						                                    </div>
 							                                    <div class="training-help" style="margin-top: 8px; color: #64748b;">
@@ -1162,18 +1189,18 @@
 						                                            </div>
 						                                            <div class="training-subsection">
 						                                                <div class="training-subsection__title">Depth (evaluation reliability)</div>
-						                                                <div class="training-help">Score candidates on more validation images and prune less aggressively.</div>
+					                                                <div class="training-help">Score candidates on more sampled images and prune less aggressively.</div>
 						                                                <div class="training-grid" style="margin-top: 8px;">
 						                                                    <div>
-						                                                        <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="Depth.&#10;How many validation images we use for the first (fast) ranking stage.&#10;Low = fast but noisy rankings.&#10;Typical: 25–100.">?</span></label>
+						                                                        <label for="agentStepsGlobalEvalCap1">Stage‑1 eval cap<span class="help-icon" title="Depth.&#10;How many sampled images we use for the first (fast) ranking stage.&#10;Low = fast but noisy rankings.&#10;Typical: 25–100.">?</span></label>
 						                                                        <input type="number" id="agentStepsGlobalEvalCap1" min="1" max="50000" value="50" />
 						                                                    </div>
 						                                                    <div>
-						                                                        <label for="agentStepsGlobalEvalCap2">Stage‑2 eval cap<span class="help-icon" title="Depth.&#10;How many validation images we use for the second stage.&#10;Higher = more reliable (slower).&#10;Typical: 100–500.">?</span></label>
+						                                                        <label for="agentStepsGlobalEvalCap2">Stage‑2 eval cap<span class="help-icon" title="Depth.&#10;How many sampled images we use for the second stage.&#10;Higher = more reliable (slower).&#10;Typical: 100–500.">?</span></label>
 						                                                        <input type="number" id="agentStepsGlobalEvalCap2" min="1" max="50000" value="200" />
 						                                                    </div>
 						                                                    <div>
-						                                                        <label for="agentStepsGlobalEvalCap3">Stage‑3 eval cap<span class="help-icon" title="Depth.&#10;How many validation images we use for the final stage.&#10;Typical: 500–2000.&#10;If your val split is smaller, we automatically use the full val split.">?</span></label>
+						                                                        <label for="agentStepsGlobalEvalCap3">Stage‑3 eval cap<span class="help-icon" title="Depth.&#10;How many sampled images we use for the final stage.&#10;Typical: 500–2000.&#10;If your sample is smaller, we automatically use the full sample.">?</span></label>
 						                                                        <input type="number" id="agentStepsGlobalEvalCap3" min="1" max="50000" value="1000" />
 						                                                    </div>
 						                                                    <div>
@@ -1193,7 +1220,7 @@
 					                                        </label>
 					                                        <div class="training-grid" style="margin-top: 10px;">
 					                                            <div>
-					                                                <label for="agentStepsTier1EvalCap">Tier‑1 eval cap (val images)<span class="help-icon" title="How many validation images we use while comparing candidate settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
+					                                                <label for="agentStepsTier1EvalCap">Tier‑1 eval cap (images)<span class="help-icon" title="How many sampled images we use while comparing candidate settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
 					                                                <input type="number" id="agentStepsTier1EvalCap" min="10" max="50000" value="200" />
 					                                            </div>
 					                                            <div>
@@ -1211,7 +1238,7 @@
 					                                            </label>
 					                                            <div class="training-grid" style="margin-top: 10px;">
 					                                                <div>
-					                                                    <label for="agentStepsTier2EvalCap">Tier‑2 eval cap (val images)<span class="help-icon" title="How many validation images we use while comparing candidate de-dupe settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
+					                                                    <label for="agentStepsTier2EvalCap">Tier‑2 eval cap (images)<span class="help-icon" title="How many sampled images we use while comparing candidate de-dupe settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
 					                                                    <input type="number" id="agentStepsTier2EvalCap" min="10" max="50000" value="200" />
 					                                                </div>
 					                                                <div>
@@ -1299,11 +1326,11 @@
 						                                <div class="training-help">Required. Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). Recommended: keep auto-tune on and use a high target precision for clean recipes.</div>
 						                            </div>
 					                            <div class="training-field training-field--inline">
-					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the validation split so recipes are clean (few false positives).&#10;These tuned thresholds are baked into the saved recipe ZIP and used whenever the recipe runs.&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
+					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the sampled images so recipes are clean (few false positives).&#10;These tuned thresholds are baked into the saved recipe ZIP and used whenever the recipe runs.&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
 					                                <input type="checkbox" id="agentClipHeadAutoTune" checked />
 					                            </div>
 					                            <div>
-					                                <label for="agentClipHeadTargetPrecision">Recipe cleanliness (precision target)<span class="help-icon" title="CLIP head auto-tune only.&#10;&#10;What “precision” means here:&#10;- Precision = matches / (matches + false positives) on the validation split.&#10;- A detection is a “match” if it overlaps an unmatched ground-truth box for that class with IoU ≥ the job’s IoU threshold.&#10;- Detections that match no ground-truth box count as false positives.&#10;- Extra detections on the same object are counted as “Duplicates” (shown separately).&#10;&#10;How to tune:&#10;- Move toward “Cleaner” to reduce false positives (but you may miss objects).&#10;- Typical clean recipes: 0.90–0.98.&#10;&#10;This sets the per-class CLIP thresholds that get baked into the saved recipe ZIP.">?</span></label>
+					                                <label for="agentClipHeadTargetPrecision">Recipe cleanliness (precision target)<span class="help-icon" title="CLIP head auto-tune only.&#10;&#10;What “precision” means here:&#10;- Precision = matches / (matches + false positives) on the sampled images.&#10;- A detection is a “match” if it overlaps an unmatched ground-truth box for that class with IoU ≥ the job’s IoU threshold.&#10;- Detections that match no ground-truth box count as false positives.&#10;- Extra detections on the same object are counted as “Duplicates” (shown separately).&#10;&#10;How to tune:&#10;- Move toward “Cleaner” to reduce false positives (but you may miss objects).&#10;- Typical clean recipes: 0.90–0.98.&#10;&#10;This sets the per-class CLIP thresholds that get baked into the saved recipe ZIP.">?</span></label>
 					                                <div class="training-help" style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
 					                                    <span style="white-space: nowrap;" title="Lower target precision = more detections, but noisier (more false positives).">More detections (noisier)</span>
 					                                    <input type="range" id="agentClipHeadTargetPrecision" min="0.5" max="0.99" step="0.01" value="0.9" style="flex: 1;" />
@@ -1357,18 +1384,6 @@
 		                                <label for="agentPromptMaxTokens">GPT-OSS max tokens<span class="help-icon" title="Maximum length of the model output when proposing extra prompts.&#10;Higher can be slower and use more GPU memory.&#10;If you see truncated lists, increase this.">?</span></label>
 		                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Maximum length of GPT-OSS output when proposing extra words." />
 		                            </div>
-		                            <div class="training-field training-field--inline training-field--inline-tight">
-		                                <label for="agentTestMode">Test mode<span class="help-icon" title="Runs on a small number of images so you can verify everything works (fast).">?</span></label>
-		                                <input type="checkbox" id="agentTestMode" checked />
-			                            </div>
-		                            <div>
-		                                <label for="agentTrainLimit">Test train imgs<span class="help-icon" title="Test mode only.&#10;Number of training images sampled for mining.&#10;Smaller = faster smoke test.">?</span></label>
-		                                <input type="number" id="agentTrainLimit" min="1" value="10" />
-	                            </div>
-	                            <div>
-	                                <label for="agentValLimit">Test val imgs<span class="help-icon" title="Test mode only.&#10;Number of validation images sampled for scoring.&#10;Smaller = faster smoke test; larger = more reliable scores.">?</span></label>
-	                                <input type="number" id="agentValLimit" min="1" value="10" />
-	                            </div>
 		                        </div>
 				                        <div class="training-field">
 				                            <label for="agentExtraPrompts">Extra prompts (optional)<span class="help-icon" title="Optional JSON dict of extra prompts to try.&#10;Keys: class names.&#10;Values: lists of strings.&#10;Special key “__base__” applies to all classes.&#10;These are appended to GPT-OSS suggestions.">?</span></label>
@@ -1392,14 +1407,14 @@
 			                        <details class="training-card">
 			                            <summary style="font-weight: 600; cursor: pointer;">Recipe mining quick reference</summary>
 			                            <div class="training-card__body">
-			                                <p><strong>Workflow:</strong> Train a CLIP head → run mining (test mode first) → review per-class results → save recipes → apply (and optionally chain) recipes from the labeling tab.</p>
+			                                <p><strong>Workflow:</strong> Train a CLIP head → run mining (start with a small sample) → review per-class results → save recipes → apply (and optionally chain) recipes from the labeling tab.</p>
 			                                <p class="training-help" style="margin-top: 10px;"><strong>How to read scores:</strong></p>
 			                                <ul class="training-help" style="margin-top: 6px;">
 			                                    <li><strong>Coverage</strong> = matches / GT objects (higher is better).</li>
 			                                    <li><strong>Precision</strong> = matches / (matches + false positives) (higher is cleaner).</li>
 			                                    <li><strong>FPs</strong> = detections that match no ground-truth box for that class (lower is better).</li>
 			                                    <li><strong>Duplicates</strong> = extra detections on the same GT object (lower is better; tracked separately).</li>
-			                                    <li><strong>Det rate</strong> = % of validation images that produced at least one detection (useful “is anything happening?” sanity check).</li>
+			                                    <li><strong>Det rate</strong> = % of sampled images that produced at least one detection (useful “is anything happening?” sanity check).</li>
 			                                </ul>
 			                                <p class="training-help" style="margin-top: 10px;"><strong>If results look “dead”:</strong> verify your CLIP head includes the dataset class names, and try lowering “Seed curve floor” or temporarily lowering “Recipe cleanliness” to confirm SAM3 is producing seeds before tightening filters.</p>
 			                            </div>

@@ -12,6 +12,11 @@ body {
     display: block !important;
 }
 
+#tabAgentMining details,
+#tabAgentMining details > summary {
+    display: block !important;
+}
+
 .ingest-progress {
     position: fixed;
     right: 16px;

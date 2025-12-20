@@ -1059,9 +1059,8 @@
 						                            </div>
 						                            <div>
 						                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Recipe mining now always uses Multi-step: it builds a chain of prompt steps and tunes CLIP head thresholds for your cleanliness target.&#10;Legacy modes are deprecated and are no longer exposed in the UI.">?</span></label>
-						                                <select id="agentSearchMode">
-						                                    <option value="steps" selected>Multi-step (precision-first)</option>
-					                                </select>
+						                                <div class="training-help">Multi-step (precision-first)</div>
+						                                <input type="hidden" id="agentSearchMode" value="steps" />
 					                            </div>
 					                        </div>
 							                        <div id="agentStepsOptions" style="margin-bottom: 12px; display: block !important; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
@@ -1264,10 +1263,6 @@
 			                                <label for="agentExpandThreshold">Expand threshold<span class="help-icon" title="Second pass (optional): after choosing seed boxes, we run a refine/expand pass from those boxes.&#10;This threshold controls how strict that refine pass is.&#10;Higher = fewer but cleaner results.">?</span></label>
 			                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.3" />
 			                            </div>
-				                            <div id="agentMaxVisualSeedsField">
-				                                <label for="agentMaxVisualSeeds">Max visual seeds<span class="help-icon" title="How many seed boxes per image we select for the refine/expand pass.&#10;0 = skip refine/expand (only use seed text detections).&#10;Higher = more compute; can increase coverage on hard objects.">?</span></label>
-				                                <input type="number" id="agentMaxVisualSeeds" min="0" value="25" />
-				                            </div>
 			                            <div>
 			                                <label for="agentSeedDedupeIou">Seed de-dupe overlap (IoU)<span class="help-icon" title="After the seed text pass, we remove near-duplicate seed boxes.&#10;If two seed boxes overlap more than this IoU, we keep one.&#10;Higher (e.g., 0.9) only removes almost-identical boxes.&#10;Lower removes more overlaps (can collapse crowded scenes).">?</span></label>
 			                                <input type="number" id="agentSeedDedupeIou" step="0.05" min="0" max="1" value="0.9" />
@@ -1276,10 +1271,6 @@
 			                                <label for="agentDedupeIou">Output de-dupe overlap (IoU)<span class="help-icon" title="Final de-duplication across all detections the recipe outputs.&#10;If two output boxes overlap more than this IoU, we keep the best one.&#10;Lower = more aggressive de-dup (fewer duplicates; may drop close objects).&#10;Higher = allows more overlaps (risk duplicate labels).">?</span></label>
 			                                <input type="number" id="agentDedupeIou" step="0.05" min="0" max="1" value="0.5" />
 			                            </div>
-				                            <div id="agentSimilarityScoreField">
-				                                <label for="agentSimilarityScore">Image similarity filter (CLIP)<span class="help-icon" title="Crop-bank mode only.&#10;For each candidate box, we crop the image and compare it to saved example crops using CLIP.&#10;We keep boxes with similarity ≥ this number.&#10;Higher = stricter (fewer false positives, can miss true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                <input type="number" id="agentSimilarityScore" step="0.01" min="0" max="1" value="0.25" />
-				                            </div>
 			                        </div>
 			                        <div class="training-grid">
 			                            <div>
@@ -1299,7 +1290,7 @@
 			                                <input type="number" id="agentSimplifyEps" min="0" step="0.1" value="0.0" />
 			                            </div>
 			                        </div>
-				                        <div class="training-grid">
+				                        <div class="training-grid training-grid--single">
 					                            <div>
 					                                <label for="agentClipHeadSelect">Pretrained CLIP head (required)<span class="help-icon" title="Required for recipe mining.&#10;Agent Mining uses a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections and tune “cleanliness” (precision).&#10;The head (and its tuned thresholds) is embedded into saved recipe zips (portable).&#10;Tip: you can also tighten CLIP thresholds later at inference time per cascade step (cumulative).">?</span></label>
 						                                <select id="agentClipHeadSelect">
@@ -1343,53 +1334,6 @@
 				                                <input type="number" id="agentClipHeadMargin" step="0.05" min="0" max="1" value="0.0" />
 				                            </div>
 				                        </div>
-				                        <details class="training-card" style="margin-bottom: 12px;">
-				                            <summary style="cursor: pointer; font-weight: 600;">Legacy crop-bank settings (deprecated)</summary>
-				                            <div class="training-card__body">
-				                                <div class="training-help" style="color: #64748b;">
-				                                    New recipes always embed a pretrained CLIP head and do not use crop banks. These settings are kept only for legacy recipe zips and are ignored during mining.
-				                                </div>
-				                                <div class="training-grid" style="margin-top: 10px;">
-				                                    <div>
-				                                        <label for="agentExemplars">Example crops/class<span class="help-icon" title="Crop-bank mode only.&#10;How many positive example cut-outs we save into the recipe zip for each class.&#10;More examples can reduce false positives but increases mining time and zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                        <input type="number" id="agentExemplars" min="0" value="20" />
-				                                    </div>
-				                                    <div>
-				                                        <label for="agentExemplarPoolValue">Candidate pool size<span class="help-icon" title="Crop-bank mode only.&#10;We build a pool of labeled boxes from the training split, then choose diverse examples from that pool.&#10;This controls how many candidate boxes we consider before picking the final crops.&#10;Bigger = more diversity, more CLIP work.">?</span></label>
-				                                        <input type="number" id="agentExemplarPoolValue" min="1" value="25" />
-				                                    </div>
-				                                    <div>
-				                                        <label for="agentExemplarPoolMode">Pool mode<span class="help-icon" title="How to interpret “candidate pool size”.&#10;% mode: pool = that percent of all labeled boxes for the class.&#10;Count mode: pool = fixed number of boxes.&#10;Only used when selecting example crops.">?</span></label>
-				                                        <select id="agentExemplarPoolMode">
-				                                            <option value="percent" selected>% of labeled objects</option>
-				                                            <option value="count">Fixed count</option>
-				                                        </select>
-				                                    </div>
-				                                    <div class="training-field training-field--inline">
-				                                        <label for="agentClusterExemplars">Diversify crops<span class="help-icon" title="Crop-bank mode only.&#10;Try to pick different-looking example crops (sizes/angles) instead of many near-identical ones.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                        <input type="checkbox" id="agentClusterExemplars" checked />
-				                                    </div>
-				                                    <div class="training-field training-field--inline">
-				                                        <label for="agentClipGuard">Use CLIP filter<span class="help-icon" title="Crop-bank mode only.&#10;Use CLIP image similarity to keep detections that look like your saved example crops, and (optionally) suppress detections that look like negatives.&#10;Recommended on.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                        <input type="checkbox" id="agentClipGuard" checked />
-				                                    </div>
-				                                </div>
-				                                <div class="training-grid" style="margin-top: 10px;">
-				                                    <div class="training-field training-field--inline">
-				                                        <label for="agentUseNegExemplars">Use negative crops<span class="help-icon" title="Crop-bank mode only.&#10;Helps reduce false positives (e.g., scooters mistaken as cars) by learning what “not this class” looks like from other classes.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                        <input type="checkbox" id="agentUseNegExemplars" checked />
-				                                    </div>
-				                                    <div>
-				                                        <label for="agentMaxNegExemplars">Max negatives/class<span class="help-icon" title="Crop-bank mode only.&#10;How many negative example crops we collect from other classes.&#10;Negatives suppress detections that look like another class.&#10;More negatives can reduce false positives but costs time and increases recipe zip size.&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                        <input type="number" id="agentMaxNegExemplars" min="0" max="256" value="25" />
-				                                    </div>
-				                                    <div>
-				                                        <label for="agentNegStrength">Negative filter strength<span class="help-icon" title="Crop-bank mode only.&#10;How strongly negative crops suppress detections.&#10;0 disables negatives.&#10;Higher = more suppression (fewer false positives; can also remove true positives).&#10;Ignored when a pretrained CLIP head is selected.">?</span></label>
-				                                        <input type="number" id="agentNegStrength" step="0.05" min="0" max="5" value="0.5" />
-				                                    </div>
-				                                </div>
-				                            </div>
-				                        </details>
 		                        <div class="two-col-grid">
 		                            <div>
 		                                <label for="agentClasses">Class IDs (optional)<span class="help-icon" title="Optional: restrict mining to specific class IDs. Leave blank to mine all classes.&#10;Example: 1,2,5">?</span></label>

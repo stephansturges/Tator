@@ -329,60 +329,71 @@ def run_tests(
                 )
             )
         if include_agent_mining and sam3_dataset_id:
-            def _start_agent_job():
-                # Try to restrict mining to a single class to keep test runs fast.
-                class_ids = None
-                try:
-                    st_cls, body_cls, _ = _http_get(f"{base_url}/sam3/datasets/{urllib.parse.quote(sam3_dataset_id)}/classes", timeout=request_timeout)
-                    if st_cls and 200 <= st_cls < 300 and body_cls:
-                        parsed_cls = json.loads(body_cls.decode("utf-8"))
-                        class_ids = parsed_cls.get("class_ids") or []
-                except Exception:
+            clip_classifier = None
+            try:
+                st_clf, body_clf, _ = _http_get(f"{base_url}/clip/classifiers", timeout=request_timeout)
+                if st_clf and 200 <= st_clf < 300 and body_clf:
+                    parsed_clf = json.loads(body_clf.decode("utf-8"))
+                    if isinstance(parsed_clf, list) and parsed_clf:
+                        first_entry = parsed_clf[0] or {}
+                        clip_classifier = first_entry.get("rel_path") or first_entry.get("path")
+            except Exception:
+                clip_classifier = None
+            if clip_classifier:
+                def _start_agent_job():
+                    # Try to restrict mining to a single class to keep test runs fast.
                     class_ids = None
-                first_class = None
-                if isinstance(class_ids, list) and class_ids:
                     try:
-                        first_class = int(class_ids[0])
+                        st_cls, body_cls, _ = _http_get(
+                            f"{base_url}/sam3/datasets/{urllib.parse.quote(sam3_dataset_id)}/classes",
+                            timeout=request_timeout,
+                        )
+                        if st_cls and 200 <= st_cls < 300 and body_cls:
+                            parsed_cls = json.loads(body_cls.decode("utf-8"))
+                            class_ids = parsed_cls.get("class_ids") or []
                     except Exception:
-                        first_class = None
-                return _http_post_json(
-                    f"{base_url}/agent_mining/jobs",
-                    {
-                        "dataset_id": sam3_dataset_id,
-                        "val_percent": 0.3,
-                        "split_seed": 42,
-                        "reuse_split": True,
-                        "test_mode": True,
-                        "test_train_limit": 2,
-                        "test_val_limit": 2,
-                        "classes": [first_class] if first_class is not None else None,
-                        # Keep prompt expansion off for smoke tests unless explicitly desired.
-                        "prompt_llm_max_prompts": 0,
-                        "mask_threshold": 0.5,
-                        "max_results": 5,
-                        "min_size": 0,
-                        "simplify_epsilon": 0.5,
-                        "positives_per_class": 2,
-                        "cluster_exemplars": False,
-                        "use_negative_exemplars": False,
-                        "max_negatives_per_class": 0,
-                        "use_clip_fp_guard": True,
-                    },
-                    timeout=request_timeout,
-                )
+                        class_ids = None
+                    first_class = None
+                    if isinstance(class_ids, list) and class_ids:
+                        try:
+                            first_class = int(class_ids[0])
+                        except Exception:
+                            first_class = None
+                    return _http_post_json(
+                        f"{base_url}/agent_mining/jobs",
+                        {
+                            "dataset_id": sam3_dataset_id,
+                            "eval_image_count": 5,
+                            "split_seed": 42,
+                            "reuse_cache": True,
+                            "classes": [first_class] if first_class is not None else None,
+                            # Keep prompt expansion off for smoke tests unless explicitly desired.
+                            "prompt_llm_max_prompts": 0,
+                            "steps_max_steps_per_recipe": 2,
+                            "steps_max_visual_seeds_per_step": 2,
+                            "mask_threshold": 0.5,
+                            "max_results": 5,
+                            "min_size": 0,
+                            "simplify_epsilon": 0.5,
+                            "clip_head_classifier_path": clip_classifier,
+                        },
+                        timeout=request_timeout,
+                    )
 
-            tests.append(
-                (
-                    "agent_mining/jobs (test_mode)",
-                    _start_agent_job,
+                tests.append(
+                    (
+                        "agent_mining/jobs (sample)",
+                        _start_agent_job,
+                    )
                 )
-            )
-            tests.append(
-                (
-                    "agent_mining/jobs (list)",
-                    lambda: _http_get(f"{base_url}/agent_mining/jobs", timeout=request_timeout),
+                tests.append(
+                    (
+                        "agent_mining/jobs (list)",
+                        lambda: _http_get(f"{base_url}/agent_mining/jobs", timeout=request_timeout),
+                    )
                 )
-            )
+            else:
+                results.append(("agent_mining/jobs (skip)", True, "No CLIP classifier available"))
     if include_auto:
         tests.append(
             (
@@ -426,7 +437,7 @@ def run_tests(
                 pass
         results.append((name, ok, detail))
         # If we just started an agent_mining job, poll it briefly so downstream endpoints can be hit.
-        if include_agent_mining and name.startswith("agent_mining/jobs (test_mode)") and status is not None and status // 100 == 2:
+        if include_agent_mining and name.startswith("agent_mining/jobs (sample)") and status is not None and status // 100 == 2:
             try:
                 data = json.loads(body.decode("utf-8")) if body else {}
             except Exception:

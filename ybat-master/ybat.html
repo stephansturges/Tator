@@ -923,11 +923,8 @@
 		                        <h2>SAM3 Recipe Mining</h2>
 			                        <p class="training-help">Automatically discover “recipes” that help SAM3 find each class in your dataset. A recipe is a portable zip (JSON + embedded pretrained CLIP head) you can reuse in the labeling panel.</p>
 			                        <div class="training-help" style="color: #b91c1c; font-weight: 600;">Recipe mining UI build: 2025-12-20 (flat layout)</div>
-			                        <div id="agentMiningHowItWorks" class="training-card" style="margin-bottom: 12px; display: block !important;">
-			                            <div class="training-card__header">
-			                                <div class="training-card__title">How recipe mining works</div>
-			                            </div>
-			                            <div class="training-card__body">
+			                        <div id="agentMiningHowItWorks" style="margin-bottom: 12px; display: block !important; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
+			                            <div style="font-weight: 700; margin-bottom: 6px;">How recipe mining works</div>
 		                                <div class="training-help">
 		                                    <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
 		                                </div>
@@ -1035,12 +1032,10 @@
 		                                        </ul>
 		                                    </div>
 
-	                                    <div style="margin-top: 12px; color: #64748b;">
-	                                        Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
-	                                    </div>
+			                                    <div style="margin-top: 12px; color: #64748b;">
+		                                        Note: we no longer generate the old crop-bank recipe style; new recipes are schema‑v2 multi-step and always embed a pretrained CLIP head. Imported legacy recipes can still be applied for backward compatibility.
+		                                    </div>
 			                                </div>
-			                            </div>
-			                            </div>
 			                        </div>
 		                        <div class="training-field">
 		                            <label for="agentDatasetSelect">Dataset<span class="help-icon" title="Choose the dataset to mine recipes from.&#10;Datasets are created/converted in the Dataset Management tab.">?</span></label>
@@ -1086,11 +1081,8 @@
 					                                </select>
 					                            </div>
 					                        </div>
-							                        <div id="agentStepsOptions" class="training-card" style="margin-bottom: 12px; display: block !important;">
-							                            <div class="training-card__header">
-							                                <div class="training-card__title">Recipe search settings</div>
-							                            </div>
-							                            <div class="training-card__body">
+							                        <div id="agentStepsOptions" style="margin-bottom: 12px; display: block !important; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
+							                            <div style="font-weight: 700; margin-bottom: 6px;">Recipe search settings</div>
 							                                <div class="training-help" style="margin-bottom: 10px; color: #475569;">Need a refresher? Open <strong>How recipe mining works</strong> above.</div>
 						                                <div class="training-grid">
 						                                    <div>
@@ -1138,14 +1130,11 @@
 							                                        Advanced (below): Global optimizer breadth/depth knobs, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
 							                                    </div>
 						                                </div>
-											                                <div id="agentStepsAdvancedDetails" class="training-card" style="margin-top: 12px;">
-											                                    <div class="training-card__header">
-											                                        <div class="training-card__title">Advanced optimization</div>
-											                                    </div>
-											                                    <div class="training-card__body">
-										                                        <div class="training-help" style="color: #475569; margin-bottom: 10px;">
-										                                            Optional knobs for Global optimizer breadth/depth, Tier‑1/Tier‑2 tuning, prompt subset refinement, and seed-curve floors.
-										                                        </div>
+											                                <div id="agentStepsAdvancedDetails" style="margin-top: 12px; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff;">
+											                                    <div style="font-weight: 700; margin-bottom: 6px;">Advanced optimization</div>
+											                                        <div class="training-help" style="color: #475569; margin-bottom: 10px;">
+											                                            Optional knobs for Global optimizer breadth/depth, Tier‑1/Tier‑2 tuning, prompt subset refinement, and seed-curve floors.
+											                                        </div>
 							                                        <div style="font-weight: 600; margin-top: 10px;">Global optimizer (successive halving)</div>
 							                                        <div class="training-help" style="margin-top: 6px; color: #475569;">
 							                                            Tune it with two levers:
@@ -1171,8 +1160,8 @@
 						                                                    <div>
 						                                                        <label for="agentStepsGlobalMaxStepsMutated">Max steps changed per variant<span class="help-icon" title="Breadth.&#10;How big each candidate change is allowed to be.&#10;1 = tiny, stable tweaks; 2–3 = coordinated changes (more powerful, less predictable).">?</span></label>
 						                                                        <input type="number" id="agentStepsGlobalMaxStepsMutated" min="1" max="10" value="2" />
-						                                                    </div>
-						                                                </div>
+												                                    </div>
+												                                </div>
 						                                                <div class="training-help" style="margin-top: 10px;">
 						                                                    <div class="training-field training-field--inline">
 						                                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Breadth (optional). Allows the optimizer to swap step order. Usually small effect, but can matter when Max dets/image is small.">

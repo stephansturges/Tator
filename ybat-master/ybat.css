@@ -6,6 +6,12 @@ body {
     color: #1f2933;
 }
 
+/* Force key Agent Mining controls to remain visible even if stale JS/CSS tries to hide them. */
+#tabAgentMining #agentMiningHowItWorks,
+#tabAgentMining #agentStepsOptions {
+    display: block !important;
+}
+
 .ingest-progress {
     position: fixed;
     right: 16px;

@@ -7660,6 +7660,29 @@ def _successive_halving_search(
                     pass
         evaluated.sort(key=lambda x: x[0], reverse=True)
         best_key = evaluated[0][0] if evaluated else None
+        if log_fn and evaluated:
+            try:
+                prefix = f"{log_prefix} " if log_prefix else ""
+                best_result = evaluated[0][2]
+                best_summary = best_result.get("summary") if isinstance(best_result, dict) else None
+                if isinstance(best_summary, dict):
+                    matches = int(best_summary.get("matches") or 0)
+                    fps = int(best_summary.get("fps") or 0)
+                    precision = float(best_summary.get("precision") or 0.0)
+                    min_prob = best_summary.get("clip_head_min_prob")
+                    margin = best_summary.get("clip_head_margin")
+                    head_bits = []
+                    if min_prob is not None:
+                        head_bits.append(f"p≥{float(min_prob):.3f}")
+                    if margin is not None and float(margin) > 0:
+                        head_bits.append(f"Δ≥{float(margin):.3f}")
+                    head_str = f" ({' '.join(head_bits)})" if head_bits else ""
+                    log_fn(
+                        f"{prefix}Stage {stage_idx + 1}: best matches={matches} fps={fps} "
+                        f"prec={precision:.3f}{head_str}"
+                    )
+            except Exception:
+                pass
         history.append(
             {
                 "stage": int(stage_idx),

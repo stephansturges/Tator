@@ -13851,9 +13851,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        const sampleImages = evalCount !== null ? (totalImages !== null ? Math.min(evalCount, totalImages) : evalCount) : null;
 
 	        const stepsRaw = readNumberInput(agentElements.stepsMaxSteps, { integer: true });
-	        const steps = Number.isFinite(stepsRaw) ? Math.max(1, Math.min(50, stepsRaw)) : 6;
-	        const seedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
-	        const seeds = Number.isFinite(seedsRaw) ? Math.max(0, Math.min(500, seedsRaw)) : 5;
+        const steps = Number.isFinite(stepsRaw) ? Math.max(1, Math.min(50, stepsRaw)) : 6;
+        const seedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
+        const seeds = Number.isFinite(seedsRaw) ? Math.max(0, Math.min(500, seedsRaw)) : 10;
 	        const perImageUnits = steps * (1 + seeds);
 	        const earlyStopEnabled = !!(agentElements.stepsEarlyStop && agentElements.stepsEarlyStop.checked);
 	        const earlyStopMode =
@@ -14182,9 +14182,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 			        const searchMode = "steps";
 			        const stepsMaxStepsRaw = readNumberInput(agentElements.stepsMaxSteps, { integer: true });
-			        const stepsMaxSteps = Number.isFinite(stepsMaxStepsRaw) ? Math.max(1, Math.min(50, stepsMaxStepsRaw)) : 6;
-			        const stepsMaxSeedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
-			        const stepsMaxSeedsPerStep = Number.isFinite(stepsMaxSeedsRaw) ? Math.max(0, Math.min(500, stepsMaxSeedsRaw)) : 5;
+        const stepsMaxSteps = Number.isFinite(stepsMaxStepsRaw) ? Math.max(1, Math.min(50, stepsMaxStepsRaw)) : 6;
+        const stepsMaxSeedsRaw = readNumberInput(agentElements.stepsMaxSeedsPerStep, { integer: true });
+        const stepsMaxSeedsPerStep = Number.isFinite(stepsMaxSeedsRaw) ? Math.max(0, Math.min(500, stepsMaxSeedsRaw)) : 10;
 			        const stepsGlobalPreset = getAgentStepsGlobalPreset();
 			        const stepsGlobalOptimizeRaw = stepsGlobalPreset !== "off";
 		        const stepsGlobalCap1Raw = readNumberInput(agentElements.stepsGlobalEvalCap1, { integer: true });
@@ -14227,10 +14227,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        const iouThresholdRaw = readNumberInput(agentElements.iouThreshold, { integer: false });
 		        const iouThreshold = Number.isFinite(iouThresholdRaw) ? Math.max(0, Math.min(1, iouThresholdRaw)) : 0.5;
 
-	        const seedThrRaw = readNumberInput(agentElements.seedThreshold, { integer: false });
-	        const seedThreshold = Number.isFinite(seedThrRaw) ? Math.max(0, Math.min(1, seedThrRaw)) : 0.05;
-	        const expandThrRaw = readNumberInput(agentElements.expandThreshold, { integer: false });
-	        const expandThreshold = Number.isFinite(expandThrRaw) ? Math.max(0, Math.min(1, expandThrRaw)) : 0.3;
+        const seedThrRaw = readNumberInput(agentElements.seedThreshold, { integer: false });
+        const seedThreshold = Number.isFinite(seedThrRaw) ? Math.max(0, Math.min(1, seedThrRaw)) : 0.02;
+        const expandThrRaw = readNumberInput(agentElements.expandThreshold, { integer: false });
+        const expandThreshold = Number.isFinite(expandThrRaw) ? Math.max(0, Math.min(1, expandThrRaw)) : 0.15;
 	        const seedDedupeIouRaw = readNumberInput(agentElements.seedDedupeIou, { integer: false });
 	        const seedDedupeIou = Number.isFinite(seedDedupeIouRaw) ? Math.max(0, Math.min(1, seedDedupeIouRaw)) : 0.9;
 	        const dedupeIouRaw = readNumberInput(agentElements.dedupeIou, { integer: false });
@@ -14257,9 +14257,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const clipHeadClassifierPath = clipHeadPathRaw ? clipHeadPathRaw : null;
 	        const clipHeadAutoTune = !!(agentElements.clipHeadAutoTune && agentElements.clipHeadAutoTune.checked);
 	        const clipHeadTargetPrecisionRaw = readNumberInput(agentElements.clipHeadTargetPrecision, { integer: false });
-	        const clipHeadTargetPrecision = Number.isFinite(clipHeadTargetPrecisionRaw)
-	            ? Math.max(0, Math.min(1, clipHeadTargetPrecisionRaw))
-	            : 0.9;
+        const clipHeadTargetPrecision = Number.isFinite(clipHeadTargetPrecisionRaw)
+            ? Math.max(0, Math.min(1, clipHeadTargetPrecisionRaw))
+            : 0.75;
 	        const clipHeadMinProbRaw = readNumberInput(agentElements.clipHeadMinProb, { integer: false });
 	        const clipHeadMinProb = Number.isFinite(clipHeadMinProbRaw) ? Math.max(0, Math.min(1, clipHeadMinProbRaw)) : 0.5;
 	        const clipHeadMarginRaw = readNumberInput(agentElements.clipHeadMargin, { integer: false });

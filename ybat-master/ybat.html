@@ -1071,8 +1071,8 @@
 						                                        <input type="number" id="agentStepsMaxSteps" min="1" max="50" value="6" />
 					                                    </div>
 					                                    <div>
-					                                        <label for="agentStepsMaxSeedsPerStep">Similarity candidates per step<span class="help-icon" title="Per step and per image, how many candidate detections we expand with similarity-based search (SAM3 visual prompting).&#10;Higher can improve coverage on diverse objects, but is slower.&#10;Typical: 3–8.">?</span></label>
-						                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="5" />
+					                                        <label for="agentStepsMaxSeedsPerStep">Similarity candidates per step<span class="help-icon" title="Per step and per image, how many candidate detections we expand with similarity-based search (SAM3 visual prompting).&#10;Higher can improve coverage on diverse objects, but is slower.&#10;Typical: 5–15 (recall-first: 10–20).">?</span></label>
+						                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="10" />
 						                                    </div>
 						                                </div>
 						                                <div class="training-subsection" style="margin-top: 10px;">
@@ -1111,10 +1111,10 @@
 						                                        <div class="training-subsection__title">Speed helpers</div>
 						                                        <div class="training-grid" style="margin-top: 8px;">
 						                                            <div>
-						                                                <label for="agentStepsEarlyStop">Early-stop<span class="help-icon" title="Stop adding prompt steps when coverage stalls or candidates are far below your cleanliness target.&#10;This can reduce runtime, but may miss rare edge cases.&#10;Balanced is a good default.">?</span></label>
+						                                                <label for="agentStepsEarlyStop">Early-stop<span class="help-icon" title="Stop adding prompt steps when coverage stalls or candidates are far below your cleanliness target.&#10;This can reduce runtime, but may miss rare edge cases.&#10;Off is safer for recall-first runs; Balanced is a good speed default.">?</span></label>
 						                                                <div class="training-field training-field--inline" style="margin-bottom: 6px;">
-						                                                    <input type="checkbox" id="agentStepsEarlyStop" checked />
-						                                                    <span class="training-help">On</span>
+						                                                    <input type="checkbox" id="agentStepsEarlyStop" />
+						                                                    <span class="training-help">Enable</span>
 						                                                </div>
 						                                                <label for="agentStepsEarlyStopMode">Strictness<span class="help-icon" title="Conservative keeps searching longer; Aggressive stops sooner.">?</span></label>
 						                                                <select id="agentStepsEarlyStopMode">
@@ -1275,7 +1275,7 @@
 					                                            <div class="training-grid">
 					                                                <div>
 					                                                    <label for="agentStepsSeedEvalFloor">Candidate curve floor (optional)<span class="help-icon" title="Multi-step mode measures each prompt at many text thresholds.&#10;By default we only see detections above your Text threshold, so thresholds below it can’t improve coverage.&#10;Set a lower floor (e.g., 0.0–0.01) so the curve can include lower thresholds.&#10;Warning: lower floor can be slower.">?</span></label>
-					                                                    <input type="number" id="agentStepsSeedEvalFloor" step="0.01" min="0" max="1" placeholder="auto" />
+					                                                    <input type="number" id="agentStepsSeedEvalFloor" step="0.01" min="0" max="1" value="0.0" />
 					                                                </div>
 					                                                <div>
 					                                                    <label for="agentStepsSeedEvalMaxResults">Candidate curve max dets (optional)<span class="help-icon" title="Safety valve for very low candidate curve floors.&#10;Caps how many candidate detections we consider per prompt per image while building curves.&#10;Lower = faster/cleaner curves, but can miss low-score matches.&#10;Leave blank to reuse Max dets/image.">?</span></label>
@@ -1287,11 +1287,11 @@
 						                        <div class="training-grid">
 						                            <div>
 						                                <label for="agentSeedThreshold">Text threshold (candidates)<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
-						                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" />
+						                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.02" />
 			                            </div>
 			                            <div>
 			                                <label for="agentExpandThreshold">Visual expansion score (SAM3)<span class="help-icon" title="Similarity-based search threshold for SAM3’s visual prompt stage.&#10;We keep expanded detections whose SAM3 score is ≥ this value.&#10;Higher = fewer but cleaner expansions; lower = more but noisier expansions.">?</span></label>
-			                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.3" />
+			                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.15" />
 			                            </div>
 			                            <div>
 			                                <label for="agentSeedDedupeIou">Candidate de-dupe overlap (IoU)<span class="help-icon" title="After the text-candidate pass, we remove near-duplicate candidate boxes.&#10;If two candidate boxes overlap more than this IoU, we keep one.&#10;Higher (e.g., 0.9) only removes almost-identical boxes.&#10;Lower removes more overlaps (can collapse crowded scenes).">?</span></label>
@@ -1333,11 +1333,11 @@
 					                                <input type="checkbox" id="agentClipHeadAutoTune" checked />
 					                            </div>
 					                            <div>
-					                                <label for="agentClipHeadTargetPrecision">Recipe cleanliness (precision target)<span class="help-icon" title="CLIP head auto-tune only.&#10;&#10;What “precision” means here:&#10;- Precision = matches / (matches + false positives) on the sampled images.&#10;- A detection is a “match” if it overlaps an unmatched ground-truth box for that class with IoU ≥ the job’s IoU threshold.&#10;- Detections that match no ground-truth box count as false positives.&#10;- Extra detections on the same object are counted as “Duplicates” (shown separately).&#10;&#10;How to tune:&#10;- Move toward “Cleaner” to reduce false positives (but you may miss objects).&#10;- Typical clean recipes: 0.90–0.98.&#10;&#10;This sets the per-class CLIP thresholds that get baked into the saved recipe ZIP.">?</span></label>
+					                                <label for="agentClipHeadTargetPrecision">Recipe cleanliness (precision target)<span class="help-icon" title="CLIP head auto-tune only.&#10;&#10;What “precision” means here:&#10;- Precision = matches / (matches + false positives) on the sampled images.&#10;- A detection is a “match” if it overlaps an unmatched ground-truth box for that class with IoU ≥ the job’s IoU threshold.&#10;- Detections that match no ground-truth box count as false positives.&#10;- Extra detections on the same object are counted as “Duplicates” (shown separately).&#10;&#10;How to tune:&#10;- Move toward “Cleaner” to reduce false positives (but you may miss objects).&#10;- Typical clean recipes: 0.85–0.98. Recall-first runs: 0.70–0.80.&#10;&#10;This sets the per-class CLIP thresholds that get baked into the saved recipe ZIP.">?</span></label>
 					                                <div class="training-help" style="display: flex; align-items: center; gap: 10px; margin-top: 4px;">
 					                                    <span style="white-space: nowrap;" title="Lower target precision = more detections, but noisier (more false positives).">More detections (noisier)</span>
-					                                    <input type="range" id="agentClipHeadTargetPrecision" min="0.5" max="0.99" step="0.01" value="0.9" style="flex: 1;" />
-					                                    <span id="agentClipHeadTargetPrecisionValue" style="min-width: 3.5em; text-align: right;">0.90</span>
+					                                    <input type="range" id="agentClipHeadTargetPrecision" min="0.5" max="0.99" step="0.01" value="0.75" style="flex: 1;" />
+					                                    <span id="agentClipHeadTargetPrecisionValue" style="min-width: 3.5em; text-align: right;">0.75</span>
 					                                    <span style="white-space: nowrap;" title="Higher target precision = cleaner results (fewer false positives), but can miss objects.">Cleaner (fewer false positives)</span>
 					                                </div>
 					                                <details class="training-help" style="margin-top: 6px;">

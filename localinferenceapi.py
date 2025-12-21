@@ -9951,6 +9951,79 @@ def _resolve_steps_prompt_prefilter_config(payload: "AgentMiningRequest") -> Dic
     }
 
 
+def _estimate_steps_speed_factor(payload: "AgentMiningRequest") -> float:
+    early_enabled = bool(getattr(payload, "steps_early_stop", False))
+    early_mode = str(getattr(payload, "steps_early_stop_mode", "balanced") or "balanced").lower().strip()
+    if early_mode not in {"conservative", "balanced", "aggressive"}:
+        early_mode = "balanced"
+    prefilter_enabled = bool(getattr(payload, "steps_prompt_prefilter", False))
+    prefilter_mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower().strip()
+    if prefilter_mode not in {"conservative", "balanced", "aggressive"}:
+        prefilter_mode = "balanced"
+    early_factor = 1.0
+    if early_enabled:
+        early_factor = 0.9 if early_mode == "conservative" else 0.65 if early_mode == "aggressive" else 0.8
+    prefilter_factor = 1.0
+    if prefilter_enabled:
+        prefilter_factor = 0.85 if prefilter_mode == "conservative" else 0.55 if prefilter_mode == "aggressive" else 0.7
+    return float(early_factor * prefilter_factor)
+
+
+def _estimate_agent_global_optimizer_image_evals(
+    *,
+    val_images: int,
+    eval_caps: Sequence[int],
+    keep_ratio: float,
+    rounds: int,
+    max_trials: int,
+    mutations_per_round: int,
+) -> Tuple[int, List[int], bool]:
+    parsed = []
+    for cap in eval_caps or []:
+        try:
+            b = int(cap)
+        except Exception:
+            continue
+        if b > 0:
+            parsed.append(b)
+    budgets = sorted(set(parsed))
+    if not budgets:
+        return 0, [], True
+    try:
+        val_n = max(1, int(val_images))
+    except Exception:
+        val_n = int(max(1, val_images))
+    try:
+        keep = max(0.0, min(1.0, float(keep_ratio)))
+    except Exception:
+        keep = 0.5
+    try:
+        rounds_i = max(1, int(rounds))
+    except Exception:
+        rounds_i = 1
+    try:
+        max_trials_i = max(1, int(max_trials))
+    except Exception:
+        max_trials_i = 1
+    try:
+        mutations_i = max(1, int(mutations_per_round))
+    except Exception:
+        mutations_i = 1
+    candidates_per_round = 1
+    if max_trials_i > 1:
+        max_mut = max(1, min(mutations_i, max_trials_i - 1))
+        candidates_per_round = 1 + max_mut
+    total = 0
+    for _round in range(rounds_i):
+        active = max(1, candidates_per_round)
+        for idx, budget in enumerate(budgets):
+            eff_budget = min(int(budget), val_n)
+            total += int(active) * int(eff_budget)
+            if idx < len(budgets) - 1:
+                active = max(1, int(math.ceil(active * keep)))
+    return int(total), budgets, False
+
+
 def _collect_clip_prefilter_crops(
     *,
     cat_id: int,
@@ -16523,6 +16596,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
     job.message = "Preparing image sample…"
     job.request = payload.dict()
     job.updated_at = time.time()
+    start_ts = time.time()
+    compute_estimate_info: Optional[Dict[str, Any]] = None
 
     def _log(msg: str) -> None:
         try:
@@ -16623,6 +16698,53 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             f"{clip_head_path.name} "
             f"(clip={clip_name_str}, classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
             f"{head_mode_bits}"
+        )
+
+        sample_images = int(len(eval_ids))
+        class_count = int(len(selected_categories))
+        per_image_units = int(payload.steps_max_steps_per_recipe) * (1 + int(payload.steps_max_visual_seeds_per_step))
+        speed_factor = _estimate_steps_speed_factor(payload)
+        base_units_per_class = float(sample_images * per_image_units) * float(speed_factor)
+        global_enabled = bool(getattr(payload, "steps_optimize_global", False)) and bool(clip_head)
+        global_units_per_class = 0.0
+        budgets: List[int] = []
+        invalid_budgets = False
+        if global_enabled:
+            global_images, budgets, invalid_budgets = _estimate_agent_global_optimizer_image_evals(
+                val_images=sample_images,
+                eval_caps=list(getattr(payload, "steps_optimize_global_eval_caps", []) or []),
+                keep_ratio=float(getattr(payload, "steps_optimize_global_keep_ratio", 0.5) or 0.5),
+                rounds=int(getattr(payload, "steps_optimize_global_rounds", 1) or 1),
+                max_trials=int(getattr(payload, "steps_optimize_global_max_trials", 1) or 1),
+                mutations_per_round=int(getattr(payload, "steps_optimize_global_mutations_per_round", 1) or 1),
+            )
+            if not invalid_budgets:
+                global_units_per_class = float(global_images * per_image_units) * float(speed_factor)
+        total_units_per_class = float(base_units_per_class + global_units_per_class)
+        total_units_all = float(total_units_per_class * class_count) if class_count > 0 else None
+        compute_estimate_info = {
+            "sample_images": sample_images,
+            "class_count": class_count,
+            "steps": int(payload.steps_max_steps_per_recipe),
+            "seeds_per_step": int(payload.steps_max_visual_seeds_per_step),
+            "per_image_units": int(per_image_units),
+            "speed_factor": float(speed_factor),
+            "base_units_per_class": float(base_units_per_class),
+            "global_units_per_class": float(global_units_per_class),
+            "total_units_per_class": float(total_units_per_class),
+            "total_units_all_classes": float(total_units_all) if total_units_all is not None else None,
+            "global_optimizer": {
+                "enabled": bool(global_enabled),
+                "eval_caps": budgets,
+                "invalid_budgets": bool(invalid_budgets),
+            },
+        }
+        _log(
+            "Compute estimate: "
+            f"sample_images={sample_images} steps={int(payload.steps_max_steps_per_recipe)} seeds/step={int(payload.steps_max_visual_seeds_per_step)} "
+            f"speed_factor={float(speed_factor):.2f} base_units/class={base_units_per_class:.0f} "
+            f"global_units/class={global_units_per_class:.0f} total_units/class={total_units_per_class:.0f}"
+            + (f" total_units/all_classes={total_units_all:.0f}" if total_units_all is not None else "")
         )
 
         # Prompt mining (GPT-OSS) per class.
@@ -17037,6 +17159,15 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             "max_iters": int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 0) or 0),
                             "top_k": int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 0) or 0),
                         },
+                        "early_stop": {
+                            **(early_stop_cfg or {}),
+                            "requested": bool(getattr(eval_payload, "steps_early_stop", False)),
+                        },
+                        "prompt_prefilter": {
+                            **(prefilter_cfg or {}),
+                            "requested": bool(getattr(eval_payload, "steps_prompt_prefilter", False)),
+                            "keep_base_prompts": True,
+                        },
                     }
                     recipes_by_class[cid] = {
                         "schema_version": 2,
@@ -17146,10 +17277,26 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 "count": len(eval_ids),
                 "seed": payload.split_seed,
             },
+            "compute_estimate": compute_estimate_info,
             "classes": results,
             "config": eval_payload.dict(),
             "note": "Agent mining completed (steps mode).",
         }
+        if compute_estimate_info and total_units_per_class:
+            runtime_sec = max(0.0, float(time.time() - start_ts))
+            total_units = compute_estimate_info.get("total_units_all_classes") or compute_estimate_info.get("total_units_per_class")
+            try:
+                total_units_val = float(total_units) if total_units is not None else 0.0
+            except Exception:
+                total_units_val = 0.0
+            sec_per_unit = runtime_sec / total_units_val if total_units_val > 0 else None
+            compute_estimate_info["runtime_sec"] = runtime_sec
+            compute_estimate_info["sec_per_unit"] = sec_per_unit
+            _log(
+                "Compute estimate calibration: "
+                f"runtime_sec={runtime_sec:.1f} units={total_units_val:.0f} "
+                + (f"sec_per_unit={sec_per_unit:.6f}" if sec_per_unit is not None else "sec_per_unit=n/a")
+            )
         if _cancelled():
             job.status = "cancelled"
             job.message = "Cancelled"

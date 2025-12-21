@@ -7184,6 +7184,7 @@ def _infer_sam3_greedy_recipe_on_image(
     clip_head_target_index: Optional[int] = None,
     clip_head_min_prob: float = 0.5,
     clip_head_margin: float = 0.0,
+    stats_out: Optional[Dict[str, int]] = None,
     state: Optional[Any] = None,
     clip_device_override: Optional[str] = None,
 ) -> List[QwenDetection]:
@@ -7197,13 +7198,32 @@ def _infer_sam3_greedy_recipe_on_image(
     4) CLIP filter + IoU dedupe to suppress dupes/FPs
     """
     prompts = [p for p in (_sanitize_prompts([str(p) for p in text_prompts if str(p).strip()]) or []) if p]
+    counts: Dict[str, int] = {
+        "text_candidates_total": 0,
+        "candidates_after_dedupe": 0,
+        "candidates_kept": 0,
+        "expand_candidates": 0,
+        "expanded_total": 0,
+        "final_total": 0,
+    }
+
+    def _emit_stats() -> None:
+        if stats_out is None:
+            return
+        try:
+            stats_out.update({k: int(v) for k, v in counts.items()})
+        except Exception:
+            return
+
     if not prompts:
+        _emit_stats()
         return []
     img_state = state
     if img_state is None:
         try:
             img_state = processor.set_image(pil_img)
         except Exception:
+            _emit_stats()
             return []
     else:
         # Ensure no stale prompt state leaks across calls when reusing an image state.
@@ -7268,11 +7288,15 @@ def _infer_sam3_greedy_recipe_on_image(
             continue
         seed_dets.extend(dets or [])
     if not seed_dets:
+        _emit_stats()
         return []
+    counts["text_candidates_total"] = int(len(seed_dets))
 
     seed_dets = _dedupe_qwen_detections_iou(seed_dets, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=seed_dedupe_iou)
     if not seed_dets:
+        _emit_stats()
         return []
+    counts["candidates_after_dedupe"] = int(len(seed_dets))
 
     seed_boxes_xywh: List[Tuple[float, float, float, float]] = []
     seed_refs: List[QwenDetection] = []
@@ -7291,6 +7315,7 @@ def _infer_sam3_greedy_recipe_on_image(
         seed_boxes_xywh.append((float(x1), float(y1), float(x2 - x1), float(y2 - y1)))
         seed_refs.append(det)
     if not seed_refs:
+        _emit_stats()
         return []
 
     # IMPORTANT: max_visual_seeds should NOT cap how many detections we keep. In crowded scenes the
@@ -7348,6 +7373,7 @@ def _infer_sam3_greedy_recipe_on_image(
                     if p_target is not None:
                         scores_for_diverse = p_target
             kept_seed_indices_all = [i for i, ok in enumerate(keep_mask.tolist()) if ok]
+            counts["candidates_kept"] = int(len(kept_seed_indices_all))
             seed_scores_for_diverse = scores_for_diverse
             if kept_seed_indices_all and max_visual_seeds > 0:
                 kept_feats = seed_feats[kept_seed_indices_all]
@@ -7362,11 +7388,14 @@ def _infer_sam3_greedy_recipe_on_image(
                     scores=kept_scores,
                 )
                 expand_seed_indices = [kept_seed_indices_all[i] for i in diverse_local]
+                counts["expand_candidates"] = int(len(expand_seed_indices))
     if not kept_seed_indices_all:
         # If we successfully ran CLIP filtering and it rejected everything, return no detections.
         if had_seed_feats:
+            _emit_stats()
             return []
         kept_seed_indices_all = list(range(len(seed_refs)))
+        counts["candidates_kept"] = int(len(kept_seed_indices_all))
         if max_visual_seeds and int(max_visual_seeds) > 0:
             ranked = sorted(
                 range(len(seed_refs)),
@@ -7374,6 +7403,7 @@ def _infer_sam3_greedy_recipe_on_image(
                 reverse=True,
             )
             expand_seed_indices = ranked[: min(int(max_visual_seeds), len(ranked))]
+            counts["expand_candidates"] = int(len(expand_seed_indices))
         else:
             expand_seed_indices = []
 
@@ -7399,9 +7429,11 @@ def _infer_sam3_greedy_recipe_on_image(
         except Exception:
             continue
         expanded.extend(dets or [])
+    counts["expanded_total"] = int(len(expanded))
 
     combined = [*kept_seed_dets, *expanded]
     if not combined:
+        _emit_stats()
         return []
     combined = _dedupe_qwen_detections_iou(combined, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)
 
@@ -7467,6 +7499,8 @@ def _infer_sam3_greedy_recipe_on_image(
             expanded_filtered = [d for d, ok in zip(det_refs, keep_mask2.tolist()) if ok]
             combined = [*kept_seed_dets, *expanded_filtered]
             combined = _dedupe_qwen_detections_iou(combined, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)
+    counts["final_total"] = int(len(combined))
+    _emit_stats()
     return combined
 
 
@@ -7644,7 +7678,8 @@ def _successive_halving_search(
             try:
                 prefix = f"{log_prefix} " if log_prefix else ""
                 log_fn(
-                    f"{prefix}Stage {stage_idx + 1}/{stage_total}: budget={int(budget)} candidates={total_candidates}"
+                    f"{prefix}Budget pass {stage_idx + 1}/{stage_total}: "
+                    f"eval_cap={int(budget)} candidates={total_candidates}"
                 )
             except Exception:
                 pass
@@ -7655,7 +7690,7 @@ def _successive_halving_search(
             if log_fn and (idx == total_candidates or idx % log_every == 0):
                 try:
                     prefix = f"{log_prefix} " if log_prefix else ""
-                    log_fn(f"{prefix}Stage {stage_idx + 1}: evaluated {idx}/{total_candidates} candidates")
+                    log_fn(f"{prefix}Budget pass {stage_idx + 1}: evaluated {idx}/{total_candidates} candidates")
                 except Exception:
                     pass
         evaluated.sort(key=lambda x: x[0], reverse=True)
@@ -7678,7 +7713,7 @@ def _successive_halving_search(
                         head_bits.append(f"Δ≥{float(margin):.3f}")
                     head_str = f" ({' '.join(head_bits)})" if head_bits else ""
                     log_fn(
-                        f"{prefix}Stage {stage_idx + 1}: best matches={matches} fps={fps} "
+                        f"{prefix}Budget pass {stage_idx + 1}: best matches={matches} fps={fps} "
                         f"prec={precision:.3f}{head_str}"
                     )
             except Exception:
@@ -7698,7 +7733,8 @@ def _successive_halving_search(
             try:
                 prefix = f"{log_prefix} " if log_prefix else ""
                 log_fn(
-                    f"{prefix}Stage {stage_idx + 1}: keeping {keep_n}/{len(evaluated)} candidates (best_key={best_key})"
+                    f"{prefix}Budget pass {stage_idx + 1}: keeping {keep_n}/{len(evaluated)} candidates "
+                    f"(best_key={best_key})"
                 )
             except Exception:
                 pass
@@ -9302,8 +9338,8 @@ def _select_steps_from_seed_prompt_stats(
             try:
                 log_fn(
                     f"[steps] select step '{best.get('prompt')}' (new_gt={best_key[1] if best_key else 0}, "
-                    f"seed_thr={float(best.get('selected_seed_threshold') or 0.0):.3f} "
-                    f"seed_prec={float(best.get('precision') or 0.0):.3f}, seed_fps={int(best.get('fps') or 0)})"
+                    f"text_thr={float(best.get('selected_seed_threshold') or 0.0):.3f} "
+                    f"text_prec={float(best.get('precision') or 0.0):.3f}, text_fps={int(best.get('fps') or 0)})"
                 )
             except Exception:
                 pass
@@ -9750,8 +9786,8 @@ def _mine_seed_prompt_stats_image_first(
     if log_fn and seed_eval_threshold < float(payload.seed_threshold) - 1e-9:
         try:
             log_fn(
-                f"[steps] Seed eval floor enabled: base_seed_thr={float(payload.seed_threshold):.3f} "
-                f"eval_seed_thr={float(seed_eval_threshold):.3f} max_results={int(seed_eval_max_results)} (class_id {cat_id})"
+                f"[steps] Candidate eval floor enabled: base_text_thr={float(payload.seed_threshold):.3f} "
+                f"eval_text_thr={float(seed_eval_threshold):.3f} max_results={int(seed_eval_max_results)} (class_id {cat_id})"
             )
         except Exception:
             pass
@@ -9787,7 +9823,7 @@ def _mine_seed_prompt_stats_image_first(
                     pass
             if log_fn and log_every > 0 and processed % log_every == 0:
                 try:
-                    log_fn(f"[steps] Seed eval: processed {processed}/{total_images} sample images for class_id {cat_id}")
+                    log_fn(f"[steps] Candidate eval: processed {processed}/{total_images} sample images for class_id {cat_id}")
                 except Exception:
                     pass
 
@@ -10355,6 +10391,18 @@ def _tune_clip_head_for_selected_steps_image_first(
     for img_id in val_ids:
         total_gt += len((gt_by_image_cat.get(int(img_id)) or {}).get(int(cat_id)) or [])
 
+    flow_keys = (
+        "text_candidates_total",
+        "candidates_after_dedupe",
+        "candidates_kept",
+        "expand_candidates",
+        "expanded_total",
+        "final_total",
+    )
+    step_flow_totals: List[Dict[str, Any]] = []
+    for step_cfg in steps_norm:
+        step_flow_totals.append({"prompt": str(step_cfg.get("prompt") or ""), **{k: 0 for k in flow_keys}})
+
     sweep_min_probs, sweep_margins, target_precision = _build_clip_head_sweep_grid(
         payload,
         base_min_prob=float(payload.clip_head_min_prob),
@@ -10405,6 +10453,7 @@ def _tune_clip_head_for_selected_steps_image_first(
     def _worker_loop(worker: "_Sam3GreedyEvalWorker") -> None:
         local: Dict[float, Dict[float, Dict[str, int]]] = {float(m): {float(p): _counts_init() for p in sweep_min_probs} for m in sweep_margins}
         local_debug = {"base_dets": 0, "with_prob": 0, "prob_min": None, "prob_max": None}
+        local_step_flow: List[Dict[str, int]] = [{k: 0 for k in flow_keys} for _ in steps_norm]
         clip_device_override = _resolve_clip_device(worker.device)
 
         while True:
@@ -10435,12 +10484,13 @@ def _tune_clip_head_for_selected_steps_image_first(
                 except Exception:
                     state = None
                 if state is not None:
-                    for step_cfg in steps_norm:
+                    for step_idx, step_cfg in enumerate(steps_norm):
                         if cancel_event is not None and cancel_event.is_set():
                             break
                         prompt = str(step_cfg.get("prompt") or "").strip()
                         if not prompt:
                             continue
+                        flow_stats: Dict[str, int] = {}
                         try:
                             dets_step = _infer_sam3_greedy_recipe_on_image(
                                 pil_img=pil_img,
@@ -10463,11 +10513,18 @@ def _tune_clip_head_for_selected_steps_image_first(
                                 clip_head_target_index=int(clip_head_target_index),
                                 clip_head_min_prob=0.0,
                                 clip_head_margin=0.0,
+                                stats_out=flow_stats,
                                 state=state,
                                 clip_device_override=clip_device_override,
                             )
                         except Exception:
                             dets_step = []
+                        if 0 <= step_idx < len(local_step_flow):
+                            for key in flow_keys:
+                                try:
+                                    local_step_flow[step_idx][key] += int(flow_stats.get(key) or 0)
+                                except Exception:
+                                    continue
                         for det in dets_step or []:
                             bbox = det.bbox or []
                             if len(bbox) < 4:
@@ -10538,6 +10595,14 @@ def _tune_clip_head_for_selected_steps_image_first(
                             dst[k] = int(dst.get(k, 0)) + int(counts.get(k, 0))
                         except Exception:
                             continue
+            for idx, stats in enumerate(local_step_flow):
+                if idx >= len(step_flow_totals):
+                    continue
+                for key in flow_keys:
+                    try:
+                        step_flow_totals[idx][key] = int(step_flow_totals[idx].get(key, 0)) + int(stats.get(key, 0))
+                    except Exception:
+                        continue
             try:
                 debug["base_dets"] = int(debug.get("base_dets") or 0) + int(local_debug.get("base_dets") or 0)
             except Exception:
@@ -10613,6 +10678,34 @@ def _tune_clip_head_for_selected_steps_image_first(
             "clip_head_meets_target_precision": False,
             "debug": debug,
         }
+    if step_flow_totals:
+        best_summary["similarity_flow"] = {
+            "images": int(total_images),
+            "steps": step_flow_totals,
+        }
+        if log_fn and total_images > 0:
+            try:
+                for entry in step_flow_totals:
+                    prompt = str(entry.get("prompt") or "").strip()
+                    if not prompt:
+                        continue
+                    text_total = int(entry.get("text_candidates_total") or 0)
+                    kept_total = int(entry.get("candidates_kept") or 0)
+                    expand_total = int(entry.get("expand_candidates") or 0)
+                    expanded_total = int(entry.get("expanded_total") or 0)
+                    final_total = int(entry.get("final_total") or 0)
+                    log_fn(
+                        "[steps] Similarity flow "
+                        f"'{prompt}': text={text_total} kept={kept_total} "
+                        f"expand={expand_total} expanded={expanded_total} final={final_total} "
+                        f"(avg/img text={text_total/total_images:.2f} "
+                        f"kept={kept_total/total_images:.2f} "
+                        f"expand={expand_total/total_images:.2f} "
+                        f"expanded={expanded_total/total_images:.2f} "
+                        f"final={final_total/total_images:.2f})"
+                    )
+            except Exception:
+                pass
     return best_summary
 
 
@@ -10631,10 +10724,10 @@ def _tune_steps_tier1_knobs_image_first(
     cancel_event: Optional[threading.Event] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Bounded Tier-1 tuning for steps-mode mining.
+    Bounded Tier-1 grid search for steps-mode mining.
 
     Tunes a small grid over:
-      - expand_threshold
+      - visual expansion score (expand_threshold)
       - max_visual_seeds (per step)
 
     Candidates are ranked via the steps CLIP-head sweep evaluator (precision/coverage/FP tradeoff),
@@ -10835,8 +10928,8 @@ def _tune_steps_tier1_knobs_image_first(
         return key, {"candidate": dict(candidate), "summary": summary, "key": key, "budget": int(budget)}
 
     _log(
-        f"[steps] Tier-1 tuning: trying up to {len(candidates)} configs (eval_cap={eval_cap}, budgets={budgets}) for class_id {cat_id} "
-        f"(expand_thr≈{base_expand:.3f}, max_seeds≈{base_max_seeds})"
+        f"[steps] Tier-1 grid search: trying up to {len(candidates)} configs (eval_cap={eval_cap}, budgets={budgets}) for class_id {cat_id} "
+        f"(visual_thr≈{base_expand:.3f}, max_seeds≈{base_max_seeds})"
     )
     best_candidate, history = _successive_halving_search(
         candidates=candidates,
@@ -10846,7 +10939,7 @@ def _tune_steps_tier1_knobs_image_first(
     )
     tuned_steps = _apply_candidate(best_candidate)
     _log(
-        f"[steps] Tier-1 tuning: selected expand_thr={float(best_candidate.get('expand_threshold')):.3f} "
+        f"[steps] Tier-1 grid search: selected visual_thr={float(best_candidate.get('expand_threshold')):.3f} "
         f"max_seeds={int(best_candidate.get('max_visual_seeds'))} for class_id {cat_id}"
     )
     return tuned_steps, {
@@ -11475,7 +11568,7 @@ def _generate_steps_global_mutations(
             mutated[i] = s2
             _add(mutated, {"op": "seed_threshold", "i": int(i), "prompt": p, "seed_threshold": float(thr_f)})
 
-    # 6) Per-step expand threshold moves (small grid around current).
+    # 6) Per-step visual expansion score moves (small grid around current).
     for i, step in enumerate(base_steps):
         cur = float(_clamp01(step.get("expand_threshold"), getattr(payload, "expand_threshold", 0.3)))
         for d in (-0.2, -0.1, -0.05, 0.05, 0.1, 0.2):
@@ -11582,7 +11675,8 @@ def _run_steps_global_successive_halving_rounds(
             try:
                 prefix = f"{log_prefix} " if log_prefix else ""
                 log_fn(
-                    f"{prefix}Round {r + 1}/{rounds_i}: {len(candidates)} candidate(s), budgets={list(budgets)} keep_ratio={float(keep_f):.2f}"
+                    f"{prefix}Mutation round {r + 1}/{rounds_i}: {len(candidates)} candidate(s), "
+                    f"eval_caps={list(budgets)} keep_ratio={float(keep_f):.2f}"
                 )
             except Exception:
                 pass
@@ -11592,7 +11686,7 @@ def _run_steps_global_successive_halving_rounds(
             evaluator=evaluator,
             keep_ratio=float(keep_f),
             log_fn=log_fn,
-            log_prefix=f"{log_prefix}Round {r + 1}",
+            log_prefix=f"{log_prefix} Mutation round {r + 1} —",
         )
         history.append({"round": int(r), "successive_halving": sh_history, "n_candidates": int(len(candidates))})
     return best, history
@@ -11766,8 +11860,9 @@ def _tune_steps_global_optimizer_image_first(
         )
         return key, {"summary": summary, "candidate": c, "key": key, "budget": int(budget)}
 
+    log_prefix = "[recipe-mining][multi-step][global-optimizer]"
     _log(
-        f"[steps] Global optimizer: rounds={rounds} max_trials={max_trials} budgets={budgets} keep_ratio={keep_ratio} "
+        f"{log_prefix} setup: rounds={rounds} max_trials={max_trials} eval_caps={budgets} keep_ratio={keep_ratio} "
         f"mutations/round={mutations_per_round} (ordering={enable_ordering}, max_results={enable_max_results}) "
         f"for class_id {cat_id}"
     )
@@ -11781,12 +11876,12 @@ def _tune_steps_global_optimizer_image_first(
         mutate=_mutate,
         evaluator=_eval,
         log_fn=_log,
-        log_prefix="[steps][global]",
+        log_prefix=log_prefix,
     )
     best_steps = _normalize_steps_candidate_steps(best.get("steps") if isinstance(best, dict) else [], payload=payload)
     if isinstance(best, dict) and isinstance(best.get("mutation"), dict):
         try:
-            _log(f"[steps][global] Selected mutation: {best.get('mutation')}")
+            _log(f"{log_prefix} selected mutation: {best.get('mutation')}")
         except Exception:
             pass
 
@@ -12090,8 +12185,8 @@ def _beam_tune_sam3_greedy_params(
             name = class_names.get(int(cid)) or f"class_{cid}"
             try:
                 _log(
-                    f"Beam selected for {name} (id={int(cid)}): seed_thr={float(ov['seed_threshold']):.3f} "
-                    f"expand_thr={float(ov['expand_threshold']):.3f} sim={float(ov['similarity_score']):.3f} "
+                    f"Beam selected for {name} (id={int(cid)}): text_thr={float(ov['seed_threshold']):.3f} "
+                    f"visual_thr={float(ov['expand_threshold']):.3f} sim={float(ov['similarity_score']):.3f} "
                     f"max_seeds={int(ov['max_visual_seeds'])}"
                 )
             except Exception:
@@ -15358,13 +15453,14 @@ class AgentMiningRequest(BaseModel):
         5,
         ge=0,
         le=500,
-        description="Max visual seeds expanded per step when search_mode='steps' (per-image, per-step).",
+        description="Max similarity candidates expanded per step when search_mode='steps' (per-image, per-step).",
     )
     steps_optimize_tier1: bool = Field(
         False,
         description=(
-            "When search_mode='steps' and a pretrained CLIP head is provided, enable bounded Tier-1 tuning of "
-            "`expand_threshold` and `steps_max_visual_seeds_per_step` (uses small validation subsets to rank "
+            "When search_mode='steps' and a pretrained CLIP head is provided, enable bounded Tier-1 grid search of "
+            "the SAM3 visual expansion score (`expand_threshold`) and `steps_max_visual_seeds_per_step` "
+            "(uses small validation subsets to rank "
             "candidates, then re-tunes on the full validation split for the final recipe)."
         ),
     )
@@ -15372,21 +15468,21 @@ class AgentMiningRequest(BaseModel):
         200,
         ge=10,
         le=50_000,
-        description="Max number of sampled images used during Tier-1 tuning stages (search_mode='steps').",
+        description="Max number of sampled images used during Tier-1 grid search stages (search_mode='steps').",
     )
     steps_optimize_tier1_max_trials: int = Field(
         9,
         ge=1,
         le=256,
-        description="Max candidate configurations evaluated during Tier-1 tuning (search_mode='steps').",
+        description="Max candidate configurations evaluated during Tier-1 grid search (search_mode='steps').",
     )
     steps_seed_eval_floor: Optional[float] = Field(
         None,
         ge=0.0,
         le=1.0,
         description=(
-            "When search_mode='steps', optionally run the seed-stage prompt evaluation at a lower threshold than "
-            "`seed_threshold` so seed-threshold curves can include values below the base. If unset, defaults to "
+            "When search_mode='steps', optionally run the text-candidate evaluation at a lower threshold than "
+            "`seed_threshold` so candidate curves can include values below the base. If unset, defaults to "
             "the base `seed_threshold` (behavior unchanged)."
         ),
     )
@@ -15396,7 +15492,7 @@ class AgentMiningRequest(BaseModel):
         le=5000,
         description=(
             "When search_mode='steps' and `steps_seed_eval_floor` is set low, this optional override caps the number "
-            "of seed-stage detections returned per prompt per image (safety valve). If unset, uses `max_results`."
+            "of text-candidate detections returned per prompt per image (safety valve). If unset, uses `max_results`."
         ),
     )
     steps_early_stop: bool = Field(
@@ -15470,7 +15566,7 @@ class AgentMiningRequest(BaseModel):
         description=(
             "When search_mode='steps' and a pretrained CLIP head is provided, enable a budgeted global optimizer that "
             "jointly searches the whole recipe configuration (prompt subset + per-step knobs + optional ordering). "
-            "This is the highest-quality mode but can be much slower than Tier-1/Tier-2."
+            "This is the highest-quality mode but can be much slower than Tier-1 grid search or Tier-2."
         ),
     )
     steps_optimize_global_eval_caps: List[int] = Field(
@@ -15570,9 +15666,24 @@ class AgentMiningRequest(BaseModel):
     )
 
     # Greedy SAM3 recipe parameters.
-    seed_threshold: float = Field(0.05, ge=0.0, le=1.0)
-    expand_threshold: float = Field(0.3, ge=0.0, le=1.0)
-    max_visual_seeds: int = Field(25, ge=0, le=500)
+    seed_threshold: float = Field(
+        0.05,
+        ge=0.0,
+        le=1.0,
+        description="Text-candidate score threshold for the initial SAM3 text prompt pass.",
+    )
+    expand_threshold: float = Field(
+        0.3,
+        ge=0.0,
+        le=1.0,
+        description="SAM3 visual expansion score threshold used during similarity-based search.",
+    )
+    max_visual_seeds: int = Field(
+        25,
+        ge=0,
+        le=500,
+        description="Max candidate boxes to expand per step (used to bound similarity-based search).",
+    )
     seed_dedupe_iou: float = Field(0.9, ge=0.0, le=1.0)
     dedupe_iou: float = Field(0.5, ge=0.0, le=1.0)
     mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
@@ -16761,11 +16872,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
         _log(
             "Config: "
-            + f"seed_thr={payload.seed_threshold} expand_thr={payload.expand_threshold} "
-            + f"seed_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
+            + f"text_thr={payload.seed_threshold} visual_thr={payload.expand_threshold} "
+            + f"cand_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
             + f"mask_thr={payload.mask_threshold} max_results={payload.max_results} iou_eval={payload.iou_threshold} "
             + f"llm_prompts={payload.prompt_llm_max_prompts} workers_per_gpu={getattr(payload, 'max_workers_per_device', 1)} "
-            + f"steps(max_steps={int(payload.steps_max_steps_per_recipe)}, seeds/step={int(payload.steps_max_visual_seeds_per_step)})"
+            + f"steps(max_steps={int(payload.steps_max_steps_per_recipe)}, candidates/step={int(payload.steps_max_visual_seeds_per_step)})"
         )
 
         # Pretrained CLIP head (LogReg) is required for Agent Mining (recipe mining).
@@ -16836,7 +16947,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         }
         _log(
             "Compute estimate: "
-            f"sample_images={sample_images} steps={int(payload.steps_max_steps_per_recipe)} seeds/step={int(payload.steps_max_visual_seeds_per_step)} "
+            f"sample_images={sample_images} steps={int(payload.steps_max_steps_per_recipe)} candidates/step={int(payload.steps_max_visual_seeds_per_step)} "
             f"speed_factor={float(speed_factor):.2f} base_units/class={base_units_per_class:.0f} "
             f"global_units/class={global_units_per_class:.0f} total_units/class={total_units_per_class:.0f}"
             + (f" total_units/all_classes={total_units_all:.0f}" if total_units_all is not None else "")
@@ -17031,7 +17142,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
 
                         return _cb
 
-                    job.message = f"[steps] Seed-evaluating prompts for {name} ({class_idx}/{total_classes})…"
+                    job.message = f"[steps] Evaluating text candidates for {name} ({class_idx}/{total_classes})…"
                     job.updated_at = time.time()
                     seed_stats = _mine_seed_prompt_stats_image_first(
                         cat_id=cid,
@@ -17044,7 +17155,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         log_every=eval_log_every,
                         log_fn=_log,
                         cancel_event=job.cancel_event,
-                        progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Seed eval"),
+                        progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Candidate eval"),
                     )
                     target_prec = (
                         float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0)
@@ -17117,7 +17228,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             )
                         else:
                             if bool(getattr(eval_payload, "steps_optimize_tier1", False)):
-                                job.message = f"[steps] Tier-1 tuning for {name} ({class_idx}/{total_classes})…"
+                                job.message = f"[steps] Tier-1 grid search for {name} ({class_idx}/{total_classes})…"
                                 job.updated_at = time.time()
                                 step_list, tier1_info = _tune_steps_tier1_knobs_image_first(
                                     cat_id=cid,

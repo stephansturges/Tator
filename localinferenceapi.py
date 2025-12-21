@@ -7596,6 +7596,8 @@ def _successive_halving_search(
     budgets: Sequence[int],
     evaluator: Callable[[Any, int], Tuple[Tuple[Any, ...], Any]],
     keep_ratio: float = 0.5,
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_prefix: str = "",
 ) -> Tuple[Any, List[Dict[str, Any]]]:
     """
     Deterministic successive-halving controller.
@@ -7636,9 +7638,26 @@ def _successive_halving_search(
     history: List[Dict[str, Any]] = []
     for stage_idx, budget in enumerate(budgets_clean):
         evaluated: List[Tuple[Tuple[Any, ...], Any, Any]] = []
-        for cand in active:
+        total_candidates = len(active)
+        stage_total = len(budgets_clean)
+        if log_fn:
+            try:
+                prefix = f"{log_prefix} " if log_prefix else ""
+                log_fn(
+                    f"{prefix}Stage {stage_idx + 1}/{stage_total}: budget={int(budget)} candidates={total_candidates}"
+                )
+            except Exception:
+                pass
+        log_every = max(1, total_candidates // 5) if total_candidates > 0 else 1
+        for idx, cand in enumerate(active, start=1):
             key, result = evaluator(cand, int(budget))
             evaluated.append((key, cand, result))
+            if log_fn and (idx == total_candidates or idx % log_every == 0):
+                try:
+                    prefix = f"{log_prefix} " if log_prefix else ""
+                    log_fn(f"{prefix}Stage {stage_idx + 1}: evaluated {idx}/{total_candidates} candidates")
+                except Exception:
+                    pass
         evaluated.sort(key=lambda x: x[0], reverse=True)
         best_key = evaluated[0][0] if evaluated else None
         history.append(
@@ -7652,6 +7671,14 @@ def _successive_halving_search(
         if stage_idx >= len(budgets_clean) - 1:
             break
         keep_n = max(1, int(math.ceil(len(evaluated) * keep)))
+        if log_fn:
+            try:
+                prefix = f"{log_prefix} " if log_prefix else ""
+                log_fn(
+                    f"{prefix}Stage {stage_idx + 1}: keeping {keep_n}/{len(evaluated)} candidates (best_key={best_key})"
+                )
+            except Exception:
+                pass
         active = [cand for _, cand, _ in evaluated[:keep_n]]
 
     if not evaluated:
@@ -11474,6 +11501,8 @@ def _run_steps_global_successive_halving_rounds(
     max_trials: int,
     mutate: Callable[[Any, int], Sequence[Any]],
     evaluator: Callable[[Any, int], Tuple[Tuple[Any, ...], Any]],
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_prefix: str = "",
 ) -> Tuple[Any, List[Dict[str, Any]]]:
     """
     Pure controller logic for the global optimizer (testable without GPUs).
@@ -11500,11 +11529,21 @@ def _run_steps_global_successive_halving_rounds(
         neighborhood = list(mutate(best, int(r)) or [])
         candidates = [best] + neighborhood
         candidates = candidates[: max_trials_i]
+        if log_fn:
+            try:
+                prefix = f"{log_prefix} " if log_prefix else ""
+                log_fn(
+                    f"{prefix}Round {r + 1}/{rounds_i}: {len(candidates)} candidate(s), budgets={list(budgets)} keep_ratio={float(keep_f):.2f}"
+                )
+            except Exception:
+                pass
         best, sh_history = _successive_halving_search(
             candidates=candidates,
             budgets=budgets,
             evaluator=evaluator,
             keep_ratio=float(keep_f),
+            log_fn=log_fn,
+            log_prefix=f"{log_prefix}Round {r + 1}",
         )
         history.append({"round": int(r), "successive_halving": sh_history, "n_candidates": int(len(candidates))})
     return best, history
@@ -11692,8 +11731,15 @@ def _tune_steps_global_optimizer_image_first(
         max_trials=int(max_trials),
         mutate=_mutate,
         evaluator=_eval,
+        log_fn=_log,
+        log_prefix="[steps][global]",
     )
     best_steps = _normalize_steps_candidate_steps(best.get("steps") if isinstance(best, dict) else [], payload=payload)
+    if isinstance(best, dict) and isinstance(best.get("mutation"), dict):
+        try:
+            _log(f"[steps][global] Selected mutation: {best.get('mutation')}")
+        except Exception:
+            pass
 
     info = {
         "enabled": True,

@@ -12977,8 +12977,67 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			                    });
 			                    promptBits = `Steps: ${steps.length} • Step prompts: ${uniq.size} • Prompt pool: ${prompts.length}`;
 			                }
-		                meta.textContent = `${promptBits} • ${configBits.join(" • ")}`;
+			                meta.textContent = `${promptBits} • ${configBits.join(" • ")}`;
 		                body.appendChild(meta);
+		            }
+
+		            const prefilterSummary = summary.prompt_prefilter && typeof summary.prompt_prefilter === "object" ? summary.prompt_prefilter : null;
+		            const earlyStopSummary = summary.early_stop && typeof summary.early_stop === "object" ? summary.early_stop : null;
+		            if (prefilterSummary || earlyStopSummary) {
+		                const block = document.createElement("div");
+		                block.className = "training-subsection";
+		                const title = document.createElement("div");
+		                title.className = "training-subsection__title";
+		                title.textContent = "Run summary";
+		                block.appendChild(title);
+
+		                if (prefilterSummary) {
+		                    const enabled = !!prefilterSummary.enabled;
+		                    const mode = prefilterSummary.mode || "balanced";
+		                    const total = Number.isFinite(prefilterSummary.total) ? prefilterSummary.total : null;
+		                    const kept = Number.isFinite(prefilterSummary.kept) ? prefilterSummary.kept : null;
+		                    const bits = [];
+		                    bits.push("Prompt prefilter");
+		                    if (enabled) {
+		                        if (kept !== null && total !== null) bits.push(`kept ${kept}/${total}`);
+		                        bits.push(mode);
+		                    } else {
+		                        bits.push("off");
+		                    }
+		                    const line = document.createElement("div");
+		                    line.className = "training-help";
+		                    line.textContent = bits.join(" • ");
+		                    block.appendChild(line);
+		                }
+
+		                if (earlyStopSummary) {
+		                    const enabled = !!earlyStopSummary.enabled;
+		                    const mode = earlyStopSummary.mode || "balanced";
+		                    const maxSteps = Number.isFinite(earlyStopSummary.max_steps) ? earlyStopSummary.max_steps : null;
+		                    const selectedSteps =
+		                        Number.isFinite(earlyStopSummary.selected_steps_final)
+		                            ? earlyStopSummary.selected_steps_final
+		                            : Number.isFinite(earlyStopSummary.selected_steps)
+		                              ? earlyStopSummary.selected_steps
+		                              : null;
+		                    const triggered = typeof earlyStopSummary.triggered === "boolean" ? earlyStopSummary.triggered : null;
+		                    const reason = earlyStopSummary.reason || "";
+		                    const bits = [];
+		                    bits.push("Early-stop");
+		                    if (enabled) {
+		                        if (selectedSteps !== null && maxSteps !== null) bits.push(`${selectedSteps}/${maxSteps} steps`);
+		                        bits.push(mode);
+		                        if (triggered === true && reason) bits.push(`triggered (${reason})`);
+		                    } else {
+		                        bits.push("off");
+		                    }
+		                    const line = document.createElement("div");
+		                    line.className = "training-help";
+		                    line.textContent = bits.join(" • ");
+		                    block.appendChild(line);
+		                }
+
+		                body.appendChild(block);
 		            }
 
 	            if (isStepRecipeV2) {

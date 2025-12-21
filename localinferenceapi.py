@@ -9111,7 +9111,7 @@ def _select_steps_from_seed_prompt_stats(
     max_candidates_per_prompt: int = 6,
     early_stop: Optional[Dict[str, Any]] = None,
     log_fn: Optional[Callable[[str], None]] = None,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Greedy set-cover over GT instances, using *seed-stage* matches.
 
@@ -9231,6 +9231,8 @@ def _select_steps_from_seed_prompt_stats(
     early_window = int(early_cfg.get("window") or 1)
     early_increment = float(early_cfg.get("min_increment") or 0.0)
     early_precision_floor = early_cfg.get("precision_floor")
+    stop_reason: Optional[str] = None
+    triggered = False
     while remaining and len(selected) < max_steps_i:
         best: Optional[Dict[str, Any]] = None
         best_key: Optional[Tuple[int, int, float, int]] = None
@@ -9252,9 +9254,12 @@ def _select_steps_from_seed_prompt_stats(
                 best_key = key
                 best = cand
         if best is None:
+            stop_reason = "no_candidates"
             break
         if early_enabled and target_precision_f is not None and early_precision_floor is not None:
             if len(selected) >= early_min_steps and float(best.get("precision") or 0.0) < float(early_precision_floor):
+                stop_reason = "precision_floor"
+                triggered = True
                 if log_fn:
                     try:
                         log_fn(
@@ -9284,6 +9289,8 @@ def _select_steps_from_seed_prompt_stats(
             if window:
                 frac = float(sum(window)) / float(total_gt)
                 if frac < float(early_increment):
+                    stop_reason = "coverage_stall"
+                    triggered = True
                     if log_fn:
                         try:
                             log_fn(
@@ -9293,7 +9300,26 @@ def _select_steps_from_seed_prompt_stats(
                         except Exception:
                             pass
                     break
-    return selected
+    if stop_reason is None:
+        if len(selected) >= max_steps_i:
+            stop_reason = "max_steps"
+        elif not remaining:
+            stop_reason = "no_candidates"
+        else:
+            stop_reason = "complete"
+    early_info = {
+        "enabled": bool(early_enabled),
+        "mode": str(early_cfg.get("mode") or "balanced"),
+        "triggered": bool(triggered),
+        "reason": str(stop_reason),
+        "selected_steps": int(len(selected)),
+        "max_steps": int(max_steps_i),
+        "min_steps": int(early_min_steps),
+        "window": int(early_window),
+        "min_increment": float(early_increment),
+        "precision_margin": float(early_cfg.get("precision_margin") or 0.0),
+    }
+    return selected, early_info
 
 
 def _build_seed_stage_candidate_from_prompt_stat(
@@ -16819,6 +16845,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             )
 
         prepared_prompts: Dict[int, List[str]] = {}
+        prompt_prefilter_stats: Dict[int, Dict[str, Any]] = {}
         for cid, name in selected_categories:
             if _cancelled():
                 break
@@ -16856,6 +16883,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 seen.add(key)
                 merged.append(str(p))
             base_keep = _sanitize_prompts([*base, *base_prompts_all])
+            prefilter_total = len(merged)
             if prefilter_cfg.get("enabled"):
                 merged = _prefilter_prompts_with_clip(
                     merged,
@@ -16870,6 +16898,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     keep_ratio=float(prefilter_cfg.get("keep_ratio") or 0.0),
                     seed=int(payload.split_seed) + int(cid),
                     log_fn=_log,
+                )
+            prompt_prefilter_stats[int(cid)] = {
+                "enabled": bool(prefilter_cfg.get("enabled")),
+                "mode": str(prefilter_cfg.get("mode") or "balanced"),
+                "total": int(prefilter_total),
+                "kept": int(len(merged)),
+            }
+            if prefilter_cfg.get("enabled"):
+                _log(
+                    f"[steps] Prompt prefilter summary for {name}: kept {len(merged)}/{prefilter_total} "
+                    f"(mode={prefilter_cfg.get('mode')})"
                 )
             prepared_prompts[cid] = merged or base
             _log(f"Prompt list for {name}: {', '.join(prepared_prompts[cid])}")
@@ -16997,13 +17036,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             f"window={early_stop_cfg.get('window')} min_increment={float(early_stop_cfg.get('min_increment') or 0.0):.3f} "
                             f"precision_margin={float(early_stop_cfg.get('precision_margin') or 0.0):.2f}"
                         )
-                    selected = _select_steps_from_seed_prompt_stats(
+                    selected, early_stop_info = _select_steps_from_seed_prompt_stats(
                         seed_stats,
                         max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
                         target_precision=target_prec,
                         early_stop=early_stop_cfg,
                         log_fn=_log,
                     )
+                    if early_stop_info.get("enabled"):
+                        _log(
+                            f"[steps] Early-stop summary for {name}: "
+                            f"selected_steps={early_stop_info.get('selected_steps')}/{early_stop_info.get('max_steps')} "
+                            f"mode={early_stop_info.get('mode')} reason={early_stop_info.get('reason')}"
+                        )
                     refine_info: Optional[Dict[str, Any]] = None
                     if bool(getattr(eval_payload, "steps_refine_prompt_subset", False)):
                         selected, refine_info = _refine_steps_prompt_subset_seed_stage(
@@ -17016,6 +17061,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             base_seed_threshold=float(eval_payload.seed_threshold),
                             log_fn=_log,
                         )
+                    if isinstance(early_stop_info, dict):
+                        early_stop_info["selected_steps_final"] = int(len(selected))
                     selected_prompts, step_list = _build_steps_recipe_step_list_from_selected_stats(
                         selected,
                         prompts_fallback=prompts_for_class,
@@ -17103,6 +17150,12 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             summary["global_optimizer"] = global_info
                         if refine_info and isinstance(summary, dict):
                             summary["prompt_subset_refinement"] = refine_info
+                        if isinstance(summary, dict):
+                            prefilter_summary = prompt_prefilter_stats.get(int(cid))
+                            if isinstance(prefilter_summary, dict):
+                                summary["prompt_prefilter"] = prefilter_summary
+                            if isinstance(early_stop_info, dict):
+                                summary["early_stop"] = early_stop_info
                     else:
                         total_gt = int(entry.get("eval_gt") or 0)
                         summary = {
@@ -17118,6 +17171,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         }
                         if refine_info:
                             summary["prompt_subset_refinement"] = refine_info
+                        prefilter_summary = prompt_prefilter_stats.get(int(cid))
+                        if isinstance(prefilter_summary, dict):
+                            summary["prompt_prefilter"] = prefilter_summary
+                        if isinstance(early_stop_info, dict):
+                            summary["early_stop"] = early_stop_info
 
                     summaries[cid] = summary
                     tuned_expand = float(eval_payload.expand_threshold)

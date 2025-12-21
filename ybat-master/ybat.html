@@ -940,18 +940,18 @@
         │    - optional GPT prompt expansion
         │    - base prompts (e.g., “object”, “small object”)
         │
-        ├─ Seed-stage prompt eval (sample, text-only)
+        ├─ Text-candidate eval (sample, text-only)
         │    - run SAM3 text inference per prompt
-        │    - build a seed-threshold curve per prompt (coverage vs false positives)
+        │    - build a candidate-threshold curve per prompt (coverage vs false positives)
         │
         ├─ Build a multi-step recipe (per class)
         │    - pick a short chain of prompt steps (usually 3–8)
-        │    - each step has its own seed threshold (from the prompt curve)
+        │    - each step has its own text threshold (from the prompt curve)
         │
         ├─ Run the full steps pipeline (sample)
         │    - for each step:
-        │        1) text seeds → pick diverse seeds
-        │        2) expand with SAM3 “similarity prompt”
+        │        1) text candidates → pick diverse expansion candidates
+        │        2) similarity-based search (SAM3 visual expansion)
         │        3) de-dupe
         │
         ├─ CLIP head gating (sample)
@@ -962,7 +962,7 @@
              - recipe.json (schema v2, multi-step)
              - clip_head/head.npz + meta.json (embedded head + tuned thresholds)</pre>
 			                                <div style="margin-top: 10px;">
-			                                    <strong>Why recipes may look “text-only”:</strong> in schema‑v2, the “similarity prompt” is SAM3’s <em>visual</em> stage (seed boxes → expand similar masks/boxes). The recipe stores the <em>text</em> prompts + thresholds; it does <em>not</em> need a fixed crop-bank of exemplars because seeds are chosen per image at inference time.
+			                                    <strong>Why recipes may look “text-only”:</strong> in schema‑v2, the “similarity prompt” is SAM3’s <em>visual</em> stage (candidate boxes → expand similar masks/boxes). The recipe stores the <em>text</em> prompts + thresholds; it does <em>not</em> need a fixed crop-bank of exemplars because candidates are chosen per image at inference time.
 			                                </div>
 			                                <div style="font-weight: 600; margin: 12px 0 6px;">What we optimize for (“cleanliness”)</div>
 			                                <div>
@@ -976,20 +976,23 @@
 			                                </div>
 			                                <div style="font-weight: 600; margin: 12px 0 6px;">Multi-step tuning modes (what to enable)</div>
 			                                <ul style="margin: 6px 0 0 18px;">
-			                                    <li><strong>Default (no extra tuning):</strong> seed curves → greedy prompt selection → full pipeline → CLIP thresholds tuned to match your cleanliness.</li>
-			                                    <li><strong>Refine prompt subset:</strong> quick “try a few swaps” pass (seed-stage only; no extra full SAM runs). Use when the chosen prompts look “obviously wrong”.</li>
-			                                    <li><strong>Tier‑1:</strong> small search over <code>expand_threshold</code> + <code>seeds/step</code> (shared across steps). Good first knob search if Global is off.</li>
-			                                    <li><strong>Tier‑2:</strong> small search over de‑dupe overlaps (IoU) (shared across steps). Helps duplicates / false positives.</li>
+			                                    <li><strong>Default (no extra tuning):</strong> candidate curves → greedy prompt selection → full pipeline → CLIP thresholds tuned to match your cleanliness.</li>
+			                                    <li><strong>Refine prompt subset:</strong> quick “try a few swaps” pass (text-candidate stage only; no extra full SAM runs). Use when the chosen prompts look “obviously wrong”.</li>
+			                                    <li><strong>Tier‑1 grid search:</strong> small search over <code>visual_expansion_score</code> (SAM3) + <code>candidates/step</code> (shared across steps). Good first knob search if Global is off.</li>
+			                                    <li><strong>Tier‑2 IoU search:</strong> small search over de‑dupe overlaps (IoU) (shared across steps). Helps duplicates / false positives.</li>
 			                                    <li><strong>Global optimizer (best quality):</strong> tries many full recipe variants and keeps the best (slowest, most thorough).</li>
 			                                </ul>
+			                                <div class="training-help" style="margin-top: 8px; color: #475569;">
+			                                    Note: when the Global optimizer is on, Tier‑1 and Tier‑2 are ignored (Global already tunes those knobs).
+			                                </div>
 			                                <div style="font-weight: 600; margin: 12px 0 6px;">Global optimizer: what knobs it can change</div>
 			                                <div>
 			                                    A <strong>trial</strong> is a full per-class recipe (ordered steps + per-step settings). We create new trials by making small changes to the current best:
 			                                    <ul style="margin: 6px 0 0 18px;">
 			                                        <li><strong>Prompt subset:</strong> add / drop / swap a step’s prompt.</li>
-			                                        <li><strong>Per-step seed threshold:</strong> how strict the text prompt must be before a box becomes a seed.</li>
-			                                        <li><strong>Per-step expand threshold</strong> and <strong>seeds per image</strong> (how many seeds we expand).</li>
-			                                        <li><strong>Per-step de-dupe overlap (IoU):</strong> seed de-dupe and output de-dupe.</li>
+			                                        <li><strong>Per-step text threshold:</strong> how strict the text prompt must be before a box becomes a candidate.</li>
+			                                        <li><strong>Per-step visual expansion score (SAM3)</strong> and <strong>candidates per image</strong> (how many candidates we expand).</li>
+			                                        <li><strong>Per-step de-dupe overlap (IoU):</strong> candidate de-dupe and output de-dupe.</li>
 			                                        <li><strong>Optional:</strong> step order and per-step max dets/image.</li>
 			                                    </ul>
 			                                    Each trial is scored by running the <em>real</em> steps pipeline on the same (repeatable) subset of sampled images, then sweeping CLIP thresholds to match your cleanliness target.
@@ -1011,7 +1014,7 @@
 			                                <div style="font-weight: 600; margin: 12px 0 6px;">How to influence results (practical)</div>
 			                                <ul style="margin: 6px 0 0 18px;">
 			                                    <li><strong>Cleaner / fewer FPs:</strong> raise “Recipe cleanliness”. Expect lower coverage.</li>
-			                                    <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Seed curve floor (lets per-step thresholds go below the base).</li>
+			                                    <li><strong>More coverage:</strong> lower “Recipe cleanliness”, increase Max recipe steps, and consider lowering Candidate curve floor (lets per-step thresholds go below the base).</li>
 			                                    <li><strong>More thorough search:</strong> set “Search budget” to Balanced/Best and increase Max trials / Rounds / Variants per round (slower).</li>
 			                                    <li><strong>Faster runs:</strong> reduce “Eval images”; lower Stage‑3 eval cap; lower Max trials.</li>
 			                                </ul>
@@ -1068,7 +1071,7 @@
 						                                        <input type="number" id="agentStepsMaxSteps" min="1" max="50" value="6" />
 					                                    </div>
 					                                    <div>
-					                                        <label for="agentStepsMaxSeedsPerStep">Visual seeds per step<span class="help-icon" title="Per step and per image, how many seed detections we expand with SAM3 visual prompting.&#10;Higher can improve coverage on diverse objects, but is slower.&#10;Typical: 3–8.">?</span></label>
+					                                        <label for="agentStepsMaxSeedsPerStep">Similarity candidates per step<span class="help-icon" title="Per step and per image, how many candidate detections we expand with similarity-based search (SAM3 visual prompting).&#10;Higher can improve coverage on diverse objects, but is slower.&#10;Typical: 3–8.">?</span></label>
 						                                        <input type="number" id="agentStepsMaxSeedsPerStep" min="0" max="500" value="5" />
 						                                    </div>
 						                                </div>
@@ -1095,7 +1098,7 @@
 						                                    <div class="training-help" style="margin-top: 10px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
 						                                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
 						                                            <div style="font-weight: 700; color: #0f172a;">
-							                                                Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). Updates live as you change settings.&#10;&#10;What it tracks: Sample images × (steps × (1 + seeds/step)), plus extra work from the Global optimizer.&#10;&#10;Global optimizer cost grows with:&#10;- Breadth (trials, rounds, variants/round, max step changes)&#10;- Depth (stage eval caps, keep ratio)&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content. Use this to see how cost scales as you turn knobs.">?</span>
+						                                                Compute estimate<span class="help-icon" title="Rough, relative compute estimate (not seconds). Updates live as you change settings.&#10;&#10;What it tracks: Sample images × (steps × (1 + candidates/step)), plus extra work from the Global optimizer.&#10;&#10;Global optimizer cost grows with:&#10;- Breadth (trials, rounds, variants/round, max step changes)&#10;- Depth (stage eval caps, keep ratio)&#10;&#10;Real runtime depends on GPU, model, image sizes, caching, and dataset content. Use this to see how cost scales as you turn knobs.">?</span>
 						                                            </div>
 						                                            <span id="agentStepsBudgetBadge" class="badge">…</span>
 						                                        </div>
@@ -1121,7 +1124,7 @@
 						                                                </select>
 						                                            </div>
 						                                            <div>
-						                                                <label for="agentStepsPromptPrefilter">CLIP prompt prefilter<span class="help-icon" title="Use CLIP similarity to filter weak prompts before running SAM3.&#10;This can greatly reduce seed-eval time. Base prompts are always kept.">?</span></label>
+						                                                <label for="agentStepsPromptPrefilter">CLIP prompt prefilter<span class="help-icon" title="Use CLIP similarity to filter weak prompts before running SAM3.&#10;This can greatly reduce candidate-eval time. Base prompts are always kept.">?</span></label>
 						                                                <div class="training-field training-field--inline" style="margin-bottom: 6px;">
 						                                                    <input type="checkbox" id="agentStepsPromptPrefilter" checked />
 						                                                    <span class="training-help">On</span>
@@ -1136,14 +1139,14 @@
 						                                        </div>
 						                                    </div>
 							                                    <div class="training-help" style="margin-top: 8px; color: #64748b;">
-							                                        Advanced (below): Global optimizer breadth/depth knobs, Tier‑1/Tier‑2, prompt subset refinement, and seed-curve floors.
+							                                        Advanced (below): Global optimizer breadth/depth knobs, Tier‑1/Tier‑2, prompt subset refinement, and candidate-curve floors.
 							                                    </div>
 						                                </div>
 						                            </div>
 											                                <div id="agentStepsAdvancedDetails" style="margin-top: 12px; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff;">
 											                                    <div style="font-weight: 700; margin-bottom: 6px;">Advanced optimization</div>
 											                                        <div class="training-help" style="color: #475569; margin-bottom: 10px;">
-											                                            Optional knobs for Global optimizer breadth/depth, Tier‑1/Tier‑2 tuning, prompt subset refinement, and seed-curve floors.
+											                                            Optional knobs for Global optimizer breadth/depth, Tier‑1/Tier‑2 tuning, prompt subset refinement, and candidate-curve floors.
 											                                        </div>
 							                                        <div style="font-weight: 600; margin-top: 10px;">Global optimizer (successive halving)</div>
 							                                        <div class="training-help" style="margin-top: 6px; color: #475569;">
@@ -1214,35 +1217,35 @@
 							                                            Note: When “Search budget” is not Off, Tier‑1 and Tier‑2 toggles are ignored.
 						                                        </div>
 					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
-					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate settings to improve coverage at your cleanliness target.&#10;This tunes the recipe’s expand threshold + seeds per step.&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
+					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small grid of candidate settings to improve coverage at your cleanliness target.&#10;This tunes the recipe’s visual expansion score (SAM3) + candidates per step (shared across steps).&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
 					                                            <input type="checkbox" id="agentStepsTier1Optimize" />
-					                                            Auto-tune expand threshold &amp; seed count (Tier‑1)
+					                                            Tier‑1 grid search: visual score &amp; candidate count
 					                                        </label>
 					                                        <div class="training-grid" style="margin-top: 10px;">
 					                                            <div>
-					                                                <label for="agentStepsTier1EvalCap">Tier‑1 eval cap (images)<span class="help-icon" title="How many sampled images we use while comparing candidate settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
+					                                            <label for="agentStepsTier1EvalCap">Tier‑1 grid search eval cap (images)<span class="help-icon" title="How many sampled images we use while comparing candidate settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
 					                                                <input type="number" id="agentStepsTier1EvalCap" min="10" max="50000" value="200" />
 					                                            </div>
 					                                            <div>
-					                                                <label for="agentStepsTier1MaxTrials">Tier‑1 max trials<span class="help-icon" title="How many candidate settings we try during Tier‑1 tuning.&#10;More trials can find better settings but costs time.&#10;Typical: 6–12.">?</span></label>
+					                                                <label for="agentStepsTier1MaxTrials">Tier‑1 grid search max trials<span class="help-icon" title="How many candidate settings we try during Tier‑1 grid search.&#10;More trials can find better settings but costs time.&#10;Typical: 6–12.">?</span></label>
 					                                                <input type="number" id="agentStepsTier1MaxTrials" min="1" max="256" value="9" />
 					                                            </div>
 					                                        </div>
 					                                        <div class="training-help" style="margin-top: 6px; color: #64748b;">
-					                                            Note: Tier‑1 tuning is only used in Multi-step mode and only when a pretrained CLIP head is selected.
+					                                            Note: Tier‑1 grid search is only used in Multi-step mode and only when a pretrained CLIP head is selected.
 					                                        </div>
 					                                        <div class="training-help" style="margin-top: 10px;">
-					                                            <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate de-duplication settings to reduce duplicates and false positives at your cleanliness target.&#10;This tunes the seed de-dupe IoU + output de-dupe IoU for the class (applied across all steps).&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
+					                                            <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;When enabled, we try a small number of candidate de-duplication settings to reduce duplicates and false positives at your cleanliness target.&#10;This tunes the candidate de-dupe IoU + output de-dupe IoU for the class (applied across all steps).&#10;Requires a pretrained CLIP head.&#10;Slower than the default.">
 					                                                <input type="checkbox" id="agentStepsTier2Optimize" />
-					                                                Auto-tune dedupe overlaps (Tier‑2)
+					                                                Tier‑2 IoU search: de‑dupe overlaps
 					                                            </label>
 					                                            <div class="training-grid" style="margin-top: 10px;">
 					                                                <div>
-					                                                    <label for="agentStepsTier2EvalCap">Tier‑2 eval cap (images)<span class="help-icon" title="How many sampled images we use while comparing candidate de-dupe settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
+					                                                    <label for="agentStepsTier2EvalCap">Tier‑2 IoU search eval cap (images)<span class="help-icon" title="How many sampled images we use while comparing candidate de-dupe settings.&#10;Higher = more reliable tuning (slower).&#10;Lower = faster but noisier.&#10;Typical: 100–500.">?</span></label>
 					                                                    <input type="number" id="agentStepsTier2EvalCap" min="10" max="50000" value="200" />
 					                                                </div>
 					                                                <div>
-					                                                    <label for="agentStepsTier2MaxTrials">Tier‑2 max trials<span class="help-icon" title="How many candidate de-dupe settings we try during Tier‑2 tuning.&#10;More trials can find better settings but costs time.&#10;Typical: 6–16.">?</span></label>
+					                                                    <label for="agentStepsTier2MaxTrials">Tier‑2 IoU search max trials<span class="help-icon" title="How many candidate de-dupe settings we try during Tier‑2 IoU search.&#10;More trials can find better settings but costs time.&#10;Typical: 6–16.">?</span></label>
 					                                                    <input type="number" id="agentStepsTier2MaxTrials" min="1" max="256" value="12" />
 					                                                </div>
 					                                            </div>
@@ -1251,7 +1254,7 @@
 					                                            </div>
 					                                        </div>
 					                                        <div class="training-help" style="margin-top: 10px;">
-					                                            <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;After the initial prompt selection, do a small local search that can add/drop/swap prompt steps.&#10;This is seed-stage only (fast) and does not run extra SAM evaluations.&#10;Useful when the greedy selection gets stuck in a suboptimal prompt set.">
+					                                            <label style="display: inline-flex; align-items: center; gap: 8px;" title="Optional (advanced).&#10;After the initial prompt selection, do a small local search that can add/drop/swap prompt steps.&#10;This is text-candidate stage only (fast) and does not run extra SAM evaluations.&#10;Useful when the greedy selection gets stuck in a suboptimal prompt set.">
 					                                                <input type="checkbox" id="agentStepsRefinePromptSubset" />
 					                                                Refine prompt subset (local search)
 					                                            </label>
@@ -1268,14 +1271,14 @@
 					                                        </div>
 					                                        <hr style="margin: 12px 0; border: none; border-top: 1px solid #e2e8f0;" />
 					                                        <div class="training-help" style="margin-top: 6px;">
-					                                            <div style="font-weight: 600; margin-bottom: 6px;">Seed-threshold curve collection</div>
+					                                            <div style="font-weight: 600; margin-bottom: 6px;">Candidate-threshold curve collection</div>
 					                                            <div class="training-grid">
 					                                                <div>
-					                                                    <label for="agentStepsSeedEvalFloor">Seed curve floor (optional)<span class="help-icon" title="Multi-step mode measures each prompt at many seed thresholds.&#10;By default we only see detections above your Seed text threshold, so thresholds below it can’t improve coverage.&#10;Set a lower floor (e.g., 0.0–0.01) so the curve can include lower thresholds.&#10;Warning: lower floor can be slower.">?</span></label>
+					                                                    <label for="agentStepsSeedEvalFloor">Candidate curve floor (optional)<span class="help-icon" title="Multi-step mode measures each prompt at many text thresholds.&#10;By default we only see detections above your Text threshold, so thresholds below it can’t improve coverage.&#10;Set a lower floor (e.g., 0.0–0.01) so the curve can include lower thresholds.&#10;Warning: lower floor can be slower.">?</span></label>
 					                                                    <input type="number" id="agentStepsSeedEvalFloor" step="0.01" min="0" max="1" placeholder="auto" />
 					                                                </div>
 					                                                <div>
-					                                                    <label for="agentStepsSeedEvalMaxResults">Seed curve max dets (optional)<span class="help-icon" title="Safety valve for very low seed curve floors.&#10;Caps how many seed detections we consider per prompt per image while building curves.&#10;Lower = faster/cleaner curves, but can miss low-score matches.&#10;Leave blank to reuse Max dets/image.">?</span></label>
+					                                                    <label for="agentStepsSeedEvalMaxResults">Candidate curve max dets (optional)<span class="help-icon" title="Safety valve for very low candidate curve floors.&#10;Caps how many candidate detections we consider per prompt per image while building curves.&#10;Lower = faster/cleaner curves, but can miss low-score matches.&#10;Leave blank to reuse Max dets/image.">?</span></label>
 					                                                    <input type="number" id="agentStepsSeedEvalMaxResults" min="1" max="5000" placeholder="auto" />
 					                                                </div>
 					                                            </div>
@@ -1283,15 +1286,15 @@
 											                                </div>
 						                        <div class="training-grid">
 						                            <div>
-						                                <label for="agentSeedThreshold">Seed text threshold<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
+						                                <label for="agentSeedThreshold">Text threshold (candidates)<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
 						                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.05" />
 			                            </div>
 			                            <div>
-			                                <label for="agentExpandThreshold">Expand threshold<span class="help-icon" title="Second pass (optional): after choosing seed boxes, we run a refine/expand pass from those boxes.&#10;This threshold controls how strict that refine pass is.&#10;Higher = fewer but cleaner results.">?</span></label>
+			                                <label for="agentExpandThreshold">Visual expansion score (SAM3)<span class="help-icon" title="Similarity-based search threshold for SAM3’s visual prompt stage.&#10;We keep expanded detections whose SAM3 score is ≥ this value.&#10;Higher = fewer but cleaner expansions; lower = more but noisier expansions.">?</span></label>
 			                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.3" />
 			                            </div>
 			                            <div>
-			                                <label for="agentSeedDedupeIou">Seed de-dupe overlap (IoU)<span class="help-icon" title="After the seed text pass, we remove near-duplicate seed boxes.&#10;If two seed boxes overlap more than this IoU, we keep one.&#10;Higher (e.g., 0.9) only removes almost-identical boxes.&#10;Lower removes more overlaps (can collapse crowded scenes).">?</span></label>
+			                                <label for="agentSeedDedupeIou">Candidate de-dupe overlap (IoU)<span class="help-icon" title="After the text-candidate pass, we remove near-duplicate candidate boxes.&#10;If two candidate boxes overlap more than this IoU, we keep one.&#10;Higher (e.g., 0.9) only removes almost-identical boxes.&#10;Lower removes more overlaps (can collapse crowded scenes).">?</span></label>
 			                                <input type="number" id="agentSeedDedupeIou" step="0.05" min="0" max="1" value="0.9" />
 			                            </div>
 			                            <div>
@@ -1416,7 +1419,44 @@
 			                                    <li><strong>Duplicates</strong> = extra detections on the same GT object (lower is better; tracked separately).</li>
 			                                    <li><strong>Det rate</strong> = % of sampled images that produced at least one detection (useful “is anything happening?” sanity check).</li>
 			                                </ul>
-			                                <p class="training-help" style="margin-top: 10px;"><strong>If results look “dead”:</strong> verify your CLIP head includes the dataset class names, and try lowering “Seed curve floor” or temporarily lowering “Recipe cleanliness” to confirm SAM3 is producing seeds before tightening filters.</p>
+					                                <p class="training-help" style="margin-top: 10px;"><strong>If results look “dead”:</strong> verify your CLIP head includes the dataset class names, and try lowering “Candidate curve floor” or temporarily lowering “Recipe cleanliness” to confirm SAM3 is producing candidates before tightening filters.</p>
+			                                <div style="font-weight: 600; margin: 12px 0 6px;">Knob glossary (all controls)</div>
+			                                <ul style="margin: 6px 0 0 18px;">
+			                                    <li><strong>Eval images</strong>: how many images are sampled for mining + scoring.</li>
+			                                    <li><strong>Sample seed</strong>: deterministic sample selector (same seed = same sample).</li>
+			                                    <li><strong>Reuse cached SAM results</strong>: reuse cached SAM3 outputs between runs.</li>
+			                                    <li><strong>Match overlap (Eval IoU)</strong>: IoU threshold for scoring matches only.</li>
+			                                    <li><strong>Predictors per GPU</strong>: SAM3 workers per GPU (more = faster, more VRAM).</li>
+			                                    <li><strong>Max predictors total</strong>: optional cap on total workers.</li>
+			                                    <li><strong>Max recipe steps</strong>: max prompt steps per class.</li>
+			                                    <li><strong>Similarity candidates per step</strong>: how many candidate boxes are expanded per image.</li>
+			                                    <li><strong>Search budget</strong>: enables Global optimizer presets (Off/Fast/Balanced/Best).</li>
+			                                    <li><strong>Compute estimate</strong>: relative cost indicator (not seconds).</li>
+			                                    <li><strong>Early-stop</strong>: stop adding steps when coverage stalls or precision is too low.</li>
+			                                    <li><strong>CLIP prompt prefilter</strong>: drop weak prompts before SAM3 (fast).</li>
+			                                    <li><strong>Global optimizer (breadth)</strong>: trials, rounds, variants, step changes.</li>
+			                                    <li><strong>Global optimizer (depth)</strong>: stage eval caps, keep ratio.</li>
+			                                    <li><strong>Tier‑1 grid search</strong>: tunes visual expansion score + candidates/step.</li>
+			                                    <li><strong>Tier‑2 IoU search</strong>: tunes candidate/output de‑dupe IoUs.</li>
+			                                    <li><strong>Refine prompt subset</strong>: small add/drop/swap search on prompts.</li>
+			                                    <li><strong>Candidate curve floor / max dets</strong>: text-candidate curve controls.</li>
+			                                    <li><strong>Text threshold (candidates)</strong>: score cutoff for text prompt detections.</li>
+			                                    <li><strong>Visual expansion score (SAM3)</strong>: score cutoff for similarity-based expansion.</li>
+			                                    <li><strong>Candidate de‑dupe IoU</strong>: remove near-duplicate candidate boxes.</li>
+			                                    <li><strong>Output de‑dupe IoU</strong>: remove near-duplicate final boxes.</li>
+			                                    <li><strong>Mask threshold</strong>: polygon mask binarization (segmentation only).</li>
+			                                    <li><strong>Max dets/image</strong>: safety cap on outputs per image.</li>
+			                                    <li><strong>Min area (px²)</strong>: drop tiny detections.</li>
+			                                    <li><strong>Simplify ε</strong>: polygon simplification amount.</li>
+			                                    <li><strong>Pretrained CLIP head</strong>: required classifier for mining.</li>
+			                                    <li><strong>Auto-tune thresholds</strong>: per-class CLIP min prob/margin tuning.</li>
+			                                    <li><strong>Recipe cleanliness</strong>: target precision for CLIP tuning.</li>
+			                                    <li><strong>Manual head min prob / margin</strong>: used when auto‑tune is off.</li>
+			                                    <li><strong>Class IDs</strong>: optional subset of classes to mine.</li>
+			                                    <li><strong>Extra text prompts/class</strong>: GPT-OSS prompt expansion count.</li>
+			                                    <li><strong>GPT‑OSS reasoning / max tokens</strong>: prompt generator settings.</li>
+			                                    <li><strong>Extra prompts JSON</strong>: user-provided prompts by class.</li>
+			                                </ul>
 			                            </div>
 			                        </details>
                         <h3>Progress & Logs</h3>

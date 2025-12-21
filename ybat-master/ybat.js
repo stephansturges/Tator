@@ -12955,9 +12955,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                }
 		                configBits.push(parts.join(" "));
 		            }
-		            if (typeof params.seed_threshold === "number") configBits.push(`seed thr ${params.seed_threshold}`);
-		            if (typeof params.expand_threshold === "number") configBits.push(`expand thr ${params.expand_threshold}`);
-		            if (typeof params.max_visual_seeds === "number") configBits.push(`seeds ${params.max_visual_seeds}`);
+            if (typeof params.seed_threshold === "number") configBits.push(`text thr ${params.seed_threshold}`);
+            if (typeof params.expand_threshold === "number") configBits.push(`visual thr ${params.expand_threshold}`);
+            if (typeof params.max_visual_seeds === "number") configBits.push(`candidates ${params.max_visual_seeds}`);
 		            if (configBits.length) {
 		                const meta = document.createElement("div");
 		                meta.className = "training-help";
@@ -13087,7 +13087,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                        const hint = document.createElement("div");
 		                        hint.className = "training-help";
 		                        hint.textContent =
-		                            "Tip: if this misses, enable Tier‑1 or the Global optimizer to tune the step knobs (expand + seeds/step + IoUs); CLIP thresholds alone may not remove FPs introduced by visual expansion.";
+                            "Tip: if this misses, enable Tier‑1 or the Global optimizer to tune the step knobs (visual score + candidates/step + IoUs); CLIP thresholds alone may not remove FPs introduced by visual expansion.";
 		                        block.appendChild(hint);
 		                    }
 		                    const debugObj = summary.debug && typeof summary.debug === "object" ? summary.debug : null;
@@ -13154,23 +13154,23 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    block.className = "training-subsection";
 	                    const title = document.createElement("div");
 	                    title.className = "training-subsection__title";
-	                    title.textContent = "Tier-1 tuning";
+                    title.textContent = "Tier-1 grid search";
 	                    block.appendChild(title);
 
 	                    const base = tier1.base && typeof tier1.base === "object" ? tier1.base : {};
 	                    const sel = tier1.selected && typeof tier1.selected === "object" ? tier1.selected : {};
-	                    const expandTxt =
-	                        Number.isFinite(base.expand_threshold) && Number.isFinite(sel.expand_threshold)
-	                            ? `expand_thr: ${Number(base.expand_threshold).toFixed(3)} → ${Number(sel.expand_threshold).toFixed(3)}`
-	                            : Number.isFinite(sel.expand_threshold)
-	                            ? `expand_thr: ${Number(sel.expand_threshold).toFixed(3)}`
-	                            : "";
-	                    const seedsTxt =
-	                        Number.isFinite(base.max_visual_seeds) && Number.isFinite(sel.max_visual_seeds)
-	                            ? `seeds: ${Number(base.max_visual_seeds)} → ${Number(sel.max_visual_seeds)}`
-	                            : Number.isFinite(sel.max_visual_seeds)
-	                            ? `seeds: ${Number(sel.max_visual_seeds)}`
-	                            : "";
+                    const expandTxt =
+                        Number.isFinite(base.expand_threshold) && Number.isFinite(sel.expand_threshold)
+                            ? `visual_thr: ${Number(base.expand_threshold).toFixed(3)} → ${Number(sel.expand_threshold).toFixed(3)}`
+                            : Number.isFinite(sel.expand_threshold)
+                            ? `visual_thr: ${Number(sel.expand_threshold).toFixed(3)}`
+                            : "";
+                    const seedsTxt =
+                        Number.isFinite(base.max_visual_seeds) && Number.isFinite(sel.max_visual_seeds)
+                            ? `candidates: ${Number(base.max_visual_seeds)} → ${Number(sel.max_visual_seeds)}`
+                            : Number.isFinite(sel.max_visual_seeds)
+                            ? `candidates: ${Number(sel.max_visual_seeds)}`
+                            : "";
 	                    const capTxt = Number.isFinite(tier1.eval_cap) ? `eval_cap: ${Number(tier1.eval_cap)}` : "";
 	                    const trialsTxt = Number.isFinite(tier1.max_trials) ? `trials: ${Number(tier1.max_trials)}` : "";
 	                    const line = document.createElement("div");
@@ -13191,12 +13191,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 	                    const base = tier2.base && typeof tier2.base === "object" ? tier2.base : {};
 	                    const sel = tier2.selected && typeof tier2.selected === "object" ? tier2.selected : {};
-	                    const seedTxt =
-	                        Number.isFinite(base.seed_dedupe_iou) && Number.isFinite(sel.seed_dedupe_iou)
-	                            ? `seed_iou: ${Number(base.seed_dedupe_iou).toFixed(3)} → ${Number(sel.seed_dedupe_iou).toFixed(3)}`
-	                            : Number.isFinite(sel.seed_dedupe_iou)
-	                            ? `seed_iou: ${Number(sel.seed_dedupe_iou).toFixed(3)}`
-	                            : "";
+                    const seedTxt =
+                        Number.isFinite(base.seed_dedupe_iou) && Number.isFinite(sel.seed_dedupe_iou)
+                            ? `cand_iou: ${Number(base.seed_dedupe_iou).toFixed(3)} → ${Number(sel.seed_dedupe_iou).toFixed(3)}`
+                            : Number.isFinite(sel.seed_dedupe_iou)
+                            ? `cand_iou: ${Number(sel.seed_dedupe_iou).toFixed(3)}`
+                            : "";
 	                    const outTxt =
 	                        Number.isFinite(base.dedupe_iou) && Number.isFinite(sel.dedupe_iou)
 	                            ? `out_iou: ${Number(base.dedupe_iou).toFixed(3)} → ${Number(sel.dedupe_iou).toFixed(3)}`
@@ -13238,22 +13238,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                    body.appendChild(block);
 	                }
 
-		                const seedStats = Array.isArray(summary.seed_prompt_stats) ? summary.seed_prompt_stats : [];
-		                if (seedStats.length) {
-		                    const block = document.createElement("div");
-		                    block.className = "training-subsection";
-		                    const title = document.createElement("div");
-		                    title.className = "training-subsection__title";
-		                    title.textContent = `Seed prompt stats (selected steps) (${seedStats.length})`;
-		                    block.appendChild(title);
+                const seedStats = Array.isArray(summary.seed_prompt_stats) ? summary.seed_prompt_stats : [];
+                if (seedStats.length) {
+                    const block = document.createElement("div");
+                    block.className = "training-subsection";
+                    const title = document.createElement("div");
+                    title.className = "training-subsection__title";
+                    title.textContent = `Candidate prompt stats (selected steps) (${seedStats.length})`;
+                    block.appendChild(title);
 
 	                    const table = document.createElement("table");
 	                    table.className = "training-table";
-	                    table.innerHTML = `
-	                        <thead>
-	                            <tr><th>#</th><th>Prompt</th><th>Matches</th><th>FPs</th><th>Prec</th><th>Seed thr</th></tr>
-	                        </thead>
-	                    `;
+                    table.innerHTML = `
+                        <thead>
+                            <tr><th>#</th><th>Prompt</th><th>Matches</th><th>FPs</th><th>Prec</th><th>Text thr</th></tr>
+                        </thead>
+                    `;
 	                    const tbody = document.createElement("tbody");
 	                    seedStats.forEach((s, idx) => {
 	                        if (!s || typeof s !== "object") return;
@@ -13274,10 +13274,71 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	                        tbody.appendChild(row);
 	                    });
 	                    table.appendChild(tbody);
-	                    block.appendChild(table);
-	                    body.appendChild(block);
-	                }
-	            }
+                    block.appendChild(table);
+                    body.appendChild(block);
+                }
+
+                const similarityFlow =
+                    summary.similarity_flow && typeof summary.similarity_flow === "object" ? summary.similarity_flow : null;
+                if (similarityFlow && Array.isArray(similarityFlow.steps) && similarityFlow.steps.length) {
+                    const block = document.createElement("div");
+                    block.className = "training-subsection";
+                    const title = document.createElement("div");
+                    title.className = "training-subsection__title";
+                    title.textContent = "Similarity-based search stats";
+                    block.appendChild(title);
+
+                    const totalImages = Number.isFinite(similarityFlow.images) ? Number(similarityFlow.images) : null;
+                    const formatCount = (val) => {
+                        const total = Number.isFinite(val) ? Number(val) : 0;
+                        if (totalImages && totalImages > 0) {
+                            return `${(total / totalImages).toFixed(2)} avg (${total})`;
+                        }
+                        return String(total);
+                    };
+
+                    const table = document.createElement("table");
+                    table.className = "training-table";
+                    table.innerHTML = `
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Prompt</th>
+                                <th>Text candidates</th>
+                                <th>Kept candidates</th>
+                                <th>Expand candidates</th>
+                                <th>Expanded dets</th>
+                                <th>Final dets</th>
+                            </tr>
+                        </thead>
+                    `;
+                    const tbody = document.createElement("tbody");
+                    similarityFlow.steps.forEach((step, idx) => {
+                        if (!step || typeof step !== "object") return;
+                        const row = document.createElement("tr");
+                        const prompt = typeof step.prompt === "string" ? step.prompt : "";
+                        row.innerHTML = `
+                            <td>${idx + 1}</td>
+                            <td>${escapeHtml(String(prompt))}</td>
+                            <td>${escapeHtml(formatCount(step.text_candidates_total))}</td>
+                            <td>${escapeHtml(formatCount(step.candidates_kept))}</td>
+                            <td>${escapeHtml(formatCount(step.expand_candidates))}</td>
+                            <td>${escapeHtml(formatCount(step.expanded_total))}</td>
+                            <td>${escapeHtml(formatCount(step.final_total))}</td>
+                        `;
+                        tbody.appendChild(row);
+                    });
+                    table.appendChild(tbody);
+                    block.appendChild(table);
+                    if (totalImages && totalImages > 0) {
+                        const note = document.createElement("div");
+                        note.className = "training-help";
+                        note.textContent = `Counts are averages per image with totals in parentheses (sample images: ${totalImages}).`;
+                        block.appendChild(note);
+                    }
+                    body.appendChild(block);
+                }
+            }
 
 		            if (prompts.length) {
 		                const block = document.createElement("div");
@@ -13368,8 +13429,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			                block.appendChild(title);
 			                const help = document.createElement("div");
 			                help.className = "training-help";
-			                help.textContent =
-			                    "Each step runs: text seeds → pick diverse seeds → SAM3 visual expansion → de-dupe. CLIP-head cleanliness thresholds (above) are applied after steps and during final merge.";
+                    help.textContent =
+                        "Each step runs: text candidates → pick diverse expansion candidates → similarity-based search (SAM3 visual expansion) → de-dupe. CLIP-head cleanliness thresholds (above) are applied after steps and during final merge.";
 			                block.appendChild(help);
 
 			                const table = document.createElement("table");
@@ -13378,17 +13439,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			                    <thead>
 			                        <tr>
 			                            <th>#</th>
-			                            <th title="Text prompt(s) used for the seed (text) stage.">Prompt(s)</th>
-			                            <th title="Minimum SAM3 text score for a seed box. Higher = fewer seeds, typically cleaner but can miss objects.">Seed thr</th>
-			                            <th title="SAM3 visual expansion threshold (similarity prompt). Higher = stricter expansion, fewer boxes.">Expand thr</th>
-			                            <th title="Max number of seed boxes per image used for visual expansion (picked to be diverse). 0 disables visual expansion.">Seeds</th>
-			                            <th title="Seed de-dupe IoU (remove near-duplicate seed boxes).">Seed IoU</th>
-			                            <th title="Output de-dupe IoU (remove near-duplicate final boxes).">Out IoU</th>
-			                            <th title="Optional per-step CLIP gating during seed selection (advanced). Empty means no extra gate.">Seed CLIP</th>
-			                            <th title="Optional per-step extra CLIP gating after expansion (advanced). Empty means only the recipe’s baked-in CLIP-head cleanliness filter applies.">Final CLIP</th>
-			                        </tr>
-			                    </thead>
-			                `;
+                            <th title="Text prompt(s) used for the text-candidate stage.">Prompt(s)</th>
+                            <th title="Minimum SAM3 text score for a candidate box. Higher = fewer candidates, typically cleaner but can miss objects.">Text thr</th>
+                            <th title="SAM3 visual expansion score threshold (similarity-based search). Higher = stricter expansion, fewer boxes.">Visual thr</th>
+                            <th title="Max number of candidate boxes per image used for similarity-based search (picked to be diverse). 0 disables visual expansion.">Candidates</th>
+                            <th title="Candidate de-dupe IoU (remove near-duplicate candidate boxes).">Candidate IoU</th>
+                            <th title="Output de-dupe IoU (remove near-duplicate final boxes).">Out IoU</th>
+                            <th title="Optional per-step CLIP gating during candidate selection (advanced). Empty means no extra gate.">Candidate CLIP</th>
+                            <th title="Optional per-step extra CLIP gating after expansion (advanced). Empty means only the recipe’s baked-in CLIP-head cleanliness filter applies.">Final CLIP</th>
+                        </tr>
+                    </thead>
+                `;
 		                const tbody = document.createElement("tbody");
 
 		                function formatClipCfg(cfg) {
@@ -13411,8 +13472,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                    }
 		                    const seedThr = step.seed_threshold ?? params.seed_threshold ?? "";
 		                    const expandThr = step.expand_threshold ?? params.expand_threshold ?? "";
-		                    const seeds = step.max_visual_seeds ?? params.max_visual_seeds ?? "";
-		                    const seedIou = step.seed_dedupe_iou ?? params.seed_dedupe_iou ?? "";
+                    const seeds = step.max_visual_seeds ?? params.max_visual_seeds ?? "";
+                    const seedIou = step.seed_dedupe_iou ?? params.seed_dedupe_iou ?? "";
 		                    const outIou = step.dedupe_iou ?? step.step_dedupe_iou ?? params.dedupe_iou ?? "";
 		                    const seedClip = formatClipCfg(step.clip_seed);
 		                    const finalClip = formatClipCfg(step.clip_final);
@@ -13422,8 +13483,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                        <td>${escapeHtml(stepPrompts.join(", "))}</td>
 		                        <td>${escapeHtml(String(seedThr))}</td>
 		                        <td>${escapeHtml(String(expandThr))}</td>
-		                        <td>${escapeHtml(String(seeds))}</td>
-		                        <td>${escapeHtml(String(seedIou))}</td>
+                        <td>${escapeHtml(String(seeds))}</td>
+                        <td>${escapeHtml(String(seedIou))}</td>
 		                        <td>${escapeHtml(String(outIou))}</td>
 		                        <td>${escapeHtml(seedClip)}</td>
 		                        <td>${escapeHtml(finalClip)}</td>
@@ -13899,7 +13960,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        agentElements.stepsBudgetFill.style.background = fillBg;
 
 			        const lines = [];
-	        lines.push(`Sample images: ${sampleImages} • steps: ${steps} • seeds/step: ${seeds}`);
+        lines.push(`Sample images: ${sampleImages} • steps: ${steps} • candidates/step: ${seeds}`);
 	        if (earlyStopEnabled || prefilterEnabled) {
 	            const speedBits = [];
 	            if (earlyStopEnabled) speedBits.push(`early-stop ${earlyStopMode}`);

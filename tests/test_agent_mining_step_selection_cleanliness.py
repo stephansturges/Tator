@@ -28,11 +28,11 @@ def test_step_selection_changes_with_target_precision():
         ],
     }
 
-    selected_lo = _select_steps_from_seed_prompt_stats([prompt_a, prompt_b], max_steps=6, target_precision=0.3)
+    selected_lo, _info_lo = _select_steps_from_seed_prompt_stats([prompt_a, prompt_b], max_steps=6, target_precision=0.3)
     assert [s["prompt"] for s in selected_lo] == ["A"]
     assert abs(float(selected_lo[0].get("selected_seed_threshold") or 0.0) - 0.1) < 1e-6
 
-    selected_hi = _select_steps_from_seed_prompt_stats([prompt_a, prompt_b], max_steps=6, target_precision=0.9)
+    selected_hi, _info_hi = _select_steps_from_seed_prompt_stats([prompt_a, prompt_b], max_steps=6, target_precision=0.9)
     prompts_hi = [s["prompt"] for s in selected_hi]
     assert set(prompts_hi) == {"A", "B"}
     by_prompt = {s["prompt"]: s for s in selected_hi}
@@ -49,7 +49,7 @@ def test_step_selection_picks_at_most_one_threshold_per_prompt():
             {"threshold": 0.9, "matches": 1, "fps": 0, "precision": 1.0},
         ],
     }
-    selected = _select_steps_from_seed_prompt_stats([prompt], max_steps=2, target_precision=0.9, max_candidates_per_prompt=4)
+    selected, _info = _select_steps_from_seed_prompt_stats([prompt], max_steps=2, target_precision=0.9, max_candidates_per_prompt=4)
     assert len(selected) == 1
     assert selected[0]["prompt"] == "A"
     assert abs(float(selected[0].get("selected_seed_threshold") or 0.0) - 0.9) < 1e-6

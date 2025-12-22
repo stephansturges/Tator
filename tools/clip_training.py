@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import random
 import shutil
@@ -54,6 +55,11 @@ CLIP_AUG_ISO_COLOR_SHIFT = (0.01, 0.05)
 CLIP_AUG_ISO_INTENSITY = (0.1, 0.4)
 CLIP_AUG_GAUSS_P = 0.05
 CLIP_AUG_GAUSS_VAR = (5.0, 20.0)
+CLIP_OVERSAMPLE_TARGET_PCTL_LOW = 50.0
+CLIP_OVERSAMPLE_TARGET_PCTL_HIGH = 90.0
+CLIP_OVERSAMPLE_TARGET_BLEND = 0.5
+CLIP_OVERSAMPLE_ALPHA = 0.6
+CLIP_OVERSAMPLE_MAX_MULTIPLIER = 4.0
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -94,6 +100,7 @@ class TrainingArtifacts:
     background_classes: List[str]
     negative_crop_policy: Dict[str, Any]
     augmentation_policy: Dict[str, Any]
+    oversample_policy: Dict[str, Any]
 
 
 def _safe_progress(progress_cb: Optional[ProgressCallback], value: float, message: str) -> None:
@@ -118,12 +125,15 @@ def _compute_dataset_signature(
     bg_class_count: int,
     bg_policy: Optional[str] = None,
     aug_policy: Optional[str] = None,
+    oversample_policy: Optional[str] = None,
 ) -> str:
     entries: List[str] = [f"clip:{clip_model}", f"bg:{bg_class_count}"]
     if bg_policy:
         entries.append(f"bg_policy:{bg_policy}")
     if aug_policy:
         entries.append(f"aug_policy:{aug_policy}")
+    if oversample_policy:
+        entries.append(f"oversample_policy:{oversample_policy}")
     image_root = Path(images_path)
     label_root = Path(labels_path)
 
@@ -187,6 +197,7 @@ def _load_cached_embeddings(signature: str) -> Optional[Dict[str, object]]:
         "encountered_cids": set(meta.get("encountered_cids", [])),
         "bg_policy": meta.get("bg_policy"),
         "aug_policy": meta.get("aug_policy"),
+        "oversample_policy": meta.get("oversample_policy"),
         "background_classes": meta.get("background_classes", []),
     }
 
@@ -201,6 +212,7 @@ def _write_cache_metadata(signature: str,
                           *,
                           bg_policy: Optional[Dict[str, float]] = None,
                           aug_policy: Optional[Dict[str, float]] = None,
+                          oversample_policy: Optional[Dict[str, float]] = None,
                           background_classes: Optional[List[str]] = None) -> None:
     meta_path = chunk_dir / "metadata.joblib"
     rel_chunks = []
@@ -220,6 +232,7 @@ def _write_cache_metadata(signature: str,
         "chunks": rel_chunks,
         "bg_policy": bg_policy,
         "aug_policy": aug_policy,
+        "oversample_policy": oversample_policy,
         "background_classes": list(background_classes or []),
     }
     joblib.dump(payload, meta_path, compress=3)
@@ -441,6 +454,40 @@ def _apply_augmenter(augmenter: "A.Compose", crop: Image.Image) -> Image.Image:
     return Image.fromarray(out)
 
 
+def _compute_oversample_multipliers(raw_counts: Dict[int, int]) -> Dict[int, float]:
+    if not raw_counts:
+        return {}
+    counts = np.array([max(1, int(v)) for v in raw_counts.values()], dtype=np.float64)
+    if counts.size == 0:
+        return {}
+    p_low = float(np.percentile(counts, CLIP_OVERSAMPLE_TARGET_PCTL_LOW))
+    p_high = float(np.percentile(counts, CLIP_OVERSAMPLE_TARGET_PCTL_HIGH))
+    p_low = max(p_low, 1.0)
+    p_high = max(p_high, p_low)
+    target = math.exp(
+        (1.0 - CLIP_OVERSAMPLE_TARGET_BLEND) * math.log(p_low)
+        + CLIP_OVERSAMPLE_TARGET_BLEND * math.log(p_high)
+    )
+    multipliers: Dict[int, float] = {}
+    for cid, count in raw_counts.items():
+        denom = max(1.0, float(count))
+        ratio = target / denom
+        mult = ratio ** CLIP_OVERSAMPLE_ALPHA
+        mult = max(1.0, min(CLIP_OVERSAMPLE_MAX_MULTIPLIER, mult))
+        multipliers[int(cid)] = float(mult)
+    return multipliers
+
+
+def _sample_repeat_count(multiplier: float, rng: random.Random) -> int:
+    if not math.isfinite(multiplier) or multiplier <= 1.0:
+        return 1
+    base = int(math.floor(multiplier))
+    frac = multiplier - base
+    if frac > 0 and rng.random() < frac:
+        base += 1
+    return max(1, base)
+
+
 def train_clip_from_yolo(
     images_path: str,
     labels_path: str,
@@ -455,7 +502,7 @@ def train_clip_from_yolo(
     device: Optional[str] = None,
     batch_size: int = 64,
     min_per_class: int = 2,
-    class_weight: str = "none",
+    class_weight: str = "balanced",
     C: float = 1.0,
     solver: str = "saga",
     reuse_embeddings: bool = False,
@@ -512,6 +559,18 @@ def train_clip_from_yolo(
         f"samples={bg_samples_per_image};max_ratio={bg_max_ratio};pad={bg_pad_ratio};"
         f"iou={bg_iou_max};scale={bg_min_scale}-{bg_max_scale};attempts={bg_max_attempts}"
     )
+    oversample_policy = {
+        "target_percentile_low": CLIP_OVERSAMPLE_TARGET_PCTL_LOW,
+        "target_percentile_high": CLIP_OVERSAMPLE_TARGET_PCTL_HIGH,
+        "target_blend": CLIP_OVERSAMPLE_TARGET_BLEND,
+        "alpha": CLIP_OVERSAMPLE_ALPHA,
+        "max_multiplier": CLIP_OVERSAMPLE_MAX_MULTIPLIER,
+    }
+    oversample_policy_signature = (
+        f"pctl={CLIP_OVERSAMPLE_TARGET_PCTL_LOW}-{CLIP_OVERSAMPLE_TARGET_PCTL_HIGH};"
+        f"blend={CLIP_OVERSAMPLE_TARGET_BLEND};alpha={CLIP_OVERSAMPLE_ALPHA};"
+        f"max_mult={CLIP_OVERSAMPLE_MAX_MULTIPLIER}"
+    )
     rng = random.Random(int(random_seed))
 
     # Prepare paths early to fail fast on unwritable destinations.
@@ -566,6 +625,7 @@ def train_clip_from_yolo(
             bg_class_count=bg_class_count,
             bg_policy=bg_policy_signature,
             aug_policy=aug_policy_signature,
+            oversample_policy=oversample_policy_signature,
         )
         _check_cancel()
         cache_payload = _load_cached_embeddings(cache_signature)
@@ -686,9 +746,13 @@ def train_clip_from_yolo(
 
     total_pos = 0
     total_valid = 0
+    raw_counts: Counter[int] = Counter()
+    oversample_multipliers: Dict[int, float] = {}
+    label_map: Dict[str, Optional[str]] = {}
+
     if not using_cached_embeddings:
         label_exts = [".txt", ".TXT"]
-        for idx, img_rel in enumerate(image_files, start=1):
+        for img_rel in image_files:
             base = os.path.splitext(img_rel)[0]
             label_file = None
             for ext in label_exts:
@@ -696,7 +760,30 @@ def train_clip_from_yolo(
                 if os.path.isfile(candidate):
                     label_file = candidate
                     break
+            label_map[img_rel] = label_file
             if label_file is None:
+                continue
+            try:
+                lines = open(label_file, "r", encoding="utf-8").read().strip().splitlines()
+            except Exception:
+                continue
+            for ln in lines:
+                parts = ln.split()
+                if len(parts) < 5:
+                    continue
+                try:
+                    cid = int(float(parts[0]))
+                except Exception:
+                    continue
+                raw_counts[cid] += 1
+        oversample_multipliers = _compute_oversample_multipliers(raw_counts)
+
+    if not using_cached_embeddings:
+        label_exts = [".txt", ".TXT"]
+        for idx, img_rel in enumerate(image_files, start=1):
+            base = os.path.splitext(img_rel)[0]
+            label_file = label_map.get(img_rel)
+            if not label_file:
                 continue
             img_path = os.path.join(images_path, img_rel)
             try:
@@ -742,12 +829,15 @@ def train_clip_from_yolo(
                 else:
                     cls_name = f"class_{cid}"
 
-                batch_crops.append(crop)
-                batch_meta.append((cls_name, cid, base))
                 encountered_cids.add(cid)
-                total_pos += 1
-                if len(batch_crops) >= batch_size:
-                    flush_batch()
+                repeat = _sample_repeat_count(oversample_multipliers.get(cid, 1.0), rng)
+                for _ in range(repeat):
+                    aug_crop = _apply_augmenter(augmenter, crop)
+                    batch_crops.append(aug_crop)
+                    batch_meta.append((cls_name, cid, base))
+                    total_pos += 1
+                    if len(batch_crops) >= batch_size:
+                        flush_batch()
 
             if bg_class_count > 0:
                 bg_boxes = _sample_background_boxes(
@@ -839,7 +929,10 @@ def train_clip_from_yolo(
         background_classes = sorted({name for name in y_class_names if name.startswith("__bg_")})
 
     counts = Counter(y_numeric_np.tolist())
-    keep_mask = np.array([counts[c] >= max(1, min_per_class) for c in y_numeric_np])
+    keep_mask = np.array([
+        (raw_counts.get(c, counts[c]) >= max(1, min_per_class))
+        for c in y_numeric_np
+    ])
     if not np.any(keep_mask):
         shutil.rmtree(chunk_dir, ignore_errors=True)
         raise TrainingError("Not enough samples after filtering low-frequency classes.")
@@ -1173,6 +1266,7 @@ def train_clip_from_yolo(
             "background_classes": list(background_classes),
             "negative_crop_policy": dict(bg_policy),
             "augmentation_policy": dict(aug_policy),
+            "oversample_policy": dict(oversample_policy),
             "n_classes_seen": len(encountered_sorted),
             "n_samples_train": n_train,
             "n_samples_test": n_test,
@@ -1196,6 +1290,7 @@ def train_clip_from_yolo(
                 encountered_cids,
                 bg_policy=bg_policy,
                 aug_policy=aug_policy,
+                oversample_policy=oversample_policy,
                 background_classes=background_classes,
             )
             cache_persisted = True
@@ -1234,6 +1329,7 @@ def train_clip_from_yolo(
             background_classes=list(background_classes),
             negative_crop_policy=dict(bg_policy),
             augmentation_policy=dict(aug_policy),
+            oversample_policy=dict(oversample_policy),
         )
 
     finally:

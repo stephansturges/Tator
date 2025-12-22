@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--class_weight",
         type=str,
-        default="none",
+        default="balanced",
         choices=["balanced", "none"],
         help="Class weighting for Logistic Regression.",
     )

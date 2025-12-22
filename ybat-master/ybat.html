@@ -1340,18 +1340,16 @@
 					                                    <span id="agentClipHeadTargetPrecisionValue" style="min-width: 3.5em; text-align: right;">0.75</span>
 					                                    <span style="white-space: nowrap;" title="Higher target precision = cleaner results (fewer false positives), but can miss objects.">Cleaner (fewer false positives)</span>
 					                                </div>
-					                                <details class="training-help" style="margin-top: 6px;">
-					                                    <summary style="cursor: pointer;">Advanced</summary>
-					                                    <div class="training-help" style="margin-top: 6px;">
-					                                        <label style="display: inline-flex; align-items: center; gap: 8px;" title="Enable precision targets below 0.50 (0.10–0.99). This is mainly useful for recall-first debugging and usually produces very noisy recipes.">
-					                                            <input type="checkbox" id="agentClipHeadAllowLowPrecision" />
-					                                            Allow very low precision targets (0.10–0.99)
-					                                        </label>
-					                                        <div class="training-help" style="margin-top: 6px; color: #b91c1c;">
-					                                            Warning: targets below 0.50 often create extremely noisy recipes (huge false positives) and can increase mining time + output size. Use only for recall-first experiments / debugging.
-					                                        </div>
+					                                <div class="training-help" style="margin-top: 6px;">
+					                                    <div style="font-weight: 600; margin-bottom: 6px;">Advanced</div>
+					                                    <label style="display: inline-flex; align-items: center; gap: 8px;" title="Enable precision targets below 0.50 (0.10–0.99). This is mainly useful for recall-first debugging and usually produces very noisy recipes.">
+					                                        <input type="checkbox" id="agentClipHeadAllowLowPrecision" />
+					                                        Allow very low precision targets (0.10–0.99)
+					                                    </label>
+					                                    <div class="training-help" style="margin-top: 6px; color: #b91c1c;">
+					                                        Warning: targets below 0.50 often create extremely noisy recipes (huge false positives) and can increase mining time + output size. Use only for recall-first experiments / debugging.
 					                                    </div>
-					                                </details>
+					                                </div>
 					                            </div>
 				                        </div>
 				                        <div class="training-grid">
@@ -1407,8 +1405,10 @@
 	                        <div class="training-help" id="agentProgressText" aria-live="polite"></div>
 	                    </section>
 	                    <section class="training-status-section">
-			                        <details class="training-card">
-			                            <summary style="font-weight: 600; cursor: pointer;">Recipe mining quick reference</summary>
+			                        <div class="training-card">
+			                            <div class="training-card__header">
+			                                <div class="training-card__title">Recipe mining quick reference</div>
+			                            </div>
 			                            <div class="training-card__body">
 			                                <p><strong>Workflow:</strong> Train a CLIP head → run mining (start with a small sample) → review per-class results → save recipes → apply (and optionally chain) recipes from the labeling tab.</p>
 			                                <p class="training-help" style="margin-top: 10px;"><strong>How to read scores:</strong></p>
@@ -1458,7 +1458,7 @@
 			                                    <li><strong>Extra prompts JSON</strong>: user-provided prompts by class.</li>
 			                                </ul>
 			                            </div>
-			                        </details>
+			                        </div>
                         <h3>Progress & Logs</h3>
                         <div class="training-help">Live status and logs for the latest SAM3 Recipe Mining job.</div>
                         <div class="training-actions">

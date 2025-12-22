@@ -447,6 +447,14 @@
                                 <div class="training-help">Lower tolerance forces more iterations before convergence.</div>
                             </div>
                         </div>
+                        <div class="training-divider"></div>
+                        <div class="training-field">
+                            <label for="trainBgClassCount">Background classes (1–10)<span class="help-icon" title="Adds hidden “background” classes trained on empty crops. These help CLIP reject false positives by learning what “none of the above” looks like. Use 1–3 for quick runs; 6–10 for tougher datasets. We cluster negatives into multiple groups so each class is coherent (better than one overly-general background class).">?</span></label>
+                            <input type="number" id="trainBgClassCount" min="1" max="10" step="1" value="2" />
+                            <div class="training-help">
+                                Hidden negative classes sampled from empty areas. More classes give finer “background” coverage, but increase training time.
+                            </div>
+                        </div>
                         <button type="button" id="startTrainingBtn">Start Training</button>
                         <div class="training-toggle-row">
                             <label><input type="checkbox" id="trainReuseEmbeddings" checked /> Cache and reuse embeddings</label>

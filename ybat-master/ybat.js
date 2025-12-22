@@ -1185,6 +1185,7 @@
         regCInput: null,
         classWeightSelect: null,
         deviceOverrideInput: null,
+        bgClassCountInput: null,
         startButton: null,
         cancelButton: null,
         progressFill: null,
@@ -7022,6 +7023,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 const convergedInfo = typeof art.converged === "boolean"
                     ? (art.converged ? "yes" : "no")
                     : "n/a";
+                const bgCount = Number.isFinite(art.background_class_count)
+                    ? art.background_class_count
+                    : (Array.isArray(art.background_classes) ? art.background_classes.length : null);
+                const augInfo = art.augmentation_policy ? "on (albumentations)" : "off";
                 const summaryLines = [
                     `Model: ${escapeHtml(art.model_path)}`,
                     `Labelmap: ${escapeHtml(art.labelmap_path)}`,
@@ -7029,6 +7034,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     `Train samples: ${art.samples_train}`,
                     `Test samples: ${art.samples_test}`,
                     `Classes seen: ${art.classes_seen}`,
+                    ...(bgCount !== null ? [`Background classes: ${escapeHtml(String(bgCount))} (hidden negatives)`] : []),
+                    `Augmentations: ${escapeHtml(augInfo)}`,
                     `Class weight: ${escapeHtml(art.class_weight || 'none')}`,
                     `Solver: ${escapeHtml(art.solver || 'saga')}`,
                     `Iterations: ${escapeHtml(String(iterationsInfo))}`,
@@ -7331,6 +7338,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (trainingElements.convergenceTolInput) {
             formData.append("convergence_tol", trainingElements.convergenceTolInput.value || "0.0001");
+        }
+        if (trainingElements.bgClassCountInput) {
+            const bgValue = String(trainingElements.bgClassCountInput.value || "").trim();
+            formData.append("bg_class_count", bgValue || "2");
         }
         if (trainingElements.deviceOverrideInput && trainingElements.deviceOverrideInput.value.trim()) {
             formData.append("device_override", trainingElements.deviceOverrideInput.value.trim());
@@ -7854,6 +7865,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.hardLowConfThresholdInput = document.getElementById("trainHardLowConfThreshold");
         trainingElements.hardMarginThresholdInput = document.getElementById("trainHardMarginThreshold");
         trainingElements.convergenceTolInput = document.getElementById("trainConvergenceTol");
+        trainingElements.bgClassCountInput = document.getElementById("trainBgClassCount");
         trainingElements.startButton = document.getElementById("startTrainingBtn");
         trainingElements.cancelButton = document.getElementById("cancelTrainingBtn");
         trainingElements.progressFill = document.getElementById("trainingProgressFill");

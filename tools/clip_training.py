@@ -15,7 +15,7 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import clip
 import joblib
@@ -90,6 +90,10 @@ class TrainingArtifacts:
     hard_mining_low_conf_threshold: float
     hard_mining_margin_threshold: float
     convergence_tol: float
+    background_class_count: int
+    background_classes: List[str]
+    negative_crop_policy: Dict[str, Any]
+    augmentation_policy: Dict[str, Any]
 
 
 def _safe_progress(progress_cb: Optional[ProgressCallback], value: float, message: str) -> None:
@@ -1226,6 +1230,10 @@ def train_clip_from_yolo(
             hard_mining_low_conf_threshold=hard_mining_low_conf_threshold,
             hard_mining_margin_threshold=hard_mining_margin_threshold,
             convergence_tol=convergence_tol,
+            background_class_count=int(bg_class_count),
+            background_classes=list(background_classes),
+            negative_crop_policy=dict(bg_policy),
+            augmentation_policy=dict(aug_policy),
         )
 
     finally:

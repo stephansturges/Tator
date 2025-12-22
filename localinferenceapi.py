@@ -6878,12 +6878,42 @@ def _apply_agent_recipe_to_image(
             if not dets_step:
                 continue
 
-            dets_step = _final_clip_filter(
-                dets_step,
-                sim_floor=final_sim_floor,
-                head_min_prob=final_head_min,
-                head_margin=final_head_margin,
-            )
+            if clip_seed_cfg or clip_final_cfg:
+                seed_dets: List[QwenDetection] = []
+                expanded_dets: List[QwenDetection] = []
+                for det in dets_step:
+                    if isinstance(det.qwen_label, str) and det.qwen_label.strip().lower() == "visual":
+                        expanded_dets.append(det)
+                    else:
+                        seed_dets.append(det)
+                seed_filter_active = bool(
+                    (use_clip_guard and ex_mat is not None)
+                    or seed_sim_floor > 0.0
+                    or seed_head_min > 0.0
+                    or seed_head_margin > 0.0
+                )
+                if seed_dets and seed_filter_active:
+                    seed_dets = _final_clip_filter(
+                        seed_dets,
+                        sim_floor=seed_sim_floor,
+                        head_min_prob=seed_head_min,
+                        head_margin=seed_head_margin,
+                    )
+                if expanded_dets:
+                    expanded_dets = _final_clip_filter(
+                        expanded_dets,
+                        sim_floor=final_sim_floor,
+                        head_min_prob=final_head_min,
+                        head_margin=final_head_margin,
+                    )
+                dets_step = [*seed_dets, *expanded_dets]
+            else:
+                dets_step = _final_clip_filter(
+                    dets_step,
+                    sim_floor=final_sim_floor,
+                    head_min_prob=final_head_min,
+                    head_margin=final_head_margin,
+                )
             filtered_final.extend(dets_step)
 
         if not filtered_final:
@@ -16899,12 +16929,23 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             head_mode_bits = ""
         clip_name = clip_head.get("clip_model") if isinstance(clip_head, dict) else None
         clip_name_str = str(clip_name).strip() if isinstance(clip_name, str) and clip_name.strip() else "unknown"
+        classes_list = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
         _log(
             "Pretrained CLIP head enabled: "
             f"{clip_head_path.name} "
-            f"(clip={clip_name_str}, classes={len(clip_head.get('classes') or [])}, mode={clip_head.get('proba_mode')}) "
+            f"(clip={clip_name_str}, classes={len(classes_list)}, mode={clip_head.get('proba_mode')}) "
             f"{head_mode_bits}"
         )
+        if classes_list:
+            preview_limit = 60
+            preview_items = []
+            for idx, label in enumerate(classes_list):
+                preview_items.append(f"{idx}:{label}")
+                if len(preview_items) >= preview_limit:
+                    break
+            preview = ", ".join(preview_items)
+            suffix = f", … (+{len(classes_list) - preview_limit} more)" if len(classes_list) > preview_limit else ""
+            _log(f"CLIP head classes (index:name): {preview}{suffix}")
 
         sample_images = int(len(eval_ids))
         class_count = int(len(selected_categories))
@@ -17076,10 +17117,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             prompts_for_class = prepared_prompts.get(cid) or [name]
             head_target_index: Optional[int] = None
             if clip_head:
-                classes_list = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
                 head_target_index = _find_clip_head_target_index(classes_list, name)
                 if head_target_index is None:
-                    _log(f"CLIP head: class '{name}' not found; skipping head filter for this class.")
+                    _log(f"CLIP head mapping: class '{name}' not found; skipping head filter for this class.")
+                else:
+                    mapped_label = (
+                        str(classes_list[head_target_index]) if 0 <= head_target_index < len(classes_list) else "unknown"
+                    )
+                    _log(f"CLIP head mapping: class '{name}' -> idx {head_target_index} (head='{mapped_label}')")
             class_entries.append(
                 {
                     "id": int(cid),
@@ -17312,6 +17357,27 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             summary["early_stop"] = early_stop_info
 
                     summaries[cid] = summary
+                    tuned_min_prob = None
+                    tuned_margin = None
+                    if isinstance(summary, dict):
+                        tuned_min_prob = summary.get("clip_head_min_prob")
+                        tuned_margin = summary.get("clip_head_margin")
+                    try:
+                        final_min_prob = float(tuned_min_prob) if tuned_min_prob is not None else float(payload.clip_head_min_prob)
+                    except Exception:
+                        final_min_prob = float(payload.clip_head_min_prob)
+                    try:
+                        final_margin = float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin)
+                    except Exception:
+                        final_margin = float(payload.clip_head_margin)
+                    if step_list:
+                        for step in step_list:
+                            if not isinstance(step, dict):
+                                continue
+                            if "clip_seed" not in step:
+                                step["clip_seed"] = {"min_prob": 0.0, "margin": 0.0}
+                            if "clip_final" not in step:
+                                step["clip_final"] = {"min_prob": float(final_min_prob), "margin": float(final_margin)}
                     tuned_expand = float(eval_payload.expand_threshold)
                     tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
                     tuned_seed_iou = float(eval_payload.seed_dedupe_iou)

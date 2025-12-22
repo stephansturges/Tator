@@ -20715,7 +20715,7 @@ async def start_clip_training(
     batch_size: int = Form(64),
     max_iter: int = Form(1000),
     min_per_class: int = Form(2),
-    class_weight: str = Form("none"),
+    class_weight: str = Form("balanced"),
     C: float = Form(1.0),
     device_override: Optional[str] = Form(None),
     images_path_native: Optional[str] = Form(None),

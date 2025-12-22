@@ -20526,6 +20526,7 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                            hard_mining_low_conf_threshold: float,
                            hard_mining_margin_threshold: float,
                            convergence_tol: float,
+                           bg_class_count: int,
                            cancel_event: threading.Event) -> None:
 
     def progress_cb(value: float, message: str) -> None:
@@ -20564,6 +20565,7 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 hard_mining_low_conf_threshold=hard_mining_low_conf_threshold,
                 hard_mining_margin_threshold=hard_mining_margin_threshold,
                 convergence_tol=convergence_tol,
+                bg_class_count=bg_class_count,
                 device=device_override,
                 progress_cb=progress_cb,
                 should_cancel=cancel_event.is_set,
@@ -20727,6 +20729,7 @@ async def start_clip_training(
     hard_low_conf_threshold: float = Form(0.65),
     hard_margin_threshold: float = Form(0.15),
     convergence_tol: float = Form(1e-4),
+    bg_class_count: int = Form(2),
     staged_temp_dir: Optional[str] = Form(None),
 ):
     images_path_native = _normalise_optional_path(images_path_native)
@@ -20832,12 +20835,15 @@ async def start_clip_training(
     hard_low_conf_threshold_f = _coerce_float(hard_low_conf_threshold, 0.65, minimum=0.0, maximum=0.9999)
     hard_margin_threshold_f = _coerce_float(hard_margin_threshold, 0.15, minimum=0.0)
     convergence_tol_f = _coerce_float(convergence_tol, 1e-4, minimum=1e-8)
+    bg_class_count_i = _coerce_int(bg_class_count, 2, minimum=1)
+    bg_class_count_i = max(1, min(10, bg_class_count_i))
 
     extras = [solver_name]
     if reuse_embeddings_flag:
         extras.append("cache")
     if hard_example_flag:
         extras.append(f"hard({hard_mis_weight_f:.1f}/{hard_low_conf_weight_f:.1f})")
+    extras.append(f"bg={bg_class_count_i}")
     job_message += f" [{', '.join(extras)}]"
     _job_log(job, job_message)
 
@@ -20869,6 +20875,7 @@ async def start_clip_training(
         hard_mining_low_conf_threshold=hard_low_conf_threshold_f,
         hard_mining_margin_threshold=hard_margin_threshold_f,
         convergence_tol=convergence_tol_f,
+        bg_class_count=bg_class_count_i,
         cancel_event=job.cancel_event,
     )
 

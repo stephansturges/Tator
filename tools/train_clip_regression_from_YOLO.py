@@ -123,6 +123,12 @@ def parse_args() -> argparse.Namespace:
         default=1e-4,
         help="Tolerance for detecting convergence; lower values force additional iterations.",
     )
+    parser.add_argument(
+        "--bg-classes",
+        type=int,
+        default=2,
+        help="Number of hidden background classes to add (1–10).",
+    )
     return parser.parse_args()
 
 
@@ -168,6 +174,7 @@ def main() -> None:
             hard_mining_low_conf_threshold=args.hard_low_conf_threshold,
             hard_mining_margin_threshold=args.hard_margin_threshold,
             convergence_tol=args.convergence_tol,
+            bg_class_count=args.bg_classes,
             progress_cb=emit,
         )
     except TrainingError as exc:

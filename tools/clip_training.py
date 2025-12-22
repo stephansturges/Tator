@@ -263,6 +263,7 @@ def train_clip_from_yolo(
     hard_mining_low_conf_threshold: float = 0.65,
     hard_mining_margin_threshold: float = 0.15,
     convergence_tol: float = 1e-4,
+    bg_class_count: int = 2,
     progress_cb: Optional[ProgressCallback] = None,
     should_cancel: Optional[CancelCallback] = None,
 ) -> TrainingArtifacts:
@@ -287,6 +288,7 @@ def train_clip_from_yolo(
     hard_mining_low_conf_threshold = float(max(0.0, min(0.9999, hard_mining_low_conf_threshold)))
     hard_mining_margin_threshold = float(max(0.0, hard_mining_margin_threshold))
     convergence_tol = float(max(1e-8, convergence_tol))
+    bg_class_count = max(1, min(10, int(bg_class_count)))
 
     # Prepare paths early to fail fast on unwritable destinations.
     model_dir = os.path.dirname(os.path.abspath(model_output)) or "."

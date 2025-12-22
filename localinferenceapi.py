@@ -6846,6 +6846,9 @@ def _apply_agent_recipe_to_image(
                 clip_head_target_index=int(clip_head_target_index) if use_head else None,
                 clip_head_min_prob=float(seed_head_min),
                 clip_head_margin=float(seed_head_margin),
+                final_similarity_floor=float(final_sim_floor),
+                final_clip_head_min_prob=float(final_head_min),
+                final_clip_head_margin=float(final_head_margin),
                 state=state,
             )
             if not dets_step and (use_crop_bank or use_head):
@@ -6877,43 +6880,6 @@ def _apply_agent_recipe_to_image(
                 )
             if not dets_step:
                 continue
-
-            if clip_seed_cfg or clip_final_cfg:
-                seed_dets: List[QwenDetection] = []
-                expanded_dets: List[QwenDetection] = []
-                for det in dets_step:
-                    if isinstance(det.qwen_label, str) and det.qwen_label.strip().lower() == "visual":
-                        expanded_dets.append(det)
-                    else:
-                        seed_dets.append(det)
-                seed_filter_active = bool(
-                    (use_clip_guard and ex_mat is not None)
-                    or seed_sim_floor > 0.0
-                    or seed_head_min > 0.0
-                    or seed_head_margin > 0.0
-                )
-                if seed_dets and seed_filter_active:
-                    seed_dets = _final_clip_filter(
-                        seed_dets,
-                        sim_floor=seed_sim_floor,
-                        head_min_prob=seed_head_min,
-                        head_margin=seed_head_margin,
-                    )
-                if expanded_dets:
-                    expanded_dets = _final_clip_filter(
-                        expanded_dets,
-                        sim_floor=final_sim_floor,
-                        head_min_prob=final_head_min,
-                        head_margin=final_head_margin,
-                    )
-                dets_step = [*seed_dets, *expanded_dets]
-            else:
-                dets_step = _final_clip_filter(
-                    dets_step,
-                    sim_floor=final_sim_floor,
-                    head_min_prob=final_head_min,
-                    head_margin=final_head_margin,
-                )
             filtered_final.extend(dets_step)
 
         if not filtered_final:
@@ -7214,6 +7180,9 @@ def _infer_sam3_greedy_recipe_on_image(
     clip_head_target_index: Optional[int] = None,
     clip_head_min_prob: float = 0.5,
     clip_head_margin: float = 0.0,
+    final_similarity_floor: Optional[float] = None,
+    final_clip_head_min_prob: Optional[float] = None,
+    final_clip_head_margin: Optional[float] = None,
     stats_out: Optional[Dict[str, int]] = None,
     state: Optional[Any] = None,
     clip_device_override: Optional[str] = None,
@@ -7234,6 +7203,8 @@ def _infer_sam3_greedy_recipe_on_image(
         "candidates_kept": 0,
         "expand_candidates": 0,
         "expanded_total": 0,
+        "final_seed_total": 0,
+        "final_expanded_total": 0,
         "final_total": 0,
     }
 
@@ -7263,6 +7234,14 @@ def _infer_sam3_greedy_recipe_on_image(
     neg_mat = negative_embeddings
     use_clip = (ex_mat is not None and isinstance(ex_mat, np.ndarray) and ex_mat.size > 0) or (
         isinstance(clip_head, dict) and clip_head_target_index is not None
+    )
+    seed_similarity_floor = float(similarity_floor)
+    final_similarity_floor = seed_similarity_floor if final_similarity_floor is None else float(final_similarity_floor)
+    final_clip_head_min_prob = (
+        float(clip_head_min_prob) if final_clip_head_min_prob is None else float(final_clip_head_min_prob)
+    )
+    final_clip_head_margin = (
+        float(clip_head_margin) if final_clip_head_margin is None else float(final_clip_head_margin)
     )
     clip_model_override: Optional[str] = None
     if isinstance(clip_head, dict):
@@ -7369,7 +7348,7 @@ def _infer_sam3_greedy_recipe_on_image(
             scores_for_diverse: Optional[np.ndarray] = None
             if ex_mat is not None:
                 pos_s, _, score_s = _clip_score(seed_feats)
-                keep_mask &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
+                keep_mask &= (pos_s >= float(seed_similarity_floor)) & (score_s >= 0.0)
                 scores_for_diverse = score_s
             if isinstance(clip_head, dict) and clip_head_target_index is not None:
                 try:
@@ -7497,7 +7476,7 @@ def _infer_sam3_greedy_recipe_on_image(
             keep_mask2 = np.ones((feats2.shape[0],), dtype=bool)
             if ex_mat is not None:
                 pos_s, _, score_s = _clip_score(feats2)
-                keep_mask2 &= (pos_s >= float(similarity_floor)) & (score_s >= 0.0)
+                keep_mask2 &= (pos_s >= float(final_similarity_floor)) & (score_s >= 0.0)
             if isinstance(clip_head, dict) and clip_head_target_index is not None:
                 try:
                     proba2 = _clip_head_predict_proba(feats2, clip_head)
@@ -7521,14 +7500,23 @@ def _infer_sam3_greedy_recipe_on_image(
                     head_keep2 = _clip_head_keep_mask(
                         proba2,
                         target_index=t_idx,
-                        min_prob=float(clip_head_min_prob),
-                        margin=float(clip_head_margin),
+                        min_prob=float(final_clip_head_min_prob),
+                        margin=float(final_clip_head_margin),
                     )
                     if head_keep2 is not None:
                         keep_mask2 &= head_keep2
             expanded_filtered = [d for d, ok in zip(det_refs, keep_mask2.tolist()) if ok]
             combined = [*kept_seed_dets, *expanded_filtered]
             combined = _dedupe_qwen_detections_iou(combined, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=out_dedupe_iou)
+    try:
+        counts["final_seed_total"] = int(
+            len([d for d in combined if not (isinstance(d.qwen_label, str) and d.qwen_label.strip().lower() == "visual")])
+        )
+        counts["final_expanded_total"] = int(
+            len([d for d in combined if isinstance(d.qwen_label, str) and d.qwen_label.strip().lower() == "visual"])
+        )
+    except Exception:
+        pass
     counts["final_total"] = int(len(combined))
     _emit_stats()
     return combined
@@ -10427,6 +10415,8 @@ def _tune_clip_head_for_selected_steps_image_first(
         "candidates_kept",
         "expand_candidates",
         "expanded_total",
+        "final_seed_total",
+        "final_expanded_total",
         "final_total",
     )
     step_flow_totals: List[Dict[str, Any]] = []
@@ -10723,15 +10713,20 @@ def _tune_clip_head_for_selected_steps_image_first(
                     kept_total = int(entry.get("candidates_kept") or 0)
                     expand_total = int(entry.get("expand_candidates") or 0)
                     expanded_total = int(entry.get("expanded_total") or 0)
+                    final_seed_total = int(entry.get("final_seed_total") or 0)
+                    final_expanded_total = int(entry.get("final_expanded_total") or 0)
                     final_total = int(entry.get("final_total") or 0)
                     log_fn(
                         "[steps] Similarity flow "
                         f"'{prompt}': text={text_total} kept={kept_total} "
-                        f"expand={expand_total} expanded={expanded_total} final={final_total} "
+                        f"expand={expand_total} expanded={expanded_total} "
+                        f"final_seed={final_seed_total} final_expanded={final_expanded_total} final={final_total} "
                         f"(avg/img text={text_total/total_images:.2f} "
                         f"kept={kept_total/total_images:.2f} "
                         f"expand={expand_total/total_images:.2f} "
                         f"expanded={expanded_total/total_images:.2f} "
+                        f"final_seed={final_seed_total/total_images:.2f} "
+                        f"final_expanded={final_expanded_total/total_images:.2f} "
                         f"final={final_total/total_images:.2f})"
                     )
             except Exception:

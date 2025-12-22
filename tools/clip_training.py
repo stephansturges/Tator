@@ -181,6 +181,9 @@ def _load_cached_embeddings(signature: str) -> Optional[Dict[str, object]]:
         "y_numeric": meta.get("y_numeric", []),
         "groups": meta.get("groups", []),
         "encountered_cids": set(meta.get("encountered_cids", [])),
+        "bg_policy": meta.get("bg_policy"),
+        "aug_policy": meta.get("aug_policy"),
+        "background_classes": meta.get("background_classes", []),
     }
 
 
@@ -190,7 +193,11 @@ def _write_cache_metadata(signature: str,
                           y_class_names: List[str],
                           y_numeric: List[int],
                           groups: List[str],
-                          encountered_cids: set[int]) -> None:
+                          encountered_cids: set[int],
+                          *,
+                          bg_policy: Optional[Dict[str, float]] = None,
+                          aug_policy: Optional[Dict[str, float]] = None,
+                          background_classes: Optional[List[str]] = None) -> None:
     meta_path = chunk_dir / "metadata.joblib"
     rel_chunks = []
     for chunk_path, start, count in chunk_records:
@@ -207,6 +214,9 @@ def _write_cache_metadata(signature: str,
         "groups": list(groups),
         "encountered_cids": list(map(int, encountered_cids)),
         "chunks": rel_chunks,
+        "bg_policy": bg_policy,
+        "aug_policy": aug_policy,
+        "background_classes": list(background_classes or []),
     }
     joblib.dump(payload, meta_path, compress=3)
 
@@ -485,6 +495,15 @@ def train_clip_from_yolo(
     bg_min_scale = 0.08
     bg_max_scale = 0.4
     bg_max_attempts = 30
+    bg_policy = {
+        "samples_per_image": bg_samples_per_image,
+        "max_ratio": bg_max_ratio,
+        "pad_ratio": bg_pad_ratio,
+        "iou_max": bg_iou_max,
+        "min_scale": bg_min_scale,
+        "max_scale": bg_max_scale,
+        "max_attempts": bg_max_attempts,
+    }
     bg_policy_signature = (
         f"samples={bg_samples_per_image};max_ratio={bg_max_ratio};pad={bg_pad_ratio};"
         f"iou={bg_iou_max};scale={bg_min_scale}-{bg_max_scale};attempts={bg_max_attempts}"
@@ -510,6 +529,23 @@ def train_clip_from_yolo(
     clip_net, preprocess = _load_clip(clip_model, resolved_device)
     augmenter = _build_clip_augmenter()
     aug_policy_signature = _clip_aug_signature()
+    aug_policy = {
+        "horizontal_flip_p": CLIP_AUG_HFLIP_P,
+        "vertical_flip_p": CLIP_AUG_VFLIP_P,
+        "brightness_limit": CLIP_AUG_BRIGHTNESS_LIMIT,
+        "contrast_limit": CLIP_AUG_CONTRAST_LIMIT,
+        "hue_shift_limit": CLIP_AUG_HUE_SHIFT,
+        "sat_shift_limit": CLIP_AUG_SAT_SHIFT,
+        "val_shift_limit": CLIP_AUG_VAL_SHIFT,
+        "to_gray_p": CLIP_AUG_GRAY_P,
+        "safe_rotate_limit": CLIP_AUG_SAFE_ROTATE_LIMIT,
+        "safe_rotate_p": CLIP_AUG_SAFE_ROTATE_P,
+        "iso_color_shift": CLIP_AUG_ISO_COLOR_SHIFT,
+        "iso_intensity": CLIP_AUG_ISO_INTENSITY,
+        "iso_p": CLIP_AUG_ISO_P,
+        "gauss_var_limit": CLIP_AUG_GAUSS_VAR,
+        "gauss_p": CLIP_AUG_GAUSS_P,
+    }
 
     cache_signature = None
     cache_payload: Optional[Dict[str, object]] = None
@@ -558,6 +594,7 @@ def train_clip_from_yolo(
     y_numeric: List[int]
     groups: List[str]
     encountered_cids: set[int]
+    background_classes: List[str] = []
 
     if using_cached_embeddings and cache_payload:
         _check_cancel()
@@ -568,6 +605,7 @@ def train_clip_from_yolo(
         y_numeric = [int(v) for v in cache_payload["y_numeric"]]
         groups = [str(v) for v in cache_payload["groups"]]
         encountered_cids = {int(v) for v in cache_payload["encountered_cids"]}
+        background_classes = [str(v) for v in cache_payload.get("background_classes") or []]
         should_cleanup_chunks = False
     else:
         _safe_progress(progress_cb, 0.05, f"Found {len(image_files)} candidate images.")
@@ -774,6 +812,7 @@ def train_clip_from_yolo(
                 if labelmap_list:
                     max_dataset_cid = max(max_dataset_cid, len(labelmap_list) - 1)
                 bg_class_names = [f"__bg_{i}" for i in range(bg_k)]
+                background_classes = list(bg_class_names)
                 bg_cids = [max_dataset_cid + 1 + i for i in range(bg_k)]
                 bg_names = [bg_class_names[int(idx)] for idx in labels]
                 bg_ids = [bg_cids[int(idx)] for idx in labels]
@@ -792,6 +831,8 @@ def train_clip_from_yolo(
     y_numeric_np = np.array(y_numeric, dtype=int)
     groups_np = np.array(groups)
     y_class_names_arr = np.array(y_class_names, dtype=object)
+    if not background_classes:
+        background_classes = sorted({name for name in y_class_names if name.startswith("__bg_")})
 
     counts = Counter(y_numeric_np.tolist())
     keep_mask = np.array([counts[c] >= max(1, min_per_class) for c in y_numeric_np])
@@ -1124,6 +1165,10 @@ def train_clip_from_yolo(
             "hard_mining_low_conf_threshold": hard_mining_low_conf_threshold,
             "hard_mining_margin_threshold": hard_mining_margin_threshold,
             "convergence_tol": convergence_tol,
+            "background_class_count": bg_class_count,
+            "background_classes": list(background_classes),
+            "negative_crop_policy": dict(bg_policy),
+            "augmentation_policy": dict(aug_policy),
             "n_classes_seen": len(encountered_sorted),
             "n_samples_train": n_train,
             "n_samples_test": n_test,
@@ -1145,6 +1190,9 @@ def train_clip_from_yolo(
                 y_numeric,
                 groups,
                 encountered_cids,
+                bg_policy=bg_policy,
+                aug_policy=aug_policy,
+                background_classes=background_classes,
             )
             cache_persisted = True
 

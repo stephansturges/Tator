@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import random
 import shutil
 import tempfile
 from collections import Counter
@@ -24,6 +25,7 @@ from PIL import Image, ImageFile
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, log_loss
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.cluster import MiniBatchKMeans
 
 # The datasets we work with can include truncated images; be lenient when reading.
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -84,8 +86,17 @@ def _ensure_cache_root() -> None:
     EMBED_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _compute_dataset_signature(images_path: str, labels_path: str, clip_model: str) -> str:
-    entries: List[str] = [f"clip:{clip_model}"]
+def _compute_dataset_signature(
+    images_path: str,
+    labels_path: str,
+    clip_model: str,
+    *,
+    bg_class_count: int,
+    bg_policy: Optional[str] = None,
+) -> str:
+    entries: List[str] = [f"clip:{clip_model}", f"bg:{bg_class_count}"]
+    if bg_policy:
+        entries.append(f"bg_policy:{bg_policy}")
     image_root = Path(images_path)
     label_root = Path(labels_path)
 
@@ -224,6 +235,85 @@ def _clamp_bbox(x_min: float, y_min: float, x_max: float, y_max: float, w_img: i
     return int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))
 
 
+def _bbox_iou(box_a: Tuple[int, int, int, int], box_b: Tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+    inter_area = float(inter_x2 - inter_x1) * float(inter_y2 - inter_y1)
+    area_a = float(max(0, ax2 - ax1)) * float(max(0, ay2 - ay1))
+    area_b = float(max(0, bx2 - bx1)) * float(max(0, by2 - by1))
+    denom = area_a + area_b - inter_area
+    if denom <= 0.0:
+        return 0.0
+    return float(inter_area / denom)
+
+
+def _pad_bbox(
+    box: Tuple[int, int, int, int],
+    pad_ratio: float,
+    w_img: int,
+    h_img: int,
+) -> Tuple[int, int, int, int]:
+    x1, y1, x2, y2 = box
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    pad_x = int(round(width * pad_ratio))
+    pad_y = int(round(height * pad_ratio))
+    nx1 = max(0, x1 - pad_x)
+    ny1 = max(0, y1 - pad_y)
+    nx2 = min(w_img, x2 + pad_x)
+    ny2 = min(h_img, y2 + pad_y)
+    return nx1, ny1, nx2, ny2
+
+
+def _sample_background_boxes(
+    rng: random.Random,
+    w_img: int,
+    h_img: int,
+    gt_boxes: Sequence[Tuple[int, int, int, int]],
+    *,
+    sample_count: int,
+    max_attempts: int,
+    pad_ratio: float,
+    iou_max: float,
+    min_scale: float,
+    max_scale: float,
+) -> List[Tuple[int, int, int, int]]:
+    if sample_count <= 0 or w_img <= 1 or h_img <= 1:
+        return []
+    padded = [_pad_bbox(box, pad_ratio, w_img, h_img) for box in gt_boxes]
+    samples: List[Tuple[int, int, int, int]] = []
+    attempts = 0
+    while len(samples) < sample_count and attempts < max_attempts:
+        attempts += 1
+        bw = rng.uniform(min_scale, max_scale) * w_img
+        bh = rng.uniform(min_scale, max_scale) * h_img
+        if bw < 2.0 or bh < 2.0:
+            continue
+        max_x = max(0.0, w_img - bw)
+        max_y = max(0.0, h_img - bh)
+        if max_x <= 0.0 or max_y <= 0.0:
+            continue
+        x1 = rng.uniform(0.0, max_x)
+        y1 = rng.uniform(0.0, max_y)
+        x2 = x1 + bw
+        y2 = y1 + bh
+        candidate = _clamp_bbox(x1, y1, x2, y2, w_img, h_img)
+        if candidate is None:
+            continue
+        if any(_bbox_iou(candidate, box) > iou_max for box in padded):
+            continue
+        if any(_bbox_iou(candidate, box) > 0.3 for box in samples):
+            continue
+        samples.append(candidate)
+    return samples
+
+
 def _encode_batch(
     clip_model: torch.nn.Module,
     preprocess: Callable[[Image.Image], torch.Tensor],
@@ -290,6 +380,19 @@ def train_clip_from_yolo(
     convergence_tol = float(max(1e-8, convergence_tol))
     bg_class_count = max(1, min(10, int(bg_class_count)))
 
+    bg_samples_per_image = 3
+    bg_max_ratio = 0.4
+    bg_pad_ratio = 0.1
+    bg_iou_max = 0.01
+    bg_min_scale = 0.08
+    bg_max_scale = 0.4
+    bg_max_attempts = 30
+    bg_policy_signature = (
+        f"samples={bg_samples_per_image};max_ratio={bg_max_ratio};pad={bg_pad_ratio};"
+        f"iou={bg_iou_max};scale={bg_min_scale}-{bg_max_scale};attempts={bg_max_attempts}"
+    )
+    rng = random.Random(int(random_seed))
+
     # Prepare paths early to fail fast on unwritable destinations.
     model_dir = os.path.dirname(os.path.abspath(model_output)) or "."
     labelmap_dir = os.path.dirname(os.path.abspath(labelmap_output)) or "."
@@ -316,7 +419,13 @@ def train_clip_from_yolo(
 
     if reuse_embeddings:
         _ensure_cache_root()
-        cache_signature = _compute_dataset_signature(images_path, labels_path, clip_model)
+        cache_signature = _compute_dataset_signature(
+            images_path,
+            labels_path,
+            clip_model,
+            bg_class_count=bg_class_count,
+            bg_policy=bg_policy_signature,
+        )
         _check_cancel()
         cache_payload = _load_cached_embeddings(cache_signature)
         if cache_payload:
@@ -381,6 +490,10 @@ def train_clip_from_yolo(
 
         batch_crops: List[Image.Image] = []
         batch_meta: List[Tuple[str, int, str]] = []  # (class_name, cid, group)
+        bg_embeddings: List[np.ndarray] = []
+        bg_groups: List[str] = []
+        bg_crop_batch: List[Image.Image] = []
+        bg_group_batch: List[str] = []
 
     def flush_batch() -> None:
         nonlocal batch_crops, batch_meta
@@ -399,6 +512,36 @@ def train_clip_from_yolo(
         batch_crops.clear()
         batch_meta.clear()
 
+    def append_embeddings(
+        embs: np.ndarray,
+        class_names: List[str],
+        cids: List[int],
+        group_names: List[str],
+    ) -> None:
+        if embs.size == 0:
+            return
+        if len(class_names) != len(embs) or len(cids) != len(embs) or len(group_names) != len(embs):
+            raise TrainingError("Embedding metadata length mismatch.")
+        chunk_start = len(y_class_names)
+        chunk_path = chunk_dir / f"chunk_{len(chunk_records):06d}.npy"
+        np.save(chunk_path, embs, allow_pickle=False)
+        y_class_names.extend(class_names)
+        y_numeric.extend(cids)
+        groups.extend(group_names)
+        chunk_records.append((str(chunk_path), chunk_start, len(embs)))
+
+    def flush_bg_batch() -> None:
+        nonlocal bg_crop_batch, bg_group_batch
+        if not bg_crop_batch:
+            return
+        _check_cancel()
+        embs = _encode_batch(clip_net, preprocess, resolved_device, bg_crop_batch)
+        bg_embeddings.append(embs)
+        bg_groups.extend(bg_group_batch)
+        bg_crop_batch.clear()
+        bg_group_batch.clear()
+
+    total_pos = 0
     total_valid = 0
     if not using_cached_embeddings:
         label_exts = [".txt", ".TXT"]
@@ -424,6 +567,7 @@ def train_clip_from_yolo(
             except Exception as exc:
                 raise TrainingError(f"Failed to read label file '{label_file}': {exc}") from exc
 
+            gt_boxes: List[Tuple[int, int, int, int]] = []
             for ln in lines:
                 _check_cancel()
                 parts = ln.split()
@@ -443,6 +587,7 @@ def train_clip_from_yolo(
                 if bbox is None:
                     continue
                 X1, Y1, X2, Y2 = bbox
+                gt_boxes.append(bbox)
                 try:
                     crop = pil_img.crop((X1, Y1, X2, Y2))
                 except Exception:
@@ -456,19 +601,87 @@ def train_clip_from_yolo(
                 batch_crops.append(crop)
                 batch_meta.append((cls_name, cid, base))
                 encountered_cids.add(cid)
-                total_valid += 1
+                total_pos += 1
                 if len(batch_crops) >= batch_size:
                     flush_batch()
 
+            if bg_class_count > 0:
+                bg_boxes = _sample_background_boxes(
+                    rng,
+                    w_img,
+                    h_img,
+                    gt_boxes,
+                    sample_count=bg_samples_per_image,
+                    max_attempts=bg_max_attempts,
+                    pad_ratio=bg_pad_ratio,
+                    iou_max=bg_iou_max,
+                    min_scale=bg_min_scale,
+                    max_scale=bg_max_scale,
+                )
+                for bg_box in bg_boxes:
+                    try:
+                        crop = pil_img.crop(bg_box)
+                    except Exception:
+                        continue
+                    bg_crop_batch.append(crop)
+                    bg_group_batch.append(base)
+                    if len(bg_crop_batch) >= batch_size:
+                        flush_bg_batch()
+
             if idx % 25 == 0 or idx == len(image_files):
                 frac = idx / max(1, len(image_files))
-                _safe_progress(progress_cb, 0.05 + 0.30 * frac, f"Processed {idx}/{len(image_files)} images (accumulated crops={total_valid}) ...")
+                _safe_progress(progress_cb, 0.05 + 0.30 * frac, f"Processed {idx}/{len(image_files)} images (accumulated crops={total_pos}) ...")
 
         flush_batch()
+        flush_bg_batch()
         _check_cancel()
+
+        total_valid = total_pos
+        if bg_embeddings:
+            bg_feats = np.concatenate(bg_embeddings, axis=0)
+            bg_total = bg_feats.shape[0]
+            if total_pos > 0 and bg_max_ratio > 0.0:
+                max_bg = int(total_pos * (bg_max_ratio / max(1e-6, (1.0 - bg_max_ratio))))
+                if max_bg > 0 and bg_total > max_bg:
+                    sel = rng.sample(range(bg_total), max_bg)
+                    bg_feats = bg_feats[sel]
+                    bg_groups = [bg_groups[i] for i in sel]
+                    bg_total = max_bg
+
+            min_cluster = max(2, min_per_class)
+            max_k = max(1, bg_total // max(1, min_cluster))
+            bg_k = min(bg_class_count, max_k) if bg_total > 0 else 0
+            if bg_k >= 1 and bg_total >= bg_k:
+                if bg_k == 1:
+                    labels = np.zeros(bg_total, dtype=int)
+                else:
+                    try:
+                        kmeans = MiniBatchKMeans(
+                            n_clusters=bg_k,
+                            random_state=int(random_seed),
+                            batch_size=max(128, batch_size),
+                            n_init=5,
+                        )
+                        labels = kmeans.fit_predict(bg_feats)
+                    except Exception:
+                        labels = np.zeros(bg_total, dtype=int)
+                        bg_k = 1
+
+                max_dataset_cid = max(encountered_cids) if encountered_cids else -1
+                if labelmap_list:
+                    max_dataset_cid = max(max_dataset_cid, len(labelmap_list) - 1)
+                bg_class_names = [f"__bg_{i}" for i in range(bg_k)]
+                bg_cids = [max_dataset_cid + 1 + i for i in range(bg_k)]
+                bg_names = [bg_class_names[int(idx)] for idx in labels]
+                bg_ids = [bg_cids[int(idx)] for idx in labels]
+                append_embeddings(bg_feats, bg_names, bg_ids, bg_groups)
+                total_valid += len(bg_names)
     else:
         total_valid = len(y_numeric)
 
+    if not encountered_cids:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        raise TrainingError("Not enough labelled boxes to train a model.")
     if total_valid == 0 or len(y_numeric) < 2:
         shutil.rmtree(chunk_dir, ignore_errors=True)
         raise TrainingError("Not enough labelled boxes to train a model.")

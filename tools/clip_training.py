@@ -22,6 +22,10 @@ import joblib
 import numpy as np
 import torch
 from PIL import Image, ImageFile
+try:
+    import albumentations as A
+except Exception:  # noqa: BLE001
+    A = None
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, log_loss
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
@@ -34,6 +38,22 @@ EMBED_CACHE_ROOT = Path(os.environ.get("CLIP_EMBED_CACHE", "./uploads/clip_embed
 CACHE_VERSION = 1
 
 logger = logging.getLogger(__name__)
+
+CLIP_AUG_HFLIP_P = 0.5
+CLIP_AUG_VFLIP_P = 0.1
+CLIP_AUG_BRIGHTNESS_LIMIT = 0.2
+CLIP_AUG_CONTRAST_LIMIT = 0.2
+CLIP_AUG_HUE_SHIFT = 8
+CLIP_AUG_SAT_SHIFT = 20
+CLIP_AUG_VAL_SHIFT = 10
+CLIP_AUG_GRAY_P = 0.05
+CLIP_AUG_SAFE_ROTATE_P = 0.1
+CLIP_AUG_SAFE_ROTATE_LIMIT = (-90, 90)
+CLIP_AUG_ISO_P = 0.05
+CLIP_AUG_ISO_COLOR_SHIFT = (0.01, 0.05)
+CLIP_AUG_ISO_INTENSITY = (0.1, 0.4)
+CLIP_AUG_GAUSS_P = 0.05
+CLIP_AUG_GAUSS_VAR = (5.0, 20.0)
 
 
 ProgressCallback = Callable[[float, str], None]
@@ -93,10 +113,13 @@ def _compute_dataset_signature(
     *,
     bg_class_count: int,
     bg_policy: Optional[str] = None,
+    aug_policy: Optional[str] = None,
 ) -> str:
     entries: List[str] = [f"clip:{clip_model}", f"bg:{bg_class_count}"]
     if bg_policy:
         entries.append(f"bg_policy:{bg_policy}")
+    if aug_policy:
+        entries.append(f"aug_policy:{aug_policy}")
     image_root = Path(images_path)
     label_root = Path(labels_path)
 
@@ -326,7 +349,82 @@ def _encode_batch(
         batch = torch.stack([preprocess(img) for img in images]).to(device)
         feats = clip_model.encode_image(batch)
         feats = feats / feats.norm(dim=-1, keepdim=True)
-        return feats.detach().cpu().numpy().astype(np.float32)
+    return feats.detach().cpu().numpy().astype(np.float32)
+
+
+def _clip_aug_signature() -> str:
+    return (
+        "albumentations:"
+        f"hflip={CLIP_AUG_HFLIP_P};vflip={CLIP_AUG_VFLIP_P};"
+        f"brightness={CLIP_AUG_BRIGHTNESS_LIMIT};contrast={CLIP_AUG_CONTRAST_LIMIT};"
+        f"hsv={CLIP_AUG_HUE_SHIFT}/{CLIP_AUG_SAT_SHIFT}/{CLIP_AUG_VAL_SHIFT};"
+        f"gray={CLIP_AUG_GRAY_P};"
+        f"safe_rotate={CLIP_AUG_SAFE_ROTATE_LIMIT}:{CLIP_AUG_SAFE_ROTATE_P};"
+        f"iso={CLIP_AUG_ISO_COLOR_SHIFT}:{CLIP_AUG_ISO_INTENSITY}:{CLIP_AUG_ISO_P};"
+        f"gauss={CLIP_AUG_GAUSS_VAR}:{CLIP_AUG_GAUSS_P}"
+    )
+
+
+def _build_clip_augmenter() -> "A.Compose":
+    if A is None:
+        raise TrainingError("Albumentations is required for CLIP training.")
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=CLIP_AUG_HFLIP_P),
+            A.VerticalFlip(p=CLIP_AUG_VFLIP_P),
+            A.RandomBrightnessContrast(
+                brightness_limit=CLIP_AUG_BRIGHTNESS_LIMIT,
+                contrast_limit=CLIP_AUG_CONTRAST_LIMIT,
+                p=0.3,
+            ),
+            A.HueSaturationValue(
+                hue_shift_limit=CLIP_AUG_HUE_SHIFT,
+                sat_shift_limit=CLIP_AUG_SAT_SHIFT,
+                val_shift_limit=CLIP_AUG_VAL_SHIFT,
+                p=0.3,
+            ),
+            A.ToGray(p=CLIP_AUG_GRAY_P),
+            A.SafeRotate(
+                limit=CLIP_AUG_SAFE_ROTATE_LIMIT,
+                interpolation=1,
+                border_mode=0,
+                rotate_method="largest_box",
+                mask_interpolation=0,
+                fill=0,
+                fill_mask=0,
+                p=CLIP_AUG_SAFE_ROTATE_P,
+            ),
+            A.ISONoise(
+                color_shift=CLIP_AUG_ISO_COLOR_SHIFT,
+                intensity=CLIP_AUG_ISO_INTENSITY,
+                p=CLIP_AUG_ISO_P,
+            ),
+            A.GaussNoise(
+                var_limit=CLIP_AUG_GAUSS_VAR,
+                p=CLIP_AUG_GAUSS_P,
+            ),
+        ]
+    )
+
+
+def _apply_augmenter(augmenter: "A.Compose", crop: Image.Image) -> Image.Image:
+    arr = np.asarray(crop)
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    elif arr.shape[2] > 3:
+        arr = arr[:, :, :3]
+    try:
+        augmented = augmenter(image=arr)
+    except Exception:
+        return crop
+    out = augmented.get("image", arr)
+    if out.ndim == 2:
+        out = np.stack([out] * 3, axis=-1)
+    elif out.shape[2] > 3:
+        out = out[:, :, :3]
+    if out.dtype != np.uint8:
+        out = np.clip(out, 0, 255).astype(np.uint8)
+    return Image.fromarray(out)
 
 
 def train_clip_from_yolo(
@@ -410,6 +508,8 @@ def train_clip_from_yolo(
     labelmap_list = _load_labelmap(input_labelmap)
     resolved_device = _resolve_device(device)
     clip_net, preprocess = _load_clip(clip_model, resolved_device)
+    augmenter = _build_clip_augmenter()
+    aug_policy_signature = _clip_aug_signature()
 
     cache_signature = None
     cache_payload: Optional[Dict[str, object]] = None
@@ -425,6 +525,7 @@ def train_clip_from_yolo(
             clip_model,
             bg_class_count=bg_class_count,
             bg_policy=bg_policy_signature,
+            aug_policy=aug_policy_signature,
         )
         _check_cancel()
         cache_payload = _load_cached_embeddings(cache_signature)
@@ -592,6 +693,7 @@ def train_clip_from_yolo(
                     crop = pil_img.crop((X1, Y1, X2, Y2))
                 except Exception:
                     continue
+                crop = _apply_augmenter(augmenter, crop)
 
                 if labelmap_list and 0 <= cid < len(labelmap_list):
                     cls_name = str(labelmap_list[cid])
@@ -623,6 +725,7 @@ def train_clip_from_yolo(
                         crop = pil_img.crop(bg_box)
                     except Exception:
                         continue
+                    crop = _apply_augmenter(augmenter, crop)
                     bg_crop_batch.append(crop)
                     bg_group_batch.append(base)
                     if len(bg_crop_batch) >= batch_size:

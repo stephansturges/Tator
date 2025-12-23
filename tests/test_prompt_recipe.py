@@ -9,6 +9,8 @@ if str(ROOT) not in sys.path:
 
 import joblib
 import numpy as np
+import pytest
+from fastapi import HTTPException
 
 from localinferenceapi import _build_prompt_recipe, _load_clip_head_from_classifier, _sample_images_for_category
 
@@ -105,7 +107,7 @@ def test_load_clip_head_from_classifier_falls_back_to_multi_class_mode(tmp_path)
     # When meta.pkl is missing, we should still infer ovr vs softmax correctly.
     dummy = SimpleNamespace(
         classes_=["light_vehicle", "person", "building"],
-        coef_=np.zeros((3, 4), dtype=np.float32),
+        coef_=np.zeros((3, 512), dtype=np.float32),
         intercept_=np.zeros((3,), dtype=np.float32),
         solver="lbfgs",
         multi_class="ovr",
@@ -115,3 +117,39 @@ def test_load_clip_head_from_classifier_falls_back_to_multi_class_mode(tmp_path)
     head = _load_clip_head_from_classifier(path)
     assert head is not None
     assert head["proba_mode"] == "ovr"
+
+def test_load_clip_head_requires_meta_for_non_clip_dim(tmp_path):
+    dummy = SimpleNamespace(
+        classes_=["light_vehicle", "person", "building"],
+        coef_=np.zeros((3, 4), dtype=np.float32),
+        intercept_=np.zeros((3,), dtype=np.float32),
+        solver="lbfgs",
+        multi_class="ovr",
+    )
+    path = tmp_path / "head_nonclip.pkl"
+    joblib.dump(dummy, path)
+    with pytest.raises(HTTPException) as exc:
+        _load_clip_head_from_classifier(path)
+    assert exc.value.detail == "agent_clip_classifier_meta_required"
+
+
+def test_load_clip_head_infers_clip_backbone_from_dim(tmp_path):
+    # Missing meta.pkl should infer ViT-B/32 for 512-dim heads even if default is ViT-L/14.
+    dummy = SimpleNamespace(
+        classes_=["light_vehicle", "person", "building"],
+        coef_=np.zeros((3, 512), dtype=np.float32),
+        intercept_=np.zeros((3,), dtype=np.float32),
+        solver="lbfgs",
+        multi_class="ovr",
+    )
+    path = tmp_path / "head_512.pkl"
+    joblib.dump(dummy, path)
+    import localinferenceapi as api  # local import to read module globals
+    original = api.clip_model_name
+    try:
+        api.clip_model_name = "ViT-L/14"
+        head = _load_clip_head_from_classifier(path)
+        assert head["clip_model"] == "ViT-B/32"
+        assert head["encoder_model"] == "ViT-B/32"
+    finally:
+        api.clip_model_name = original

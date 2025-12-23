@@ -187,6 +187,9 @@
 
     let samVariant = "sam1";
     let autoModeCheckbox = null;
+    let autoClassMarginEnabledCheckbox = null;
+    let autoClassMarginValueInput = null;
+    let autoClassMarginWarnCheckbox = null;
     let samModeCheckbox = null;
     let pointModeCheckbox = null;
     let multiPointModeCheckbox = null;
@@ -766,6 +769,28 @@
         return entry.id;
     }
 
+    function enqueueTaskNotice(message, { durationMs = 3500 } = {}) {
+        const container = ensureTaskQueueElement();
+        if (!container) {
+            return null;
+        }
+        const entry = {
+            id: ++taskQueueState.counter,
+            message: String(message || "").trim() || "Notice",
+            expiresAt: Date.now() + Math.max(1500, Number(durationMs) || 3500),
+        };
+        taskQueueState.notices.push(entry);
+        renderTaskQueue();
+        window.setTimeout(() => {
+            const idx = taskQueueState.notices.findIndex((item) => item.id === entry.id);
+            if (idx !== -1) {
+                taskQueueState.notices.splice(idx, 1);
+                renderTaskQueue();
+            }
+        }, Math.max(1500, Number(durationMs) || 3500));
+        return entry.id;
+    }
+
     function completeTask(taskId) {
         if (!taskId) {
             return;
@@ -797,10 +822,24 @@
 	        if (!container) {
 	            return;
 	        }
-	        if (!taskQueueState.items.length) {
+	        const now = Date.now();
+	        if (taskQueueState.notices.length) {
+	            taskQueueState.notices = taskQueueState.notices.filter((item) => item.expiresAt > now);
+	        }
+	        const hasItems = taskQueueState.items.length > 0;
+	        const hasNotices = taskQueueState.notices.length > 0;
+	        if (!hasItems && !hasNotices) {
 	            container.innerHTML = "";
 	            container.classList.remove("visible");
 	            return;
+	        }
+	        const fragments = [];
+	        if (hasNotices) {
+	            taskQueueState.notices.forEach((notice) => {
+	                fragments.push(
+	                    `<div class="task-queue__entry task-queue__entry--notice"><span class="task-queue__label">${escapeHtml(notice.message)}</span></div>`
+	                );
+	            });
 	        }
 	        const summary = new Map();
 	        taskQueueState.items.forEach((item) => {
@@ -825,7 +864,7 @@
 	            }
 	            summary.set(group, meta);
 	        });
-	        const fragments = Array.from(summary.entries()).map(([group, meta]) => {
+	        const taskFragments = Array.from(summary.entries()).map(([group, meta]) => {
 	            const label = (TASK_GROUP_LABELS[group] || group).toLowerCase();
 	            const noun = meta.count === 1 ? "task" : "tasks";
 	            const extra =
@@ -834,7 +873,7 @@
 	                    : "";
 	            return `<div class="task-queue__entry"><span class="task-queue__label">${meta.count} ${label} ${noun} pending${extra}</span></div>`;
 	        });
-	        container.innerHTML = fragments.join("");
+	        container.innerHTML = fragments.concat(taskFragments).join("");
 	        container.classList.add("visible");
 	    }
 
@@ -987,6 +1026,7 @@
     const taskQueueState = {
         element: null,
         items: [],
+        notices: [],
         counter: 0,
     };
     const classScrollIndicatorState = {
@@ -1163,7 +1203,11 @@
     };
 
     const trainingElements = {
+        encoderTypeSelect: null,
         clipBackboneSelect: null,
+        dinov3BackboneSelect: null,
+        clipBackboneRow: null,
+        dinov3BackboneRow: null,
         solverSelect: null,
         imagesInput: null,
         imagesBtn: null,
@@ -1196,6 +1240,8 @@
         historyContainer: null,
         reuseEmbeddingsCheckbox: null,
         hardMiningCheckbox: null,
+        uploadCurrentDatasetBtn: null,
+        openDatasetManagerBtn: null,
     };
 
 	const qwenTrainElements = {
@@ -1251,12 +1297,27 @@
         classifierPath: null,
         classifierUpload: null,
         classifierBrowse: null,
+        classifierSelect: null,
+        classifierRefresh: null,
+        classifierUse: null,
+        classifierDownload: null,
+        classifierDelete: null,
         labelmapPath: null,
         labelmapUpload: null,
         labelmapBrowse: null,
+        labelmapSelect: null,
+        labelmapRefresh: null,
+        labelmapUse: null,
+        labelmapDownload: null,
+        labelmapDelete: null,
         activateLatestButton: null,
         applyButton: null,
         refreshButton: null,
+    };
+
+    const activeState = {
+        classifiers: [],
+        labelmaps: [],
     };
 
     const trainingState = {
@@ -1264,6 +1325,7 @@
         pollHandle: null,
         jobs: new Map(),
         latestArtifacts: null,
+        lastRefreshJobId: null,
         outputDirPath: ".",
         imagesFolderName: null,
         labelsFolderName: null,
@@ -1487,6 +1549,8 @@ const sam3TrainState = {
 	        minSize: null,
 	        simplifyEps: null,
 	        clipHeadSelect: null,
+        clipHeadRefresh: null,
+        clipHeadMeta: null,
 	        clipHeadMinProb: null,
 	        clipHeadMargin: null,
 	        clipHeadAutoTune: null,
@@ -1525,6 +1589,7 @@ const sam3TrainState = {
 			    const agentState = {
 			        lastJob: null,
 			        datasetsById: {},
+			        clipHeads: [],
 			        pollTimer: null,
 			        pollInFlight: false,
 			        lastRenderedLogKey: null,
@@ -1922,9 +1987,11 @@ const sam3TrainState = {
 		                datasetManagerElements.uploadCurrentSummary.textContent = `Saved as ${label}`;
 		            }
 		            await refreshDatasetList();
+		            return data;
 	        } catch (err) {
 	            console.error("Upload current dataset failed", err);
 	            setDatasetUploadMessage(err.message || "Failed to upload current dataset", "error");
+	            return null;
 	        }
 	    }
 
@@ -2834,6 +2901,31 @@ const sam3TrainState = {
         }
     }
 
+    const DINOV3_BACKBONES = [
+        "facebook/dinov3-vits16-pretrain-lvd1689m",
+        "facebook/dinov3-vitb16-pretrain-lvd1689m",
+        "facebook/dinov3-vitl16-pretrain-lvd1689m",
+    ];
+
+    function getTrainingEncoderType() {
+        const raw = trainingElements.encoderTypeSelect ? trainingElements.encoderTypeSelect.value : "clip";
+        return raw ? String(raw).toLowerCase().trim() : "clip";
+    }
+
+    function updateTrainingEncoderControls() {
+        const encoderType = getTrainingEncoderType();
+        const useClip = encoderType !== "dinov3";
+        if (trainingElements.clipBackboneRow) trainingElements.clipBackboneRow.hidden = !useClip;
+        if (trainingElements.dinov3BackboneRow) trainingElements.dinov3BackboneRow.hidden = useClip;
+        if (trainingElements.clipBackboneSelect) trainingElements.clipBackboneSelect.disabled = !useClip;
+        if (trainingElements.dinov3BackboneSelect) trainingElements.dinov3BackboneSelect.disabled = useClip;
+    }
+
+    function populateDinov3Backbones() {
+        fillSelectOptions(trainingElements.dinov3BackboneSelect, DINOV3_BACKBONES, DINOV3_BACKBONES[0] || "");
+        updateTrainingEncoderControls();
+    }
+
     async function populateClipBackbones() {
         try {
             const resp = await fetch(`${API_ROOT}/clip/backbones`);
@@ -2845,6 +2937,7 @@ const sam3TrainState = {
             const active = data.active || (list.length ? list[0] : null);
             fillSelectOptions(trainingElements.clipBackboneSelect, list, active);
             fillSelectOptions(activeElements.clipSelect, list, active);
+            updateTrainingEncoderControls();
         } catch (error) {
             console.warn("Failed to fetch clip backbones", error);
             setTrainingMessage(`Unable to load CLIP backbones: ${error.message || error}`, "error");
@@ -2859,11 +2952,15 @@ const sam3TrainState = {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            const encoderTypeRaw = data.encoder_type || "clip";
+            const encoderType = String(encoderTypeRaw).toLowerCase().trim();
             const clipModelName = data.clip_model || "(not loaded)";
+            const encoderModelName = data.encoder_model || clipModelName || "(unknown)";
+            const encoderLabel = encoderType === "clip" ? "CLIP" : encoderType.toUpperCase();
             const classifierPath = data.classifier_path || "(none)";
             const labelmapPath = data.labelmap_path || "(none)";
             if (activeElements.info) {
-                activeElements.info.innerHTML = `CLIP: <strong>${escapeHtml(clipModelName)}</strong><br/>Classifier: <strong>${escapeHtml(classifierPath)}</strong><br/>Labelmap: <strong>${escapeHtml(labelmapPath)}</strong>`;
+                activeElements.info.innerHTML = `Encoder: <strong>${escapeHtml(encoderLabel)}</strong> (${escapeHtml(encoderModelName)})<br/>Classifier: <strong>${escapeHtml(classifierPath)}</strong><br/>Labelmap: <strong>${escapeHtml(labelmapPath)}</strong>`;
             }
             if (activeElements.classifierPath) {
                 activeElements.classifierPath.value = data.classifier_path || "";
@@ -2871,25 +2968,164 @@ const sam3TrainState = {
             if (activeElements.labelmapPath) {
                 activeElements.labelmapPath.value = data.labelmap_path || "";
             }
-            if (activeElements.clipSelect && data.clip_model) {
-                activeElements.clipSelect.value = data.clip_model;
+            if (activeElements.clipSelect) {
+                const clipReady = encoderType === "clip";
+                activeElements.clipSelect.disabled = !clipReady;
+                if (clipReady && data.clip_model) {
+                    activeElements.clipSelect.value = data.clip_model;
+                }
             }
             if (trainingElements.clipBackboneSelect && data.clip_model) {
                 trainingElements.clipBackboneSelect.value = data.clip_model;
             }
-            if (data.clip_ready) {
-                setActiveMessage("CLIP is ready for auto-labeling.", "success");
-            } else if (data.clip_error && String(data.clip_error).includes("numpy._core")) {
-                setActiveMessage("CLIP classifier failed to load: numpy version mismatch. Please retrain CLIP in this environment or re-export with the current NumPy.", "error");
-            } else if (data.clip_error) {
-                setActiveMessage(`CLIP classifier not ready: ${data.clip_error}`, "error");
+            syncActiveApplyAvailability();
+            const encoderReady = data.encoder_ready !== undefined ? !!data.encoder_ready : !!data.clip_ready;
+            const encoderError = data.encoder_error || data.clip_error;
+            if (encoderReady) {
+                setActiveMessage(`${encoderLabel} classifier is ready for auto-labeling.`, "success");
+            } else if (encoderError && String(encoderError).includes("numpy._core")) {
+                setActiveMessage("Classifier failed to load: numpy version mismatch. Please retrain in this environment or re-export with the current NumPy.", "error");
+            } else if (encoderError) {
+                setActiveMessage(`${encoderLabel} classifier not ready: ${encoderError}`, "error");
             } else {
-                setActiveMessage("CLIP classifier is not ready. Load a model to enable auto-labeling.", "error");
+                setActiveMessage(`${encoderLabel} classifier is not ready. Load a model to enable auto-labeling.`, "error");
             }
         } catch (error) {
             console.warn("Failed to refresh active model", error);
             setActiveMessage(`Unable to read active model: ${error.message || error}`, "error");
         }
+    }
+
+    function syncActiveApplyAvailability() {
+        if (!activeElements.applyButton || !activeElements.classifierPath) return;
+        const hasPath = !!(activeElements.classifierPath.value || "").trim();
+        activeElements.applyButton.disabled = !hasPath;
+        activeElements.applyButton.title = hasPath
+            ? "Apply active model configuration."
+            : "Select or upload a classifier first.";
+    }
+
+    function getSelectedActiveClassifier() {
+        if (!activeElements.classifierSelect) return null;
+        const selectedPath = activeElements.classifierSelect.value || "";
+        return activeState.classifiers.find((entry) => entry.path === selectedPath) || null;
+    }
+
+    function getSelectedActiveLabelmap() {
+        if (!activeElements.labelmapSelect) return null;
+        const selectedPath = activeElements.labelmapSelect.value || "";
+        return activeState.labelmaps.find((entry) => entry.path === selectedPath) || null;
+    }
+
+    function applyActiveClassifierSelection() {
+        const entry = getSelectedActiveClassifier();
+        if (!entry || !activeElements.classifierPath) return;
+        activeElements.classifierPath.value = entry.path || "";
+        if (entry.labelmap_guess && activeElements.labelmapPath) {
+            activeElements.labelmapPath.value = entry.labelmap_guess;
+            if (activeElements.labelmapSelect) {
+                const match = activeState.labelmaps.find((lm) => lm.path === entry.labelmap_guess);
+                if (match) activeElements.labelmapSelect.value = match.path;
+            }
+        }
+        syncActiveApplyAvailability();
+    }
+
+    function applyActiveLabelmapSelection() {
+        const entry = getSelectedActiveLabelmap();
+        if (!entry || !activeElements.labelmapPath) return;
+        activeElements.labelmapPath.value = entry.path || "";
+    }
+
+    async function loadActiveClipClassifiers(selectedPath) {
+        if (!activeElements.classifierSelect) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/clip/classifiers`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            const list = Array.isArray(data) ? data : [];
+            activeState.classifiers = list;
+            activeElements.classifierSelect.innerHTML = "";
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = list.length ? "Select a classifier…" : "No classifiers found";
+            activeElements.classifierSelect.appendChild(empty);
+            list.forEach((entry) => {
+                const opt = document.createElement("option");
+                opt.value = entry.path || "";
+                const bits = [];
+                if (entry.filename) bits.push(entry.filename);
+                if (entry.n_classes) bits.push(`${entry.n_classes} classes`);
+                const encoderTypeRaw = entry.encoder_type || "clip";
+                const encoderType = String(encoderTypeRaw).toUpperCase();
+                const encoderModel = entry.encoder_model || entry.clip_model;
+                if (encoderModel) {
+                    bits.push(`${encoderType}:${encoderModel}`);
+                } else if (encoderType) {
+                    bits.push(encoderType);
+                }
+                if (!entry.encoder_type) {
+                    bits.push("legacy/no meta");
+                }
+                if (!entry.encoder_type) {
+                    bits.push("legacy/no meta");
+                }
+                opt.textContent = bits.join(" • ") || entry.rel_path || entry.path || "classifier";
+                activeElements.classifierSelect.appendChild(opt);
+            });
+            const preferred = selectedPath || activeElements.classifierPath?.value || "";
+            const match = Array.from(activeElements.classifierSelect.options || []).some((opt) => opt.value === preferred);
+            if (match) {
+                activeElements.classifierSelect.value = preferred;
+            } else if (list.length === 1 && list[0].path) {
+                activeElements.classifierSelect.value = list[0].path;
+            }
+        } catch (err) {
+            console.warn("Failed to load classifiers", err);
+        }
+    }
+
+    async function loadActiveLabelmaps(selectedPath) {
+        if (!activeElements.labelmapSelect) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/clip/labelmaps`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            const list = Array.isArray(data) ? data : [];
+            activeState.labelmaps = list;
+            activeElements.labelmapSelect.innerHTML = "";
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = list.length ? "Select a labelmap…" : "No labelmaps found";
+            activeElements.labelmapSelect.appendChild(empty);
+            list.forEach((entry) => {
+                const opt = document.createElement("option");
+                opt.value = entry.path || "";
+                const bits = [];
+                if (entry.filename) bits.push(entry.filename);
+                if (entry.n_classes) bits.push(`${entry.n_classes} classes`);
+                opt.textContent = bits.join(" • ") || entry.rel_path || entry.path || "labelmap";
+                activeElements.labelmapSelect.appendChild(opt);
+            });
+            const preferred = selectedPath || activeElements.labelmapPath?.value || "";
+            const match = Array.from(activeElements.labelmapSelect.options || []).some((opt) => opt.value === preferred);
+            if (match) {
+                activeElements.labelmapSelect.value = preferred;
+            } else if (list.length === 1 && list[0].path) {
+                activeElements.labelmapSelect.value = list[0].path;
+            }
+        } catch (err) {
+            console.warn("Failed to load labelmaps", err);
+        }
+    }
+
+    function downloadClipAsset(url, filenameFallback) {
+        const link = document.createElement("a");
+        link.href = url;
+        if (filenameFallback) link.download = filenameFallback;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     }
 function renderTrainingHistoryItem(container, job) {
     const item = document.createElement("div");
@@ -6911,6 +7147,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (savedPath && activeElements.classifierPath) {
                 activeElements.classifierPath.value = savedPath;
                 setActiveMessage('Classifier uploaded and path updated.', 'success');
+                loadActiveClipClassifiers(savedPath).catch((err) => console.warn("Active classifier list refresh failed", err));
+                loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier refresh failed", err));
             } else if (activeElements.classifierPath) {
                 setActiveMessage('Classifier staged locally; enter the server path manually.', 'warn');
             }
@@ -6946,6 +7184,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (savedPath && activeElements.labelmapPath) {
                 activeElements.labelmapPath.value = savedPath;
                 setActiveMessage('Labelmap uploaded and path updated.', 'success');
+                loadActiveLabelmaps(savedPath).catch((err) => console.warn("Active labelmap list refresh failed", err));
             } else if (activeElements.labelmapPath) {
                 setActiveMessage('Labelmap staged locally; enter the server path manually.', 'warn');
             }
@@ -7062,6 +7301,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             stopTrainingPoll();
             if (trainingElements.cancelButton) {
                 trainingElements.cancelButton.disabled = true;
+            }
+            if (trainingState.lastRefreshJobId !== status.job_id) {
+                trainingState.lastRefreshJobId = status.job_id;
+                loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier refresh failed", err));
+                loadActiveClipClassifiers().catch((err) => console.warn("Active classifier refresh failed", err));
+                loadActiveLabelmaps().catch((err) => console.warn("Active labelmap refresh failed", err));
             }
         } else if (status.status === "failed") {
             const message = status.error || "Training failed.";
@@ -7248,55 +7493,28 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     function gatherTrainingFormData() {
-        if (!trainingElements.imagesInput || !trainingElements.labelsInput) {
-            throw new Error("Training form not ready");
-        }
         const usingNativeImages = Boolean(trainingState.nativeImagesPath);
         const usingNativeLabels = Boolean(trainingState.nativeLabelsPath);
-        if (usingNativeImages !== usingNativeLabels) {
-            throw new Error("Provide both images and labels folders via server paths or file selection.");
-        }
-        let imageEntries = [];
-        let labelEntries = [];
-        const usingUploads = !usingNativeImages;
-        if (usingUploads) {
-            imageEntries = getStoredEntries("images");
-            if (!imageEntries.length) {
-                throw new Error("Select an images folder that contains supported image files.");
-            }
-            labelEntries = getStoredEntries("labels");
-        }
-        let labelFallback = false;
-        if (usingUploads && !labelEntries.length) {
-            const synthetic = synthesiseLabelEntriesFromBboxes(imageEntries);
-            if (synthetic.length) {
-                labelEntries = synthetic;
-                labelFallback = true;
-            }
-        }
-        if (usingUploads && (!imageEntries.length || !labelEntries.length)) {
-            throw new Error("Select an images folder and ensure label files or bounding boxes are available.");
+        if (!usingNativeImages || !usingNativeLabels) {
+            throw new Error("Select a cached dataset (or upload the current labeling dataset) before training.");
         }
         const formData = new FormData();
-        if (!usingUploads) {
-            formData.append("images_path_native", trainingState.nativeImagesPath);
-            formData.append("labels_path_native", trainingState.nativeLabelsPath);
-            if (trainingState.nativeLabelmapPath) {
-                formData.append("labelmap_path_native", trainingState.nativeLabelmapPath);
+        formData.append("images_path_native", trainingState.nativeImagesPath);
+        formData.append("labels_path_native", trainingState.nativeLabelsPath);
+        if (trainingState.nativeLabelmapPath) {
+            formData.append("labelmap_path_native", trainingState.nativeLabelmapPath);
+        }
+        const encoderType = getTrainingEncoderType();
+        formData.append("encoder_type", encoderType);
+        if (encoderType === "dinov3") {
+            if (trainingElements.dinov3BackboneSelect) {
+                formData.append("encoder_model", trainingElements.dinov3BackboneSelect.value);
             }
+        } else if (trainingElements.clipBackboneSelect) {
+            const clipModel = trainingElements.clipBackboneSelect.value;
+            formData.append("clip_model_name", clipModel);
+            formData.append("encoder_model", clipModel);
         }
-        if (usingUploads) {
-            if (trainingElements.labelmapInput && trainingElements.labelmapInput.files.length === 1) {
-                formData.append("labelmap", trainingElements.labelmapInput.files[0]);
-            } else if (loadedClassList.length) {
-                const blob = new Blob([loadedClassList.join("\n")], { type: "text/plain" });
-                formData.append("labelmap", blob, "ui_labelmap.txt");
-            }
-        }
-        if (trainingElements.clipBackboneSelect) {
-            formData.append("clip_model_name", trainingElements.clipBackboneSelect.value);
-        }
-        formData.append("output_dir", trainingState.outputDirPath || '.');
         if (trainingElements.modelFilenameInput) {
             formData.append("model_filename", trainingElements.modelFilenameInput.value.trim() || "my_logreg_model.pkl");
         }
@@ -7355,8 +7573,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (trainingElements.hardMiningCheckbox && trainingElements.hardMiningCheckbox.checked) {
             formData.append("hard_example_mining", "true");
         }
-        const datasetStats = usingUploads ? computeDatasetStats(imageEntries, labelEntries) : null;
-        return { formData, usingUploads, imageEntries, labelEntries, datasetStats, labelFallback };
+        return { formData };
     }
 
     async function stageClipDatasetUploads(imageEntries, labelEntries) {
@@ -7449,44 +7666,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!trainingElements.startButton) {
             return;
         }
-        let packagingModalVisible = false;
         try {
-            const { formData, usingUploads, imageEntries, labelEntries, datasetStats, labelFallback } = gatherTrainingFormData();
+            const { formData } = gatherTrainingFormData();
             trainingElements.startButton.disabled = true;
-            const preppingMessage = usingUploads && datasetStats
-                ? `Packaging dataset (${datasetStats.totalFiles} files ≈ ${formatBytes(datasetStats.totalBytes)}).`
-                : "Submitting training job…";
+            const preppingMessage = "Submitting training job…";
             setTrainingMessage(preppingMessage, null);
             setActiveMessage(preppingMessage, null);
-            if (usingUploads) {
-                const statsForModal = datasetStats || {
-                    imageCount: imageEntries.length,
-                    labelCount: labelEntries.length,
-                    totalFiles: imageEntries.length + labelEntries.length,
-                    imageBytes: 0,
-                    labelBytes: 0,
-                    totalBytes: 0,
-                };
-                showTrainingPackagingModal(statsForModal, { indeterminate: false, progressText: "Uploading dataset…" });
-                packagingModalVisible = true;
-                try {
-                    updateTrainingPackagingProgress(0, "Uploading images… 0%");
-                    const stagingResult = await stageClipDatasetUploads(imageEntries, labelEntries);
-                    formData.append("images_path_native", stagingResult.images_path);
-                    formData.append("labels_path_native", stagingResult.labels_path);
-                    if (stagingResult.temp_dir) {
-                        formData.append("staged_temp_dir", stagingResult.temp_dir);
-                    }
-                } finally {
-                    if (packagingModalVisible) {
-                        hideTrainingPackagingModal();
-                        packagingModalVisible = false;
-                    }
-                }
-                if (labelFallback) {
-                    setTrainingMessage("No label folder selected; using in-memory annotations.", "warn");
-                }
-            }
             if (trainingElements.summary) {
                 trainingElements.summary.textContent = "";
             }
@@ -7530,9 +7715,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setTrainingMessage(msg, "error");
             setActiveMessage(msg, "error");
         } finally {
-            if (packagingModalVisible) {
-                hideTrainingPackagingModal();
-            }
             if (trainingElements.startButton) {
                 trainingElements.startButton.disabled = false;
             }
@@ -7835,7 +8017,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return;
         }
         trainingUiInitialized = true;
+        trainingElements.encoderTypeSelect = document.getElementById("trainEncoderType");
         trainingElements.clipBackboneSelect = document.getElementById("clipBackboneSelect");
+        trainingElements.dinov3BackboneSelect = document.getElementById("dinov3BackboneSelect");
+        trainingElements.clipBackboneRow = document.getElementById("clipBackboneRow");
+        trainingElements.dinov3BackboneRow = document.getElementById("dinov3BackboneRow");
         trainingElements.solverSelect = document.getElementById("trainSolver");
         trainingElements.datasetSelect = document.getElementById("trainDatasetSelect");
         trainingElements.datasetRefresh = document.getElementById("trainDatasetRefresh");
@@ -7876,6 +8062,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.historyContainer = document.getElementById("trainingHistory");
         trainingElements.reuseEmbeddingsCheckbox = document.getElementById("trainReuseEmbeddings");
         trainingElements.hardMiningCheckbox = document.getElementById("trainHardMining");
+        if (trainingElements.encoderTypeSelect) {
+            trainingElements.encoderTypeSelect.addEventListener("change", updateTrainingEncoderControls);
+        }
+        populateDinov3Backbones();
 
         const applyDatasetSelection = (datasetId) => {
             const item = clipDatasetState.items.find((d) => d.id === datasetId);
@@ -7886,16 +8076,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 trainingState.imagesFolderName = null;
                 trainingState.labelsFolderName = null;
                 if (trainingElements.datasetSummary) {
-                    trainingElements.datasetSummary.textContent = "Choose a cached YOLO dataset or upload folders below.";
+                    trainingElements.datasetSummary.textContent = "Pick a cached dataset or upload the current labeling dataset.";
                 }
-                updateFileSummary(null, trainingElements.imagesSummary, { emptyText: "No folder selected" });
-                updateFileSummary(null, trainingElements.labelsSummary, { emptyText: "No folder selected" });
                 return;
             }
             const root = item.dataset_root;
-            trainingState.nativeImagesPath = `${root}/train/images`;
-            trainingState.nativeLabelsPath = `${root}/train/labels`;
-            trainingState.nativeLabelmapPath = `${root}/labelmap.txt`;
+            trainingState.nativeImagesPath = item.yolo_images_dir || `${root}/train/images`;
+            trainingState.nativeLabelsPath = item.yolo_labels_dir || `${root}/train/labels`;
+            trainingState.nativeLabelmapPath = item.yolo_labelmap_path || `${root}/labelmap.txt`;
             trainingState.imagesFolderName = item.label || item.id;
             trainingState.labelsFolderName = item.label || item.id;
             trainingState.imageEntries = [];
@@ -7931,19 +8119,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     ? data.filter((d) => {
                         const root = d.dataset_root;
                         if (!root) return false;
-                        const typeOk = (d.type || "bbox") === "bbox";
-                        const fromQwen = (d.source || "").toLowerCase() === "qwen";
-                        if (!typeOk || fromQwen) return false;
-                        const trainImages = `${root}/train/images`;
-                        const trainLabels = `${root}/train/labels`;
-                        // We can’t stat on the client; rely on registry entries to only list YOLO datasets for CLIP.
-                        return Boolean(trainImages) && Boolean(trainLabels);
+                        const typeVal = String(d.type || "bbox").toLowerCase();
+                        const typeOk = typeVal === "bbox" || typeVal === "seg";
+                        if (!typeOk) return false;
+                        return Boolean(d.yolo_ready);
                     })
                     : [];
                 trainingElements.datasetSelect.innerHTML = "";
                 const emptyOpt = document.createElement("option");
                 emptyOpt.value = "";
-                emptyOpt.textContent = "Use local upload…";
+                emptyOpt.textContent = "Select a dataset…";
                 trainingElements.datasetSelect.appendChild(emptyOpt);
                 clipDatasetState.items.forEach((item) => {
                     const opt = document.createElement("option");
@@ -7963,20 +8148,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
         };
 
-        if (trainingElements.imagesBtn) {
-            trainingElements.imagesBtn.addEventListener("click", () => chooseTrainingFolder("images"));
+        if (trainingElements.uploadCurrentDatasetBtn) {
+            trainingElements.uploadCurrentDatasetBtn.addEventListener("click", async () => {
+                try {
+                    await initDatasetManagerTab();
+                    const result = await uploadCurrentDatasetToCache();
+                    const datasetId = result?.id || result?.dataset_id || result?.label || "";
+                    await refreshClipDatasets(datasetId || trainingElements.datasetSelect?.value || "");
+                } catch (err) {
+                    setTrainingMessage(err.message || "Failed to upload current dataset.", "error");
+                }
+            });
         }
-        if (trainingElements.imagesInput) {
-            trainingElements.imagesInput.addEventListener("change", handleImagesInputChange);
-        }
-        if (trainingElements.labelsBtn) {
-            trainingElements.labelsBtn.addEventListener("click", () => chooseTrainingFolder("labels"));
-        }
-        if (trainingElements.labelsInput) {
-            trainingElements.labelsInput.addEventListener("change", handleLabelsInputChange);
-        }
-        if (trainingElements.labelmapInput) {
-            trainingElements.labelmapInput.addEventListener("change", () => updateFileSummary(trainingElements.labelmapInput, trainingElements.labelmapSummary, { emptyText: "Optional" }));
+        if (trainingElements.openDatasetManagerBtn) {
+            trainingElements.openDatasetManagerBtn.addEventListener("click", () => setActiveTab(TAB_DATASETS));
         }
         if (trainingElements.outputDirBtn) {
             trainingElements.outputDirBtn.addEventListener("click", () => {
@@ -8008,9 +8193,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             });
         }
 
-        updateFileSummary(trainingElements.imagesInput, trainingElements.imagesSummary, { emptyText: "No folder selected", mode: "folder", allowedExts: IMAGE_EXTENSIONS });
-        updateFileSummary(trainingElements.labelsInput, trainingElements.labelsSummary, { emptyText: "No folder selected", mode: "folder", allowedExts: LABEL_EXTENSIONS });
-        updateFileSummary(trainingElements.labelmapInput, trainingElements.labelmapSummary, { emptyText: "Optional" });
         if (trainingElements.outputDirSummary) {
             trainingElements.outputDirSummary.textContent = trainingState.outputDirPath && trainingState.outputDirPath !== '.' ? trainingState.outputDirPath : 'Server default (.)';
         }
@@ -8030,9 +8212,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         activeElements.classifierPath = document.getElementById("activeClassifierPath");
         activeElements.classifierUpload = document.getElementById("activeClassifierUpload");
         activeElements.classifierBrowse = document.getElementById("activeClassifierBrowse");
+        activeElements.classifierSelect = document.getElementById("activeClassifierSelect");
+        activeElements.classifierRefresh = document.getElementById("activeClassifierRefresh");
+        activeElements.classifierUse = document.getElementById("activeClassifierUse");
+        activeElements.classifierDownload = document.getElementById("activeClassifierDownload");
+        activeElements.classifierDelete = document.getElementById("activeClassifierDelete");
         activeElements.labelmapPath = document.getElementById("activeLabelmapPath");
         activeElements.labelmapUpload = document.getElementById("activeLabelmapUpload");
         activeElements.labelmapBrowse = document.getElementById("activeLabelmapBrowse");
+        activeElements.labelmapSelect = document.getElementById("activeLabelmapSelect");
+        activeElements.labelmapRefresh = document.getElementById("activeLabelmapRefresh");
+        activeElements.labelmapUse = document.getElementById("activeLabelmapUse");
+        activeElements.labelmapDownload = document.getElementById("activeLabelmapDownload");
+        activeElements.labelmapDelete = document.getElementById("activeLabelmapDelete");
         activeElements.activateLatestButton = document.getElementById("activateLatestModelBtn");
         activeElements.applyButton = document.getElementById("applyActiveModelBtn");
         activeElements.refreshButton = document.getElementById("refreshActiveModelBtn");
@@ -8051,10 +8243,95 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 });
             });
         }
+        if (activeElements.classifierPath) {
+            activeElements.classifierPath.addEventListener("input", syncActiveApplyAvailability);
+        }
         if (activeElements.refreshButton) {
             activeElements.refreshButton.addEventListener("click", () => {
                 refreshActiveModelPanel();
                 populateClipBackbones();
+                loadActiveClipClassifiers(activeElements.classifierSelect?.value || "");
+                loadActiveLabelmaps(activeElements.labelmapSelect?.value || "");
+            });
+        }
+        if (activeElements.classifierRefresh) {
+            activeElements.classifierRefresh.addEventListener("click", () => {
+                loadActiveClipClassifiers(activeElements.classifierSelect?.value || "");
+            });
+        }
+        if (activeElements.classifierSelect) {
+            activeElements.classifierSelect.addEventListener("change", applyActiveClassifierSelection);
+        }
+        if (activeElements.classifierUse) {
+            activeElements.classifierUse.addEventListener("click", applyActiveClassifierSelection);
+        }
+        if (activeElements.classifierDownload) {
+            activeElements.classifierDownload.addEventListener("click", () => {
+                const entry = getSelectedActiveClassifier();
+                if (!entry || !entry.rel_path) {
+                    alert("Select a classifier to download.");
+                    return;
+                }
+                const url = `${API_ROOT}/clip/classifiers/download_zip?rel_path=${encodeURIComponent(entry.rel_path)}`;
+                const baseName = entry.filename ? entry.filename.replace(/\\.pkl$/i, "") : "clip_head";
+                downloadClipAsset(url, `${baseName}_clip_head.zip`);
+            });
+        }
+        if (activeElements.classifierDelete) {
+            activeElements.classifierDelete.addEventListener("click", async () => {
+                const entry = getSelectedActiveClassifier();
+                if (!entry || !entry.rel_path) {
+                    alert("Select a classifier to delete.");
+                    return;
+                }
+                if (!confirm(`Delete classifier ${entry.filename || entry.rel_path}?`)) return;
+                try {
+                    const resp = await fetch(`${API_ROOT}/clip/classifiers?rel_path=${encodeURIComponent(entry.rel_path)}`, { method: "DELETE" });
+                    if (!resp.ok) throw new Error(await resp.text());
+                    await loadActiveClipClassifiers("");
+                } catch (err) {
+                    alert(`Delete failed: ${err.message || err}`);
+                }
+            });
+        }
+        if (activeElements.labelmapRefresh) {
+            activeElements.labelmapRefresh.addEventListener("click", () => {
+                loadActiveLabelmaps(activeElements.labelmapSelect?.value || "");
+            });
+        }
+        if (activeElements.labelmapSelect) {
+            activeElements.labelmapSelect.addEventListener("change", applyActiveLabelmapSelection);
+        }
+        if (activeElements.labelmapUse) {
+            activeElements.labelmapUse.addEventListener("click", applyActiveLabelmapSelection);
+        }
+        if (activeElements.labelmapDownload) {
+            activeElements.labelmapDownload.addEventListener("click", () => {
+                const entry = getSelectedActiveLabelmap();
+                if (!entry || !entry.rel_path) {
+                    alert("Select a labelmap to download.");
+                    return;
+                }
+                const url = `${API_ROOT}/clip/labelmaps/download?rel_path=${encodeURIComponent(entry.rel_path)}&root=${encodeURIComponent(entry.root || "labelmaps")}`;
+                downloadClipAsset(url, entry.filename || "labelmap.pkl");
+            });
+        }
+        if (activeElements.labelmapDelete) {
+            activeElements.labelmapDelete.addEventListener("click", async () => {
+                const entry = getSelectedActiveLabelmap();
+                if (!entry || !entry.rel_path) {
+                    alert("Select a labelmap to delete.");
+                    return;
+                }
+                if (!confirm(`Delete labelmap ${entry.filename || entry.rel_path}?`)) return;
+                try {
+                    const url = `${API_ROOT}/clip/labelmaps?rel_path=${encodeURIComponent(entry.rel_path)}&root=${encodeURIComponent(entry.root || "labelmaps")}`;
+                    const resp = await fetch(url, { method: "DELETE" });
+                    if (!resp.ok) throw new Error(await resp.text());
+                    await loadActiveLabelmaps("");
+                } catch (err) {
+                    alert(`Delete failed: ${err.message || err}`);
+                }
             });
         }
         if (activeElements.classifierBrowse && activeElements.classifierUpload) {
@@ -8079,6 +8356,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 handleLabelmapUploadChange(event).catch((err) => console.error('Labelmap upload error', err));
             });
         }
+        loadActiveClipClassifiers().catch((err) => console.warn("Active classifier list load failed", err));
+        loadActiveLabelmaps().catch((err) => console.warn("Active labelmap list load failed", err));
     }
 
 
@@ -12485,6 +12764,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (autoModeCheckbox) {
             autoModeCheckbox.checked = autoMode;
         }
+        syncAutoClassGuardControls();
         samAutoMode = samMode && autoMode;
         samPointAutoMode = pointMode && autoMode;
         samMultiPointAutoMode = multiPointMode && autoMode;
@@ -12498,6 +12778,28 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             "samMultiPointAutoMode =>",
             samMultiPointAutoMode,
         );
+    }
+
+    function syncAutoClassGuardControls() {
+        const autoEnabled = !!autoMode;
+        if (autoClassMarginEnabledCheckbox) {
+            autoClassMarginEnabledCheckbox.disabled = !autoEnabled;
+        }
+        const guardEnabled = autoEnabled && !!autoClassMarginEnabledCheckbox?.checked;
+        if (autoClassMarginValueInput) {
+            autoClassMarginValueInput.disabled = !guardEnabled;
+        }
+        if (autoClassMarginWarnCheckbox) {
+            autoClassMarginWarnCheckbox.disabled = !guardEnabled;
+        }
+    }
+
+    function getClipAutoGuardConfig() {
+        const enabled = autoMode && !!autoClassMarginEnabledCheckbox?.checked;
+        const marginRaw = autoClassMarginValueInput ? parseFloat(autoClassMarginValueInput.value) : NaN;
+        const minMargin = Number.isFinite(marginRaw) ? Math.max(0, Math.min(1, marginRaw)) : 0;
+        const warnAmbiguous = !!autoClassMarginWarnCheckbox?.checked;
+        return { enabled, minMargin, warnAmbiguous };
     }
 
     function updatePointModeState(checked) {
@@ -12557,6 +12859,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 }
             });
         }
+        syncActiveApplyAvailability();
     }
 
     function scheduleSamPreload(options = {}) {
@@ -12967,9 +13270,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                }
 		                configBits.push(parts.join(" "));
 		            }
-            if (typeof params.seed_threshold === "number") configBits.push(`text thr ${params.seed_threshold}`);
-            if (typeof params.expand_threshold === "number") configBits.push(`visual thr ${params.expand_threshold}`);
-            if (typeof params.max_visual_seeds === "number") configBits.push(`candidates ${params.max_visual_seeds}`);
+            if (typeof params.seed_threshold === "number") configBits.push(`base text thr ${params.seed_threshold}`);
+            if (typeof params.expand_threshold === "number") configBits.push(`base visual thr ${params.expand_threshold}`);
+            if (typeof params.max_visual_seeds === "number") configBits.push(`base candidates ${params.max_visual_seeds}`);
 		            if (configBits.length) {
 		                const meta = document.createElement("div");
 		                meta.className = "training-help";
@@ -13014,7 +13317,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                        if (kept !== null && total !== null) bits.push(`kept ${kept}/${total}`);
 		                        bits.push(mode);
 		                    } else {
-		                        bits.push("off");
+		                        const reason = prefilterSummary.disabled_reason;
+		                        if (reason === "head_encoder_not_clip") {
+		                            bits.push("disabled (non-CLIP head)");
+		                        } else {
+		                            bits.push("off");
+		                        }
 		                    }
 		                    const line = document.createElement("div");
 		                    line.className = "training-help";
@@ -13442,7 +13750,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			                const help = document.createElement("div");
 			                help.className = "training-help";
                     help.textContent =
-                        "Each step runs: text candidates → pick diverse expansion candidates → similarity-based search (SAM3 visual expansion) → de-dupe. CLIP-head cleanliness thresholds (above) are applied after steps and during final merge.";
+                        "Each step runs: text candidates → pick diverse expansion candidates → similarity-based search (SAM3 visual expansion) → de-dupe. Per-step text thresholds are auto-selected from candidate curves by default. Visual score/candidate counts start from base settings unless tuned by Tier‑1 or Global.";
 			                block.appendChild(help);
 
 			                const table = document.createElement("table");
@@ -13673,9 +13981,48 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.datasetSummary.textContent = parts.join(" • ") || "Dataset ready";
 	    }
 
+    function getAgentSelectedClipHeadEntry() {
+        if (!agentElements.clipHeadSelect) return null;
+        const selected = agentElements.clipHeadSelect.value || "";
+        if (!selected) return null;
+        if (!Array.isArray(agentState.clipHeads)) return null;
+        return (
+            agentState.clipHeads.find((entry) => entry && (entry.rel_path === selected || entry.path === selected)) || null
+        );
+    }
+
+    function isAgentPromptPrefilterAllowed() {
+        const entry = getAgentSelectedClipHeadEntry();
+        const encoderType = entry && entry.encoder_type ? String(entry.encoder_type).toLowerCase().trim() : "clip";
+        return !encoderType || encoderType === "clip";
+    }
+
+    function updateAgentClipHeadMeta() {
+        if (!agentElements.clipHeadMeta) return;
+        const entry = getAgentSelectedClipHeadEntry();
+        if (!entry) {
+            agentElements.clipHeadMeta.textContent = "";
+            return;
+        }
+        const encoderTypeRaw = entry.encoder_type || "clip";
+        const encoderType = String(encoderTypeRaw).toLowerCase().trim();
+        const encoderModel = entry.encoder_model || entry.clip_model || "";
+        const hasMeta = !!entry.encoder_type;
+        const label = encoderType === "clip" ? "CLIP" : encoderType.toUpperCase();
+        const bits = [`Encoder: ${label}${encoderModel ? ` (${encoderModel})` : ""}`];
+        if (!hasMeta) {
+            bits.push("Legacy head (missing metadata). DINOv3 requires a .meta.pkl file.");
+        }
+        if (encoderType !== "clip") {
+            bits.push("CLIP prompt prefilter is unavailable for image-only heads.");
+        }
+        agentElements.clipHeadMeta.textContent = bits.join(" ");
+    }
+
     function syncAgentClipHeadControls() {
         const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
         const autoTune = !!(agentElements.clipHeadAutoTune && agentElements.clipHeadAutoTune.checked);
+        const prefilterAllowed = isAgentPromptPrefilterAllowed();
 
         if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.disabled = !hasHead;
         if (agentElements.clipHeadTargetPrecision) agentElements.clipHeadTargetPrecision.disabled = !hasHead || !autoTune;
@@ -13683,8 +14030,28 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !hasHead || autoTune;
         if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !hasHead || autoTune;
 
+        if (agentElements.stepsPromptPrefilter) {
+            agentElements.stepsPromptPrefilter.disabled = !hasHead || !prefilterAllowed;
+            if (!prefilterAllowed) {
+                agentElements.stepsPromptPrefilter.checked = false;
+                agentElements.stepsPromptPrefilter.title =
+                    "Disabled because the selected head uses DINOv3 (prefilter requires CLIP embeddings).";
+            } else {
+                agentElements.stepsPromptPrefilter.title = "";
+            }
+        }
+        if (agentElements.stepsPromptPrefilterMode) {
+            const enabled = !!(
+                prefilterAllowed &&
+                agentElements.stepsPromptPrefilter &&
+                agentElements.stepsPromptPrefilter.checked
+            );
+            agentElements.stepsPromptPrefilterMode.disabled = !enabled;
+        }
+
         syncAgentStepsOptimizationControls();
         syncAgentRunButtonAvailability();
+        updateAgentClipHeadMeta();
     }
 
 	    function syncAgentRunButtonAvailability() {
@@ -13872,7 +14239,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            agentElements.stepsEarlyStopMode && agentElements.stepsEarlyStopMode.value
 	                ? agentElements.stepsEarlyStopMode.value
 	                : "balanced";
-	        const prefilterEnabled = !!(agentElements.stepsPromptPrefilter && agentElements.stepsPromptPrefilter.checked);
+	        const prefilterAllowed = isAgentPromptPrefilterAllowed();
+	        const prefilterEnabled = !!(
+	            prefilterAllowed &&
+	            agentElements.stepsPromptPrefilter &&
+	            agentElements.stepsPromptPrefilter.checked
+	        );
 	        const prefilterMode =
 	            agentElements.stepsPromptPrefilterMode && agentElements.stepsPromptPrefilterMode.value
 	                ? agentElements.stepsPromptPrefilterMode.value
@@ -13973,10 +14345,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 			        const lines = [];
         lines.push(`Sample images: ${sampleImages} • steps: ${steps} • candidates/step: ${seeds}`);
-	        if (earlyStopEnabled || prefilterEnabled) {
+	        if (earlyStopEnabled || prefilterEnabled || !prefilterAllowed) {
 	            const speedBits = [];
 	            if (earlyStopEnabled) speedBits.push(`early-stop ${earlyStopMode}`);
-	            if (prefilterEnabled) speedBits.push(`CLIP prefilter ${prefilterMode}`);
+	            if (prefilterEnabled) {
+	                speedBits.push(`CLIP prefilter ${prefilterMode}`);
+	            } else if (!prefilterAllowed) {
+	                speedBits.push("CLIP prefilter disabled (non-CLIP head)");
+	            }
 	            speedBits.push(`est. ${(speedFactor * 100).toFixed(0)}% base work`);
 	            lines.push(`Speed helpers: ${speedBits.join(" • ")}`);
 	        }
@@ -14095,6 +14471,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             const list = Array.isArray(data) ? data : [];
+            agentState.clipHeads = list;
             agentElements.clipHeadSelect.innerHTML = "";
             const empty = document.createElement("option");
             empty.value = "";
@@ -14108,7 +14485,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 const bits = [];
                 if (entry.filename) bits.push(entry.filename);
                 if (entry.n_classes) bits.push(`${entry.n_classes} classes`);
-                if (entry.clip_model) bits.push(entry.clip_model);
+                const encoderTypeRaw = entry.encoder_type || "clip";
+                const encoderType = String(encoderTypeRaw).toUpperCase();
+                const encoderModel = entry.encoder_model || entry.clip_model;
+                if (encoderModel) {
+                    bits.push(`${encoderType}:${encoderModel}`);
+                } else if (encoderType) {
+                    bits.push(encoderType);
+                }
                 opt.textContent = bits.join(" • ") || rel;
                 agentElements.clipHeadSelect.appendChild(opt);
             });
@@ -14124,6 +14508,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             console.warn("Failed to load CLIP classifiers", err);
         } finally {
             syncAgentClipHeadControls();
+            updateAgentClipHeadMeta();
         }
     }
 
@@ -14330,7 +14715,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (!["conservative", "balanced", "aggressive"].includes(stepsEarlyStopMode)) {
 	            stepsEarlyStopMode = "balanced";
 	        }
-	        const stepsPromptPrefilter = !!(agentElements.stepsPromptPrefilter && agentElements.stepsPromptPrefilter.checked);
+	        const prefilterAllowed = isAgentPromptPrefilterAllowed();
+	        const stepsPromptPrefilter = !!(
+	            prefilterAllowed &&
+	            agentElements.stepsPromptPrefilter &&
+	            agentElements.stepsPromptPrefilter.checked
+	        );
 	        let stepsPromptPrefilterMode =
 	            agentElements.stepsPromptPrefilterMode && agentElements.stepsPromptPrefilterMode.value
 	                ? agentElements.stepsPromptPrefilterMode.value
@@ -14687,6 +15077,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.minSize = document.getElementById("agentMinSize");
 	        agentElements.simplifyEps = document.getElementById("agentSimplifyEps");
 	        agentElements.clipHeadSelect = document.getElementById("agentClipHeadSelect");
+        agentElements.clipHeadRefresh = document.getElementById("agentClipHeadRefresh");
+        agentElements.clipHeadMeta = document.getElementById("agentClipHeadMeta");
 	        agentElements.clipHeadAutoTune = document.getElementById("agentClipHeadAutoTune");
 	        agentElements.clipHeadTargetPrecision = document.getElementById("agentClipHeadTargetPrecision");
         agentElements.clipHeadTargetPrecisionValue = document.getElementById("agentClipHeadTargetPrecisionValue");
@@ -14718,6 +15110,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        if (agentElements.logs) agentElements.logs.innerHTML = "";
 	        if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
 	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
+        if (agentElements.clipHeadRefresh) {
+            agentElements.clipHeadRefresh.addEventListener("click", () => loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier refresh failed", err)));
+        }
 	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
 		        if (agentElements.stepsGlobalPreset) {
 		            agentElements.stepsGlobalPreset.addEventListener("change", () => {
@@ -14888,8 +15283,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 	    document.addEventListener("DOMContentLoaded", () => {
 	        initHelpTooltips();
-	        autoModeCheckbox = document.getElementById("autoMode");
-	        samModeCheckbox = document.getElementById("samMode");
+        autoModeCheckbox = document.getElementById("autoMode");
+        autoClassMarginEnabledCheckbox = document.getElementById("autoClassMarginEnabled");
+        autoClassMarginValueInput = document.getElementById("autoClassMarginValue");
+        autoClassMarginWarnCheckbox = document.getElementById("autoClassMarginWarn");
+        samModeCheckbox = document.getElementById("samMode");
 	        pointModeCheckbox = document.getElementById("pointMode");
 	        multiPointModeCheckbox = document.getElementById("multiPointMode");
         samVariantSelect = document.getElementById("samVariant");
@@ -14925,6 +15323,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             autoModeCheckbox.addEventListener("change", () => {
                 updateAutoModeState(autoModeCheckbox.checked);
             });
+        }
+        if (autoClassMarginEnabledCheckbox) {
+            autoClassMarginEnabledCheckbox.addEventListener("change", syncAutoClassGuardControls);
         }
 
         if (samModeCheckbox) {
@@ -14965,6 +15366,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             });
         }
         refreshPolygonDetailVisibility();
+
+        syncAutoClassGuardControls();
 
         if (samPreloadCheckbox) {
             samPreloadCheckbox.addEventListener("change", () => {
@@ -15160,17 +15563,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 }
                 return;
             }
-            if (datasetType === "seg") {
-                const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
-                if (placeholderContext) {
-                    removePendingBbox(placeholderContext);
-                }
-                delete pendingApiBboxes[returnedUUID];
-                if (!applied) {
-                    setSamStatus("SAM auto point returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
-                }
-                return;
-            }
             currentBbox = {
                 bbox: targetBbox,
                 index: -1,
@@ -15307,6 +15699,34 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
+    function resolveClipAutoPrediction(result) {
+        const prediction = String(result?.prediction || "").trim();
+        const err = String(result?.error || "");
+        const proba = typeof result?.proba === "number" ? result.proba : parseFloat(result?.proba);
+        const secondLabel = String(result?.second_label || result?.secondLabel || "").trim();
+        const secondProba = typeof result?.second_proba === "number"
+            ? result.second_proba
+            : parseFloat(result?.second_proba || result?.secondProba);
+        if (err === "clip_background") {
+            enqueueTaskNotice("CLIP auto class negative (background).");
+            return null;
+        }
+        if (!prediction || prediction === "unknown") {
+            return null;
+        }
+        const guard = getClipAutoGuardConfig();
+        if (guard.enabled && Number.isFinite(proba) && Number.isFinite(secondProba) && secondLabel) {
+            const margin = proba - secondProba;
+            if (margin < guard.minMargin) {
+                if (guard.warnAmbiguous) {
+                    enqueueTaskNotice(`CLIP class unclear between "${prediction}" and "${secondLabel}".`);
+                }
+                return null;
+            }
+        }
+        return prediction;
+    }
+
     async function autoPredictNewCrop(bbox) {
         const progressToken = beginClipProgress();
         const clipTaskId = enqueueTask({ kind: "clip-auto", imageName: currentImage ? currentImage.name : null, detail: bbox?.class || currentClass || null });
@@ -15343,7 +15763,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 removeBbox(bbox);
                 return;
             }
-            const predictedClass = data.prediction;
+            const predictedClass = resolveClipAutoPrediction(data);
             const returnedUUID = data.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
             if (!targetBbox) {
@@ -15364,7 +15784,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const oldArr = bboxes[currentImage.name][oldClass];
             const idx = oldArr.indexOf(targetBbox);
             if (idx !== -1) oldArr.splice(idx, 1);
-            if (typeof classes[predictedClass] === "undefined") {
+            if (!predictedClass || typeof classes[predictedClass] === "undefined") {
                 console.warn("AutoPredict returned unknown class:", predictedClass);
                 if (!bboxes[currentImage.name][oldClass]) {
                     bboxes[currentImage.name][oldClass] = [];
@@ -15467,8 +15887,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const idx = oldArr.indexOf(targetBbox);
         if (idx !== -1) oldArr.splice(idx, 1);
         // If prediction present, move bbox to predicted class; else keep current class
-        if (result.prediction) {
-            const newClass = result.prediction;
+        const resolvedPrediction = resolveClipAutoPrediction(result);
+        if (resolvedPrediction) {
+            const newClass = resolvedPrediction;
             if (typeof classes[newClass] === "undefined") {
                 console.warn("SAM bbox auto predicted unknown class:", newClass);
                 if (!bboxes[currentImage.name][oldClass]) {
@@ -15583,8 +16004,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const oldArr = bboxes[currentImage.name][oldClass];
         const idx = oldArr.indexOf(targetBbox);
         if (idx !== -1) oldArr.splice(idx, 1);
-        if (result.prediction) {
-            const newClass = result.prediction;
+        const resolvedPrediction = resolveClipAutoPrediction(result);
+        if (resolvedPrediction) {
+            const newClass = resolvedPrediction;
             if (typeof classes[newClass] === "undefined") {
                 console.warn("SAM point auto predicted unknown class:", newClass);
                 if (!bboxes[currentImage.name][oldClass]) {
@@ -15779,8 +16201,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const oldArr = bboxes[currentImage.name][oldClass];
             const idx = oldArr.indexOf(targetBbox);
             if (idx !== -1) oldArr.splice(idx, 1);
-            if (result.prediction) {
-                const newClass = result.prediction;
+            const resolvedPrediction = resolveClipAutoPrediction(result);
+            if (resolvedPrediction) {
+                const newClass = resolvedPrediction;
                 if (typeof classes[newClass] === "undefined") {
                     console.warn("SAM multi-point auto predicted unknown class:", newClass);
                     if (!bboxes[currentImage.name][oldClass]) {

@@ -109,6 +109,19 @@
                                 <input type="checkbox" id="autoMode" name="autoMode" />
                             </div>
                             <div class="training-field training-field--inline">
+                                <label for="autoClassMarginEnabled">Auto-class clarity guard<span class="help-icon" title="Optional. Require the top CLIP class to beat the runner-up by a minimum margin before we accept it. Helps avoid ambiguous auto-class suggestions.">?</span></label>
+                                <input type="checkbox" id="autoClassMarginEnabled" />
+                            </div>
+                            <div class="training-field">
+                                <label for="autoClassMarginValue">Auto-class min margin<span class="help-icon" title="Minimum difference between the best and second-best CLIP class. If the gap is smaller, we keep the current class instead of auto-assigning.">?</span></label>
+                                <input type="number" id="autoClassMarginValue" value="0.2" min="0" max="1" step="0.01" />
+                                <div class="training-help">Use higher values for stricter auto-class picks (fewer ambiguous labels).</div>
+                            </div>
+                            <div class="training-field training-field--inline">
+                                <label for="autoClassMarginWarn">Show ambiguity notice<span class="help-icon" title="If the clarity guard rejects a class, show a quick notice like “CLIP class unclear between car and truck.”">?</span></label>
+                                <input type="checkbox" id="autoClassMarginWarn" />
+                            </div>
+                            <div class="training-field training-field--inline">
                                 <label for="samMode">SAM Mode</label>
                                 <input type="checkbox" id="samMode" name="samMode" />
                             </div>
@@ -314,8 +327,22 @@
                     <section class="training-form-section">
                         <h2>CLIP Class Predictor Settings</h2>
                         <div class="training-field">
+                            <label for="trainEncoderType">Encoder type</label>
+                            <select id="trainEncoderType">
+                                <option value="clip" selected>CLIP (image + text)</option>
+                                <option value="dinov3">DINOv3 (image-only)</option>
+                            </select>
+                            <div class="training-help">CLIP is the default and enables prompt prefiltering; DINOv3 is image-only and skips text-based prompt filters.</div>
+                        </div>
+                        <div class="training-field" id="clipBackboneRow">
                             <label for="clipBackboneSelect">CLIP Backbone</label>
                             <select id="clipBackboneSelect"></select>
+                            <div class="training-help">Default is the largest backbone (ViT-L/14) for best accuracy. Choose a smaller model for faster training or lower VRAM.</div>
+                        </div>
+                        <div class="training-field" id="dinov3BackboneRow" hidden>
+                            <label for="dinov3BackboneSelect">DINOv3 Backbone</label>
+                            <select id="dinov3BackboneSelect"></select>
+                            <div class="training-help">Frozen image encoder only (no text). Larger models are more accurate but need more VRAM.</div>
                         </div>
                         <div class="training-field">
                             <label for="qwenTrainDevices">Device IDs</label>
@@ -336,37 +363,19 @@
                             <label for="trainDatasetSelect">Cached dataset (YOLO)</label>
                             <div class="training-picker">
                                 <select id="trainDatasetSelect">
-                                    <option value="">Use local upload…</option>
+                                    <option value="">Select a dataset…</option>
                                 </select>
                                 <button type="button" class="training-button secondary" id="trainDatasetRefresh">Refresh</button>
                             </div>
-                            <div class="training-help" id="trainDatasetSummary">Choose a cached YOLO dataset or upload folders below.</div>
+                            <div class="training-help" id="trainDatasetSummary">Choose a cached YOLO dataset (bbox or seg). Use Dataset Management to upload datasets.</div>
                         </div>
                         <div class="training-field">
-                            <label for="trainImagesBtn">Images Folder</label>
+                            <label for="trainUploadCurrentDatasetBtn">Current labeling dataset</label>
                             <div class="training-picker">
-                                <button type="button" class="training-button" id="trainImagesBtn">Choose folder…</button>
-                                <input type="file" id="trainImages" accept="image/jpeg,image/png,image/webp,image/bmp,image/tiff" webkitdirectory directory multiple class="file-input-hidden" />
+                                <button type="button" class="training-button" id="trainUploadCurrentDatasetBtn">Upload current dataset</button>
+                                <button type="button" class="training-button secondary" id="trainOpenDatasetManagerBtn">Open Dataset Management</button>
                             </div>
-                            <div class="training-help" id="trainImagesSummary">No folder selected</div>
-                        </div>
-                        <div class="training-field">
-                            <label for="trainLabelsBtn">Labels Folder (YOLO txt)</label>
-                            <div class="training-picker">
-                                <button type="button" class="training-button" id="trainLabelsBtn">Choose folder…</button>
-                                <input type="file" id="trainLabels" accept="text/plain" webkitdirectory directory multiple class="file-input-hidden" />
-                            </div>
-                            <div class="training-help" id="trainLabelsSummary">No folder selected</div>
-                        </div>
-                        <div class="training-field">
-                            <label for="trainLabelmap">Labelmap (.txt or .pkl)</label>
-                            <input type="file" id="trainLabelmap" accept=".txt,.pkl" />
-                            <div class="training-help" id="trainLabelmapSummary">Optional</div>
-                        </div>
-                        <div class="training-field">
-                            <label for="trainOutputDirBtn">Output Directory</label>
-                            <button type="button" class="training-button" id="trainOutputDirBtn">Choose folder…</button>
-                            <div class="training-help" id="trainOutputDirSummary">Server default (.)</div>
+                            <div class="training-help">Uploads the dataset from the labeling tab as YOLO so it appears in the cached list above.</div>
                         </div>
                         <div class="training-field-double">
                             <div>
@@ -377,6 +386,9 @@
                                 <label for="trainLabelmapFilename">Labelmap Filename</label>
                                 <input type="text" id="trainLabelmapFilename" value="my_label_list.pkl" />
                             </div>
+                        </div>
+                        <div class="training-help">
+                            Saved automatically to <code>uploads/classifiers/</code> (model + meta) and <code>uploads/labelmaps/</code> (labelmap).
                         </div>
                         <div class="training-advanced-grid">
                             <div>
@@ -936,6 +948,9 @@
 			                            <div class="training-help">
 			                                <strong>Prerequisite:</strong> Train a CLIP head first (CLIP tab). Recipe mining uses that head to score detections and to auto-tune “cleanliness” (precision) thresholds. This is required.
 			                            </div>
+			                            <div class="training-help" style="margin-top: 6px; color: #475569;">
+			                                Defaults are <strong>recall-first</strong> (lower thresholds, more candidates). Raise cleanliness or thresholds when you need higher precision.
+			                            </div>
 			                            <div class="training-help" style="margin-top: 10px;">
 			                                <div style="font-weight: 600;">Full flow + how to tune it</div>
 			                                <div style="font-weight: 600; margin: 10px 0 6px;">High-level flow</div>
@@ -1065,14 +1080,14 @@
 						                                <input type="number" id="agentMaxWorkers" min="1" max="256" placeholder="auto" />
 						                            </div>
 						                            <div>
-						                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Recipe mining now always uses Multi-step: it builds a chain of prompt steps and tunes CLIP head thresholds for your cleanliness target.&#10;Legacy modes are deprecated and are no longer exposed in the UI.">?</span></label>
-						                                <div class="training-help">Multi-step (precision-first)</div>
+						                                <label for="agentSearchMode">Search mode<span class="help-icon" title="Recipe mining now always uses Multi-step: it builds a chain of prompt steps and tunes CLIP head thresholds for your cleanliness target.&#10;Defaults are recall-first; raise cleanliness or thresholds for precision.&#10;Legacy modes are deprecated and are no longer exposed in the UI.">?</span></label>
+						                                <div class="training-help">Multi-step (recall-first defaults)</div>
 						                                <input type="hidden" id="agentSearchMode" value="steps" />
 					                            </div>
 					                        </div>
 							                        <div id="agentStepsOptions" style="margin-bottom: 12px; display: block !important; padding: 12px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
 							                            <div style="font-weight: 700; margin-bottom: 6px;">Recipe search settings</div>
-							                                <div class="training-help" style="margin-bottom: 10px; color: #475569;">Need a refresher? Open <strong>How recipe mining works</strong> above.</div>
+							                            <div class="training-help" style="margin-bottom: 10px; color: #475569;">Need a refresher? Open <strong>How recipe mining works</strong> above. Defaults are recall-heavy; raise cleanliness for precision.</div>
 						                                <div class="training-grid">
 						                                    <div>
 						                                        <label for="agentStepsMaxSteps">Max recipe steps<span class="help-icon" title="How many prompt steps we are allowed to select for a class.&#10;More steps can increase coverage but costs more compute and can add false positives.&#10;A good starting point is 4–8.">?</span></label>
@@ -1121,8 +1136,8 @@
 						                                            <div>
 						                                                <label for="agentStepsEarlyStop">Early-stop<span class="help-icon" title="Stop adding prompt steps when coverage stalls or candidates are far below your cleanliness target.&#10;This can reduce runtime, but may miss rare edge cases.&#10;Off is safer for recall-first runs; Balanced is a good speed default.">?</span></label>
 						                                                <div class="training-field training-field--inline" style="margin-bottom: 6px;">
-						                                                    <input type="checkbox" id="agentStepsEarlyStop" />
-						                                                    <span class="training-help">Enable</span>
+						                                                    <input type="checkbox" id="agentStepsEarlyStop" checked />
+						                                                    <span class="training-help">On (default)</span>
 						                                                </div>
 						                                                <label for="agentStepsEarlyStopMode">Strictness<span class="help-icon" title="Conservative keeps searching longer; Aggressive stops sooner.">?</span></label>
 						                                                <select id="agentStepsEarlyStopMode">
@@ -1282,8 +1297,8 @@
 					                                            <div style="font-weight: 600; margin-bottom: 6px;">Candidate-threshold curve collection</div>
 					                                            <div class="training-grid">
 					                                                <div>
-					                                                    <label for="agentStepsSeedEvalFloor">Candidate curve floor (optional)<span class="help-icon" title="Multi-step mode measures each prompt at many text thresholds.&#10;By default we only see detections above your Text threshold, so thresholds below it can’t improve coverage.&#10;Set a lower floor (e.g., 0.0–0.01) so the curve can include lower thresholds.&#10;Warning: lower floor can be slower.">?</span></label>
-					                                                    <input type="number" id="agentStepsSeedEvalFloor" step="0.01" min="0" max="1" value="0.0" />
+					                                                    <label for="agentStepsSeedEvalFloor">Candidate curve floor (optional)<span class="help-icon" title="Candidate-threshold curve = we sweep the text score from low → high and record how many true objects vs false positives we get. That curve shows the trade-off, and we auto-pick per-step thresholds from it.&#10;&#10;Auto (default) uses your base Text threshold.&#10;Set a lower floor (e.g., 0.0–0.01) so the curve can include lower thresholds.&#10;Warning: lower floor can be slower.">?</span></label>
+					                                                    <input type="number" id="agentStepsSeedEvalFloor" step="0.01" min="0" max="1" placeholder="auto" />
 					                                                </div>
 					                                                <div>
 					                                                    <label for="agentStepsSeedEvalMaxResults">Candidate curve max dets (optional)<span class="help-icon" title="Safety valve for very low candidate curve floors.&#10;Caps how many candidate detections we consider per prompt per image while building curves.&#10;Lower = faster/cleaner curves, but can miss low-score matches.&#10;Leave blank to reuse Max dets/image.">?</span></label>
@@ -1294,11 +1309,11 @@
 											                                </div>
 						                        <div class="training-grid">
 						                            <div>
-						                                <label for="agentSeedThreshold">Text threshold (candidates)<span class="help-icon" title="First pass on each image: run the text prompt(s) and keep boxes with score ≥ this.&#10;Lower = more candidate boxes (better recall, more noise, slower).&#10;Higher = fewer boxes (cleaner/faster, can miss objects).">?</span></label>
+						                                <label for="agentSeedThreshold">Base text threshold (candidates)<span class="help-icon" title="Base SAM3 text score used to collect candidate curves.&#10;Per-step text thresholds are auto-selected from those curves (default).&#10;Lower = more candidates (better recall, more noise, slower).&#10;Higher = fewer candidates (cleaner/faster, can miss objects).">?</span></label>
 						                                <input type="number" id="agentSeedThreshold" step="0.01" min="0" max="1" value="0.02" />
 			                            </div>
 			                            <div>
-			                                <label for="agentExpandThreshold">Visual expansion score (SAM3)<span class="help-icon" title="Similarity-based search threshold for SAM3’s visual prompt stage.&#10;We keep expanded detections whose SAM3 score is ≥ this value.&#10;Higher = fewer but cleaner expansions; lower = more but noisier expansions.">?</span></label>
+			                                <label for="agentExpandThreshold">Visual expansion score (SAM3)<span class="help-icon" title="Similarity-based search threshold for SAM3’s visual prompt stage.&#10;Higher = fewer but cleaner expansions; lower = more but noisier expansions.&#10;Per-step values can be tuned by Tier‑1 or the Global optimizer; otherwise this base value is used.">?</span></label>
 			                                <input type="number" id="agentExpandThreshold" step="0.01" min="0" max="1" value="0.15" />
 			                            </div>
 			                            <div>
@@ -1331,10 +1346,14 @@
 				                        <div class="training-grid training-grid--single">
 					                            <div>
 					                                <label for="agentClipHeadSelect">Pretrained CLIP head (required)<span class="help-icon" title="Required for recipe mining.&#10;Agent Mining uses a pretrained CLIP classifier head (trained earlier on your dataset) to filter detections and tune “cleanliness” (precision).&#10;The head (and its tuned thresholds) is embedded into saved recipe zips (portable).&#10;Tip: you can also tighten CLIP thresholds later at inference time per cascade step (cumulative).">?</span></label>
-						                                <select id="agentClipHeadSelect">
-						                                    <option value="">Select a CLIP head…</option>
-						                                </select>
+						                                <div class="training-picker">
+							                                <select id="agentClipHeadSelect">
+							                                    <option value="">Select a CLIP head…</option>
+							                                </select>
+							                                <button type="button" class="training-button secondary" id="agentClipHeadRefresh">Refresh</button>
+						                                </div>
 						                                <div class="training-help">Required. Select a classifier under <code>uploads/classifiers/</code> (trained via the CLIP tab or uploaded). Recommended: keep auto-tune on and use a high target precision for clean recipes.</div>
+						                                <div class="training-help" id="agentClipHeadMeta"></div>
 						                            </div>
 					                            <div class="training-field training-field--inline">
 					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the sampled images so recipes are clean (few false positives).&#10;These tuned thresholds are baked into the saved recipe ZIP and used whenever the recipe runs.&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
@@ -1348,6 +1367,7 @@
 					                                    <span id="agentClipHeadTargetPrecisionValue" style="min-width: 3.5em; text-align: right;">0.75</span>
 					                                    <span style="white-space: nowrap;" title="Higher target precision = cleaner results (fewer false positives), but can miss objects.">Cleaner (fewer false positives)</span>
 					                                </div>
+					                                <div class="training-help" style="margin-top: 6px; color: #64748b;">Default is recall-first (0.75). Increase for cleaner results.</div>
 					                                <div class="training-help" style="margin-top: 6px;">
 					                                    <div style="font-weight: 600; margin-bottom: 6px;">Advanced</div>
 					                                    <label style="display: inline-flex; align-items: center; gap: 8px;" title="Enable precision targets below 0.50 (0.10–0.99). This is mainly useful for recall-first debugging and usually produces very noisy recipes.">
@@ -1828,25 +1848,51 @@
                         <div class="active-message" id="activeMessage" role="status"></div>
                         <p class="active-help">When you activate a trained classifier, the system loads the CLIP backbone saved in its metadata. Use these controls if you need to override the paths manually.</p>
                         <div class="active-field">
-                            <label for="activeClipSelect">CLIP Backbone</label>
+                            <label for="activeClassifierSelect">Saved classifiers</label>
+                            <div class="active-picker">
+                                <select id="activeClassifierSelect"></select>
+                                <button type="button" class="training-button" id="activeClassifierRefresh">Refresh</button>
+                            </div>
+                            <div class="active-actions">
+                                <button type="button" class="training-button secondary" id="activeClassifierUse">Use selected</button>
+                                <button type="button" class="training-button secondary" id="activeClassifierDownload">Download zip</button>
+                                <button type="button" class="training-button secondary" id="activeClassifierDelete">Delete</button>
+                            </div>
+                            <div class="active-help">Pick a classifier stored under <code>uploads/classifiers/</code>. Download zip includes the classifier, meta (encoder type/model), and labelmap (if found).</div>
+                        </div>
+                        <div class="active-field">
+                            <label for="activeLabelmapSelect">Saved labelmaps</label>
+                            <div class="active-picker">
+                                <select id="activeLabelmapSelect"></select>
+                                <button type="button" class="training-button" id="activeLabelmapRefresh">Refresh</button>
+                            </div>
+                            <div class="active-actions">
+                                <button type="button" class="training-button secondary" id="activeLabelmapUse">Use selected</button>
+                                <button type="button" class="training-button secondary" id="activeLabelmapDownload">Download</button>
+                                <button type="button" class="training-button secondary" id="activeLabelmapDelete">Delete</button>
+                            </div>
+                            <div class="active-help">Labelmaps are copied into <code>uploads/labelmaps/</code> after training.</div>
+                        </div>
+                        <div class="active-field">
+                            <label for="activeClipSelect">CLIP Backbone (CLIP heads only)</label>
                             <select id="activeClipSelect"></select>
-                            <div class="active-help">CLIP encoder that will run before the logistic regression head.</div>
+                            <div class="active-help">Used only when the active head is CLIP-based. DINOv3 heads ignore this setting.</div>
                         </div>
                         <div class="active-field">
                             <label for="activeClassifierPath">Classifier Path</label>
                             <div class="active-picker">
                                 <input type="text" id="activeClassifierPath" placeholder="./my_logreg_model.pkl" />
-                                <button type="button" class="training-button" id="activeClassifierBrowse">Browse…</button>
+                                <button type="button" class="training-button" id="activeClassifierBrowse">Upload…</button>
                             </div>
-                            <div class="active-help">Choose the logistic-regression `.pkl` returned by training.</div>
+                            <div class="active-help">Upload a `.pkl` classifier. It will be stored under <code>uploads/classifiers/</code> and appear in the saved list.</div>
                         </div>
                         <div class="active-field">
                             <label for="activeLabelmapPath">Labelmap Path</label>
                             <div class="active-picker">
                                 <input type="text" id="activeLabelmapPath" placeholder="Optional" />
-                                <button type="button" class="training-button" id="activeLabelmapBrowse">Browse…</button>
+                                <button type="button" class="training-button" id="activeLabelmapBrowse">Upload…</button>
                             </div>
-                            <div class="active-help">Optional `.pkl`/`.txt` mapping to keep YOLO order.</div>
+                            <div class="active-help">Optional `.pkl`/`.txt` mapping to keep YOLO order (saved under <code>uploads/labelmaps/</code>).</div>
                         </div>
                         <div class="active-field active-fallback">
                             <h3>Fallback: Dilate Crop on Low Confidence</h3>
@@ -1967,7 +2013,6 @@
                     <ul class="settings-help">
                         <li>Dataset zips (SAM3/Qwen): up to ~100GB zip, ~50GB per entry.</li>
                         <li>CLIP/Qwen chunked uploads: ~10GB per file, ~100GB per job quota.</li>
-                        <li>CLIP training uploads: ~10GB per file, ~100GB per job quota.</li>
                         <li>Classifier/labelmap/general assets: ~10GB per file, ~100GB per uploads quota.</li>
                         <li>Agent recipe zips: ~2GB total; crops capped (~1000 pngs / ~512MB total).</li>
                         <li>Responses: max ~5000 detections / 2000 masks; SAM preload cache ~2GB.</li>

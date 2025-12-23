@@ -84,6 +84,12 @@ body {
     border-bottom: none;
 }
 
+.task-queue__entry--notice .task-queue__label {
+    text-align: left;
+    color: #fde68a;
+    font-weight: 600;
+}
+
 .task-queue__type {
     text-transform: uppercase;
     font-size: 10px;
@@ -383,6 +389,10 @@ body {
 }
 
 .tab-panel[data-tab-panel="datasets"] {
+    overflow-y: auto;
+}
+
+.tab-panel[data-tab-panel="active"] {
     overflow-y: auto;
 }
 
@@ -2306,6 +2316,12 @@ details.training-card > summary::marker {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+}
+
+.active-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .active-picker {

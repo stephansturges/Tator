@@ -80,6 +80,9 @@ class TrainingArtifacts:
     samples_train: int
     samples_test: int
     clip_model: str
+    encoder_type: str
+    encoder_model: str
+    embedding_dim: int
     device: str
     classification_report: str
     confusion_matrix: List[List[int]]
@@ -122,12 +125,25 @@ def _compute_dataset_signature(
     labels_path: str,
     clip_model: str,
     *,
+    encoder_type: str = "clip",
+    encoder_model: Optional[str] = None,
     bg_class_count: int,
+    labelmap_path: Optional[str] = None,
     bg_policy: Optional[str] = None,
     aug_policy: Optional[str] = None,
     oversample_policy: Optional[str] = None,
 ) -> str:
-    entries: List[str] = [f"clip:{clip_model}", f"bg:{bg_class_count}"]
+    encoder_name = str(encoder_model or clip_model or "").strip()
+    entries: List[str] = [f"encoder:{encoder_type}:{encoder_name}", f"bg:{bg_class_count}"]
+    if labelmap_path:
+        try:
+            lm_path = Path(labelmap_path)
+            if lm_path.exists() and lm_path.is_file():
+                stat = lm_path.stat()
+                lm_hash = hashlib.sha256(lm_path.read_bytes()).hexdigest()
+                entries.append(f"LM:{lm_path.name}:{stat.st_mtime_ns}:{stat.st_size}:{lm_hash}")
+        except Exception:
+            pass
     if bg_policy:
         entries.append(f"bg_policy:{bg_policy}")
     if aug_policy:
@@ -213,7 +229,9 @@ def _write_cache_metadata(signature: str,
                           bg_policy: Optional[Dict[str, float]] = None,
                           aug_policy: Optional[Dict[str, float]] = None,
                           oversample_policy: Optional[Dict[str, float]] = None,
-                          background_classes: Optional[List[str]] = None) -> None:
+                          background_classes: Optional[List[str]] = None,
+                          labelmap_path: Optional[str] = None,
+                          labelmap_hash: Optional[str] = None) -> None:
     meta_path = chunk_dir / "metadata.joblib"
     rel_chunks = []
     for chunk_path, start, count in chunk_records:
@@ -234,6 +252,8 @@ def _write_cache_metadata(signature: str,
         "aug_policy": aug_policy,
         "oversample_policy": oversample_policy,
         "background_classes": list(background_classes or []),
+        "labelmap_path": labelmap_path,
+        "labelmap_hash": labelmap_hash,
     }
     joblib.dump(payload, meta_path, compress=3)
 
@@ -273,6 +293,36 @@ def _load_clip(arch: str, device: str) -> Tuple[torch.nn.Module, Callable[[Image
         raise TrainingError(f"Failed to load CLIP backbone '{arch}': {exc}") from exc
     model.eval()
     return model, preprocess
+
+
+def _load_dinov3(model_name: str, device: str) -> Tuple[torch.nn.Module, Any]:
+    try:
+        from transformers import AutoImageProcessor, AutoModel
+    except Exception as exc:  # noqa: BLE001
+        raise TrainingError(f"DINOv3 requires transformers: {exc}") from exc
+
+    def _format_hf_error(err: Exception) -> str:
+        msg = str(err)
+        lowered = msg.lower()
+        if any(token in lowered for token in ("401", "403", "unauthorized", "forbidden", "gated")):
+            return (
+                "Access denied. If this model is gated, run `huggingface-cli login` or set HF_TOKEN "
+                "and accept the model license on Hugging Face."
+            )
+        if "not found" in lowered or "404" in lowered:
+            return "Model not found. Check the model name and spelling."
+        if "connection" in lowered or "offline" in lowered or "timeout" in lowered:
+            return "Network error while fetching the model. Check connectivity or pre-download the weights."
+        return msg
+
+    try:
+        processor = AutoImageProcessor.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(model_name)
+    except Exception as exc:  # noqa: BLE001
+        raise TrainingError(f"Failed to load DINOv3 backbone '{model_name}': {_format_hf_error(exc)}") from exc
+    model.eval()
+    model.to(device)
+    return model, processor
 
 
 def _clamp_bbox(x_min: float, y_min: float, x_max: float, y_max: float, w_img: int, h_img: int) -> Optional[Tuple[int, int, int, int]]:
@@ -379,7 +429,34 @@ def _encode_batch(
     return feats.detach().cpu().numpy().astype(np.float32)
 
 
-def _clip_aug_signature() -> str:
+def _encode_batch_dinov3(
+    model: torch.nn.Module,
+    processor: Any,
+    device: str,
+    images: Sequence[Image.Image],
+) -> np.ndarray:
+    if not images:
+        hidden = int(getattr(getattr(model, "config", None), "hidden_size", 0) or 0)
+        if hidden <= 0:
+            hidden = int(getattr(getattr(model, "config", None), "embed_dim", 0) or 0)
+        return np.empty((0, hidden or 0), dtype=np.float32)
+    with torch.no_grad():
+        batch = processor(images=list(images), return_tensors="pt")
+        batch = {k: v.to(device) for k, v in batch.items()}
+        outputs = model(**batch)
+        feats = getattr(outputs, "pooler_output", None)
+        if feats is None:
+            feats = getattr(outputs, "last_hidden_state", None)
+            if feats is None:
+                raise TrainingError("DINOv3 output missing pooler_output/last_hidden_state.")
+            feats = feats[:, 0, :]
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+    return feats.detach().cpu().numpy().astype(np.float32)
+
+
+def _clip_aug_signature(enabled: bool) -> str:
+    if not enabled:
+        return "albumentations:disabled"
     return (
         "albumentations:"
         f"hflip={CLIP_AUG_HFLIP_P};vflip={CLIP_AUG_VFLIP_P};"
@@ -392,9 +469,10 @@ def _clip_aug_signature() -> str:
     )
 
 
-def _build_clip_augmenter() -> "A.Compose":
+def _build_clip_augmenter() -> Optional["A.Compose"]:
     if A is None:
-        raise TrainingError("Albumentations is required for CLIP training.")
+        logger.warning("Albumentations is unavailable; CLIP training will run without augmentation.")
+        return None
     return A.Compose(
         [
             A.HorizontalFlip(p=CLIP_AUG_HFLIP_P),
@@ -434,7 +512,9 @@ def _build_clip_augmenter() -> "A.Compose":
     )
 
 
-def _apply_augmenter(augmenter: "A.Compose", crop: Image.Image) -> Image.Image:
+def _apply_augmenter(augmenter: Optional["A.Compose"], crop: Image.Image) -> Image.Image:
+    if augmenter is None:
+        return crop
     arr = np.asarray(crop)
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
@@ -452,6 +532,43 @@ def _apply_augmenter(augmenter: "A.Compose", crop: Image.Image) -> Image.Image:
     if out.dtype != np.uint8:
         out = np.clip(out, 0, 255).astype(np.uint8)
     return Image.fromarray(out)
+
+
+def _parse_yolo_box_line(parts: Sequence[str],
+                         w_img: int,
+                         h_img: int) -> Optional[Tuple[int, Tuple[int, int, int, int]]]:
+    if len(parts) < 5:
+        return None
+    try:
+        cid = int(float(parts[0]))
+    except Exception:
+        return None
+    coords = []
+    try:
+        coords = [float(v) for v in parts[1:]]
+    except Exception:
+        return None
+    if len(coords) == 4:
+        x_c, y_c, w_n, h_n = coords
+        x_min = (x_c - 0.5 * w_n) * w_img
+        y_min = (y_c - 0.5 * h_n) * h_img
+        x_max = x_min + w_n * w_img
+        y_max = y_min + h_n * h_img
+    else:
+        if len(coords) < 6 or len(coords) % 2 != 0:
+            return None
+        xs = coords[0::2]
+        ys = coords[1::2]
+        if not xs or not ys:
+            return None
+        x_min = min(xs) * w_img
+        y_min = min(ys) * h_img
+        x_max = max(xs) * w_img
+        y_max = max(ys) * h_img
+    bbox = _clamp_bbox(x_min, y_min, x_max, y_max, w_img, h_img)
+    if bbox is None:
+        return None
+    return cid, bbox
 
 
 def _compute_oversample_multipliers(raw_counts: Dict[int, int]) -> Dict[int, float]:
@@ -495,6 +612,8 @@ def train_clip_from_yolo(
     labelmap_output: str,
     *,
     clip_model: str = "ViT-B/32",
+    encoder_type: str = "clip",
+    encoder_model: Optional[str] = None,
     input_labelmap: Optional[str] = None,
     test_size: float = 0.2,
     random_seed: int = 42,
@@ -527,6 +646,19 @@ def train_clip_from_yolo(
         raise TrainingError(f"Images folder not found: {images_path}")
     if not os.path.isdir(labels_path):
         raise TrainingError(f"Labels folder not found: {labels_path}")
+
+    encoder_type = (encoder_type or "clip").strip().lower()
+    if encoder_type not in {"clip", "dinov3"}:
+        raise TrainingError(f"encoder_type_unsupported:{encoder_type}")
+    encoder_model_name = (encoder_model or "").strip()
+    if encoder_type == "clip":
+        if encoder_model_name:
+            clip_model = encoder_model_name
+        encoder_model_name = clip_model
+    else:
+        if not encoder_model_name:
+            raise TrainingError("encoder_model_required")
+        clip_model = encoder_model_name
 
     class_weight = (class_weight or "none").lower()
     if class_weight not in {"none", "balanced"}:
@@ -588,11 +720,28 @@ def train_clip_from_yolo(
 
     _check_cancel()
     labelmap_list = _load_labelmap(input_labelmap)
+    labelmap_hash: Optional[str] = None
+    if input_labelmap:
+        try:
+            lm_path = Path(input_labelmap)
+            if lm_path.exists() and lm_path.is_file():
+                labelmap_hash = hashlib.sha256(lm_path.read_bytes()).hexdigest()
+        except Exception:
+            labelmap_hash = None
     resolved_device = _resolve_device(device)
-    clip_net, preprocess = _load_clip(clip_model, resolved_device)
+    if encoder_type == "clip":
+        clip_net, preprocess = _load_clip(clip_model, resolved_device)
+        def encode_batch(images: Sequence[Image.Image]) -> np.ndarray:
+            return _encode_batch(clip_net, preprocess, resolved_device, images)
+    else:
+        dino_model, dino_processor = _load_dinov3(encoder_model_name, resolved_device)
+        def encode_batch(images: Sequence[Image.Image]) -> np.ndarray:
+            return _encode_batch_dinov3(dino_model, dino_processor, resolved_device, images)
     augmenter = _build_clip_augmenter()
-    aug_policy_signature = _clip_aug_signature()
+    aug_enabled = augmenter is not None
+    aug_policy_signature = _clip_aug_signature(aug_enabled)
     aug_policy = {
+        "enabled": aug_enabled,
         "horizontal_flip_p": CLIP_AUG_HFLIP_P,
         "vertical_flip_p": CLIP_AUG_VFLIP_P,
         "brightness_limit": CLIP_AUG_BRIGHTNESS_LIMIT,
@@ -622,7 +771,10 @@ def train_clip_from_yolo(
             images_path,
             labels_path,
             clip_model,
+            encoder_type=encoder_type,
+            encoder_model=encoder_model_name,
             bg_class_count=bg_class_count,
+            labelmap_path=input_labelmap,
             bg_policy=bg_policy_signature,
             aug_policy=aug_policy_signature,
             oversample_policy=oversample_policy_signature,
@@ -673,7 +825,7 @@ def train_clip_from_yolo(
         should_cleanup_chunks = False
     else:
         _safe_progress(progress_cb, 0.05, f"Found {len(image_files)} candidate images.")
-        _safe_progress(progress_cb, 0.08, f"Encoding CLIP embeddings on {resolved_device} (batch size={batch_size}) ...")
+        _safe_progress(progress_cb, 0.08, f"Encoding {encoder_type} embeddings on {resolved_device} (batch size={batch_size}) ...")
 
         if reuse_embeddings and cache_signature:
             cache_dir = EMBED_CACHE_ROOT / cache_signature
@@ -703,7 +855,7 @@ def train_clip_from_yolo(
         if not batch_crops:
             return
         _check_cancel()
-        embs = _encode_batch(clip_net, preprocess, resolved_device, batch_crops)
+        embs = encode_batch(batch_crops)
         chunk_start = len(y_class_names)
         chunk_path = chunk_dir / f"chunk_{len(chunk_records):06d}.npy"
         np.save(chunk_path, embs, allow_pickle=False)
@@ -738,7 +890,7 @@ def train_clip_from_yolo(
         if not bg_crop_batch:
             return
         _check_cancel()
-        embs = _encode_batch(clip_net, preprocess, resolved_device, bg_crop_batch)
+        embs = encode_batch(bg_crop_batch)
         bg_embeddings.append(embs)
         bg_groups.extend(bg_group_batch)
         bg_crop_batch.clear()
@@ -801,28 +953,16 @@ def train_clip_from_yolo(
             for ln in lines:
                 _check_cancel()
                 parts = ln.split()
-                if len(parts) < 5:
+                parsed = _parse_yolo_box_line(parts, w_img, h_img)
+                if not parsed:
                     continue
-                try:
-                    cid = int(float(parts[0]))
-                    x_c, y_c, w_n, h_n = map(float, parts[1:5])
-                except Exception:
-                    continue
-
-                x_min = (x_c - 0.5 * w_n) * w_img
-                y_min = (y_c - 0.5 * h_n) * h_img
-                x_max = x_min + w_n * w_img
-                y_max = y_min + h_n * h_img
-                bbox = _clamp_bbox(x_min, y_min, x_max, y_max, w_img, h_img)
-                if bbox is None:
-                    continue
+                cid, bbox = parsed
                 X1, Y1, X2, Y2 = bbox
                 gt_boxes.append(bbox)
                 try:
-                    crop = pil_img.crop((X1, Y1, X2, Y2))
+                    base_crop = pil_img.crop((X1, Y1, X2, Y2))
                 except Exception:
                     continue
-                crop = _apply_augmenter(augmenter, crop)
 
                 if labelmap_list and 0 <= cid < len(labelmap_list):
                     cls_name = str(labelmap_list[cid])
@@ -832,7 +972,7 @@ def train_clip_from_yolo(
                 encountered_cids.add(cid)
                 repeat = _sample_repeat_count(oversample_multipliers.get(cid, 1.0), rng)
                 for _ in range(repeat):
-                    aug_crop = _apply_augmenter(augmenter, crop)
+                    aug_crop = _apply_augmenter(augmenter, base_crop)
                     batch_crops.append(aug_crop)
                     batch_meta.append((cls_name, cid, base))
                     total_pos += 1
@@ -976,13 +1116,29 @@ def train_clip_from_yolo(
 
     train_memmap_path = os.path.join(chunk_dir, "train_embeddings.dat")
     test_memmap_path = os.path.join(chunk_dir, "test_embeddings.dat")
-    X_train_mm = np.memmap(train_memmap_path, dtype=np.float64, mode="w+", shape=(train_size, 512))
-    X_test_mm = np.memmap(test_memmap_path, dtype=np.float64, mode="w+", shape=(test_size, 512))
+    embedding_dim: Optional[int] = None
+    for chunk_path, _, _ in chunk_records:
+        try:
+            probe = np.load(chunk_path, mmap_mode="r")
+        except Exception as exc:
+            raise TrainingError(f"Failed to load embedding chunk '{chunk_path}': {exc}") from exc
+        if probe.ndim != 2 or probe.shape[1] <= 0:
+            raise TrainingError(f"Invalid embedding chunk shape for '{chunk_path}': {probe.shape}")
+        embedding_dim = int(probe.shape[1])
+        break
+    if embedding_dim is None:
+        raise TrainingError("No embeddings available to build train/test split.")
+    X_train_mm = np.memmap(train_memmap_path, dtype=np.float64, mode="w+", shape=(train_size, embedding_dim))
+    X_test_mm = np.memmap(test_memmap_path, dtype=np.float64, mode="w+", shape=(test_size, embedding_dim))
 
     for chunk_path, old_start, count in chunk_records:
         _check_cancel()
         chunk = np.load(chunk_path)
         chunk = np.asarray(chunk, dtype=np.float64)
+        if chunk.ndim != 2 or chunk.shape[1] != embedding_dim:
+            raise TrainingError(
+                f"Embedding dimension mismatch for '{chunk_path}': got {chunk.shape}, expected (*, {embedding_dim})"
+            )
         old_indices = np.arange(old_start, old_start + count)
         new_indices = new_index_map[old_indices]
         valid_mask = new_indices >= 0
@@ -1249,6 +1405,8 @@ def train_clip_from_yolo(
 
         meta = {
             "clip_model": clip_model,
+            "encoder_type": encoder_type,
+            "encoder_model": clip_model,
             "device": resolved_device,
             "test_size": test_size,
             "random_seed": random_seed,
@@ -1267,6 +1425,8 @@ def train_clip_from_yolo(
             "negative_crop_policy": dict(bg_policy),
             "augmentation_policy": dict(aug_policy),
             "oversample_policy": dict(oversample_policy),
+            "labelmap_filename": os.path.basename(labelmap_output),
+            "labelmap_path": labelmap_output,
             "n_classes_seen": len(encountered_sorted),
             "n_samples_train": n_train,
             "n_samples_test": n_test,
@@ -1292,6 +1452,8 @@ def train_clip_from_yolo(
                 aug_policy=aug_policy,
                 oversample_policy=oversample_policy,
                 background_classes=background_classes,
+                labelmap_path=input_labelmap,
+                labelmap_hash=labelmap_hash,
             )
             cache_persisted = True
 
@@ -1309,6 +1471,9 @@ def train_clip_from_yolo(
             samples_train=n_train,
             samples_test=n_test,
             clip_model=clip_model,
+            encoder_type=encoder_type,
+            encoder_model=clip_model,
+            embedding_dim=embedding_dim,
             device=resolved_device,
             classification_report=report,
             confusion_matrix=matrix,

@@ -97,7 +97,7 @@ Tator/
 ```
 
 ### Major code paths (end-to-end)
-- **CLIP (recommended first)**: `Train CLIP` tab → `/clip/train` job → activate via `/clip/active_model` → used by Auto Class, CLIP verification, and as an optional **pretrained CLIP head** for Agent Mining / cascade scoring.
+- **CLIP / DINOv3 heads (recommended first)**: `Train CLIP` tab → `/clip/train` job → activate via `/clip/active_model` → used by Auto Class, CLIP verification (CLIP only), and as a **pretrained head** for Agent Mining / cascade scoring.
 - **SAM assists (Label Images tab)**: UI actions → SAM endpoints (SAM1/2/3 depending on `SAM_VARIANT`) → detections written into the current image session.
 - **SAM3 text prompt**: `SAM3 Text Prompt` panel → SAM3 processor runtime → returns boxes/polygons via the same `QwenDetection` response model used elsewhere.
 - **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → results include per-class recipes in either:
@@ -281,17 +281,22 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 - `Backspace` / `W` – delete the currently selected bbox (⌘+Delete on macOS still works too).
 
 ### Train CLIP Tab
-1. Choose **Image folder** and **Label folder** via native directory pickers. Only files matching YOLO expectations are enumerated.
-2. (Optional) Provide a labelmap so class ordering matches the labeling tab.
-3. Configure solver, class weights, max iterations, batch size, convergence tolerance, and hard-example mining (with adjustable weights/thresholds) plus **Cache & reuse embeddings** (enabled by default).
-4. Select an output directory; training writes `{model,labelmap,meta}.pkl` plus JSON metrics.
-5. Click **Start Training**. Progress logs stream live, including per-iteration convergence and per-class precision/recall/F1. Completed runs appear in the summary panel with download links.
+1. Choose **Encoder type** (CLIP or DINOv3). CLIP enables text-based prompt prefiltering; DINOv3 is image-only and skips text prompts. If a DINOv3 model is gated, run `huggingface-cli login` (or set `HF_TOKEN`) and accept the license on Hugging Face.
+2. DINOv3 heads **require the `.meta.pkl`** produced by training so the encoder type/model is known. Legacy heads without meta are treated as CLIP and cannot be activated as DINOv3.
+3. Choose **Image folder** and **Label folder** via native directory pickers. Only files matching YOLO expectations are enumerated.
+4. (Optional) Provide a labelmap so class ordering matches the labeling tab.
+5. Configure solver, class weights, max iterations, batch size, convergence tolerance, and hard-example mining (with adjustable weights/thresholds) plus **Cache & reuse embeddings** (enabled by default).
+6. Training outputs are written automatically to <code>uploads/classifiers/</code> (classifier + meta) and <code>uploads/labelmaps/</code> (labelmap). Output paths are fixed to keep model management consistent.
+7. Click **Start Training**. Progress logs stream live, including per-iteration convergence and per-class precision/recall/F1. Completed runs appear in the summary panel with download links.
 
-Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keyed by dataset paths + CLIP backbone, independent of batch size. Toggling cache reuse will hit the store when inputs match.
+Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keyed by dataset paths + encoder model, independent of batch size. Toggling cache reuse will hit the store when inputs match.
 
-### CLIP Model Tab
-- Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct CLIP backbone and labelmap.
-- Guidance text explains backbone auto-detection when a `.meta.pkl` file accompanies the classifier.
+### CLIP Class Predictor Settings Tab
+- Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct encoder type/model and labelmap.
+- Manage saved heads: **Refresh**, **Download zip** (classifier + meta + labelmap if found), or **Delete** directly from the list under <code>uploads/classifiers/</code>.
+- Uploading a local `.pkl` stores it under <code>uploads/classifiers/</code> and adds it to the saved list (legacy heads without meta are treated as CLIP).
+- CLIP heads use the CLIP backbone selector; DINOv3 heads ignore the CLIP backbone setting.
+- Optional **Auto Class guard** can require a minimum confidence gap between the top two classes before accepting a suggestion.
 
 ### Train Qwen Tab
 - Converts whatever images + YOLO boxes you loaded in the labeling tab into JSONL + image bundles automatically. The browser shuffles the set, builds an 80/20 train/val split, and streams the dataset via `/qwen/dataset/init` → `/qwen/dataset/chunk` → `/qwen/dataset/finalize`—no manual dataset paths required.
@@ -324,6 +329,8 @@ The **Agent Mining** tab mines **portable SAM3 “recipes”** for each class in
 - optional `clip_head/` (a pretrained CLIP classifier head exported from the CLIP training tab)
 
 *(Screenshot coming: Agent Mining tab overview + per-class recipe details.)*
+
+Note: **CLIP prompt prefiltering is CLIP-only**. If you select a DINOv3 head, the prompt prefilter toggle is disabled and recipe mining skips text-embedding filters.
 
 #### Recommended workflow (best results)
 1. **Train CLIP first** on the dataset (Train CLIP tab). This gives you fast Auto Class while labeling and unlocks the most reliable “recipe search” because CLIP embeddings + (optional) pretrained CLIP heads become dataset-specific.
@@ -419,6 +426,12 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
+
+## 2025-12-20 – DINOv3 Heads + CLIP Model Management
+- Added **DINOv3 encoder support** for classifier heads (image-only alternative to CLIP). DINOv3 heads require `.meta.pkl` so the encoder model is known.
+- Consolidated **CLIP model management**: refresh/download/delete saved heads and labelmaps, upload local `.pkl` heads, and activate models from a single UI panel.
+- Hardened classifier loading: missing meta now falls back to CLIP with backbone inference from embedding size (512 → ViT‑B/32, 768 → ViT‑L/14); non‑CLIP heads require meta.
+- UI status updates now surface encoder readiness/errors so you can see when a head can’t load.
 
 ## 2025-12-18 – Recipe ZIP Import Fix
 - Rebuilt Agent Mining’s “Multi-step” mode so it produces **schema‑v2 step recipes** (`mode=sam3_steps`, `schema_version=2`) instead of a legacy/implicit structure.

@@ -316,6 +316,8 @@ LABELMAP_DEFAULT_PATH = "./my_label_list.pkl"
 active_classifier_path: Optional[str] = MODEL_PATH if clf is not None else None
 active_labelmap_path: Optional[str] = LABELMAP_DEFAULT_PATH if os.path.exists(LABELMAP_DEFAULT_PATH) else None
 active_label_list: List[str] = []
+active_encoder_type: str = "clip"
+active_encoder_model: Optional[str] = None
 if active_labelmap_path:
     try:
         if active_labelmap_path.lower().endswith(".pkl"):
@@ -331,6 +333,18 @@ if active_labelmap_path:
         print(f"Failed to load labelmap {active_labelmap_path}: {exc}")
         active_labelmap_path = None
         active_label_list = []
+
+try:
+    if active_classifier_path and os.path.isfile(active_classifier_path):
+        meta_path = os.path.splitext(active_classifier_path)[0] + ".meta.pkl"
+        if os.path.exists(meta_path):
+            meta_obj = joblib.load(meta_path)
+            if isinstance(meta_obj, dict):
+                active_encoder_type = meta_obj.get("encoder_type") or "clip"
+                active_encoder_model = meta_obj.get("encoder_model") or meta_obj.get("clip_model")
+except Exception:
+    active_encoder_type = "clip"
+    active_encoder_model = None
 
 # Keep default CLIP artifacts usable with path allowlists by mirroring them into uploads/.
 # This preserves older workflows that write my_logreg_model.pkl/my_label_list.pkl at repo root.
@@ -375,11 +389,25 @@ if torch.cuda.is_available():
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to enable TF32: %s", exc)
 SUPPORTED_CLIP_MODELS = [
-    "ViT-B/32",
-    "ViT-B/16",
     "ViT-L/14",
+    "ViT-B/16",
+    "ViT-B/32",
 ]
 DEFAULT_CLIP_MODEL = SUPPORTED_CLIP_MODELS[0]
+
+def _infer_clip_model_from_embedding_dim(embedding_dim: Optional[int], *, active_name: Optional[str] = None) -> Optional[str]:
+    try:
+        emb = int(embedding_dim or 0)
+    except Exception:
+        return None
+    if emb == 768:
+        return "ViT-L/14"
+    if emb == 512:
+        active = str(active_name or "").strip()
+        if active in {"ViT-B/32", "ViT-B/16"}:
+            return active
+        return "ViT-B/32"
+    return None
 
 clip_model = None
 clip_preprocess = None
@@ -405,6 +433,16 @@ if clip_model is None or clf is None:
 _agent_clip_backbones: Dict[Tuple[str, str], Tuple[Any, Any]] = {}
 _agent_clip_locks: Dict[Tuple[str, str], threading.Lock] = {}
 _agent_clip_backbones_lock = threading.Lock()
+
+# Optional DINOv3 image encoder (frozen) for classifier heads.
+dinov3_model: Optional[Any] = None
+dinov3_processor: Optional[Any] = None
+dinov3_model_name: Optional[str] = None
+dinov3_initialized = False
+dinov3_lock = threading.Lock()
+_agent_dinov3_backbones: Dict[Tuple[str, str], Tuple[Any, Any]] = {}
+_agent_dinov3_locks: Dict[Tuple[str, str], threading.Lock] = {}
+_agent_dinov3_backbones_lock = threading.Lock()
 
 
 def _suspend_clip_backbone() -> None:
@@ -2595,6 +2633,11 @@ class Base64Payload(BaseModel):
 
 class PredictResponse(BaseModel):
     prediction: str
+    proba: Optional[float] = None
+    second_label: Optional[str] = None
+    second_proba: Optional[float] = None
+    margin: Optional[float] = None
+    error: Optional[str] = None
     uuid: Optional[str] = None
 
 
@@ -2825,6 +2868,9 @@ class Sam3VisualPrompt(BaseModel):
 class SamPointAutoResponse(BaseModel):
     prediction: Optional[str] = None
     proba: Optional[float] = None
+    second_label: Optional[str] = None
+    second_proba: Optional[float] = None
+    margin: Optional[float] = None
     bbox: List[float]
     uuid: Optional[str] = None
     error: Optional[str] = None
@@ -3050,6 +3096,8 @@ class ActiveModelRequest(BaseModel):
 
 class ActiveModelResponse(BaseModel):
     clip_model: Optional[str]
+    encoder_type: Optional[str] = None
+    encoder_model: Optional[str] = None
     classifier_path: Optional[str]
     labelmap_path: Optional[str]
     clip_ready: bool
@@ -3771,13 +3819,24 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 coco_train = sam3_meta.get("coco_train_json")
                 coco_val = sam3_meta.get("coco_val_json")
                 coco_ready = bool(coco_train and coco_val)
-            yolo_ready = bool(
-                (path / "labelmap.txt").exists()
-                and (
-                    ((path / "train" / "images").exists() and (path / "train" / "labels").exists())
-                    or ((path / "images").exists() and (path / "labels").exists())
-                )
-            )
+            labelmap_path = path / "labelmap.txt"
+            train_images = path / "train" / "images"
+            train_labels = path / "train" / "labels"
+            root_images = path / "images"
+            root_labels = path / "labels"
+            yolo_images_dir: Optional[str] = None
+            yolo_labels_dir: Optional[str] = None
+            yolo_layout: Optional[str] = None
+            if labelmap_path.exists():
+                if train_images.exists() and train_labels.exists():
+                    yolo_images_dir = str(train_images)
+                    yolo_labels_dir = str(train_labels)
+                    yolo_layout = "split"
+                elif root_images.exists() and root_labels.exists():
+                    yolo_images_dir = str(root_images)
+                    yolo_labels_dir = str(root_labels)
+                    yolo_layout = "flat"
+            yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
             qwen_meta = _load_qwen_dataset_metadata(path)
             qwen_ready = bool(
                 qwen_meta
@@ -3809,6 +3868,10 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 "coco_val_json": coco_val,
                 "format": dataset_format,
                 "yolo_ready": yolo_ready,
+                "yolo_images_dir": yolo_images_dir,
+                "yolo_labels_dir": yolo_labels_dir,
+                "yolo_labelmap_path": str(labelmap_path) if labelmap_path.exists() else None,
+                "yolo_layout": yolo_layout,
                 "qwen_ready": qwen_ready,
                 "qwen_train_count": qwen_meta.get("train_count") if qwen_meta else None,
                 "qwen_val_count": qwen_meta.get("val_count") if qwen_meta else None,
@@ -5664,6 +5727,93 @@ def _ensure_agent_clip_backbone_for_device(
         return model, preprocess, cached_lock, normalized_device
 
 
+def _format_hf_model_error(exc: Exception) -> str:
+    msg = str(exc)
+    lowered = msg.lower()
+    if any(token in lowered for token in ("401", "403", "unauthorized", "forbidden", "gated")):
+        return (
+            "Access denied. If this model is gated, run `huggingface-cli login` or set HF_TOKEN "
+            "and accept the model license on Hugging Face."
+        )
+    if "not found" in lowered or "404" in lowered:
+        return "Model not found. Check the model name and spelling."
+    if "connection" in lowered or "offline" in lowered or "timeout" in lowered:
+        return "Network error while fetching the model. Check connectivity or pre-download the weights."
+    return msg
+
+
+def _load_dinov3_backbone(
+    model_name: str,
+    target_device: str,
+    *,
+    raise_on_error: bool = False,
+) -> Tuple[Optional[Any], Optional[Any]]:
+    try:
+        from transformers import AutoImageProcessor, AutoModel
+    except Exception as exc:  # noqa: BLE001
+        msg = f"DINOv3 requires transformers: {exc}"
+        logger.warning("%s", msg)
+        if raise_on_error:
+            raise RuntimeError(msg) from exc
+        return None, None
+    try:
+        processor = AutoImageProcessor.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(model_name)
+        model.eval()
+        model.to(target_device)
+        return model, processor
+    except Exception as exc:  # noqa: BLE001
+        msg = _format_hf_model_error(exc)
+        logger.warning("Failed to load DINOv3 backbone %s on %s: %s", model_name, target_device, msg)
+        if raise_on_error:
+            raise RuntimeError(msg) from exc
+        return None, None
+
+
+def _ensure_agent_dinov3_backbone_for_device(
+    device_str: str,
+    *,
+    model_name_override: Optional[str] = None,
+) -> Tuple[Optional[Any], Optional[Any], threading.Lock, str]:
+    model_name = str(model_name_override).strip() if model_name_override is not None and str(model_name_override).strip() else None
+    if not model_name:
+        model_name = dinov3_model_name
+    if not model_name:
+        return None, None, dinov3_lock, str(device_str or device)
+    normalized_device = str(device_str or "").strip() or str(device)
+    global_device = str(device)
+    if (
+        dinov3_model is not None
+        and dinov3_processor is not None
+        and dinov3_model_name == model_name
+        and (
+            normalized_device == global_device
+            or (global_device in {"cuda", "cuda:0"} and normalized_device in {"cuda", "cuda:0"})
+        )
+    ):
+        return dinov3_model, dinov3_processor, dinov3_lock, global_device
+    key = (model_name, normalized_device)
+    with _agent_dinov3_backbones_lock:
+        cached = _agent_dinov3_backbones.get(key)
+        cached_lock = _agent_dinov3_locks.get(key)
+        if cached is not None and cached_lock is not None:
+            return cached[0], cached[1], cached_lock, normalized_device
+        if cached_lock is None:
+            cached_lock = threading.Lock()
+            _agent_dinov3_locks[key] = cached_lock
+    with cached_lock:
+        with _agent_dinov3_backbones_lock:
+            cached = _agent_dinov3_backbones.get(key)
+            if cached is not None:
+                return cached[0], cached[1], cached_lock, normalized_device
+        model, processor = _load_dinov3_backbone(model_name, normalized_device)
+        if model is None or processor is None:
+            return None, None, cached_lock, normalized_device
+        with _agent_dinov3_backbones_lock:
+            _agent_dinov3_backbones[key] = (model, processor)
+        return model, processor, cached_lock, normalized_device
+
+
 def _clip_encode_pil_batch(
     crops: Sequence[Image.Image],
     *,
@@ -5739,6 +5889,123 @@ def _clip_encode_pil_batch(
     if last_error is not None:
         logger.debug("CLIP batch encode failed (fallbacks exhausted): %s", last_error)
     return None
+
+
+def _dinov3_encode_pil_batch(
+    crops: Sequence[Image.Image],
+    *,
+    device_override: Optional[str] = None,
+    model_name_override: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    if not crops:
+        return None
+    preferred = str(device_override or "").strip() if device_override is not None else ""
+    attempt_devices: List[str] = []
+    if preferred:
+        attempt_devices.append(preferred)
+    global_device = str(device)
+    if global_device and global_device not in attempt_devices:
+        attempt_devices.append(global_device)
+    if "cpu" not in attempt_devices:
+        attempt_devices.append("cpu")
+
+    batch_size = 32
+    try:
+        raw = os.environ.get("AGENT_DINOV3_BATCH_SIZE")
+        if raw is not None and str(raw).strip():
+            batch_size = max(1, int(raw))
+    except Exception:
+        batch_size = 32
+    batch_size = max(1, min(int(batch_size), 256))
+
+    last_error: Optional[BaseException] = None
+    for dev in attempt_devices:
+        model, processor, lock, target_device = _ensure_agent_dinov3_backbone_for_device(
+            str(dev),
+            model_name_override=model_name_override,
+        )
+        if model is None or processor is None:
+            continue
+        try:
+            chunks: List[torch.Tensor] = []
+            with lock:
+                for start in range(0, len(crops), batch_size):
+                    batch = crops[start : start + batch_size]
+                    inputs = processor(images=list(batch), return_tensors="pt")
+                    inputs = {k: v.to(target_device) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        outputs = model(**inputs)
+                    feats = getattr(outputs, "pooler_output", None)
+                    if feats is None:
+                        feats = getattr(outputs, "last_hidden_state", None)
+                        if feats is None:
+                            raise RuntimeError("dinov3_missing_outputs")
+                        feats = feats[:, 0, :]
+                    chunks.append(feats.to(dtype=torch.float32, device="cpu"))
+            if not chunks:
+                continue
+            feats_all = torch.cat(chunks, dim=0)
+            feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
+            return feats_all.cpu().numpy()
+        except torch.cuda.OutOfMemoryError as exc:
+            last_error = exc
+            if torch.cuda.is_available() and str(target_device).startswith("cuda"):
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        logger.debug("DINOv3 batch encode failed (fallbacks exhausted): %s", last_error)
+    return None
+
+
+def _encode_pil_batch(
+    crops: Sequence[Image.Image],
+    *,
+    encoder_type: str,
+    encoder_model: Optional[str],
+    device_override: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    encoder_type_norm = str(encoder_type or "clip").strip().lower()
+    if encoder_type_norm == "dinov3":
+        return _dinov3_encode_pil_batch(crops, device_override=device_override, model_name_override=encoder_model)
+    return _clip_encode_pil_batch(crops, device_override=device_override, clip_model_override=encoder_model)
+
+
+def _encode_pil_batch_for_head(
+    crops: Sequence[Image.Image],
+    *,
+    head: Dict[str, Any],
+    device_override: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
+    encoder_model = head.get("encoder_model")
+    if not isinstance(encoder_model, str) or not encoder_model.strip():
+        encoder_model = head.get("clip_model")
+    return _encode_pil_batch(
+        crops,
+        encoder_type=encoder_type,
+        encoder_model=str(encoder_model) if encoder_model is not None else None,
+        device_override=device_override,
+    )
+
+
+def _encode_pil_batch_for_active(
+    crops: Sequence[Image.Image],
+    *,
+    device_override: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    return _encode_pil_batch(
+        crops,
+        encoder_type=active_encoder_type,
+        encoder_model=active_encoder_model,
+        device_override=device_override,
+    )
 
 
 def _clip_encode_text_batch(
@@ -5840,6 +6107,9 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
     - coef: np.ndarray float32 (K,D) or (1,D) for binary
     - intercept: np.ndarray float32 (K,) or (1,)
     - clip_model: str|None
+    - encoder_type: str
+    - encoder_model: str|None
+    - embedding_dim: int
     - proba_mode: 'binary' | 'softmax' | 'ovr'
     """
     try:
@@ -5865,17 +6135,26 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
 
     clip_model_used = None
+    encoder_type_used = None
+    encoder_model_used = None
+    meta_found = False
     solver_used = None
     meta_path = os.path.splitext(str(classifier_path))[0] + ".meta.pkl"
     if os.path.exists(meta_path):
         try:
             meta_obj = joblib.load(meta_path)
             if isinstance(meta_obj, dict):
+                meta_found = True
                 clip_model_used = meta_obj.get("clip_model")
+                encoder_type_used = meta_obj.get("encoder_type")
+                encoder_model_used = meta_obj.get("encoder_model")
                 solver_used = meta_obj.get("solver")
         except Exception:
             clip_model_used = None
+            encoder_type_used = None
+            encoder_model_used = None
             solver_used = None
+            meta_found = False
     if not solver_used:
         try:
             raw_solver = getattr(clf_obj, "solver", None)
@@ -5890,31 +6169,40 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
         embedding_dim = int(coef.shape[1]) if hasattr(coef, "shape") else 0
     except Exception:
         embedding_dim = 0
-    if not clip_model_used:
-        inferred: Optional[str] = None
-        if embedding_dim == 768:
-            inferred = "ViT-L/14"
-        elif embedding_dim == 512:
-            active = str(clip_model_name or "").strip() or DEFAULT_CLIP_MODEL
-            if active in {"ViT-B/32", "ViT-B/16"}:
-                inferred = active
-            else:
-                inferred = DEFAULT_CLIP_MODEL
+    if not meta_found:
+        if embedding_dim and int(embedding_dim) not in {512, 768}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_meta_required")
+        inferred = _infer_clip_model_from_embedding_dim(embedding_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
         if inferred:
             clip_model_used = inferred
     if clip_model_used:
         try:
             expected_dim = {"ViT-B/32": 512, "ViT-B/16": 512, "ViT-L/14": 768}.get(str(clip_model_used))
             if expected_dim and embedding_dim and int(expected_dim) != int(embedding_dim):
-                logger.warning(
-                    "CLIP head %s embedding dim %s mismatches clip_model=%s (expected %s); head probabilities may be unavailable.",
-                    classifier_path.name,
-                    embedding_dim,
-                    clip_model_used,
-                    expected_dim,
-                )
+                inferred = _infer_clip_model_from_embedding_dim(embedding_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
+                if inferred and inferred != clip_model_used:
+                    logger.warning(
+                        "CLIP head %s embedding dim %s mismatches clip_model=%s; using inferred %s instead.",
+                        classifier_path.name,
+                        embedding_dim,
+                        clip_model_used,
+                        inferred,
+                    )
+                    clip_model_used = inferred
+                else:
+                    logger.warning(
+                        "CLIP head %s embedding dim %s mismatches clip_model=%s (expected %s); head probabilities may be unavailable.",
+                        classifier_path.name,
+                        embedding_dim,
+                        clip_model_used,
+                        expected_dim,
+                    )
         except Exception:
             pass
+    if not isinstance(encoder_type_used, str) or not encoder_type_used.strip():
+        encoder_type_used = "clip"
+    if not isinstance(encoder_model_used, str) or not encoder_model_used.strip():
+        encoder_model_used = clip_model_used
     multi_class_used = None
     try:
         raw_multi = getattr(clf_obj, "multi_class", None)
@@ -5934,11 +6222,19 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
     else:
         proba_mode = "softmax"
 
+    bg_indices = _clip_head_background_indices(classes)
+    bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
+
     return {
         "classes": classes,
+        "background_indices": bg_indices,
+        "background_classes": bg_classes,
         "coef": coef,
         "intercept": intercept,
         "clip_model": str(clip_model_used) if clip_model_used else None,
+        "encoder_type": str(encoder_type_used),
+        "encoder_model": str(encoder_model_used) if encoder_model_used else None,
+        "embedding_dim": int(embedding_dim),
         "proba_mode": proba_mode,
     }
 
@@ -5995,6 +6291,7 @@ def _clip_head_keep_mask(
     target_index: int,
     min_prob: float,
     margin: float,
+    background_indices: Optional[Sequence[int]] = None,
 ) -> Optional[np.ndarray]:
     """Return boolean keep mask for rows in proba."""
     try:
@@ -6016,6 +6313,16 @@ def _clip_head_keep_mask(
 
     p_target = probs[:, target_index]
     keep = p_target >= min_prob_f
+
+    # Always compare against background classes if present, even when margin=0.
+    bg_indices: List[int] = []
+    if background_indices:
+        for idx in background_indices:
+            if isinstance(idx, int) and 0 <= idx < probs.shape[1] and idx != target_index:
+                bg_indices.append(idx)
+    if bg_indices:
+        p_bg = np.max(probs[:, bg_indices], axis=1)
+        keep &= p_target >= p_bg
 
     # "Margin" is optional: a value of 0 disables the margin check (i.e., do not require the target
     # class to be the argmax). When enabled, require p(target) >= p(best_other) + margin.
@@ -6059,8 +6366,14 @@ def _save_clip_head_artifacts(
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_clip_head_write_failed:{exc}") from exc
 
     classes = head.get("classes") if isinstance(head.get("classes"), list) else []
+    encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
+    encoder_model = head.get("encoder_model")
+    if not isinstance(encoder_model, str) or not encoder_model.strip():
+        encoder_model = head.get("clip_model")
     meta = {
         "clip_model": head.get("clip_model"),
+        "encoder_type": encoder_type,
+        "encoder_model": encoder_model,
         "proba_mode": head.get("proba_mode"),
         "classes": [str(c) for c in classes],
         "min_prob": float(min_prob),
@@ -6141,27 +6454,30 @@ def _load_clip_head_artifacts(
     except Exception:
         clip_model_val = None
     if not clip_model_val and coef.ndim == 2:
-        inferred: Optional[str] = None
         emb_dim = 0
         try:
             emb_dim = int(coef.shape[1])
         except Exception:
             emb_dim = 0
-        if emb_dim == 768:
-            inferred = "ViT-L/14"
-        elif emb_dim == 512:
-            active = str(clip_model_name or "").strip() or DEFAULT_CLIP_MODEL
-            if active in {"ViT-B/32", "ViT-B/16"}:
-                inferred = active
-            else:
-                inferred = DEFAULT_CLIP_MODEL
-        clip_model_val = inferred
+        clip_model_val = _infer_clip_model_from_embedding_dim(emb_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
+
+    encoder_type = meta.get("encoder_type") if isinstance(meta.get("encoder_type"), str) else "clip"
+    encoder_model = meta.get("encoder_model")
+    if not isinstance(encoder_model, str) or not encoder_model.strip():
+        encoder_model = clip_model_val
+
+    bg_indices = _clip_head_background_indices(classes)
+    bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
 
     return {
         "classes": classes,
+        "background_indices": bg_indices,
+        "background_classes": bg_classes,
         "coef": coef,
         "intercept": intercept,
         "clip_model": clip_model_val,
+        "encoder_type": encoder_type,
+        "encoder_model": encoder_model,
         "proba_mode": proba_mode,
         "min_prob": min_prob_val,
         "margin": margin_val,
@@ -6179,6 +6495,18 @@ def _normalize_class_name_for_match(name: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]+", "", s)
 
 
+def _is_background_class_name(name: Optional[str]) -> bool:
+    try:
+        label = str(name or "").strip().lower()
+    except Exception:
+        return False
+    return label.startswith("__bg_")
+
+
+def _clip_head_background_indices(classes: Sequence[str]) -> List[int]:
+    return [idx for idx, label in enumerate(classes) if _is_background_class_name(label)]
+
+
 def _find_clip_head_target_index(classes: Sequence[str], class_name: Optional[str]) -> Optional[int]:
     target = _normalize_class_name_for_match(class_name)
     if not target:
@@ -6187,6 +6515,151 @@ def _find_clip_head_target_index(classes: Sequence[str], class_name: Optional[st
         if _normalize_class_name_for_match(c) == target:
             return int(idx)
     return None
+
+
+def _clip_auto_predict_label(feats_np: np.ndarray) -> Tuple[str, Optional[float], Optional[str]]:
+    """Return (label, probability, error) for auto-classification using the active CLIP head."""
+    if clf is None:
+        return "unknown", None, "clip_unavailable"
+    classes_raw = getattr(clf, "classes_", None)
+    classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
+    proba_arr: Optional[np.ndarray] = None
+    if hasattr(clf, "predict_proba"):
+        try:
+            proba = clf.predict_proba(feats_np)
+            proba_arr = np.asarray(proba, dtype=np.float32)
+        except Exception:
+            proba_arr = None
+    if proba_arr is not None and proba_arr.ndim == 2 and proba_arr.shape[0] >= 1 and proba_arr.shape[1] == len(classes):
+        row = proba_arr[0]
+        bg_indices = _clip_head_background_indices(classes)
+        if bg_indices:
+            non_bg_indices = [idx for idx in range(len(classes)) if idx not in bg_indices]
+            if not non_bg_indices:
+                return "unknown", float(np.max(row)) if row.size else None, "clip_background"
+            best_non_bg = non_bg_indices[int(np.argmax(row[non_bg_indices]))]
+            p_non_bg = float(row[best_non_bg])
+            p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
+            if p_bg >= p_non_bg:
+                return "unknown", p_bg, "clip_background"
+            return str(classes[best_non_bg]), p_non_bg, None
+        best_idx = int(np.argmax(row))
+        return str(classes[best_idx]), float(row[best_idx]), None
+    try:
+        pred_cls = clf.predict(feats_np)[0]
+    except Exception as exc:  # noqa: BLE001
+        return "unknown", None, f"classifier_error:{exc}"
+    label = str(pred_cls)
+    if _is_background_class_name(label):
+        return "unknown", None, "clip_background"
+    return label, None, None
+
+
+def _clip_auto_predict_details(feats_np: np.ndarray) -> Dict[str, Optional[object]]:
+    if clf is None:
+        return {
+            "label": "unknown",
+            "proba": None,
+            "second_label": None,
+            "second_proba": None,
+            "margin": None,
+            "error": "clip_unavailable",
+        }
+    classes_raw = getattr(clf, "classes_", None)
+    classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
+    proba_arr: Optional[np.ndarray] = None
+    if hasattr(clf, "predict_proba"):
+        try:
+            proba = clf.predict_proba(feats_np)
+            proba_arr = np.asarray(proba, dtype=np.float32)
+        except Exception:
+            proba_arr = None
+    if proba_arr is not None and proba_arr.ndim == 2 and proba_arr.shape[0] >= 1 and proba_arr.shape[1] == len(classes):
+        row = proba_arr[0]
+        bg_indices = _clip_head_background_indices(classes)
+
+        def _best_two(indices: Sequence[int]) -> Tuple[Optional[int], Optional[float], Optional[int], Optional[float]]:
+            if not indices:
+                return None, None, None, None
+            ordered = sorted(indices, key=lambda i: float(row[i]), reverse=True)
+            best_idx = ordered[0]
+            second_idx = ordered[1] if len(ordered) > 1 else None
+            best_val = float(row[best_idx])
+            second_val = float(row[second_idx]) if second_idx is not None else None
+            return best_idx, best_val, second_idx, second_val
+
+        if bg_indices:
+            non_bg = [idx for idx in range(len(classes)) if idx not in bg_indices]
+            best_idx, best_val, second_idx, second_val = _best_two(non_bg)
+            if best_idx is None:
+                return {
+                    "label": "unknown",
+                    "proba": float(np.max(row)) if row.size else None,
+                    "second_label": None,
+                    "second_proba": None,
+                    "margin": None,
+                    "error": "clip_background",
+                }
+            p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
+            if p_bg >= best_val:
+                return {
+                    "label": "unknown",
+                    "proba": p_bg,
+                    "second_label": str(classes[best_idx]),
+                    "second_proba": best_val,
+                    "margin": float(p_bg - best_val),
+                    "error": "clip_background",
+                }
+            margin = float(best_val - second_val) if second_val is not None else None
+            return {
+                "label": str(classes[best_idx]),
+                "proba": best_val,
+                "second_label": str(classes[second_idx]) if second_idx is not None else None,
+                "second_proba": second_val,
+                "margin": margin,
+                "error": None,
+            }
+
+        best_idx, best_val, second_idx, second_val = _best_two(range(len(classes)))
+        margin = float(best_val - second_val) if second_val is not None and best_val is not None else None
+        return {
+            "label": str(classes[best_idx]) if best_idx is not None else "unknown",
+            "proba": best_val,
+            "second_label": str(classes[second_idx]) if second_idx is not None else None,
+            "second_proba": second_val,
+            "margin": margin,
+            "error": None,
+        }
+
+    try:
+        pred_cls = clf.predict(feats_np)[0]
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "label": "unknown",
+            "proba": None,
+            "second_label": None,
+            "second_proba": None,
+            "margin": None,
+            "error": f"classifier_error:{exc}",
+        }
+    label = str(pred_cls)
+    if _is_background_class_name(label):
+        return {
+            "label": "unknown",
+            "proba": None,
+            "second_label": None,
+            "second_proba": None,
+            "margin": None,
+            "error": "clip_background",
+        }
+    return {
+        "label": label,
+        "proba": None,
+        "second_label": None,
+        "second_proba": None,
+        "margin": None,
+        "error": None,
+    }
 
 
 def _score_detections_with_clip_head(
@@ -6208,14 +6681,6 @@ def _score_detections_with_clip_head(
     classes = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
     if not classes:
         return None
-    clip_model_override: Optional[str] = None
-    try:
-        raw = clip_head.get("clip_model")
-        if isinstance(raw, str) and raw.strip():
-            clip_model_override = raw.strip()
-    except Exception:
-        clip_model_override = None
-
     crops: List[Image.Image] = []
     det_refs: List[QwenDetection] = []
     for det in dets:
@@ -6233,7 +6698,7 @@ def _score_detections_with_clip_head(
     if not det_refs:
         return {}
 
-    feats = _clip_encode_pil_batch(crops, clip_model_override=clip_model_override)
+    feats = _encode_pil_batch_for_head(crops, head=clip_head)
     if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
         return None
     proba = _clip_head_predict_proba(feats, clip_head)
@@ -6410,6 +6875,7 @@ def _apply_agent_recipe_to_image(
             clip_head_margin = 0.0
     clip_head: Optional[Dict[str, Any]] = None
     clip_head_target_index: Optional[int] = None
+    clip_head_bg_indices: List[int] = []
     clip_head_missing_class = False
     if recipe_id:
         recipe_root = (AGENT_MINING_RECIPES_ROOT / str(recipe_id)).resolve()
@@ -6428,6 +6894,10 @@ def _apply_agent_recipe_to_image(
             except Exception:
                 pass
         classes_list = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
+        head_encoder_type_raw = clip_head.get("encoder_type") if isinstance(clip_head, dict) else None
+        head_encoder_type = str(head_encoder_type_raw or "clip").lower().strip()
+        prefilter_allowed = head_encoder_type == "clip"
+        clip_head_bg_indices = _clip_head_background_indices(classes_list)
         clip_head_target_index = _find_clip_head_target_index(classes_list, recipe_target_class_name)
         if clip_head_target_index is None and classes_list and recipe_target_class_name:
             clip_head_missing_class = True
@@ -6613,6 +7083,14 @@ def _apply_agent_recipe_to_image(
     if use_clip_guard and ex_mat is None:
         _add_warning("clip_missing_exemplars")
         use_clip_guard = False
+    head_encoder_type = "clip"
+    if isinstance(clip_head, dict):
+        raw_encoder = clip_head.get("encoder_type")
+        if isinstance(raw_encoder, str) and raw_encoder.strip():
+            head_encoder_type = raw_encoder.strip().lower()
+    if use_clip_guard and ex_mat is not None and head_encoder_type != "clip":
+        _add_warning("clip_guard_disabled_encoder")
+        use_clip_guard = False
 
     _, processor, _ = _ensure_sam3_text_runtime()
     try:
@@ -6656,11 +7134,8 @@ def _apply_agent_recipe_to_image(
         score = pos - max(0.0, neg_strength) * neg
         return pos, neg, score
 
-    clip_model_override: Optional[str] = None
-    if isinstance(clip_head, dict):
-        raw_clip_model = clip_head.get("clip_model")
-        if isinstance(raw_clip_model, str) and raw_clip_model.strip():
-            clip_model_override = raw_clip_model.strip()
+    classes_list = clip_head.get("classes") if isinstance(clip_head, dict) and isinstance(clip_head.get("classes"), list) else []
+    clip_head_bg_indices = _clip_head_background_indices(classes_list)
 
     def _final_clip_filter(
         dets_in: List[QwenDetection],
@@ -6690,7 +7165,13 @@ def _apply_agent_recipe_to_image(
             except Exception:
                 continue
             det_refs.append(det)
-        det_feats = _clip_encode_pil_batch(det_crops, clip_model_override=clip_model_override) if det_crops else None
+        if det_crops:
+            if clip_head_active and isinstance(clip_head, dict):
+                det_feats = _encode_pil_batch_for_head(det_crops, head=clip_head)
+            else:
+                det_feats = _clip_encode_pil_batch(det_crops)
+        else:
+            det_feats = None
         if det_feats is None or det_feats.size == 0:
             _add_warning("clip_unavailable")
             return dets_in
@@ -6720,6 +7201,7 @@ def _apply_agent_recipe_to_image(
                     target_index=t_idx,
                     min_prob=float(head_min_prob),
                     margin=float(head_margin),
+                    background_indices=clip_head_bg_indices,
                 )
                 if head_keep is not None:
                     keep_mask &= head_keep
@@ -6937,11 +7419,13 @@ def _apply_agent_recipe_to_image(
             seed_boxes_xywh.append((float(x1), float(y1), float(x2 - x1), float(y2 - y1)))
             seed_keep_refs.append(det)
         need_seed_feats = bool(seed_crops) and (use_clip_guard or clip_head_active)
-        feats = (
-            _clip_encode_pil_batch(seed_crops, clip_model_override=clip_model_override)
-            if need_seed_feats
-            else None
-        )
+        if need_seed_feats and seed_crops:
+            if clip_head_active and isinstance(clip_head, dict):
+                feats = _encode_pil_batch_for_head(seed_crops, head=clip_head)
+            else:
+                feats = _clip_encode_pil_batch(seed_crops)
+        else:
+            feats = None
         # IMPORTANT: max_visual_seeds should NOT cap how many detections we keep.
         # We keep all filtered seed detections, and use max_visual_seeds only to bound visual expansion/refinement.
         kept_seed_idx_all: List[int] = []
@@ -6975,6 +7459,7 @@ def _apply_agent_recipe_to_image(
                         target_index=t_idx,
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
+                        background_indices=clip_head_bg_indices,
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
@@ -7069,6 +7554,7 @@ def _apply_agent_recipe_to_image(
                 _add_warning("extra_clip_classifier_unavailable")
             else:
                 extra_classes = extra_head.get("classes") if isinstance(extra_head.get("classes"), list) else []
+                extra_bg_indices = _clip_head_background_indices(extra_classes)
                 extra_t_idx = _find_clip_head_target_index(extra_classes, target_name)
                 if extra_t_idx is None:
                     _add_warning("extra_clip_class_missing")
@@ -7103,16 +7589,7 @@ def _apply_agent_recipe_to_image(
                             continue
                         det_refs.append(det)
 
-                    clip_model_override: Optional[str] = None
-                    try:
-                        raw_clip_model = extra_head.get("clip_model")
-                        if isinstance(raw_clip_model, str) and raw_clip_model.strip():
-                            clip_model_override = raw_clip_model.strip()
-                    except Exception:
-                        clip_model_override = None
-                    det_feats = (
-                        _clip_encode_pil_batch(det_crops, clip_model_override=clip_model_override) if det_crops else None
-                    )
+                    det_feats = _encode_pil_batch_for_head(det_crops, head=extra_head) if det_crops else None
                     if det_feats is None or det_feats.size == 0:
                         _add_warning("extra_clip_unavailable")
                     else:
@@ -7123,6 +7600,7 @@ def _apply_agent_recipe_to_image(
                                 target_index=int(extra_t_idx),
                                 min_prob=float(extra_min),
                                 margin=float(extra_mar),
+                                background_indices=extra_bg_indices,
                             )
                             if proba is not None
                             else None
@@ -7243,11 +7721,14 @@ def _infer_sam3_greedy_recipe_on_image(
     final_clip_head_margin = (
         float(clip_head_margin) if final_clip_head_margin is None else float(final_clip_head_margin)
     )
-    clip_model_override: Optional[str] = None
+    head_encoder_type = "clip"
     if isinstance(clip_head, dict):
-        raw_clip_model = clip_head.get("clip_model")
-        if isinstance(raw_clip_model, str) and raw_clip_model.strip():
-            clip_model_override = raw_clip_model.strip()
+        raw_encoder = clip_head.get("encoder_type")
+        if isinstance(raw_encoder, str) and raw_encoder.strip():
+            head_encoder_type = raw_encoder.strip().lower()
+    if ex_mat is not None and head_encoder_type != "clip":
+        ex_mat = None
+        neg_mat = None
 
     def _clip_score(feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         pos = np.zeros((feats.shape[0],), dtype=np.float32)
@@ -7276,6 +7757,7 @@ def _infer_sam3_greedy_recipe_on_image(
             target_index=int(clip_head_target_index),
             min_prob=float(clip_head_min_prob),
             margin=float(clip_head_margin),
+            background_indices=clip_head_bg_indices,
         )
 
     seed_dets: List[QwenDetection] = []
@@ -7337,11 +7819,10 @@ def _infer_sam3_greedy_recipe_on_image(
     seed_scores_for_diverse: Optional[np.ndarray] = None
 
     if use_clip and seed_crops:
-        seed_feats = _clip_encode_pil_batch(
-            seed_crops,
-            device_override=clip_device_override,
-            clip_model_override=clip_model_override,
-        )
+        if isinstance(clip_head, dict) and clip_head_target_index is not None:
+            seed_feats = _encode_pil_batch_for_head(seed_crops, head=clip_head, device_override=clip_device_override)
+        else:
+            seed_feats = _clip_encode_pil_batch(seed_crops, device_override=clip_device_override)
         if seed_feats is not None and seed_feats.size:
             had_seed_feats = True
             keep_mask = np.ones((seed_feats.shape[0],), dtype=bool)
@@ -7376,6 +7857,7 @@ def _infer_sam3_greedy_recipe_on_image(
                         target_index=t_idx,
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
+                        background_indices=clip_head_bg_indices,
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
@@ -7463,15 +7945,13 @@ def _infer_sam3_greedy_recipe_on_image(
             except Exception:
                 continue
             det_refs.append(det)
-        feats2 = (
-            _clip_encode_pil_batch(
-                det_crops,
-                device_override=clip_device_override,
-                clip_model_override=clip_model_override,
-            )
-            if det_crops
-            else None
-        )
+        if det_crops:
+            if isinstance(clip_head, dict) and clip_head_target_index is not None:
+                feats2 = _encode_pil_batch_for_head(det_crops, head=clip_head, device_override=clip_device_override)
+            else:
+                feats2 = _clip_encode_pil_batch(det_crops, device_override=clip_device_override)
+        else:
+            feats2 = None
         if feats2 is not None and feats2.size:
             keep_mask2 = np.ones((feats2.shape[0],), dtype=bool)
             if ex_mat is not None:
@@ -7502,6 +7982,7 @@ def _infer_sam3_greedy_recipe_on_image(
                         target_index=t_idx,
                         min_prob=float(final_clip_head_min_prob),
                         margin=float(final_clip_head_margin),
+                        background_indices=clip_head_bg_indices,
                     )
                     if head_keep2 is not None:
                         keep_mask2 &= head_keep2
@@ -10062,8 +10543,16 @@ def _resolve_steps_early_stop_config(payload: "AgentMiningRequest", *, target_pr
     }
 
 
-def _resolve_steps_prompt_prefilter_config(payload: "AgentMiningRequest") -> Dict[str, Any]:
-    enabled = bool(getattr(payload, "steps_prompt_prefilter", False))
+def _resolve_steps_prompt_prefilter_config(
+    payload: "AgentMiningRequest",
+    *,
+    allow_prefilter: bool = True,
+) -> Dict[str, Any]:
+    requested = bool(getattr(payload, "steps_prompt_prefilter", False))
+    enabled = bool(requested and allow_prefilter)
+    disabled_reason = None
+    if requested and not allow_prefilter:
+        disabled_reason = "head_encoder_not_clip"
     mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower().strip()
     if mode not in {"conservative", "balanced", "aggressive"}:
         mode = "balanced"
@@ -10078,15 +10567,17 @@ def _resolve_steps_prompt_prefilter_config(payload: "AgentMiningRequest") -> Dic
         "mode": mode,
         "sample_size": int(cfg["sample_size"]),
         "keep_ratio": float(cfg["keep_ratio"]),
+        "requested": requested,
+        "disabled_reason": disabled_reason,
     }
 
 
-def _estimate_steps_speed_factor(payload: "AgentMiningRequest") -> float:
+def _estimate_steps_speed_factor(payload: "AgentMiningRequest", *, allow_prefilter: bool = True) -> float:
     early_enabled = bool(getattr(payload, "steps_early_stop", False))
     early_mode = str(getattr(payload, "steps_early_stop_mode", "balanced") or "balanced").lower().strip()
     if early_mode not in {"conservative", "balanced", "aggressive"}:
         early_mode = "balanced"
-    prefilter_enabled = bool(getattr(payload, "steps_prompt_prefilter", False))
+    prefilter_enabled = bool(getattr(payload, "steps_prompt_prefilter", False) and allow_prefilter)
     prefilter_mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower().strip()
     if prefilter_mode not in {"conservative", "balanced", "aggressive"}:
         prefilter_mode = "balanced"
@@ -14089,10 +14580,20 @@ def _safe_extract_zip(
         extracted_bytes += max(file_size, 0)
 
 
-def _link_or_copy_file(src: Path, dst: Path) -> None:
+def _link_or_copy_file(src: Path, dst: Path, *, overwrite: bool = False) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if src.resolve() == dst.resolve():
+            return
+    except Exception:
+        pass
     if dst.exists():
-        return
+        if not overwrite:
+            return
+        try:
+            dst.unlink()
+        except Exception:
+            return
     try:
         os.link(src, dst)
     except Exception:
@@ -15475,7 +15976,7 @@ class AgentMiningRequest(BaseModel):
         description="Maximum number of prompt steps to select per class when search_mode='steps'.",
     )
     steps_max_visual_seeds_per_step: int = Field(
-        5,
+        10,
         ge=0,
         le=500,
         description="Max similarity candidates expanded per step when search_mode='steps' (per-image, per-step).",
@@ -15681,7 +16182,7 @@ class AgentMiningRequest(BaseModel):
         ),
     )
     clip_head_target_precision: float = Field(
-        0.9,
+        0.75,
         ge=0.0,
         le=1.0,
         description=(
@@ -15692,13 +16193,13 @@ class AgentMiningRequest(BaseModel):
 
     # Greedy SAM3 recipe parameters.
     seed_threshold: float = Field(
-        0.05,
+        0.02,
         ge=0.0,
         le=1.0,
-        description="Text-candidate score threshold for the initial SAM3 text prompt pass.",
+        description="Base text-candidate score threshold for the initial SAM3 text prompt pass (per-step thresholds are auto-selected from candidate curves by default).",
     )
     expand_threshold: float = Field(
-        0.3,
+        0.15,
         ge=0.0,
         le=1.0,
         description="SAM3 visual expansion score threshold used during similarity-based search.",
@@ -16945,7 +17446,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         sample_images = int(len(eval_ids))
         class_count = int(len(selected_categories))
         per_image_units = int(payload.steps_max_steps_per_recipe) * (1 + int(payload.steps_max_visual_seeds_per_step))
-        speed_factor = _estimate_steps_speed_factor(payload)
+        speed_factor = _estimate_steps_speed_factor(payload, allow_prefilter=prefilter_allowed)
         base_units_per_class = float(sample_images * per_image_units) * float(speed_factor)
         global_enabled = bool(getattr(payload, "steps_optimize_global", False)) and bool(clip_head)
         global_units_per_class = 0.0
@@ -17001,7 +17502,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if base_prompts_all:
             _log(f"Base prompts (all classes): {', '.join(base_prompts_all)}")
 
-        prefilter_cfg = _resolve_steps_prompt_prefilter_config(payload)
+        prefilter_cfg = _resolve_steps_prompt_prefilter_config(payload, allow_prefilter=prefilter_allowed)
         clip_model_for_prefilter: Optional[str] = None
         if isinstance(clip_head, dict):
             raw_model = clip_head.get("clip_model")
@@ -17013,6 +17514,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 f"mode={prefilter_cfg.get('mode')} sample_size={prefilter_cfg.get('sample_size')} "
                 f"keep_ratio={float(prefilter_cfg.get('keep_ratio') or 0.0):.2f}"
             )
+        elif prefilter_cfg.get("requested") and not prefilter_allowed:
+            _log(f"CLIP prompt prefilter disabled: head encoder_type={head_encoder_type}")
 
         prepared_prompts: Dict[int, List[str]] = {}
         prompt_prefilter_stats: Dict[int, Dict[str, Any]] = {}
@@ -17074,6 +17577,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 "mode": str(prefilter_cfg.get("mode") or "balanced"),
                 "total": int(prefilter_total),
                 "kept": int(len(merged)),
+                "requested": bool(prefilter_cfg.get("requested")),
+                "disabled_reason": prefilter_cfg.get("disabled_reason"),
             }
             if prefilter_cfg.get("enabled"):
                 _log(
@@ -17464,7 +17969,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         },
                         "prompt_prefilter": {
                             **(prefilter_cfg or {}),
-                            "requested": bool(getattr(eval_payload, "steps_prompt_prefilter", False)),
+                            "requested": bool(
+                                prefilter_cfg.get("requested")
+                                if isinstance(prefilter_cfg, dict)
+                                else getattr(eval_payload, "steps_prompt_prefilter", False)
+                            ),
                             "keep_base_prompts": True,
                         },
                     }
@@ -20183,6 +20692,42 @@ def _cleanup_job(job: ClipTrainingJob) -> None:
         shutil.rmtree(job.temp_dir, ignore_errors=True)
 
 
+def _publish_clip_training_artifacts(artifacts: TrainingArtifacts) -> TrainingArtifacts:
+    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
+    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+    labelmaps_root.mkdir(parents=True, exist_ok=True)
+
+    model_src = Path(artifacts.model_path).resolve()
+    labelmap_src = Path(artifacts.labelmap_path).resolve()
+    meta_src = Path(artifacts.meta_path).resolve()
+
+    model_dst = classifiers_root / model_src.name
+    labelmap_dst = labelmaps_root / labelmap_src.name
+    meta_dst = classifiers_root / meta_src.name
+
+    try:
+        if model_src.exists():
+            _link_or_copy_file(model_src, model_dst, overwrite=True)
+            artifacts.model_path = str(model_dst)
+    except Exception as exc:
+        logger.warning("Failed to publish CLIP classifier %s: %s", model_src, exc)
+    try:
+        if meta_src.exists():
+            _link_or_copy_file(meta_src, meta_dst, overwrite=True)
+            artifacts.meta_path = str(meta_dst)
+    except Exception as exc:
+        logger.warning("Failed to publish CLIP meta %s: %s", meta_src, exc)
+    try:
+        if labelmap_src.exists():
+            _link_or_copy_file(labelmap_src, labelmap_dst, overwrite=True)
+            artifacts.labelmap_path = str(labelmap_dst)
+    except Exception as exc:
+        logger.warning("Failed to publish CLIP labelmap %s: %s", labelmap_src, exc)
+
+    return artifacts
+
+
 def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = False) -> List[str]:
     if path is None:
         return []
@@ -20221,14 +20766,28 @@ def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = Fals
 
 
 def _current_active_payload() -> Dict[str, Any]:
+    encoder_ready = _active_encoder_ready()
+    encoder_error = clip_last_error
     return {
         "clip_model": clip_model_name,
         "classifier_path": active_classifier_path,
         "labelmap_path": active_labelmap_path,
-        "clip_ready": bool(clip_initialized and clf is not None and clip_model is not None),
+        "clip_ready": encoder_ready,
         "clip_error": clip_last_error,
         "labelmap_entries": list(active_label_list),
+        "encoder_type": active_encoder_type,
+        "encoder_model": active_encoder_model,
+        "encoder_ready": encoder_ready,
+        "encoder_error": encoder_error,
     }
+
+
+def _active_encoder_ready() -> bool:
+    if clf is None:
+        return False
+    if str(active_encoder_type or "").strip().lower() == "dinov3":
+        return bool(dinov3_initialized and dinov3_model is not None and dinov3_processor is not None)
+    return bool(clip_initialized and clip_model is not None and clip_preprocess is not None)
 
 def mask_to_bounding_box(mask: np.ndarray) -> tuple[int,int,int,int]:
     rows = np.any(mask, axis=1)
@@ -20396,17 +20955,23 @@ def yolo_to_corners(box: List[float], w: int, h: int) -> Tuple[int, int, int, in
 @app.post("/predict_base64", response_model=PredictResponse)
 def predict_base64(payload: Base64Payload):
     # If CLIP/logreg not loaded, return error message in "prediction"
-    if not clip_initialized:
-        return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None) # messy ... returning the error message int as str. Crap logic needs cleanup
+    if not _active_encoder_ready():
+        return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable") # messy ... returning the error message int as str. Crap logic needs cleanup
 
     pil_img, _ = _decode_image_base64(payload.image_base64)
-    inp = clip_preprocess(pil_img).unsqueeze(0).to(device)
-    with torch.no_grad():
-        feats = clip_model.encode_image(inp)
-    feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-    pred_cls = clf.predict(feats_np)[0]
-    return PredictResponse(prediction=pred_cls, uuid=payload.uuid)
+    feats_np = _encode_pil_batch_for_active([pil_img])
+    if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
+        return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable")
+    details = _clip_auto_predict_details(feats_np)
+    return PredictResponse(
+        prediction=str(details.get("label") or "unknown"),
+        proba=details.get("proba"),
+        second_label=details.get("second_label"),
+        second_proba=details.get("second_proba"),
+        margin=details.get("margin"),
+        error=details.get("error"),
+        uuid=payload.uuid,
+    )
 
 
 @app.get("/clip/backbones")
@@ -20420,6 +20985,7 @@ def list_clip_backbones():
 def _list_clip_classifiers() -> List[Dict[str, Any]]:
     """List classifier heads available for CLIP filtering (typically trained via the CLIP training tab)."""
     root = (UPLOAD_ROOT / "classifiers").resolve()
+    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
     classifiers: List[Dict[str, Any]] = []
     if not root.exists():
         return classifiers
@@ -20446,6 +21012,8 @@ def _list_clip_classifiers() -> List[Dict[str, Any]]:
                 meta_obj = joblib.load(meta_path)
                 if isinstance(meta_obj, dict):
                     entry["clip_model"] = meta_obj.get("clip_model")
+                    entry["encoder_type"] = meta_obj.get("encoder_type") or "clip"
+                    entry["encoder_model"] = meta_obj.get("encoder_model") or entry.get("clip_model")
                     entry["solver"] = meta_obj.get("solver")
                     entry["embedding_dim"] = meta_obj.get("embedding_dim")
                     entry["n_samples_train"] = meta_obj.get("n_samples_train")
@@ -20464,11 +21032,25 @@ def _list_clip_classifiers() -> List[Dict[str, Any]]:
                 entry["embedding_dim"] = int(coef.shape[1])
         except Exception as exc:  # noqa: BLE001
             entry["load_error"] = str(exc)
+        if "encoder_type" not in entry:
+            entry["encoder_type"] = "clip"
+        if "encoder_model" not in entry:
+            entry["encoder_model"] = entry.get("clip_model")
 
         try:
             entry["modified_at"] = path.stat().st_mtime
         except Exception:
             entry["modified_at"] = None
+        try:
+            stem = path.stem
+            for ext in LABELMAP_ALLOWED_EXTS:
+                candidate = (labelmaps_root / f"{stem}{ext}").resolve()
+                if candidate.exists() and _path_is_within_root(candidate, labelmaps_root):
+                    entry["labelmap_guess"] = str(candidate)
+                    entry["labelmap_guess_rel"] = str(candidate.relative_to(labelmaps_root))
+                    break
+        except Exception:
+            pass
         classifiers.append(entry)
 
     classifiers.sort(key=lambda c: (c.get("modified_at") or 0), reverse=True)
@@ -20478,6 +21060,182 @@ def _list_clip_classifiers() -> List[Dict[str, Any]]:
 @app.get("/clip/classifiers")
 def list_clip_classifiers():
     return _list_clip_classifiers()
+
+
+def _resolve_clip_labelmap_path(path_str: Optional[str], *, root_hint: Optional[str] = None) -> Optional[Path]:
+    if not path_str:
+        return None
+    raw = str(path_str).strip()
+    if not raw:
+        return None
+    roots: List[Path] = []
+    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
+    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
+    if root_hint == "classifiers":
+        roots = [classifiers_root]
+    elif root_hint == "labelmaps":
+        roots = [labelmaps_root]
+    else:
+        roots = [labelmaps_root, classifiers_root]
+    for root in roots:
+        try:
+            candidate = (root / raw).resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root(candidate, root):
+            continue
+        if candidate.suffix.lower() not in LABELMAP_ALLOWED_EXTS:
+            continue
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _find_labelmap_for_classifier(classifier_path: Path) -> Optional[Path]:
+    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    if meta_path.exists():
+        try:
+            meta_obj = joblib.load(meta_path)
+            if isinstance(meta_obj, dict):
+                labelmap_hint = meta_obj.get("labelmap_filename") or meta_obj.get("labelmap_path")
+                resolved = _resolve_clip_labelmap_path(labelmap_hint, root_hint="labelmaps")
+                if resolved is not None:
+                    return resolved
+        except Exception:
+            pass
+    stem = classifier_path.stem
+    roots = [
+        (UPLOAD_ROOT / "labelmaps").resolve(),
+        (UPLOAD_ROOT / "classifiers").resolve(),
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for ext in LABELMAP_ALLOWED_EXTS:
+            candidate = (root / f"{stem}{ext}").resolve()
+            if candidate.exists() and candidate.is_file() and _path_is_within_root(candidate, root):
+                return candidate
+    return None
+
+
+def _list_clip_labelmaps() -> List[Dict[str, Any]]:
+    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
+    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
+    entries: List[Dict[str, Any]] = []
+    roots = [("labelmaps", labelmaps_root), ("classifiers", classifiers_root)]
+    for root_name, root in roots:
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in LABELMAP_ALLOWED_EXTS:
+                continue
+            if path.name.endswith(".meta.pkl"):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if path.suffix.lower() == ".pkl" and root_name == "classifiers" and stat.st_size > 5 * 1024 * 1024:
+                continue
+            try:
+                classes = _load_labelmap_file(path)
+            except Exception:
+                classes = []
+            if not classes:
+                continue
+            entries.append(
+                {
+                    "filename": path.name,
+                    "path": str(path.resolve()),
+                    "rel_path": str(path.relative_to(root)),
+                    "root": root_name,
+                    "n_classes": len(classes),
+                    "modified_at": stat.st_mtime,
+                }
+            )
+    entries.sort(key=lambda item: (item.get("modified_at") or 0), reverse=True)
+    return entries
+
+
+@app.get("/clip/labelmaps")
+def list_clip_labelmaps():
+    return _list_clip_labelmaps()
+
+
+@app.get("/clip/classifiers/download")
+def download_clip_classifier(rel_path: str = Query(...)):
+    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    if classifier_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    stream = classifier_path.open("rb")
+    headers = {"Content-Disposition": f'attachment; filename="{classifier_path.name}"'}
+    return StreamingResponse(stream, media_type="application/octet-stream", headers=headers)
+
+
+@app.get("/clip/classifiers/download_zip")
+def download_clip_classifier_zip(rel_path: str = Query(...)):
+    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    if classifier_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    buffer = io.BytesIO()
+    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    labelmap_path = _find_labelmap_for_classifier(classifier_path)
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(classifier_path, arcname=classifier_path.name)
+        if meta_path.exists():
+            zf.write(meta_path, arcname=meta_path.name)
+        if labelmap_path is not None:
+            zf.write(labelmap_path, arcname=labelmap_path.name)
+    buffer.seek(0)
+    filename = f"{classifier_path.stem}_clip_head.zip"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+@app.delete("/clip/classifiers")
+def delete_clip_classifier(rel_path: str = Query(...)):
+    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    if classifier_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    try:
+        classifier_path.unlink()
+    except FileNotFoundError:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    try:
+        if meta_path.exists():
+            meta_path.unlink()
+    except Exception:
+        pass
+    return {"status": "deleted", "rel_path": rel_path}
+
+
+@app.get("/clip/labelmaps/download")
+def download_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query(None)):
+    labelmap_path = _resolve_clip_labelmap_path(rel_path, root_hint=root)
+    if labelmap_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
+    stream = labelmap_path.open("rb")
+    headers = {"Content-Disposition": f'attachment; filename="{labelmap_path.name}"'}
+    return StreamingResponse(stream, media_type="application/octet-stream", headers=headers)
+
+
+@app.delete("/clip/labelmaps")
+def delete_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query(None)):
+    labelmap_path = _resolve_clip_labelmap_path(rel_path, root_hint=root)
+    if labelmap_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
+    try:
+        labelmap_path.unlink()
+    except FileNotFoundError:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    return {"status": "deleted", "rel_path": rel_path}
 
 
 @app.post("/fs/upload_classifier")
@@ -20517,7 +21275,8 @@ def _validate_job_exists(job_id: str) -> ClipTrainingJob:
 
 
 def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir: str, labelmap_path: Optional[str],
-                           clip_name: str, output_dir: str, model_filename: str, labelmap_filename: str,
+                           clip_name: str, encoder_type: str, encoder_model: Optional[str],
+                           output_dir: str, labelmap_dir: str, model_filename: str, labelmap_filename: str,
                            test_size: float, random_seed: int, batch_size: int, max_iter: int,
                            min_per_class: int, class_weight: str, C: float, device_override: Optional[str],
                            solver: str, reuse_embeddings: bool, hard_example_mining: bool,
@@ -20547,8 +21306,10 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 images_path=images_dir,
                 labels_path=labels_dir,
                 model_output=os.path.join(output_dir, model_filename),
-                labelmap_output=os.path.join(output_dir, labelmap_filename),
+                labelmap_output=os.path.join(labelmap_dir, labelmap_filename),
                 clip_model=clip_name,
+                encoder_type=encoder_type,
+                encoder_model=encoder_model,
                 input_labelmap=labelmap_path,
                 test_size=test_size,
                 random_seed=random_seed,
@@ -20570,6 +21331,7 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 progress_cb=progress_cb,
                 should_cancel=cancel_event.is_set,
             )
+            artifacts = _publish_clip_training_artifacts(artifacts)
             payload = _artifacts_to_payload(artifacts)
             with TRAINING_JOBS_LOCK:
                 _job_update(job, status="succeeded", progress=1.0, message="Training completed.", artifacts=payload)
@@ -20707,6 +21469,8 @@ async def start_clip_training(
     labels: Optional[List[UploadFile]] = File(None),
     labelmap: Optional[UploadFile] = File(None),
     clip_model_name: str = Form(DEFAULT_CLIP_MODEL),
+    encoder_type: str = Form("clip"),
+    encoder_model: Optional[str] = Form(None),
     output_dir: str = Form("."),
     model_filename: str = Form("my_logreg_model.pkl"),
     labelmap_filename: str = Form("my_label_list.pkl"),
@@ -20736,6 +21500,19 @@ async def start_clip_training(
     labels_path_native = _normalise_optional_path(labels_path_native)
     labelmap_path_native = _normalise_optional_path(labelmap_path_native)
 
+    encoder_type_norm = (encoder_type or "clip").strip().lower()
+    if encoder_type_norm not in {"clip", "dinov3"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported")
+    encoder_model_name = (encoder_model or "").strip()
+    if encoder_type_norm == "clip":
+        if encoder_model_name:
+            clip_model_name = encoder_model_name
+        if clip_model_name not in SUPPORTED_CLIP_MODELS:
+            SUPPORTED_CLIP_MODELS.append(clip_model_name)
+    else:
+        if not encoder_model_name:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="encoder_model_required")
+
     solver_name = (solver or "saga").strip().lower()
     if solver_name not in {"saga", "sag", "lbfgs", "liblinear", "newton-cg"}:
         solver_name = "saga"
@@ -20755,10 +21532,10 @@ async def start_clip_training(
         if not labels:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labels_required")
 
-    if clip_model_name not in SUPPORTED_CLIP_MODELS:
-        SUPPORTED_CLIP_MODELS.append(clip_model_name)
-
-    output_dir_abs = _ensure_directory(output_dir)
+    classifiers_dir = _ensure_directory(str((UPLOAD_ROOT / "classifiers").resolve()))
+    labelmaps_dir = _ensure_directory(str((UPLOAD_ROOT / "labelmaps").resolve()))
+    if output_dir and output_dir not in {".", classifiers_dir}:
+        logger.info("Ignoring CLIP output_dir=%s; saving under %s", output_dir, classifiers_dir)
 
     temp_root: Optional[str] = None
     images_dir: Optional[str] = None
@@ -20815,7 +21592,13 @@ async def start_clip_training(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_paths_unresolved")
     # Fail fast on obviously invalid staged datasets.
     _validate_clip_dataset({"images_dir": images_dir, "labels_dir": labels_dir, "labelmap_path": labelmap_path})
-    logger.info("Starting training job %s (clip=%s, native_paths=%s)", job_id[:8], clip_model_name, use_native_paths)
+    logger.info(
+        "Starting training job %s (encoder=%s, model=%s, native_paths=%s)",
+        job_id[:8],
+        encoder_type_norm,
+        clip_model_name,
+        use_native_paths,
+    )
     if staged_temp_dir:
         temp_root = os.path.abspath(staged_temp_dir)
     job = ClipTrainingJob(job_id=job_id, temp_dir=temp_root, images_dir=images_dir, labels_dir=labels_dir, labelmap_path=labelmap_path)
@@ -20837,6 +21620,8 @@ async def start_clip_training(
     convergence_tol_f = _coerce_float(convergence_tol, 1e-4, minimum=1e-8)
     bg_class_count_i = _coerce_int(bg_class_count, 2, minimum=1)
     bg_class_count_i = max(1, min(10, bg_class_count_i))
+    model_filename = Path(model_filename).name or "my_logreg_model.pkl"
+    labelmap_filename = Path(labelmap_filename).name or "my_label_list.pkl"
 
     extras = [solver_name]
     if reuse_embeddings_flag:
@@ -20856,7 +21641,10 @@ async def start_clip_training(
         labels_dir=labels_dir,
         labelmap_path=labelmap_path,
         clip_name=clip_model_name,
-        output_dir=output_dir_abs,
+        encoder_type=encoder_type_norm,
+        encoder_model=encoder_model_name or None,
+        output_dir=classifiers_dir,
+        labelmap_dir=labelmaps_dir,
         model_filename=model_filename,
         labelmap_filename=labelmap_filename,
         test_size=test_size_f,
@@ -21502,11 +22290,13 @@ def get_active_model():
 def set_active_model(payload: ActiveModelRequest):
     global clf, clip_model, clip_preprocess, clip_model_name, clip_initialized
     global active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
+    global active_encoder_type, active_encoder_model
+    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized
 
     classifier_path = _normalise_optional_path(payload.classifier_path) or active_classifier_path
     labelmap_path = _normalise_optional_path(payload.labelmap_path)
     labelmap_provided = "labelmap_path" in payload.__fields_set__
-    clip_name = _normalise_optional_path(payload.clip_model) or clip_model_name or DEFAULT_CLIP_MODEL
+    requested_clip_model = _normalise_optional_path(payload.clip_model)
 
     if not classifier_path:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_required")
@@ -21525,29 +22315,25 @@ def set_active_model(payload: ActiveModelRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"classifier_load_failed:{exc}") from exc
 
     meta_clip_model = None
+    meta_encoder_type = "clip"
+    meta_encoder_model = None
+    meta_found = False
     meta_path = os.path.splitext(classifier_path_abs)[0] + ".meta.pkl"
     if os.path.exists(meta_path):
         try:
             meta_obj = joblib.load(meta_path)
             if isinstance(meta_obj, dict):
+                meta_found = True
                 meta_clip_model = meta_obj.get("clip_model")
+                meta_encoder_type = meta_obj.get("encoder_type") or "clip"
+                meta_encoder_model = meta_obj.get("encoder_model") or meta_clip_model
         except Exception:
             meta_clip_model = None
-    if meta_clip_model and not payload.clip_model:
-        clip_name = str(meta_clip_model)
-
-    if clip_name not in SUPPORTED_CLIP_MODELS:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_model_not_allowed")
-
-    need_new_clip = clip_model is None or clip_model_name != clip_name
-    if need_new_clip:
-        try:
-            new_clip_model, new_preprocess = clip.load(clip_name, device=device)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"clip_load_failed:{exc}") from exc
-    else:
-        new_clip_model = clip_model
-        new_preprocess = clip_preprocess
+            meta_encoder_type = "clip"
+            meta_encoder_model = None
+            meta_found = False
+    encoder_type_norm = str(meta_encoder_type or "clip").strip().lower()
+    encoder_model_norm = str(meta_encoder_model or "").strip() or (str(meta_clip_model).strip() if meta_clip_model else "")
 
     embed_dim = None
     try:
@@ -21556,43 +22342,110 @@ def set_active_model(payload: ActiveModelRequest):
             embed_dim = coef.shape[1]
     except Exception:
         embed_dim = None
+    new_clip_model = None
+    new_preprocess = None
+    new_dinov3_model = None
+    new_dinov3_processor = None
+    encoder_model_for_active = None
 
-    clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
-    if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dimension_mismatch:{embed_dim}!={clip_dim}")
+    if not meta_found:
+        if embed_dim is not None and int(embed_dim) not in {512, 768}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_meta_required")
+        if encoder_type_norm != "clip":
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_meta_required")
+
+    if encoder_type_norm == "clip":
+        clip_name = requested_clip_model or str(meta_clip_model or "").strip() or clip_model_name or DEFAULT_CLIP_MODEL
+        inferred = _infer_clip_model_from_embedding_dim(embed_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
+        if inferred and inferred != clip_name and not requested_clip_model:
+            clip_name = inferred
+        if clip_name not in SUPPORTED_CLIP_MODELS:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_model_not_allowed")
+        need_new_clip = clip_model is None or clip_model_name != clip_name
+        if need_new_clip:
+            try:
+                new_clip_model, new_preprocess = clip.load(clip_name, device=device)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"clip_load_failed:{exc}") from exc
+        else:
+            new_clip_model = clip_model
+            new_preprocess = clip_preprocess
+        clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
+        if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dimension_mismatch:{embed_dim}!={clip_dim}")
+        encoder_model_for_active = clip_name
+    elif encoder_type_norm == "dinov3":
+        if not encoder_model_norm:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="encoder_model_required")
+        try:
+            new_dinov3_model, new_dinov3_processor = _load_dinov3_backbone(
+                encoder_model_norm,
+                device,
+                raise_on_error=True,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dinov3_load_failed:{exc}") from exc
+        dino_dim = None
+        try:
+            cfg = getattr(new_dinov3_model, "config", None)
+            dino_dim = getattr(cfg, "hidden_size", None) or getattr(cfg, "embed_dim", None)
+        except Exception:
+            dino_dim = None
+        if embed_dim is not None and dino_dim is not None and int(embed_dim) != int(dino_dim):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dimension_mismatch:{embed_dim}!={dino_dim}")
+        encoder_model_for_active = encoder_model_norm
+    else:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported")
 
     labelmap_path_abs = None
     labelmap_entries: List[str] = []
     if labelmap_path is not None:
         labelmap_path_abs = os.path.abspath(labelmap_path)
-        allowed_label_root = (UPLOAD_ROOT / "labelmaps").resolve()
-        if not str(Path(labelmap_path_abs).resolve()).startswith(str(allowed_label_root)):
+        allowed_label_roots = [
+            (UPLOAD_ROOT / "labelmaps").resolve(),
+            (UPLOAD_ROOT / "classifiers").resolve(),
+        ]
+        if not any(str(Path(labelmap_path_abs).resolve()).startswith(str(root)) for root in allowed_label_roots):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_not_allowed")
         _validate_upload_extension(labelmap_path_abs, LABELMAP_ALLOWED_EXTS, "labelmap_extension_not_allowed")
         labelmap_entries = _load_labelmap_file(labelmap_path_abs, strict=True)
     elif not labelmap_provided and active_labelmap_path:
         labelmap_path_abs = active_labelmap_path
         labelmap_entries = list(active_label_list)
-    try:
-        clf_classes = int(getattr(new_clf, "coef_", None).shape[0]) if getattr(new_clf, "coef_", None) is not None else None
-    except Exception:
-        clf_classes = None
+    classes_raw = getattr(new_clf, "classes_", None)
+    classes_list = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
+    clf_classes = len(classes_list) if classes_list else None
     if clf_classes is not None:
         if not labelmap_entries:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_required_for_classifier")
-        if clf_classes != len(labelmap_entries):
+        bg_indices = _clip_head_background_indices(classes_list)
+        non_bg_classes = [c for idx, c in enumerate(classes_list) if idx not in bg_indices]
+        label_norm = {_normalize_class_name_for_match(n) for n in labelmap_entries if n}
+        clf_norm = {_normalize_class_name_for_match(n) for n in non_bg_classes if n}
+        if label_norm != clf_norm:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_classifier_class_mismatch")
 
     with clip_lock:
         clf = new_clf
-        clip_model = new_clip_model
-        clip_preprocess = new_preprocess
-        clip_model_name = clip_name
-        clip_initialized = True
+        if encoder_type_norm == "clip":
+            clip_model = new_clip_model
+            clip_preprocess = new_preprocess
+            clip_model_name = encoder_model_for_active
+            clip_initialized = True
+        else:
+            clip_initialized = bool(clip_model is not None and clip_preprocess is not None)
         active_classifier_path = classifier_path_abs
         active_labelmap_path = labelmap_path_abs
         active_label_list = labelmap_entries
+        active_encoder_type = encoder_type_norm
+        active_encoder_model = encoder_model_for_active
         clip_last_error = None
+    if encoder_type_norm == "dinov3":
+        with dinov3_lock:
+            dinov3_model = new_dinov3_model
+            dinov3_processor = new_dinov3_processor
+            dinov3_model_name = encoder_model_for_active
+            dinov3_initialized = bool(dinov3_model is not None and dinov3_processor is not None)
 
     return _current_active_payload()
 
@@ -21864,7 +22717,7 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_text_requires_sam3")
-    if not clip_initialized or clf is None or clip_model is None or clip_preprocess is None:
+    if not _active_encoder_ready():
         return Sam3TextPromptAutoResponse(
             detections=[],
             warnings=["clip_unavailable"],
@@ -21919,26 +22772,39 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
             continue
         subarr = np_img[ti:bi, li:ri, :]
         final_pil = Image.fromarray(subarr)
-        inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
-        with torch.no_grad():
-            feats = clip_model.encode_image(inp)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-        try:
-            pred_cls = clf.predict(feats_np)[0]
-            prediction = str(pred_cls)
-        except Exception as exc:  # noqa: BLE001
-            prediction = "unknown"
-            warnings.append(f"classifier_error:{exc}")
+        feats_np = _encode_pil_batch_for_active([final_pil])
+        if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
+            responses.append(
+                SamPointAutoResponse(
+                    prediction="unknown",
+                    bbox=det.bbox,
+                    uuid=str(uuid.uuid4()),
+                    error="clip_unavailable",
+                    image_token=token,
+                    score=det.score,
+                    mask=mask_payload,
+                    simplify_epsilon=getattr(det, "simplify_epsilon", None),
+                )
+            )
+            continue
+        details = _clip_auto_predict_details(feats_np)
+        err = details.get("error")
+        if isinstance(err, str) and err.startswith("classifier_error") and err not in warnings:
+            warnings.append(err)
         responses.append(
             SamPointAutoResponse(
-                prediction=prediction,
+                prediction=str(details.get("label") or "unknown"),
+                proba=details.get("proba"),
+                second_label=details.get("second_label"),
+                second_proba=details.get("second_proba"),
+                margin=details.get("margin"),
                 bbox=det.bbox,
                 uuid=str(uuid.uuid4()),
                 image_token=token,
                 score=det.score,
                 mask=mask_payload,
                 simplify_epsilon=getattr(det, "simplify_epsilon", None),
+                error=err,
             )
         )
     return Sam3TextPromptAutoResponse(detections=responses, warnings=warnings, image_token=token)
@@ -22031,7 +22897,7 @@ def sam_point(prompt: PointPrompt):
 
 @app.post("/sam_bbox_auto", response_model=SamPointAutoResponse)
 def sam_bbox_auto(prompt: BboxPrompt):
-    if not clip_initialized:
+    if not _active_encoder_ready():
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
 
     pil_img, np_img, token = resolve_image_payload(
@@ -22081,25 +22947,28 @@ def sam_bbox_auto(prompt: BboxPrompt):
         )
     subarr = np_img[gy_min_i:gy_max_i, gx_min_i:gx_max_i, :]
     final_pil = Image.fromarray(subarr)
-    inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
-    with torch.no_grad():
-        feats = clip_model.encode_image(inp)
-    feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-    pred_cls = clf.predict(feats_np)[0]
+    feats_np = _encode_pil_batch_for_active([final_pil])
+    if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
+        return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="clip_unavailable", image_token=token)
+    details = _clip_auto_predict_details(feats_np)
     return SamPointAutoResponse(
-        prediction=str(pred_cls),
+        prediction=str(details.get("label") or "unknown"),
+        proba=details.get("proba"),
+        second_label=details.get("second_label"),
+        second_proba=details.get("second_proba"),
+        margin=details.get("margin"),
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
         mask=encode_binary_mask(mask_arr),
         simplify_epsilon=None,
+        error=details.get("error"),
     )
 
 
 @app.post("/sam_point_auto", response_model=SamPointAutoResponse)
 def sam_point_auto(prompt: PointPrompt):
-    if not clip_initialized:
+    if not _active_encoder_ready():
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
 
     pil_img, np_img, token = resolve_image_payload(
@@ -22140,19 +23009,30 @@ def sam_point_auto(prompt: PointPrompt):
         )
     subarr = np_img[ti:bi, li:ri, :]
     final_pil = Image.fromarray(subarr)
-    inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
-    with torch.no_grad():
-        feats = clip_model.encode_image(inp)
-    feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-    pred_cls = clf.predict(feats_np)[0]
+    feats_np = _encode_pil_batch_for_active([final_pil])
+    if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
+        return SamPointAutoResponse(
+            prediction="unknown",
+            bbox=yolo_box,
+            uuid=prompt.uuid,
+            error="clip_unavailable",
+            image_token=token,
+            mask=encode_binary_mask(mask_arr),
+            simplify_epsilon=None,
+        )
+    details = _clip_auto_predict_details(feats_np)
     return SamPointAutoResponse(
-        prediction=str(pred_cls),
+        prediction=str(details.get("label") or "unknown"),
+        proba=details.get("proba"),
+        second_label=details.get("second_label"),
+        second_proba=details.get("second_proba"),
+        margin=details.get("margin"),
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
         mask=encode_binary_mask(mask_arr),
         simplify_epsilon=None,
+        error=details.get("error"),
     )
 
 
@@ -22197,7 +23077,7 @@ def sam_point_multi(prompt: MultiPointPrompt):
 
 @app.post("/sam_point_multi_auto", response_model=SamPointAutoResponse)
 def sam_point_multi_auto(prompt: MultiPointPrompt):
-    if not clip_initialized:
+    if not _active_encoder_ready():
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
 
     positive = prompt.positive_points or []
@@ -22235,19 +23115,22 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
         return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="empty_mask", image_token=token)
     subarr = np_img[ti:bi, li:ri, :]
     final_pil = Image.fromarray(subarr)
-    inp = clip_preprocess(final_pil).unsqueeze(0).to(device)
-    with torch.no_grad():
-        feats = clip_model.encode_image(inp)
-    feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats_np = feats.squeeze(0).cpu().numpy().reshape(1, -1)
-    pred_cls = clf.predict(feats_np)[0]
+    feats_np = _encode_pil_batch_for_active([final_pil])
+    if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
+        return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="clip_unavailable", image_token=token)
+    details = _clip_auto_predict_details(feats_np)
     return SamPointAutoResponse(
-        prediction=str(pred_cls),
+        prediction=str(details.get("label") or "unknown"),
+        proba=details.get("proba"),
+        second_label=details.get("second_label"),
+        second_proba=details.get("second_proba"),
+        margin=details.get("margin"),
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
         mask=encode_binary_mask(mask_arr),
         simplify_epsilon=None,
+        error=details.get("error"),
     )
 
 

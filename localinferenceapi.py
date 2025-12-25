@@ -6102,7 +6102,7 @@ def _resolve_agent_clip_classifier_path(path_str: Optional[str]) -> Optional[Pat
 
 def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str, Any]]:
     """
-    Load a scikit-learn LogisticRegression head and return a portable dict containing:
+    Load a classifier head and return a portable dict containing:
     - classes: list[str]
     - coef: np.ndarray float32 (K,D) or (1,D) for binary
     - intercept: np.ndarray float32 (K,) or (1,)
@@ -6116,23 +6116,6 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
         clf_obj = joblib.load(str(classifier_path))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_clip_classifier_load_failed:{exc}") from exc
-    classes_raw = getattr(clf_obj, "classes_", None)
-    coef_raw = getattr(clf_obj, "coef_", None)
-    intercept_raw = getattr(clf_obj, "intercept_", None)
-    if classes_raw is None or coef_raw is None or intercept_raw is None:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid")
-    try:
-        classes = [str(c) for c in list(classes_raw)]
-        coef = np.asarray(coef_raw, dtype=np.float32)
-        intercept = np.asarray(intercept_raw, dtype=np.float32).reshape(-1)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_clip_classifier_invalid:{exc}") from exc
-    if coef.ndim != 2 or intercept.ndim != 1:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
-    if coef.shape[0] != intercept.shape[0]:
-        # sklearn binary case often stores coef as (1,D) but classes has length 2; intercept is (1,).
-        if not (coef.shape[0] == 1 and intercept.shape[0] == 1 and len(classes) == 2):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
 
     clip_model_used = None
     encoder_type_used = None
@@ -6162,6 +6145,76 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
                 solver_used = str(raw_solver).strip()
         except Exception:
             solver_used = None
+
+    if isinstance(clf_obj, dict) and str(clf_obj.get("classifier_type") or clf_obj.get("head_type") or "").lower() == "mlp":
+        classes = [str(c) for c in list(clf_obj.get("classes") or [])]
+        layers_raw = clf_obj.get("layers")
+        if not classes or not isinstance(layers_raw, list) or not layers_raw:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid")
+        if not meta_found:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_meta_required")
+        layers: List[Dict[str, Any]] = []
+        embedding_dim = int(clf_obj.get("embedding_dim") or 0)
+        total_layers = len(layers_raw)
+        for idx, layer in enumerate(layers_raw):
+            try:
+                weight = np.asarray(layer.get("weight"), dtype=np.float32)
+                bias = np.asarray(layer.get("bias"), dtype=np.float32).reshape(-1)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_clip_classifier_invalid:{exc}") from exc
+            if weight.ndim != 2 or bias.ndim != 1 or weight.shape[0] != bias.shape[0]:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
+            if embedding_dim <= 0:
+                embedding_dim = int(weight.shape[1])
+            activation = str(layer.get("activation") or "").strip().lower()
+            if not activation:
+                activation = "linear" if idx == total_layers - 1 else "relu"
+            if activation not in {"relu", "linear", "none", "identity"}:
+                activation = "relu" if idx < total_layers - 1 else "linear"
+            layers.append({
+                "weight": weight,
+                "bias": bias,
+                "activation": activation,
+            })
+        if embedding_dim <= 0:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
+        bg_indices = _clip_head_background_indices(classes)
+        bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
+        if not isinstance(encoder_type_used, str) or not encoder_type_used.strip():
+            encoder_type_used = "clip"
+        if not isinstance(encoder_model_used, str) or not encoder_model_used.strip():
+            encoder_model_used = clip_model_used
+        return {
+            "classes": classes,
+            "background_indices": bg_indices,
+            "background_classes": bg_classes,
+            "layers": layers,
+            "clip_model": str(clip_model_used) if clip_model_used else None,
+            "encoder_type": str(encoder_type_used),
+            "encoder_model": str(encoder_model_used) if encoder_model_used else None,
+            "embedding_dim": int(embedding_dim),
+            "proba_mode": "softmax",
+            "classifier_type": "mlp",
+        }
+
+    classes_raw = getattr(clf_obj, "classes_", None)
+    coef_raw = getattr(clf_obj, "coef_", None)
+    intercept_raw = getattr(clf_obj, "intercept_", None)
+    if classes_raw is None or coef_raw is None or intercept_raw is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid")
+    try:
+        classes = [str(c) for c in list(classes_raw)]
+        coef = np.asarray(coef_raw, dtype=np.float32)
+        intercept = np.asarray(intercept_raw, dtype=np.float32).reshape(-1)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_clip_classifier_invalid:{exc}") from exc
+    if coef.ndim != 2 or intercept.ndim != 1:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
+    if coef.shape[0] != intercept.shape[0]:
+        # sklearn binary case often stores coef as (1,D) but classes has length 2; intercept is (1,).
+        if not (coef.shape[0] == 1 and intercept.shape[0] == 1 and len(classes) == 2):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
+
     # Back-compat: older classifier uploads may not have the .meta.pkl sidecar (which records clip_model).
     # Infer clip backbone from embedding dim when possible, otherwise fall back to the active global CLIP model.
     embedding_dim = 0
@@ -6236,26 +6289,63 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
         "encoder_model": str(encoder_model_used) if encoder_model_used else None,
         "embedding_dim": int(embedding_dim),
         "proba_mode": proba_mode,
+        "classifier_type": "logreg",
     }
 
 
 def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optional[np.ndarray]:
-    """Compute predict_proba(feats) for an exported LogisticRegression head."""
+    """Compute predict_proba(feats) for an exported classifier head (logreg or MLP)."""
     if feats is None:
         return None
-    coef = head.get("coef")
-    intercept = head.get("intercept")
-    proba_mode = head.get("proba_mode")
     classes = head.get("classes") or []
     if not isinstance(classes, list) or not classes:
         return None
     try:
         X = np.asarray(feats, dtype=np.float32)
+    except Exception:
+        return None
+    if X.ndim != 2:
+        return None
+    if isinstance(head.get("classifier_type"), str) and head.get("classifier_type") == "mlp" or head.get("layers"):
+        layers = head.get("layers")
+        if not isinstance(layers, list) or not layers:
+            return None
+        out = X
+        total_layers = len(layers)
+        for idx, layer in enumerate(layers):
+            try:
+                W = np.asarray(layer.get("weight"), dtype=np.float32)
+                b = np.asarray(layer.get("bias"), dtype=np.float32).reshape(-1)
+            except Exception:
+                return None
+            if W.ndim != 2 or b.ndim != 1 or W.shape[0] != b.shape[0] or out.shape[1] != W.shape[1]:
+                return None
+            out = out @ W.T + b.reshape(1, -1)
+            activation = str(layer.get("activation") or "").strip().lower()
+            if not activation:
+                activation = "linear" if idx == total_layers - 1 else "relu"
+            if activation == "relu":
+                out = np.maximum(out, 0.0)
+            elif activation in {"linear", "none", "identity"}:
+                pass
+            else:
+                out = np.maximum(out, 0.0)
+        if out.shape[1] != len(classes):
+            return None
+        max_logit = np.max(out, axis=1, keepdims=True)
+        exp_logits = np.exp(out - max_logit)
+        denom = exp_logits.sum(axis=1, keepdims=True) + 1e-8
+        return (exp_logits / denom).astype(np.float32)
+
+    coef = head.get("coef")
+    intercept = head.get("intercept")
+    proba_mode = head.get("proba_mode")
+    try:
         W = np.asarray(coef, dtype=np.float32)
         b = np.asarray(intercept, dtype=np.float32).reshape(-1)
     except Exception:
         return None
-    if X.ndim != 2 or W.ndim != 2 or b.ndim != 1:
+    if W.ndim != 2 or b.ndim != 1:
         return None
     if W.shape[1] != X.shape[1]:
         return None
@@ -6352,33 +6442,87 @@ def _save_clip_head_artifacts(
 
     npz_path = clip_dir / "head.npz"
     meta_path = clip_dir / "meta.json"
-    try:
-        coef = np.asarray(head.get("coef"), dtype=np.float32)
-        intercept = np.asarray(head.get("intercept"), dtype=np.float32).reshape(-1)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_clip_head_invalid:{exc}") from exc
-    if coef.ndim != 2 or intercept.ndim != 1:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_invalid")
+    classifier_type = str(head.get("classifier_type") or "").strip().lower()
+    if not classifier_type and head.get("layers"):
+        classifier_type = "mlp"
+    if classifier_type == "mlp":
+        layers = head.get("layers")
+        if not isinstance(layers, list) or not layers:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_invalid")
+        arrays: Dict[str, np.ndarray] = {}
+        layers_meta: List[Dict[str, str]] = []
+        total_layers = len(layers)
+        for idx, layer in enumerate(layers):
+            try:
+                weight = np.asarray(layer.get("weight"), dtype=np.float32)
+                bias = np.asarray(layer.get("bias"), dtype=np.float32).reshape(-1)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_clip_head_invalid:{exc}") from exc
+            if weight.ndim != 2 or bias.ndim != 1 or weight.shape[0] != bias.shape[0]:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_invalid")
+            weight_key = f"layer{idx}_weight"
+            bias_key = f"layer{idx}_bias"
+            arrays[weight_key] = weight
+            arrays[bias_key] = bias
+            activation = str(layer.get("activation") or "").strip().lower()
+            if not activation:
+                activation = "linear" if idx == total_layers - 1 else "relu"
+            if activation not in {"relu", "linear", "none", "identity"}:
+                activation = "relu" if idx < total_layers - 1 else "linear"
+            layers_meta.append({
+                "weight": weight_key,
+                "bias": bias_key,
+                "activation": activation,
+            })
+        try:
+            np.savez_compressed(str(npz_path), **arrays)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_clip_head_write_failed:{exc}") from exc
+        classes = head.get("classes") if isinstance(head.get("classes"), list) else []
+        encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
+        encoder_model = head.get("encoder_model")
+        if not isinstance(encoder_model, str) or not encoder_model.strip():
+            encoder_model = head.get("clip_model")
+        meta = {
+            "clip_model": head.get("clip_model"),
+            "encoder_type": encoder_type,
+            "encoder_model": encoder_model,
+            "proba_mode": "softmax",
+            "classifier_type": "mlp",
+            "classes": [str(c) for c in classes],
+            "layers": layers_meta,
+            "min_prob": float(min_prob),
+            "margin": float(margin),
+        }
+    else:
+        try:
+            coef = np.asarray(head.get("coef"), dtype=np.float32)
+            intercept = np.asarray(head.get("intercept"), dtype=np.float32).reshape(-1)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_clip_head_invalid:{exc}") from exc
+        if coef.ndim != 2 or intercept.ndim != 1:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_invalid")
 
-    try:
-        np.savez_compressed(str(npz_path), coef=coef, intercept=intercept)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_clip_head_write_failed:{exc}") from exc
+        try:
+            np.savez_compressed(str(npz_path), coef=coef, intercept=intercept)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_clip_head_write_failed:{exc}") from exc
 
-    classes = head.get("classes") if isinstance(head.get("classes"), list) else []
-    encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
-    encoder_model = head.get("encoder_model")
-    if not isinstance(encoder_model, str) or not encoder_model.strip():
-        encoder_model = head.get("clip_model")
-    meta = {
-        "clip_model": head.get("clip_model"),
-        "encoder_type": encoder_type,
-        "encoder_model": encoder_model,
-        "proba_mode": head.get("proba_mode"),
-        "classes": [str(c) for c in classes],
-        "min_prob": float(min_prob),
-        "margin": float(margin),
-    }
+        classes = head.get("classes") if isinstance(head.get("classes"), list) else []
+        encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
+        encoder_model = head.get("encoder_model")
+        if not isinstance(encoder_model, str) or not encoder_model.strip():
+            encoder_model = head.get("clip_model")
+        meta = {
+            "clip_model": head.get("clip_model"),
+            "encoder_type": encoder_type,
+            "encoder_model": encoder_model,
+            "proba_mode": head.get("proba_mode"),
+            "classifier_type": "logreg",
+            "classes": [str(c) for c in classes],
+            "min_prob": float(min_prob),
+            "margin": float(margin),
+        }
     try:
         with meta_path.open("w", encoding="utf-8") as fp:
             json.dump(meta, fp, ensure_ascii=False, indent=2)
@@ -6406,12 +6550,6 @@ def _load_clip_head_artifacts(
         return None
     if not npz_path.exists() or not npz_path.is_file():
         return None
-    try:
-        with np.load(str(npz_path)) as data:
-            coef = np.asarray(data["coef"], dtype=np.float32)
-            intercept = np.asarray(data["intercept"], dtype=np.float32).reshape(-1)
-    except Exception:
-        return None
     meta: Dict[str, Any] = {}
     if meta_path.exists() and meta_path.is_file():
         try:
@@ -6428,11 +6566,9 @@ def _load_clip_head_artifacts(
     proba_mode = meta.get("proba_mode")
     min_prob = meta.get("min_prob")
     margin = meta.get("margin")
-    if not isinstance(proba_mode, str) or not proba_mode:
-        if coef.shape[0] == 1 and len(classes) == 2:
-            proba_mode = "binary"
-        else:
-            proba_mode = "softmax"
+    classifier_type = str(meta.get("classifier_type") or "").strip().lower()
+    layers_meta = meta.get("layers") if isinstance(meta.get("layers"), list) else None
+
     min_prob_val: Optional[float] = None
     margin_val: Optional[float] = None
     try:
@@ -6453,6 +6589,73 @@ def _load_clip_head_artifacts(
             clip_model_val = raw.strip()
     except Exception:
         clip_model_val = None
+
+    encoder_type = meta.get("encoder_type") if isinstance(meta.get("encoder_type"), str) else "clip"
+    encoder_model = meta.get("encoder_model")
+    if not isinstance(encoder_model, str) or not encoder_model.strip():
+        encoder_model = clip_model_val
+
+    if classifier_type == "mlp" or layers_meta:
+        try:
+            with np.load(str(npz_path)) as data:
+                layers: List[Dict[str, Any]] = []
+                total_layers = len(layers_meta or [])
+                for idx, layer in enumerate(layers_meta or []):
+                    weight_key = layer.get("weight")
+                    bias_key = layer.get("bias")
+                    if not weight_key or not bias_key:
+                        return None
+                    weight = np.asarray(data.get(weight_key), dtype=np.float32)
+                    bias = np.asarray(data.get(bias_key), dtype=np.float32).reshape(-1)
+                    if weight.ndim != 2 or bias.ndim != 1 or weight.shape[0] != bias.shape[0]:
+                        return None
+                    activation = str(layer.get("activation") or "").strip().lower()
+                    if not activation:
+                        activation = "linear" if idx == total_layers - 1 else "relu"
+                    if activation not in {"relu", "linear", "none", "identity"}:
+                        activation = "relu" if idx < total_layers - 1 else "linear"
+                    layers.append({
+                        "weight": weight,
+                        "bias": bias,
+                        "activation": activation,
+                    })
+        except Exception:
+            return None
+        bg_indices = _clip_head_background_indices(classes)
+        bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
+        embedding_dim = 0
+        try:
+            embedding_dim = int(layers[0].get("weight").shape[1]) if layers else 0
+        except Exception:
+            embedding_dim = 0
+        return {
+            "classes": classes,
+            "background_indices": bg_indices,
+            "background_classes": bg_classes,
+            "layers": layers,
+            "clip_model": clip_model_val,
+            "encoder_type": encoder_type,
+            "encoder_model": encoder_model,
+            "embedding_dim": embedding_dim,
+            "proba_mode": "softmax",
+            "classifier_type": "mlp",
+            "min_prob": min_prob_val,
+            "margin": margin_val,
+        }
+
+    try:
+        with np.load(str(npz_path)) as data:
+            coef = np.asarray(data["coef"], dtype=np.float32)
+            intercept = np.asarray(data["intercept"], dtype=np.float32).reshape(-1)
+    except Exception:
+        return None
+
+    if not isinstance(proba_mode, str) or not proba_mode:
+        if coef.shape[0] == 1 and len(classes) == 2:
+            proba_mode = "binary"
+        else:
+            proba_mode = "softmax"
+
     if not clip_model_val and coef.ndim == 2:
         emb_dim = 0
         try:
@@ -6460,11 +6663,6 @@ def _load_clip_head_artifacts(
         except Exception:
             emb_dim = 0
         clip_model_val = _infer_clip_model_from_embedding_dim(emb_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
-
-    encoder_type = meta.get("encoder_type") if isinstance(meta.get("encoder_type"), str) else "clip"
-    encoder_model = meta.get("encoder_model")
-    if not isinstance(encoder_model, str) or not encoder_model.strip():
-        encoder_model = clip_model_val
 
     bg_indices = _clip_head_background_indices(classes)
     bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
@@ -6479,6 +6677,7 @@ def _load_clip_head_artifacts(
         "encoder_type": encoder_type,
         "encoder_model": encoder_model,
         "proba_mode": proba_mode,
+        "classifier_type": "logreg",
         "min_prob": min_prob_val,
         "margin": margin_val,
     }
@@ -6522,7 +6721,10 @@ def _clip_auto_predict_label(feats_np: np.ndarray) -> Tuple[str, Optional[float]
     if clf is None:
         return "unknown", None, "clip_unavailable"
     classes_raw = getattr(clf, "classes_", None)
-    classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
+    if classes_raw is None and isinstance(clf, dict):
+        classes = [str(c) for c in list(clf.get("classes") or [])]
+    else:
+        classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
     proba_arr: Optional[np.ndarray] = None
     if hasattr(clf, "predict_proba"):
         try:
@@ -6530,6 +6732,8 @@ def _clip_auto_predict_label(feats_np: np.ndarray) -> Tuple[str, Optional[float]
             proba_arr = np.asarray(proba, dtype=np.float32)
         except Exception:
             proba_arr = None
+    elif isinstance(clf, dict):
+        proba_arr = _clip_head_predict_proba(feats_np, clf)
     if proba_arr is not None and proba_arr.ndim == 2 and proba_arr.shape[0] >= 1 and proba_arr.shape[1] == len(classes):
         row = proba_arr[0]
         bg_indices = _clip_head_background_indices(classes)
@@ -6566,7 +6770,10 @@ def _clip_auto_predict_details(feats_np: np.ndarray) -> Dict[str, Optional[objec
             "error": "clip_unavailable",
         }
     classes_raw = getattr(clf, "classes_", None)
-    classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
+    if classes_raw is None and isinstance(clf, dict):
+        classes = [str(c) for c in list(clf.get("classes") or [])]
+    else:
+        classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
     proba_arr: Optional[np.ndarray] = None
     if hasattr(clf, "predict_proba"):
         try:
@@ -6574,6 +6781,8 @@ def _clip_auto_predict_details(feats_np: np.ndarray) -> Dict[str, Optional[objec
             proba_arr = np.asarray(proba, dtype=np.float32)
         except Exception:
             proba_arr = None
+    elif isinstance(clf, dict):
+        proba_arr = _clip_head_predict_proba(feats_np, clf)
     if proba_arr is not None and proba_arr.ndim == 2 and proba_arr.shape[0] >= 1 and proba_arr.shape[1] == len(classes):
         row = proba_arr[0]
         bg_indices = _clip_head_background_indices(classes)
@@ -6901,6 +7110,13 @@ def _apply_agent_recipe_to_image(
         clip_head_target_index = _find_clip_head_target_index(classes_list, recipe_target_class_name)
         if clip_head_target_index is None and classes_list and recipe_target_class_name:
             clip_head_missing_class = True
+        if recipe_target_class_name and classes_list:
+            logger.info(
+                "CLIP head class mapping: target=%s index=%s classes=%s",
+                recipe_target_class_name,
+                clip_head_target_index,
+                classes_list,
+            )
 
     def _recipe_param(key: str) -> Any:
         if key in params_combined:
@@ -21015,6 +21231,7 @@ def _list_clip_classifiers() -> List[Dict[str, Any]]:
                     entry["encoder_type"] = meta_obj.get("encoder_type") or "clip"
                     entry["encoder_model"] = meta_obj.get("encoder_model") or entry.get("clip_model")
                     entry["solver"] = meta_obj.get("solver")
+                    entry["classifier_type"] = meta_obj.get("classifier_type")
                     entry["embedding_dim"] = meta_obj.get("embedding_dim")
                     entry["n_samples_train"] = meta_obj.get("n_samples_train")
                     entry["n_samples_test"] = meta_obj.get("n_samples_test")
@@ -21027,6 +21244,10 @@ def _list_clip_classifiers() -> List[Dict[str, Any]]:
             if classes_raw is not None:
                 entry["classes"] = [str(c) for c in list(classes_raw)]
                 entry["n_classes"] = len(entry["classes"])
+            elif isinstance(clf_obj, dict) and clf_obj.get("classes"):
+                entry["classes"] = [str(c) for c in list(clf_obj.get("classes") or [])]
+                entry["n_classes"] = len(entry["classes"])
+                entry["classifier_type"] = clf_obj.get("classifier_type") or clf_obj.get("head_type")
             coef = getattr(clf_obj, "coef_", None)
             if coef is not None and hasattr(coef, "shape") and len(getattr(coef, "shape", [])) >= 2:
                 entry["embedding_dim"] = int(coef.shape[1])
@@ -21279,7 +21500,9 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                            output_dir: str, labelmap_dir: str, model_filename: str, labelmap_filename: str,
                            test_size: float, random_seed: int, batch_size: int, max_iter: int,
                            min_per_class: int, class_weight: str, C: float, device_override: Optional[str],
-                           solver: str, reuse_embeddings: bool, hard_example_mining: bool,
+                           solver: str, classifier_type: str, mlp_hidden_sizes: str, mlp_dropout: float,
+                           mlp_epochs: int, mlp_lr: float, mlp_weight_decay: float, mlp_label_smoothing: float,
+                           mlp_patience: int, reuse_embeddings: bool, hard_example_mining: bool,
                            hard_mining_misclassified_weight: float,
                            hard_mining_low_conf_weight: float,
                            hard_mining_low_conf_threshold: float,
@@ -21319,6 +21542,14 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 class_weight=class_weight,
                 C=C,
                 solver=solver,
+                classifier_type=classifier_type,
+                mlp_hidden_sizes=mlp_hidden_sizes,
+                mlp_dropout=mlp_dropout,
+                mlp_epochs=mlp_epochs,
+                mlp_lr=mlp_lr,
+                mlp_weight_decay=mlp_weight_decay,
+                mlp_label_smoothing=mlp_label_smoothing,
+                mlp_patience=mlp_patience,
                 reuse_embeddings=reuse_embeddings,
                 hard_example_mining=hard_example_mining,
                 hard_mining_misclassified_weight=hard_mining_misclassified_weight,
@@ -21486,6 +21717,14 @@ async def start_clip_training(
     labels_path_native: Optional[str] = Form(None),
     labelmap_path_native: Optional[str] = Form(None),
     solver: str = Form("saga"),
+    classifier_type: str = Form("logreg"),
+    mlp_hidden_sizes: str = Form("256"),
+    mlp_dropout: float = Form(0.1),
+    mlp_epochs: int = Form(50),
+    mlp_lr: float = Form(1e-3),
+    mlp_weight_decay: float = Form(1e-4),
+    mlp_label_smoothing: float = Form(0.05),
+    mlp_patience: int = Form(6),
     reuse_embeddings: Optional[str] = Form(None),
     hard_example_mining: Optional[str] = Form(None),
     hard_mis_weight: float = Form(3.0),
@@ -21516,6 +21755,9 @@ async def start_clip_training(
     solver_name = (solver or "saga").strip().lower()
     if solver_name not in {"saga", "sag", "lbfgs", "liblinear", "newton-cg"}:
         solver_name = "saga"
+    classifier_type_norm = (classifier_type or "logreg").strip().lower()
+    if classifier_type_norm not in {"logreg", "mlp"}:
+        classifier_type_norm = "logreg"
     reuse_embeddings_flag = _parse_bool(reuse_embeddings)
     hard_example_flag = _parse_bool(hard_example_mining)
 
@@ -21612,6 +21854,12 @@ async def start_clip_training(
     if class_weight_norm not in {"balanced", "none"}:
         class_weight_norm = "none"
     C_f = _coerce_float(C, 1.0, minimum=0.0001)
+    mlp_dropout_f = _coerce_float(mlp_dropout, 0.1, minimum=0.0, maximum=0.9)
+    mlp_epochs_i = _coerce_int(mlp_epochs, 50, minimum=1)
+    mlp_lr_f = _coerce_float(mlp_lr, 1e-3, minimum=1e-6)
+    mlp_weight_decay_f = _coerce_float(mlp_weight_decay, 1e-4, minimum=0.0)
+    mlp_label_smoothing_f = _coerce_float(mlp_label_smoothing, 0.05, minimum=0.0, maximum=0.3)
+    mlp_patience_i = _coerce_int(mlp_patience, 6, minimum=1)
     device_override_clean = (device_override or None)
     hard_mis_weight_f = _coerce_float(hard_mis_weight, 3.0, minimum=1.0)
     hard_low_conf_weight_f = _coerce_float(hard_low_conf_weight, 2.0, minimum=1.0)
@@ -21624,6 +21872,7 @@ async def start_clip_training(
     labelmap_filename = Path(labelmap_filename).name or "my_label_list.pkl"
 
     extras = [solver_name]
+    extras.append(classifier_type_norm)
     if reuse_embeddings_flag:
         extras.append("cache")
     if hard_example_flag:
@@ -21656,6 +21905,14 @@ async def start_clip_training(
         C=C_f,
         device_override=device_override_clean,
         solver=solver_name,
+        classifier_type=classifier_type_norm,
+        mlp_hidden_sizes=str(mlp_hidden_sizes or "256"),
+        mlp_dropout=mlp_dropout_f,
+        mlp_epochs=mlp_epochs_i,
+        mlp_lr=mlp_lr_f,
+        mlp_weight_decay=mlp_weight_decay_f,
+        mlp_label_smoothing=mlp_label_smoothing_f,
+        mlp_patience=mlp_patience_i,
         reuse_embeddings=reuse_embeddings_flag,
         hard_example_mining=hard_example_flag,
         hard_mining_misclassified_weight=hard_mis_weight_f,
@@ -22337,9 +22594,18 @@ def set_active_model(payload: ActiveModelRequest):
 
     embed_dim = None
     try:
-        coef = getattr(new_clf, "coef_", None)
-        if coef is not None:
-            embed_dim = coef.shape[1]
+        if isinstance(new_clf, dict):
+            embed_dim = new_clf.get("embedding_dim")
+            if embed_dim is None:
+                layers = new_clf.get("layers")
+                if isinstance(layers, list) and layers:
+                    weight = layers[0].get("weight")
+                    if weight is not None and hasattr(weight, "shape"):
+                        embed_dim = weight.shape[1]
+        else:
+            coef = getattr(new_clf, "coef_", None)
+            if coef is not None:
+                embed_dim = coef.shape[1]
     except Exception:
         embed_dim = None
     new_clip_model = None
@@ -22349,6 +22615,8 @@ def set_active_model(payload: ActiveModelRequest):
     encoder_model_for_active = None
 
     if not meta_found:
+        if isinstance(new_clf, dict) and str(new_clf.get("classifier_type") or new_clf.get("head_type") or "") == "mlp":
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_meta_required")
         if embed_dim is not None and int(embed_dim) not in {512, 768}:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_meta_required")
         if encoder_type_norm != "clip":
@@ -22413,7 +22681,10 @@ def set_active_model(payload: ActiveModelRequest):
         labelmap_path_abs = active_labelmap_path
         labelmap_entries = list(active_label_list)
     classes_raw = getattr(new_clf, "classes_", None)
-    classes_list = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
+    if classes_raw is None and isinstance(new_clf, dict):
+        classes_list = [str(c) for c in list(new_clf.get("classes") or [])]
+    else:
+        classes_list = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
     clf_classes = len(classes_list) if classes_list else None
     if clf_classes is not None:
         if not labelmap_entries:

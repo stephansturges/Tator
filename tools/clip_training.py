@@ -22,6 +22,7 @@ import clip
 import joblib
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 from PIL import Image, ImageFile
 try:
     import albumentations as A
@@ -104,6 +105,14 @@ class TrainingArtifacts:
     negative_crop_policy: Dict[str, Any]
     augmentation_policy: Dict[str, Any]
     oversample_policy: Dict[str, Any]
+    classifier_type: str
+    mlp_hidden_sizes: List[int]
+    mlp_dropout: float
+    mlp_epochs: int
+    mlp_lr: float
+    mlp_weight_decay: float
+    mlp_label_smoothing: float
+    mlp_patience: int
 
 
 def _safe_progress(progress_cb: Optional[ProgressCallback], value: float, message: str) -> None:
@@ -114,6 +123,29 @@ def _safe_progress(progress_cb: Optional[ProgressCallback], value: float, messag
         except Exception:
             # Never let callback issues break the training job.
             pass
+
+
+def _parse_hidden_sizes(raw: Optional[str]) -> List[int]:
+    if raw is None:
+        return [256]
+    if isinstance(raw, (list, tuple)):
+        sizes = [int(s) for s in raw if int(s) > 0]
+        return sizes or [256]
+    text = str(raw).strip()
+    if not text:
+        return [256]
+    parts = [p.strip() for p in text.replace(";", ",").split(",")]
+    sizes: List[int] = []
+    for part in parts:
+        if not part:
+            continue
+        try:
+            value = int(float(part))
+        except Exception:
+            continue
+        if value > 0:
+            sizes.append(value)
+    return sizes or [256]
 
 
 def _ensure_cache_root() -> None:
@@ -624,6 +656,14 @@ def train_clip_from_yolo(
     class_weight: str = "balanced",
     C: float = 1.0,
     solver: str = "saga",
+    classifier_type: str = "logreg",
+    mlp_hidden_sizes: Optional[str] = None,
+    mlp_dropout: float = 0.1,
+    mlp_epochs: int = 50,
+    mlp_lr: float = 1e-3,
+    mlp_weight_decay: float = 1e-4,
+    mlp_label_smoothing: float = 0.05,
+    mlp_patience: int = 6,
     reuse_embeddings: bool = False,
     hard_example_mining: bool = False,
     hard_mining_misclassified_weight: float = 3.0,
@@ -663,6 +703,16 @@ def train_clip_from_yolo(
     class_weight = (class_weight or "none").lower()
     if class_weight not in {"none", "balanced"}:
         class_weight = "none"
+    classifier_type = (classifier_type or "logreg").strip().lower()
+    if classifier_type not in {"logreg", "mlp"}:
+        classifier_type = "logreg"
+    mlp_hidden_sizes_list = _parse_hidden_sizes(mlp_hidden_sizes)
+    mlp_dropout = float(max(0.0, min(0.9, mlp_dropout)))
+    mlp_epochs = int(max(1, mlp_epochs))
+    mlp_lr = float(max(1e-6, mlp_lr))
+    mlp_weight_decay = float(max(0.0, mlp_weight_decay))
+    mlp_label_smoothing = float(max(0.0, min(0.3, mlp_label_smoothing)))
+    mlp_patience = int(max(1, mlp_patience))
 
     hard_mining_misclassified_weight = float(max(1.0, hard_mining_misclassified_weight))
     hard_mining_low_conf_weight = float(max(1.0, hard_mining_low_conf_weight))
@@ -1173,197 +1223,383 @@ def train_clip_from_yolo(
     matrix: List[List[int]] = []
     label_list: List[str] = []
     class_weight_param = None if class_weight == "none" else "balanced"
-
-    clf = LogisticRegression(
-        random_state=random_seed,
-        max_iter=1,
-        multi_class="auto",
-        solver=solver,
-        class_weight=class_weight_param,
-        C=C,
-        warm_start=True,
-        verbose=0,
-        tol=convergence_tol,
-    )
-    tol = convergence_tol
-    prev_coef: Optional[np.ndarray] = None
-    prev_loss: Optional[float] = None
-    last_train_pred: Optional[np.ndarray] = None
-    last_val_pred: Optional[np.ndarray] = None
-    last_train_proba: Optional[np.ndarray] = None
-    last_val_proba: Optional[np.ndarray] = None
-
-    iteration_counter = 0
+    classifier_solver = solver
+    clf: Optional[object] = None
+    labels_for_cm: List[str] = []
+    report_dict: Dict[str, Any] = {}
+    per_class_metrics: List[Dict[str, Optional[float]]] = []
+    iterations_run = 0
 
     try:
-        for iteration in range(1, max_iter + 1):
-            _check_cancel()
-            clf.fit(X_train, y_train)
-            proba_train = clf.predict_proba(X_train)
-            train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
-            train_pred = clf.predict(X_train)
-            train_acc = float((train_pred == y_train).mean())
-            last_train_pred = train_pred
-            last_train_proba = proba_train
+        if classifier_type == "mlp":
+            _safe_progress(progress_cb, 0.45, "Training MLP head ...")
+            classes_list = sorted(set(map(str, y_train)) | set(map(str, y_test)))
+            class_to_idx = {name: idx for idx, name in enumerate(classes_list)}
+            y_train_idx = np.array([class_to_idx[str(name)] for name in y_train], dtype=np.int64)
+            y_test_idx = np.array([class_to_idx[str(name)] for name in y_test], dtype=np.int64) if y_test.size else None
 
-            val_loss: Optional[float] = None
-            val_acc: Optional[float] = None
-            if y_test.size:
-                proba_val = clf.predict_proba(X_test)
-                val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
-                val_pred = clf.predict(X_test)
-                val_acc = float((val_pred == y_test).mean())
-                last_val_pred = val_pred
-                last_val_proba = proba_val
+            counts = Counter(y_train_idx.tolist())
+            class_weights = None
+            if class_weight_param == "balanced" and counts:
+                n_classes = len(classes_list)
+                weights = np.ones(n_classes, dtype=np.float32)
+                total = float(sum(counts.values()))
+                for idx, count in counts.items():
+                    if count:
+                        weights[idx] = total / (n_classes * float(count))
+                class_weights = torch.tensor(weights, device=resolved_device, dtype=torch.float32)
 
-            coef_delta: Optional[float] = None
-            if prev_coef is not None:
-                coef_delta = float(np.linalg.norm(clf.coef_ - prev_coef))
+            input_dim = int(X_train.shape[1]) if X_train.size else 0
+            if input_dim <= 0:
+                raise TrainingError("No embeddings available to train MLP classifier.")
+            if len(classes_list) < 2:
+                raise TrainingError("Need at least two classes to train MLP classifier.")
 
-            loss_delta: Optional[float] = None
-            if prev_loss is not None:
-                loss_delta = float(abs(prev_loss - train_loss))
+            hidden_sizes = list(mlp_hidden_sizes_list or [256])
+            layer_dims = [input_dim] + hidden_sizes + [len(classes_list)]
+            mlp_layers: List[torch.nn.Module] = []
+            for idx in range(len(layer_dims) - 1):
+                mlp_layers.append(torch.nn.Linear(layer_dims[idx], layer_dims[idx + 1]))
+                if idx < len(layer_dims) - 2:
+                    mlp_layers.append(torch.nn.ReLU())
+                    if mlp_dropout > 0:
+                        mlp_layers.append(torch.nn.Dropout(mlp_dropout))
+            model = torch.nn.Sequential(*mlp_layers).to(resolved_device)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=mlp_lr, weight_decay=mlp_weight_decay)
+            criterion = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=mlp_label_smoothing)
 
-            convergence_trace.append({
-                "iteration": iteration,
-                "train_loss": train_loss,
-                "train_accuracy": train_acc,
-                "val_loss": val_loss,
-                "val_accuracy": val_acc,
-                "coef_delta": coef_delta,
-                "loss_delta": loss_delta,
-            })
-            iteration_counter += 1
+            train_tensor = torch.tensor(X_train, dtype=torch.float32)
+            train_labels = torch.tensor(y_train_idx, dtype=torch.long)
+            train_loader = DataLoader(
+                TensorDataset(train_tensor, train_labels),
+                batch_size=min(max(8, batch_size), len(train_tensor)),
+                shuffle=True,
+            )
+            val_loader = None
+            if y_test.size and y_test_idx is not None:
+                val_tensor = torch.tensor(X_test, dtype=torch.float32)
+                val_labels = torch.tensor(y_test_idx, dtype=torch.long)
+                val_loader = DataLoader(
+                    TensorDataset(val_tensor, val_labels),
+                    batch_size=min(max(8, batch_size), len(val_tensor)),
+                    shuffle=False,
+                )
 
-            progress_fraction = 0.45 + 0.15 * (iteration / max(1, max_iter))
-            status_parts = [
-                f"iter {iteration}",
-                f"train_loss={train_loss:.4f}",
-                f"train_acc={train_acc:.3f}",
-            ]
-            if val_loss is not None:
-                status_parts.append(f"val_loss={val_loss:.4f}")
-            if val_acc is not None:
-                status_parts.append(f"val_acc={val_acc:.3f}")
-            _safe_progress(progress_cb, progress_fraction, "Convergence: " + ", ".join(status_parts))
+            best_state = None
+            best_val = None
+            epochs_no_improve = 0
 
-            prev_coef = clf.coef_.copy()
-            prev_loss = train_loss
+            for epoch in range(1, mlp_epochs + 1):
+                _check_cancel()
+                model.train()
+                running_loss = 0.0
+                correct = 0
+                total = 0
+                for batch_x, batch_y in train_loader:
+                    batch_x = batch_x.to(resolved_device)
+                    batch_y = batch_y.to(resolved_device)
+                    optimizer.zero_grad()
+                    logits = model(batch_x)
+                    loss = criterion(logits, batch_y)
+                    loss.backward()
+                    optimizer.step()
+                    running_loss += float(loss.item()) * batch_y.size(0)
+                    preds = logits.argmax(dim=1)
+                    correct += int((preds == batch_y).sum().item())
+                    total += int(batch_y.size(0))
 
-            if coef_delta is not None and coef_delta <= tol:
-                converged = True
-                break
-            if loss_delta is not None and loss_delta <= tol:
-                converged = True
-                break
+                train_loss = running_loss / max(1, total)
+                train_acc = float(correct) / max(1, total)
 
-        iterations_run = iteration_counter
-        if not converged and iterations_run >= max_iter:
-            _safe_progress(progress_cb, 0.62, "Warning: LogisticRegression hit max_iter; consider increasing it or loosening tolerance.")
+                val_loss = None
+                val_acc = None
+                if val_loader is not None:
+                    model.eval()
+                    val_running = 0.0
+                    val_correct = 0
+                    val_total = 0
+                    with torch.no_grad():
+                        for batch_x, batch_y in val_loader:
+                            batch_x = batch_x.to(resolved_device)
+                            batch_y = batch_y.to(resolved_device)
+                            logits = model(batch_x)
+                            loss = criterion(logits, batch_y)
+                            val_running += float(loss.item()) * batch_y.size(0)
+                            preds = logits.argmax(dim=1)
+                            val_correct += int((preds == batch_y).sum().item())
+                            val_total += int(batch_y.size(0))
+                    val_loss = val_running / max(1, val_total)
+                    val_acc = float(val_correct) / max(1, val_total)
 
-        if hard_example_mining and last_train_pred is not None and last_train_proba is not None:
-            _safe_progress(progress_cb, 0.66, "Starting hard example mining pass ...")
-            sample_weight = np.ones(len(y_train), dtype=np.float64)
+                    if best_val is None or val_loss < best_val - 1e-4:
+                        best_val = val_loss
+                        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                        epochs_no_improve = 0
+                    else:
+                        epochs_no_improve += 1
+                        if epochs_no_improve >= mlp_patience:
+                            converged = True
+                            break
 
-            if hard_mining_misclassified_weight > 1.0:
-                misclassified_mask = last_train_pred != y_train
-                if np.any(misclassified_mask):
-                    sample_weight[misclassified_mask] = np.maximum(
-                        sample_weight[misclassified_mask], hard_mining_misclassified_weight
-                    )
+                convergence_trace.append({
+                    "iteration": epoch,
+                    "train_loss": train_loss,
+                    "train_accuracy": train_acc,
+                    "val_loss": val_loss,
+                    "val_accuracy": val_acc,
+                    "coef_delta": None,
+                    "loss_delta": None,
+                })
+                iterations_run = epoch
+                progress_fraction = 0.45 + 0.15 * (epoch / max(1, mlp_epochs))
+                status_parts = [
+                    f"epoch {epoch}",
+                    f"train_loss={train_loss:.4f}",
+                    f"train_acc={train_acc:.3f}",
+                ]
+                if val_loss is not None:
+                    status_parts.append(f"val_loss={val_loss:.4f}")
+                if val_acc is not None:
+                    status_parts.append(f"val_acc={val_acc:.3f}")
+                _safe_progress(progress_cb, progress_fraction, "MLP: " + ", ".join(status_parts))
 
-            if hard_mining_low_conf_weight > 1.0:
-                top1 = last_train_proba.max(axis=1)
-                low_conf_mask = np.zeros_like(top1, dtype=bool)
-                if hard_mining_low_conf_threshold > 0.0:
-                    low_conf_mask |= top1 < hard_mining_low_conf_threshold
-                if hard_mining_margin_threshold > 0.0 and last_train_proba.shape[1] > 1:
-                    second_best = np.partition(last_train_proba, -2, axis=1)[:, -2]
-                    margin_gap = top1 - second_best
-                    low_conf_mask |= margin_gap < hard_mining_margin_threshold
-                if np.any(low_conf_mask):
-                    sample_weight[low_conf_mask] = np.maximum(
-                        sample_weight[low_conf_mask], hard_mining_low_conf_weight
-                    )
+            if best_state:
+                model.load_state_dict(best_state)
 
-            if not np.any(sample_weight != 1.0):
-                _safe_progress(progress_cb, 0.7, "Hard mining skipped — no samples met weighting criteria.")
-            else:
-                extra_iters = max(5, min(200, max_iter // 5))
-                for extra_iter in range(1, extra_iters + 1):
-                    _check_cancel()
-                    clf.fit(X_train, y_train, sample_weight=sample_weight)
-                    proba_train = clf.predict_proba(X_train)
-                    train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
-                    train_pred = clf.predict(X_train)
-                    train_acc = float((train_pred == y_train).mean())
-                    last_train_pred = train_pred
-                    last_train_proba = proba_train
-
-                    val_loss = None
-                    val_acc = None
-                    if y_test.size:
-                        proba_val = clf.predict_proba(X_test)
-                        val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
-                        val_pred = clf.predict(X_test)
-                        val_acc = float((val_pred == y_test).mean())
-                        last_val_pred = val_pred
-                        last_val_proba = proba_val
-
-                    coef_delta = float(np.linalg.norm(clf.coef_ - prev_coef)) if prev_coef is not None else None
-                    loss_delta = float(abs(prev_loss - train_loss)) if prev_loss is not None else None
-
-                    iteration_counter += 1
-                    convergence_trace.append({
-                        "iteration": iteration_counter,
-                        "train_loss": train_loss,
-                        "train_accuracy": train_acc,
-                        "val_loss": val_loss,
-                        "val_accuracy": val_acc,
-                        "coef_delta": coef_delta,
-                        "loss_delta": loss_delta,
+            classifier_solver = "mlp"
+            clf = {
+                "classifier_type": "mlp",
+                "classes": classes_list,
+                "layers": [],
+            }
+            linear_count = max(1, len(layer_dims) - 1)
+            linear_index = 0
+            for layer in model:
+                if isinstance(layer, torch.nn.Linear):
+                    activation = "relu" if linear_index < (linear_count - 1) else "linear"
+                    clf["layers"].append({
+                        "weight": layer.weight.detach().cpu().numpy(),
+                        "bias": layer.bias.detach().cpu().numpy(),
+                        "activation": activation,
                     })
+                    linear_index += 1
 
-                    progress_fraction = 0.66 + 0.09 * (extra_iter / extra_iters)
-                    status_parts = [
-                        f"hard_iter {extra_iter}",
-                        f"train_loss={train_loss:.4f}",
-                        f"train_acc={train_acc:.3f}",
-                    ]
-                    if val_loss is not None:
-                        status_parts.append(f"val_loss={val_loss:.4f}")
-                    if val_acc is not None:
-                        status_parts.append(f"val_acc={val_acc:.3f}")
-                    _safe_progress(progress_cb, progress_fraction, "Hard mining: " + ", ".join(status_parts))
+            def predict_probs(data: np.ndarray) -> np.ndarray:
+                model.eval()
+                with torch.no_grad():
+                    tensor = torch.tensor(data, dtype=torch.float32, device=resolved_device)
+                    logits = model(tensor)
+                    probs = torch.softmax(logits, dim=1)
+                return probs.cpu().numpy()
 
-                    prev_coef = clf.coef_.copy()
-                    prev_loss = train_loss
+            _safe_progress(progress_cb, 0.65, "Evaluating classifier on validation split ...")
+            if y_test.size:
+                proba_val = predict_probs(X_test)
+                val_pred_idx = np.argmax(proba_val, axis=1)
+                y_pred = np.array([classes_list[i] for i in val_pred_idx], dtype=object)
+                accuracy = float((y_pred == y_test).mean())
+                report_dict = classification_report(y_test, y_pred, zero_division=0, output_dict=True)
+                report = classification_report(y_test, y_pred, zero_division=0, digits=4)
+                labels_for_cm = sorted(set(y_test) | set(y_pred))
+                matrix = confusion_matrix(y_test, y_pred, labels=labels_for_cm).tolist()
+            else:
+                proba_train = predict_probs(X_train)
+                train_pred_idx = np.argmax(proba_train, axis=1)
+                train_pred = np.array([classes_list[i] for i in train_pred_idx], dtype=object)
+                accuracy = float((train_pred == y_train).mean())
+                report_dict = classification_report(y_train, train_pred, zero_division=0, output_dict=True)
+                report = classification_report(y_train, train_pred, zero_division=0, digits=4)
+                labels_for_cm = sorted(set(y_train) | set(train_pred))
+                matrix = confusion_matrix(y_train, train_pred, labels=labels_for_cm).tolist()
+        else:
+            clf = LogisticRegression(
+                random_state=random_seed,
+                max_iter=1,
+                multi_class="auto",
+                solver=solver,
+                class_weight=class_weight_param,
+                C=C,
+                warm_start=True,
+                verbose=0,
+                tol=convergence_tol,
+            )
+            tol = convergence_tol
+            prev_coef: Optional[np.ndarray] = None
+            prev_loss: Optional[float] = None
+            last_train_pred: Optional[np.ndarray] = None
+            last_val_pred: Optional[np.ndarray] = None
+            last_train_proba: Optional[np.ndarray] = None
+            last_val_proba: Optional[np.ndarray] = None
 
-                    if coef_delta is not None and coef_delta <= tol:
-                        converged = True
-                        break
-                    if loss_delta is not None and loss_delta <= tol:
-                        converged = True
-                        break
+            iteration_counter = 0
+
+            for iteration in range(1, max_iter + 1):
+                _check_cancel()
+                clf.fit(X_train, y_train)
+                proba_train = clf.predict_proba(X_train)
+                train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
+                train_pred = clf.predict(X_train)
+                train_acc = float((train_pred == y_train).mean())
+                last_train_pred = train_pred
+                last_train_proba = proba_train
+
+                val_loss: Optional[float] = None
+                val_acc: Optional[float] = None
+                if y_test.size:
+                    proba_val = clf.predict_proba(X_test)
+                    val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
+                    val_pred = clf.predict(X_test)
+                    val_acc = float((val_pred == y_test).mean())
+                    last_val_pred = val_pred
+                    last_val_proba = proba_val
+
+                coef_delta: Optional[float] = None
+                if prev_coef is not None:
+                    coef_delta = float(np.linalg.norm(clf.coef_ - prev_coef))
+
+                loss_delta: Optional[float] = None
+                if prev_loss is not None:
+                    loss_delta = float(abs(prev_loss - train_loss))
+
+                convergence_trace.append({
+                    "iteration": iteration,
+                    "train_loss": train_loss,
+                    "train_accuracy": train_acc,
+                    "val_loss": val_loss,
+                    "val_accuracy": val_acc,
+                    "coef_delta": coef_delta,
+                    "loss_delta": loss_delta,
+                })
+                iteration_counter += 1
+
+                progress_fraction = 0.45 + 0.15 * (iteration / max(1, max_iter))
+                status_parts = [
+                    f"iter {iteration}",
+                    f"train_loss={train_loss:.4f}",
+                    f"train_acc={train_acc:.3f}",
+                ]
+                if val_loss is not None:
+                    status_parts.append(f"val_loss={val_loss:.4f}")
+                if val_acc is not None:
+                    status_parts.append(f"val_acc={val_acc:.3f}")
+                _safe_progress(progress_cb, progress_fraction, "Convergence: " + ", ".join(status_parts))
+
+                prev_coef = clf.coef_.copy()
+                prev_loss = train_loss
+
+                if coef_delta is not None and coef_delta <= tol:
+                    converged = True
+                    break
+                if loss_delta is not None and loss_delta <= tol:
+                    converged = True
+                    break
 
             iterations_run = iteration_counter
+            if not converged and iterations_run >= max_iter:
+                _safe_progress(progress_cb, 0.62, "Warning: LogisticRegression hit max_iter; consider increasing it or loosening tolerance.")
 
-        _safe_progress(progress_cb, 0.65, "Evaluating classifier on validation split ...")
-        per_class_metrics: List[Dict[str, Optional[float]]] = []
-        if y_test.size:
-            y_pred = last_val_pred if last_val_pred is not None else clf.predict(X_test)
-            accuracy = float((y_pred == y_test).mean())
-            report_dict = classification_report(y_test, y_pred, zero_division=0, output_dict=True)
-            report = classification_report(y_test, y_pred, zero_division=0, digits=4)
-            labels_for_cm = sorted(set(y_test) | set(y_pred))
-            matrix = confusion_matrix(y_test, y_pred, labels=labels_for_cm).tolist()
-        else:
-            train_pred_final = last_train_pred if last_train_pred is not None else clf.predict(X_train)
-            accuracy = float((train_pred_final == y_train).mean())
-            report_dict = classification_report(y_train, train_pred_final, zero_division=0, output_dict=True)
-            report = classification_report(y_train, train_pred_final, zero_division=0, digits=4)
-            labels_for_cm = sorted(set(y_train) | set(train_pred_final))
-            matrix = confusion_matrix(y_train, train_pred_final, labels=labels_for_cm).tolist()
+            if hard_example_mining and last_train_pred is not None and last_train_proba is not None:
+                _safe_progress(progress_cb, 0.66, "Starting hard example mining pass ...")
+                sample_weight = np.ones(len(y_train), dtype=np.float64)
+
+                if hard_mining_misclassified_weight > 1.0:
+                    misclassified_mask = last_train_pred != y_train
+                    if np.any(misclassified_mask):
+                        sample_weight[misclassified_mask] = np.maximum(
+                            sample_weight[misclassified_mask], hard_mining_misclassified_weight
+                        )
+
+                if hard_mining_low_conf_weight > 1.0:
+                    top1 = last_train_proba.max(axis=1)
+                    low_conf_mask = np.zeros_like(top1, dtype=bool)
+                    if hard_mining_low_conf_threshold > 0.0:
+                        low_conf_mask |= top1 < hard_mining_low_conf_threshold
+                    if hard_mining_margin_threshold > 0.0 and last_train_proba.shape[1] > 1:
+                        second_best = np.partition(last_train_proba, -2, axis=1)[:, -2]
+                        margin_gap = top1 - second_best
+                        low_conf_mask |= margin_gap < hard_mining_margin_threshold
+                    if np.any(low_conf_mask):
+                        sample_weight[low_conf_mask] = np.maximum(
+                            sample_weight[low_conf_mask], hard_mining_low_conf_weight
+                        )
+
+                if not np.any(sample_weight != 1.0):
+                    _safe_progress(progress_cb, 0.7, "Hard mining skipped — no samples met weighting criteria.")
+                else:
+                    extra_iters = max(5, min(200, max_iter // 5))
+                    for extra_iter in range(1, extra_iters + 1):
+                        _check_cancel()
+                        clf.fit(X_train, y_train, sample_weight=sample_weight)
+                        proba_train = clf.predict_proba(X_train)
+                        train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
+                        train_pred = clf.predict(X_train)
+                        train_acc = float((train_pred == y_train).mean())
+                        last_train_pred = train_pred
+                        last_train_proba = proba_train
+
+                        val_loss = None
+                        val_acc = None
+                        if y_test.size:
+                            proba_val = clf.predict_proba(X_test)
+                            val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
+                            val_pred = clf.predict(X_test)
+                            val_acc = float((val_pred == y_test).mean())
+                            last_val_pred = val_pred
+                            last_val_proba = proba_val
+
+                        coef_delta = float(np.linalg.norm(clf.coef_ - prev_coef)) if prev_coef is not None else None
+                        loss_delta = float(abs(prev_loss - train_loss)) if prev_loss is not None else None
+
+                        iteration_counter += 1
+                        convergence_trace.append({
+                            "iteration": iteration_counter,
+                            "train_loss": train_loss,
+                            "train_accuracy": train_acc,
+                            "val_loss": val_loss,
+                            "val_accuracy": val_acc,
+                            "coef_delta": coef_delta,
+                            "loss_delta": loss_delta,
+                        })
+
+                        progress_fraction = 0.66 + 0.09 * (extra_iter / extra_iters)
+                        status_parts = [
+                            f"hard_iter {extra_iter}",
+                            f"train_loss={train_loss:.4f}",
+                            f"train_acc={train_acc:.3f}",
+                        ]
+                        if val_loss is not None:
+                            status_parts.append(f"val_loss={val_loss:.4f}")
+                        if val_acc is not None:
+                            status_parts.append(f"val_acc={val_acc:.3f}")
+                        _safe_progress(progress_cb, progress_fraction, "Hard mining: " + ", ".join(status_parts))
+
+                        prev_coef = clf.coef_.copy()
+                        prev_loss = train_loss
+
+                        if coef_delta is not None and coef_delta <= tol:
+                            converged = True
+                            break
+                        if loss_delta is not None and loss_delta <= tol:
+                            converged = True
+                            break
+
+                iterations_run = iteration_counter
+
+            _safe_progress(progress_cb, 0.65, "Evaluating classifier on validation split ...")
+            if y_test.size:
+                y_pred = last_val_pred if last_val_pred is not None else clf.predict(X_test)
+                accuracy = float((y_pred == y_test).mean())
+                report_dict = classification_report(y_test, y_pred, zero_division=0, output_dict=True)
+                report = classification_report(y_test, y_pred, zero_division=0, digits=4)
+                labels_for_cm = sorted(set(y_test) | set(y_pred))
+                matrix = confusion_matrix(y_test, y_pred, labels=labels_for_cm).tolist()
+            else:
+                train_pred_final = last_train_pred if last_train_pred is not None else clf.predict(X_train)
+                accuracy = float((train_pred_final == y_train).mean())
+                report_dict = classification_report(y_train, train_pred_final, zero_division=0, output_dict=True)
+                report = classification_report(y_train, train_pred_final, zero_division=0, digits=4)
+                labels_for_cm = sorted(set(y_train) | set(train_pred_final))
+                matrix = confusion_matrix(y_train, train_pred_final, labels=labels_for_cm).tolist()
 
         for label in labels_for_cm:
             key = str(label)
@@ -1413,13 +1649,21 @@ def train_clip_from_yolo(
             "min_per_class": min_per_class,
             "class_weight": class_weight,
             "C": C,
-            "solver": solver,
+            "solver": classifier_solver,
+            "classifier_type": classifier_type,
             "hard_example_mining": hard_example_mining,
             "hard_mining_misclassified_weight": hard_mining_misclassified_weight,
             "hard_mining_low_conf_weight": hard_mining_low_conf_weight,
             "hard_mining_low_conf_threshold": hard_mining_low_conf_threshold,
             "hard_mining_margin_threshold": hard_mining_margin_threshold,
             "convergence_tol": convergence_tol,
+            "mlp_hidden_sizes": list(mlp_hidden_sizes_list),
+            "mlp_dropout": mlp_dropout,
+            "mlp_epochs": mlp_epochs,
+            "mlp_lr": mlp_lr,
+            "mlp_weight_decay": mlp_weight_decay,
+            "mlp_label_smoothing": mlp_label_smoothing,
+            "mlp_patience": mlp_patience,
             "background_class_count": bg_class_count,
             "background_classes": list(background_classes),
             "negative_crop_policy": dict(bg_policy),
@@ -1481,7 +1725,7 @@ def train_clip_from_yolo(
             iterations_run=iterations_run,
             converged=converged,
             convergence_trace=convergence_trace,
-            solver=solver,
+            solver=classifier_solver,
             hard_example_mining=hard_example_mining,
             class_weight=class_weight,
             per_class_metrics=per_class_metrics,
@@ -1495,6 +1739,14 @@ def train_clip_from_yolo(
             negative_crop_policy=dict(bg_policy),
             augmentation_policy=dict(aug_policy),
             oversample_policy=dict(oversample_policy),
+            classifier_type=classifier_type,
+            mlp_hidden_sizes=list(mlp_hidden_sizes_list),
+            mlp_dropout=float(mlp_dropout),
+            mlp_epochs=int(mlp_epochs),
+            mlp_lr=float(mlp_lr),
+            mlp_weight_decay=float(mlp_weight_decay),
+            mlp_label_smoothing=float(mlp_label_smoothing),
+            mlp_patience=int(mlp_patience),
         )
 
     finally:

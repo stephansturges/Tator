@@ -1209,6 +1209,7 @@
         clipBackboneRow: null,
         dinov3BackboneRow: null,
         solverSelect: null,
+        classifierTypeSelect: null,
         imagesInput: null,
         imagesBtn: null,
         imagesSummary: null,
@@ -1227,6 +1228,14 @@
         maxIterInput: null,
         minPerClassInput: null,
         regCInput: null,
+        mlpHiddenSizesInput: null,
+        mlpHiddenSizesAutoBtn: null,
+        mlpDropoutInput: null,
+        mlpEpochsInput: null,
+        mlpLrInput: null,
+        mlpWeightDecayInput: null,
+        mlpLabelSmoothingInput: null,
+        mlpPatienceInput: null,
         classWeightSelect: null,
         deviceOverrideInput: null,
         bgClassCountInput: null,
@@ -2941,6 +2950,100 @@ const sam3TrainState = {
         if (trainingElements.dinov3BackboneSelect) trainingElements.dinov3BackboneSelect.disabled = useClip;
     }
 
+    function updateTrainingClassifierControls() {
+        const raw = trainingElements.classifierTypeSelect ? trainingElements.classifierTypeSelect.value : "logreg";
+        const classifierType = raw ? String(raw).toLowerCase().trim() : "logreg";
+        const isMlp = classifierType === "mlp";
+        const mlpOnlyFields = document.querySelectorAll(".mlp-only");
+        const logregOnlyFields = document.querySelectorAll(".logreg-only");
+        mlpOnlyFields.forEach((el) => {
+            el.hidden = !isMlp;
+        });
+        logregOnlyFields.forEach((el) => {
+            el.hidden = isMlp;
+            const controls = el.querySelectorAll("input, select, textarea, button");
+            controls.forEach((control) => {
+                control.disabled = isMlp;
+            });
+        });
+        if (trainingElements.solverSelect) {
+            trainingElements.solverSelect.disabled = isMlp;
+        }
+        if (trainingElements.regCInput) {
+            trainingElements.regCInput.disabled = isMlp;
+        }
+        applyRecommendedMlpHiddenSizes(false);
+    }
+
+    let mlpHiddenSizesTouched = false;
+    let mlpHiddenSizesAutoValue = null;
+
+    function inferEmbeddingDimFromEncoder(encoderType, modelName) {
+        if (!modelName) return null;
+        const name = String(modelName);
+        if (encoderType === "clip") {
+            if (name.includes("ViT-L/14")) return 768;
+            if (name.includes("ViT-B/16")) return 512;
+            if (name.includes("ViT-B/32")) return 512;
+            return null;
+        }
+        const lower = name.toLowerCase();
+        const dimMap = [
+            { key: "vits16plus", dim: 384 },
+            { key: "vits16", dim: 384 },
+            { key: "vitb16", dim: 768 },
+            { key: "vitl16", dim: 1024 },
+            { key: "vith16plus", dim: 1280 },
+            { key: "vit7b16", dim: 2560 },
+            { key: "convnext-tiny", dim: 768 },
+            { key: "convnext-small", dim: 768 },
+            { key: "convnext-base", dim: 1024 },
+            { key: "convnext-large", dim: 1536 },
+        ];
+        for (const entry of dimMap) {
+            if (lower.includes(entry.key)) return entry.dim;
+        }
+        return null;
+    }
+
+    function recommendedHiddenSizesForDim(dim) {
+        if (!dim || dim <= 0) return null;
+        if (dim <= 384) return "256";
+        if (dim <= 512) return "256";
+        if (dim <= 768) return "512";
+        if (dim <= 1024) return "768,384";
+        if (dim <= 1280) return "1024,512";
+        if (dim <= 1536) return "1024,512";
+        return "1536,768";
+    }
+
+    function getRecommendedMlpHiddenSizes() {
+        const rawType = trainingElements.classifierTypeSelect ? trainingElements.classifierTypeSelect.value : "logreg";
+        const classifierType = rawType ? String(rawType).toLowerCase().trim() : "logreg";
+        if (classifierType !== "mlp") return null;
+        const encoderType = getTrainingEncoderType();
+        const modelName = encoderType === "dinov3"
+            ? (trainingElements.dinov3BackboneSelect ? trainingElements.dinov3BackboneSelect.value : null)
+            : (trainingElements.clipBackboneSelect ? trainingElements.clipBackboneSelect.value : null);
+        const dim = inferEmbeddingDimFromEncoder(encoderType, modelName);
+        return recommendedHiddenSizesForDim(dim);
+    }
+
+    function applyRecommendedMlpHiddenSizes(force) {
+        if (!trainingElements.mlpHiddenSizesInput) return;
+        const recommended = getRecommendedMlpHiddenSizes();
+        if (!recommended) return;
+        const current = String(trainingElements.mlpHiddenSizesInput.value || "").trim();
+        if (!force) {
+            if (mlpHiddenSizesTouched && current && current !== mlpHiddenSizesAutoValue) {
+                return;
+            }
+        }
+        trainingElements.mlpHiddenSizesInput.value = recommended;
+        mlpHiddenSizesAutoValue = recommended;
+        mlpHiddenSizesTouched = false;
+    }
+
     function populateDinov3Backbones() {
         fillSelectOptions(trainingElements.dinov3BackboneSelect, DINOV3_BACKBONES, DINOV3_BACKBONES[0] || "");
         updateTrainingEncoderControls();
@@ -2958,6 +3061,7 @@ const sam3TrainState = {
             fillSelectOptions(trainingElements.clipBackboneSelect, list, active);
             fillSelectOptions(activeElements.clipSelect, list, active);
             updateTrainingEncoderControls();
+            applyRecommendedMlpHiddenSizes(false);
         } catch (error) {
             console.warn("Failed to fetch clip backbones", error);
             setTrainingMessage(`Unable to load CLIP backbones: ${error.message || error}`, "error");
@@ -7286,6 +7390,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     ? art.background_class_count
                     : (Array.isArray(art.background_classes) ? art.background_classes.length : null);
                 const augInfo = art.augmentation_policy ? "on (albumentations)" : "off";
+                const classifierType = art.classifier_type ? String(art.classifier_type) : "logreg";
                 const summaryLines = [
                     `Model: ${escapeHtml(art.model_path)}`,
                     `Labelmap: ${escapeHtml(art.labelmap_path)}`,
@@ -7295,6 +7400,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     `Classes seen: ${art.classes_seen}`,
                     ...(bgCount !== null ? [`Background classes: ${escapeHtml(String(bgCount))} (hidden negatives)`] : []),
                     `Augmentations: ${escapeHtml(augInfo)}`,
+                    `Classifier head: ${escapeHtml(classifierType)}`,
                     `Class weight: ${escapeHtml(art.class_weight || 'none')}`,
                     `Solver: ${escapeHtml(art.solver || 'saga')}`,
                     `Iterations: ${escapeHtml(String(iterationsInfo))}`,
@@ -7306,6 +7412,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     `Margin threshold: ${escapeHtml(formatNumber(art.hard_mining_margin_threshold, 3))}`,
                     `Convergence tol: ${escapeHtml(formatNumber(art.convergence_tol, 6))}`,
                 ];
+                if (classifierType === "mlp") {
+                    const hidden = Array.isArray(art.mlp_hidden_sizes) ? art.mlp_hidden_sizes.join(",") : art.mlp_hidden_sizes;
+                    summaryLines.push(`MLP hidden sizes: ${escapeHtml(String(hidden || "256"))}`);
+                    summaryLines.push(`MLP dropout: ${escapeHtml(formatNumber(art.mlp_dropout, 3))}`);
+                    summaryLines.push(`MLP epochs: ${escapeHtml(String(art.mlp_epochs ?? "n/a"))}`);
+                    summaryLines.push(`MLP lr: ${escapeHtml(formatNumber(art.mlp_lr, 6))}`);
+                    summaryLines.push(`MLP weight decay: ${escapeHtml(formatNumber(art.mlp_weight_decay, 6))}`);
+                    summaryLines.push(`MLP label smoothing: ${escapeHtml(formatNumber(art.mlp_label_smoothing, 3))}`);
+                    summaryLines.push(`MLP patience: ${escapeHtml(String(art.mlp_patience ?? "n/a"))}`);
+                }
                 const summaryHtml = summaryLines.map((line) => `<div>${line}</div>`).join("");
                 const perClassHtml = renderPerClassMetrics(art.per_class_metrics);
                 const convergenceHtml = renderConvergenceTable(art.convergence_trace);
@@ -7558,6 +7674,30 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (trainingElements.regCInput) {
             formData.append("C", trainingElements.regCInput.value || "1.0");
+        }
+        if (trainingElements.classifierTypeSelect) {
+            formData.append("classifier_type", trainingElements.classifierTypeSelect.value || "logreg");
+        }
+        if (trainingElements.mlpHiddenSizesInput) {
+            formData.append("mlp_hidden_sizes", trainingElements.mlpHiddenSizesInput.value || "256");
+        }
+        if (trainingElements.mlpDropoutInput) {
+            formData.append("mlp_dropout", trainingElements.mlpDropoutInput.value || "0.1");
+        }
+        if (trainingElements.mlpEpochsInput) {
+            formData.append("mlp_epochs", trainingElements.mlpEpochsInput.value || "50");
+        }
+        if (trainingElements.mlpLrInput) {
+            formData.append("mlp_lr", trainingElements.mlpLrInput.value || "0.001");
+        }
+        if (trainingElements.mlpWeightDecayInput) {
+            formData.append("mlp_weight_decay", trainingElements.mlpWeightDecayInput.value || "0.0001");
+        }
+        if (trainingElements.mlpLabelSmoothingInput) {
+            formData.append("mlp_label_smoothing", trainingElements.mlpLabelSmoothingInput.value || "0.05");
+        }
+        if (trainingElements.mlpPatienceInput) {
+            formData.append("mlp_patience", trainingElements.mlpPatienceInput.value || "6");
         }
         if (trainingElements.classWeightSelect) {
             formData.append("class_weight", trainingElements.classWeightSelect.value || "none");
@@ -8043,6 +8183,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.clipBackboneRow = document.getElementById("clipBackboneRow");
         trainingElements.dinov3BackboneRow = document.getElementById("dinov3BackboneRow");
         trainingElements.solverSelect = document.getElementById("trainSolver");
+        trainingElements.classifierTypeSelect = document.getElementById("trainClassifierType");
         trainingElements.datasetSelect = document.getElementById("trainDatasetSelect");
         trainingElements.datasetRefresh = document.getElementById("trainDatasetRefresh");
         trainingElements.datasetSummary = document.getElementById("trainDatasetSummary");
@@ -8064,6 +8205,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.maxIterInput = document.getElementById("trainMaxIter");
         trainingElements.minPerClassInput = document.getElementById("trainMinPerClass");
         trainingElements.regCInput = document.getElementById("trainRegC");
+        trainingElements.mlpHiddenSizesInput = document.getElementById("trainMlpHiddenSizes");
+        trainingElements.mlpHiddenSizesAutoBtn = document.getElementById("trainMlpHiddenSizesAuto");
+        trainingElements.mlpDropoutInput = document.getElementById("trainMlpDropout");
+        trainingElements.mlpEpochsInput = document.getElementById("trainMlpEpochs");
+        trainingElements.mlpLrInput = document.getElementById("trainMlpLr");
+        trainingElements.mlpWeightDecayInput = document.getElementById("trainMlpWeightDecay");
+        trainingElements.mlpLabelSmoothingInput = document.getElementById("trainMlpLabelSmoothing");
+        trainingElements.mlpPatienceInput = document.getElementById("trainMlpPatience");
         trainingElements.classWeightSelect = document.getElementById("trainClassWeight");
         trainingElements.deviceOverrideInput = document.getElementById("trainDeviceOverride");
         trainingElements.hardMisWeightInput = document.getElementById("trainHardMisWeight");
@@ -8083,9 +8232,34 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.reuseEmbeddingsCheckbox = document.getElementById("trainReuseEmbeddings");
         trainingElements.hardMiningCheckbox = document.getElementById("trainHardMining");
         if (trainingElements.encoderTypeSelect) {
-            trainingElements.encoderTypeSelect.addEventListener("change", updateTrainingEncoderControls);
+            trainingElements.encoderTypeSelect.addEventListener("change", () => {
+                updateTrainingEncoderControls();
+                applyRecommendedMlpHiddenSizes(false);
+            });
+        }
+        if (trainingElements.classifierTypeSelect) {
+            trainingElements.classifierTypeSelect.addEventListener("change", updateTrainingClassifierControls);
+        }
+        if (trainingElements.clipBackboneSelect) {
+            trainingElements.clipBackboneSelect.addEventListener("change", () => applyRecommendedMlpHiddenSizes(false));
+        }
+        if (trainingElements.dinov3BackboneSelect) {
+            trainingElements.dinov3BackboneSelect.addEventListener("change", () => applyRecommendedMlpHiddenSizes(false));
+        }
+        if (trainingElements.mlpHiddenSizesInput) {
+            trainingElements.mlpHiddenSizesInput.addEventListener("input", () => {
+                const current = String(trainingElements.mlpHiddenSizesInput.value || "").trim();
+                mlpHiddenSizesTouched = current.length > 0;
+                if (current && current === mlpHiddenSizesAutoValue) {
+                    mlpHiddenSizesTouched = false;
+                }
+            });
+        }
+        if (trainingElements.mlpHiddenSizesAutoBtn) {
+            trainingElements.mlpHiddenSizesAutoBtn.addEventListener("click", () => applyRecommendedMlpHiddenSizes(true));
         }
         populateDinov3Backbones();
+        updateTrainingClassifierControls();
 
         const applyDatasetSelection = (datasetId) => {
             const item = clipDatasetState.items.find((d) => d.id === datasetId);

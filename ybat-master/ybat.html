@@ -326,6 +326,20 @@
                 <div class="training-wrapper two-col">
                     <section class="training-form-section">
                         <h2>CLIP Class Predictor Settings</h2>
+                        <div class="training-help" style="margin: 8px 0 14px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
+                            <div style="font-weight: 600; color: #0f172a;">Backbone guide (recent comparison on qwen_dataset)</div>
+                            <div style="margin-top: 6px;">
+                                <strong>DINOv3 LVD (ViT-L/16)</strong> ranked highest in our test, followed by LVD ViT-B/16, then LVD ViT-S/16.
+                                <strong>CLIP</strong> trailed but enables text prompts and prompt prefiltering.
+                                <strong>SAT backbones</strong> were slower and did not beat LVD in that test.
+                            </div>
+                            <div style="margin-top: 6px;">
+                                <strong>Compute / VRAM / latency (rough bands)</strong><br />
+                                CLIP ViT-B/32: Low (<=8&nbsp;GB) • Fast · CLIP ViT-B/16: Medium (8-12&nbsp;GB) • Medium · CLIP ViT-L/14: High (12-16&nbsp;GB) • Slow<br />
+                                DINOv3 LVD ViT-S/B: Medium (12-16&nbsp;GB) • Slow · DINOv3 LVD ViT-L/H+: High (16-24&nbsp;GB+) • Slower · DINOv3 7B/SAT: Very high (48&nbsp;GB+) • Very slow
+                            </div>
+                            <div style="margin-top: 6px; color: #475569;">Choose the largest model your GPU can handle if accuracy matters; use smaller models for faster iteration. Results vary by dataset.</div>
+                        </div>
                         <div class="training-field">
                             <label for="trainEncoderType">Encoder type</label>
                             <select id="trainEncoderType">
@@ -349,7 +363,7 @@
                             <input type="text" id="qwenTrainDevices" placeholder="e.g., 0,1" />
                             <div class="training-help">Leave blank to use a single GPU. Enter comma-separated CUDA device indices to split across multiple GPUs.</div>
                         </div>
-                        <div class="training-field">
+                        <div class="training-field logreg-only">
                             <label for="trainSolver">Solver</label>
                             <select id="trainSolver">
                                 <option value="saga" selected>SAGA (elastic net-friendly)</option>
@@ -358,6 +372,16 @@
                                 <option value="sag">SAG</option>
                                 <option value="newton-cg">Newton-CG</option>
                             </select>
+                        </div>
+                        <div class="training-field">
+                            <label for="trainClassifierType">Classifier head</label>
+                            <select id="trainClassifierType">
+                                <option value="logreg" selected>LogReg (fast, linear)</option>
+                                <option value="mlp">MLP (nonlinear, slower)</option>
+                            </select>
+                            <div class="training-help">MLP can improve class separation at the cost of extra training time. LogReg is fast and stable.</div>
+                            <div class="training-help">MLP input size equals the encoder embedding size (CLIP ViT-B = 512, ViT-L = 768, DINOv3 varies). Use hidden sizes around 0.5–1.0× the embedding for best results.</div>
+                            <div class="training-help mlp-only" hidden>LogReg-only tuning (solver, C, hard mining, max iter) is hidden when MLP is selected.</div>
                         </div>
                         <div class="training-field">
                             <label for="trainDatasetSelect">Cached dataset (YOLO)</label>
@@ -406,7 +430,7 @@
                                 <input type="number" id="trainBatchSize" value="64" min="1" />
                                 <div class="training-help">Images encoded per CLIP forward pass.</div>
                             </div>
-                            <div>
+                            <div class="logreg-only">
                                 <label for="trainMaxIter">Max Iter</label>
                                 <input type="number" id="trainMaxIter" value="1000" min="100" step="50" />
                                 <div class="training-help">Upper bound on solver iterations.</div>
@@ -416,10 +440,48 @@
                                 <input type="number" id="trainMinPerClass" value="2" min="1" />
                                 <div class="training-help">Drops classes with fewer samples before training.</div>
                             </div>
-                            <div>
+                            <div class="logreg-only">
                                 <label for="trainRegC">C</label>
                                 <input type="number" id="trainRegC" value="1.0" step="0.1" min="0.01" />
                                 <div class="training-help">Inverse regularisation strength (higher = less regularisation).</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpHiddenSizes">MLP hidden sizes</label>
+                                <div class="training-picker">
+                                    <input type="text" id="trainMlpHiddenSizes" value="256" />
+                                    <button type="button" class="training-button secondary" id="trainMlpHiddenSizesAuto">Use recommended</button>
+                                </div>
+                                <div class="training-help">Comma-separated layer sizes (e.g., 768,384). Use recommended to match the selected backbone. Smaller layers train faster, larger layers boost accuracy.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpDropout">MLP dropout</label>
+                                <input type="number" id="trainMlpDropout" value="0.1" min="0" max="0.9" step="0.05" />
+                                <div class="training-help">Dropout between hidden layers.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpEpochs">MLP epochs</label>
+                                <input type="number" id="trainMlpEpochs" value="50" min="1" step="1" />
+                                <div class="training-help">Training epochs for the MLP head.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpLr">MLP learning rate</label>
+                                <input type="number" id="trainMlpLr" value="0.001" min="0.000001" step="0.0001" />
+                                <div class="training-help">AdamW learning rate.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpWeightDecay">MLP weight decay</label>
+                                <input type="number" id="trainMlpWeightDecay" value="0.0001" min="0" step="0.0001" />
+                                <div class="training-help">L2 regularisation for the MLP head.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpLabelSmoothing">Soft targets (label smoothing)</label>
+                                <input type="number" id="trainMlpLabelSmoothing" value="0.05" min="0" max="0.3" step="0.01" />
+                                <div class="training-help">Softens targets to improve class separation.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpPatience">MLP early-stop patience</label>
+                                <input type="number" id="trainMlpPatience" value="6" min="1" step="1" />
+                                <div class="training-help">Stop when val loss stops improving.</div>
                             </div>
                             <div>
                                 <label for="trainClassWeight">Class Weight</label>
@@ -433,27 +495,27 @@
                                 <label for="trainDeviceOverride">Device Override</label>
                                 <input type="text" id="trainDeviceOverride" placeholder="cpu or cuda" />
                             </div>
-                            <div>
+                            <div class="logreg-only">
                                 <label for="trainHardMisWeight">Hard W (misclass)</label>
                                 <input type="number" id="trainHardMisWeight" value="3.0" min="1" step="0.1" />
                                 <div class="training-help">Multiplier applied to misclassified samples in hard mining.</div>
                             </div>
-                            <div>
+                            <div class="logreg-only">
                                 <label for="trainHardLowConfWeight">Hard W (low conf)</label>
                                 <input type="number" id="trainHardLowConfWeight" value="2.0" min="1" step="0.1" />
                                 <div class="training-help">Multiplier for low-confidence samples (below the thresholds).</div>
                             </div>
-                            <div>
+                            <div class="logreg-only">
                                 <label for="trainHardLowConfThreshold">Low-conf threshold</label>
                                 <input type="number" id="trainHardLowConfThreshold" value="0.65" min="0" max="0.9999" step="0.01" />
                                 <div class="training-help">Samples with max probability below this value get boosted.</div>
                             </div>
-                            <div>
+                            <div class="logreg-only">
                                 <label for="trainHardMarginThreshold">Margin threshold</label>
                                 <input type="number" id="trainHardMarginThreshold" value="0.15" min="0" max="1" step="0.01" />
                                 <div class="training-help">Boost samples whose top-1 vs top-2 gap falls under this margin.</div>
                             </div>
-                            <div>
+                            <div class="logreg-only">
                                 <label for="trainConvergenceTol">Convergence tol</label>
                                 <input type="number" id="trainConvergenceTol" value="0.0001" min="0" step="0.00001" />
                                 <div class="training-help">Lower tolerance forces more iterations before convergence.</div>
@@ -470,7 +532,7 @@
                         <button type="button" id="startTrainingBtn">Start Training</button>
                         <div class="training-toggle-row">
                             <label><input type="checkbox" id="trainReuseEmbeddings" checked /> Cache and reuse embeddings</label>
-                            <label><input type="checkbox" id="trainHardMining" /> Hard example mining</label>
+                            <label class="logreg-only"><input type="checkbox" id="trainHardMining" /> Hard example mining</label>
                         </div>
                         <div class="training-message" id="trainingMessage" role="status"></div>
                     </section>

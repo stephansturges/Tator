@@ -84,6 +84,55 @@ def parse_args() -> argparse.Namespace:
         help="Logistic regression solver.",
     )
     parser.add_argument(
+        "--classifier_type",
+        type=str,
+        default="logreg",
+        choices=["logreg", "mlp"],
+        help="Classifier head type: logistic regression or a small MLP.",
+    )
+    parser.add_argument(
+        "--mlp_hidden_sizes",
+        type=str,
+        default="256",
+        help="Comma-separated hidden sizes for the MLP head (e.g., '512,256').",
+    )
+    parser.add_argument(
+        "--mlp_dropout",
+        type=float,
+        default=0.1,
+        help="Dropout rate for MLP hidden layers.",
+    )
+    parser.add_argument(
+        "--mlp_epochs",
+        type=int,
+        default=50,
+        help="Epochs for MLP head training.",
+    )
+    parser.add_argument(
+        "--mlp_lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate for MLP head training.",
+    )
+    parser.add_argument(
+        "--mlp_weight_decay",
+        type=float,
+        default=1e-4,
+        help="Weight decay for MLP head training.",
+    )
+    parser.add_argument(
+        "--mlp_label_smoothing",
+        type=float,
+        default=0.05,
+        help="Label smoothing for soft targets (0 disables).",
+    )
+    parser.add_argument(
+        "--mlp_patience",
+        type=int,
+        default=6,
+        help="Early-stop patience for MLP validation loss.",
+    )
+    parser.add_argument(
         "--reuse-embeddings",
         action="store_true",
         help="Reuse cached CLIP embeddings for this dataset if available.",
@@ -167,6 +216,14 @@ def main() -> None:
             class_weight=args.class_weight,
             C=args.C,
             solver=args.solver,
+            classifier_type=args.classifier_type,
+            mlp_hidden_sizes=args.mlp_hidden_sizes,
+            mlp_dropout=args.mlp_dropout,
+            mlp_epochs=args.mlp_epochs,
+            mlp_lr=args.mlp_lr,
+            mlp_weight_decay=args.mlp_weight_decay,
+            mlp_label_smoothing=args.mlp_label_smoothing,
+            mlp_patience=args.mlp_patience,
             reuse_embeddings=args.reuse_embeddings,
             hard_example_mining=args.hard_example_mining,
             hard_mining_misclassified_weight=args.hard_misclassified_weight,

@@ -291,6 +291,25 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 
 Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keyed by dataset paths + encoder model, independent of batch size. Toggling cache reuse will hit the store when inputs match.
 
+#### Classifier Benchmarks (CLIP/DINOv3)
+We run all classifier benchmarks on a **fixed group split** (20% by image, seed 42) so scores are comparable. Metrics below are **foreground-only** (exclude `__bg_*`) and come from the same cached embeddings used at training time. Full procedure lives in `classifier_testing_methodology.md`.
+
+Recent DINOv3 MLP comparisons (qwen_dataset, 5 bg classes):
+
+| Encoder | MLP sizes | Label smoothing | FG macro precision | FG macro recall | FG macro F1 | Accuracy |
+| --- | --- | --- | --- | --- | --- | --- |
+| dinov3-vits16 | 256 | 0.0 | 0.7635 | 0.8532 | 0.7991 | 0.8800 |
+| dinov3-vits16 | 256 | 0.1 | 0.7348 | 0.8618 | 0.7789 | 0.8658 |
+| dinov3-vitb16 | 512 | 0.0 | 0.7311 | 0.8423 | 0.7714 | 0.8603 |
+| dinov3-vitb16 | 512 | 0.1 | 0.7484 | 0.8591 | 0.7892 | 0.8718 |
+| dinov3-vitl16 | 768,384 | 0.0 | 0.7541 | 0.8465 | 0.7908 | 0.8732 |
+| dinov3-vitl16 | 768,384 | 0.1 | 0.7991 | 0.8548 | 0.8226 | 0.8996 |
+
+Takeaways:
+- **Soft targets (label smoothing 0.1)** improved recall for all three sizes.
+- Precision **improved for vitb16/vitl16** and dipped slightly for vits16.
+- Best overall in this batch: **dinov3-vitl16 + MLP 768/384 + smoothing 0.1**.
+
 ### CLIP Class Predictor Settings Tab
 - Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct encoder type/model and labelmap.
 - Manage saved heads: **Refresh**, **Download zip** (classifier + meta + labelmap if found), or **Delete** directly from the list under <code>uploads/classifiers/</code>.
@@ -426,6 +445,11 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
+
+## 2025-12-25 – DINOv3 MLP Benchmarks + Soft Targets
+- Benchmarked **DINOv3 + MLP** heads (small/base/large) with and without **label smoothing** and logged results to the comparison tables.
+- Added a concise methodology (`classifier_testing_methodology.md`) so future classifier runs are evaluated on the same split + metrics.
+- Updated the Train CLIP section with a quick summary table and the precision/recall tradeoffs from soft targets.
 
 ## 2025-12-20 – DINOv3 Heads + CLIP Model Management
 - Added **DINOv3 encoder support** for classifier heads (image-only alternative to CLIP). DINOv3 heads require `.meta.pkl` so the encoder model is known.

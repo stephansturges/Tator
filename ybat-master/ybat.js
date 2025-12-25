@@ -2889,22 +2889,42 @@ const sam3TrainState = {
         }
         const previous = selectEl.value;
         selectEl.innerHTML = "";
-        options.forEach((name) => {
+        const values = [];
+        options.forEach((entry) => {
             const option = document.createElement("option");
-            option.value = name;
-            option.textContent = name;
+            if (entry && typeof entry === "object") {
+                option.value = entry.value;
+                option.textContent = entry.label || entry.value;
+                values.push(entry.value);
+            } else {
+                option.value = entry;
+                option.textContent = entry;
+                values.push(entry);
+            }
             selectEl.appendChild(option);
         });
-        const desired = preferred || previous || (options.length ? options[0] : "");
-        if (desired && options.includes(desired)) {
+        const defaultValue = options.length
+            ? (options[0] && typeof options[0] === "object" ? options[0].value : options[0])
+            : "";
+        const desired = preferred || previous || defaultValue;
+        if (desired && values.includes(desired)) {
             selectEl.value = desired;
         }
     }
 
     const DINOV3_BACKBONES = [
-        "facebook/dinov3-vits16-pretrain-lvd1689m",
-        "facebook/dinov3-vitb16-pretrain-lvd1689m",
-        "facebook/dinov3-vitl16-pretrain-lvd1689m",
+        { value: "facebook/dinov3-vits16-pretrain-lvd1689m", label: "DINOv3 ViT-S/16 (LVD-1689M)" },
+        { value: "facebook/dinov3-vits16plus-pretrain-lvd1689m", label: "DINOv3 ViT-S+/16 (LVD-1689M)" },
+        { value: "facebook/dinov3-vitb16-pretrain-lvd1689m", label: "DINOv3 ViT-B/16 (LVD-1689M)" },
+        { value: "facebook/dinov3-vitl16-pretrain-lvd1689m", label: "DINOv3 ViT-L/16 (LVD-1689M)" },
+        { value: "facebook/dinov3-vith16plus-pretrain-lvd1689m", label: "DINOv3 ViT-H+/16 (LVD-1689M)" },
+        { value: "facebook/dinov3-vit7b16-pretrain-lvd1689m", label: "DINOv3 ViT-7B/16 (LVD-1689M)" },
+        { value: "facebook/dinov3-convnext-tiny-pretrain-lvd1689m", label: "DINOv3 ConvNeXt Tiny (LVD-1689M)" },
+        { value: "facebook/dinov3-convnext-small-pretrain-lvd1689m", label: "DINOv3 ConvNeXt Small (LVD-1689M)" },
+        { value: "facebook/dinov3-convnext-base-pretrain-lvd1689m", label: "DINOv3 ConvNeXt Base (LVD-1689M)" },
+        { value: "facebook/dinov3-convnext-large-pretrain-lvd1689m", label: "DINOv3 ConvNeXt Large (LVD-1689M)" },
+        { value: "facebook/dinov3-vitl16-pretrain-sat493m", label: "DINOv3 ViT-L/16 (SAT-493M)" },
+        { value: "facebook/dinov3-vit7b16-pretrain-sat493m", label: "DINOv3 ViT-7B/16 (SAT-493M)" },
     ];
 
     function getTrainingEncoderType() {

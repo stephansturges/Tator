@@ -134,5 +134,39 @@
     "labelmap_path": "/home/steph/Tator/uploads/labelmaps/qwen_dataset_dinov3_vits16_bg5_labels.pkl",
     "meta_path": "/home/steph/Tator/uploads/classifiers/qwen_dataset_dinov3_vits16_bg5.meta.pkl",
     "job_id": "f7e57cc4df1249f9923433f172610da6"
+  },
+  {
+    "label": "qwen_dataset_clip_vitb32_mlp_bg5",
+    "encoder_type": "clip",
+    "encoder_model": "ViT-B/32",
+    "embedding_dim": 512,
+    "accuracy": 0.7534061830002075,
+    "macro_f1_all": 0.6913992160455154,
+    "macro_f1_fg": 0.6201790591915134,
+    "weighted_f1_all": 0.7691473782403658,
+    "weighted_f1_fg": 0.76204999259341,
+    "iters": 22,
+    "converged": true,
+    "model_path": "/home/steph/Tator/uploads/classifiers/qwen_dataset_clip_vitb32_mlp_bg5.pkl",
+    "labelmap_path": "uploads/labelmaps/qwen_dataset_clip_vitb32_mlp_bg5_labels.pkl",
+    "meta_path": "/home/steph/Tator/uploads/classifiers/qwen_dataset_clip_vitb32_mlp_bg5.meta.pkl",
+    "job_id": null
+  },
+  {
+    "label": "qwen_dataset_clip_vitb32_mlp512_256_bg5",
+    "encoder_type": "clip",
+    "encoder_model": "ViT-B/32",
+    "embedding_dim": 512,
+    "accuracy": 0.7645929870668787,
+    "macro_f1_all": 0.7202016880825132,
+    "macro_f1_fg": 0.6522448095127106,
+    "weighted_f1_all": 0.778330927316649,
+    "weighted_f1_fg": 0.7697890730031389,
+    "iters": 14,
+    "converged": true,
+    "model_path": "/home/steph/Tator/uploads/classifiers/qwen_dataset_clip_vitb32_mlp512_256_bg5.pkl",
+    "labelmap_path": "uploads/labelmaps/qwen_dataset_clip_vitb32_mlp512_256_bg5_labels.pkl",
+    "meta_path": "/home/steph/Tator/uploads/classifiers/qwen_dataset_clip_vitb32_mlp512_256_bg5.meta.pkl",
+    "job_id": null
   }
 ]

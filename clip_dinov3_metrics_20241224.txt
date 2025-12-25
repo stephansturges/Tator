@@ -4,6 +4,8 @@ label, encoder_model, acc, macro_f1_fg, weighted_f1_fg
 qwen_dataset_clip_vitb16_bg5, ViT-B/16, 0.7003, 0.5613, 0.7111
 qwen_dataset_clip_vitl14_bg5, ViT-L/14, 0.6912, 0.5812, 0.7200
 qwen_dataset_clip_vitb32_bg5, ViT-B/32, 0.6874, 0.5609, 0.7048
+qwen_dataset_clip_vitb32_mlp_bg5, ViT-B/32, 0.7534, 0.6202, 0.7620
+qwen_dataset_clip_vitb32_mlp512_256_bg5, ViT-B/32, 0.7646, 0.6522, 0.7698
 qwen_dataset_dinov3_vitl16_bg5, facebook/dinov3-vitl16-pretrain-lvd1689m, 0.8236, 0.7189, 0.8336
 qwen_dataset_dinov3_vitb16_bg5, facebook/dinov3-vitb16-pretrain-lvd1689m, 0.8217, 0.6937, 0.8309
 qwen_dataset_dinov3_vits16_bg5, facebook/dinov3-vits16-pretrain-lvd1689m, 0.7812, 0.6684, 0.7980

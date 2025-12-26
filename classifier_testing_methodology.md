@@ -25,6 +25,7 @@ We report:
 - `accuracy` (overall)
 - `macro_f1_all` / `weighted_f1_all` (all classes)
 - `macro_f1_fg` / `weighted_f1_fg` (foreground only)
+- `macro_precision_fg` / `macro_recall_fg` (foreground only)
 
 Foreground-only metrics exclude any `__bg_*` classes from the CLIP/DINOv3
 negative-class augmentation.
@@ -35,7 +36,8 @@ We append/update three files:
 - `clip_dinov3_metrics_20241224.csv`
 - `clip_dinov3_metrics_20241224.txt`
 
-Each entry includes: encoder type/model, embedding dim, metrics, convergence
+Each entry includes: encoder type/model, embedding dim, metrics (including
+foreground precision/recall when available), convergence
 info, and artifact paths.
 
 ## How To Extend (New Run)

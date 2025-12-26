@@ -294,21 +294,21 @@ Cached embeddings live under `uploads/clip_embeddings/<signature>/` and are keye
 #### Classifier Benchmarks (CLIP/DINOv3)
 We run all classifier benchmarks on a **fixed group split** (20% by image, seed 42) so scores are comparable. Metrics below are **foreground-only** (exclude `__bg_*`) and come from the same cached embeddings used at training time. Full procedure lives in `classifier_testing_methodology.md`.
 
-Recent DINOv3 MLP comparisons (qwen_dataset, 5 bg classes):
+Wide DINOv3 MLP sweep (qwen_dataset, 5 bg classes): 40 size configs across vits16/vitb16/vitl16 + SAT variants, each with/without label smoothing. Full tables live in `clip_dinov3_metrics_20241224.*`.
+
+Top DINOv3 MLP heads (by FG macro F1):
 
 | Encoder | MLP sizes | Label smoothing | FG macro precision | FG macro recall | FG macro F1 | Accuracy |
 | --- | --- | --- | --- | --- | --- | --- |
-| dinov3-vits16 | 256 | 0.0 | 0.7635 | 0.8532 | 0.7991 | 0.8800 |
-| dinov3-vits16 | 256 | 0.1 | 0.7348 | 0.8618 | 0.7789 | 0.8658 |
-| dinov3-vitb16 | 512 | 0.0 | 0.7311 | 0.8423 | 0.7714 | 0.8603 |
-| dinov3-vitb16 | 512 | 0.1 | 0.7484 | 0.8591 | 0.7892 | 0.8718 |
-| dinov3-vitl16 | 768,384 | 0.0 | 0.7541 | 0.8465 | 0.7908 | 0.8732 |
+| dinov3-vits16 | 384,192 | 0.1 | 0.8059 | 0.8551 | 0.8266 | 0.8976 |
+| dinov3-vitl16 | 1024,512 | 0.1 | 0.8057 | 0.8528 | 0.8264 | 0.8977 |
 | dinov3-vitl16 | 768,384 | 0.1 | 0.7991 | 0.8548 | 0.8226 | 0.8996 |
+| dinov3-vitb16 | 768,384 | 0.1 | 0.7911 | 0.8521 | 0.8182 | 0.8875 |
+| dinov3-vitl16 | 768 | 0.1 | 0.7873 | 0.8631 | 0.8180 | 0.8927 |
 
-Takeaways:
-- **Soft targets (label smoothing 0.1)** improved recall for all three sizes.
-- Precision **improved for vitb16/vitl16** and dipped slightly for vits16.
-- Best overall in this batch: **dinov3-vitl16 + MLP 768/384 + smoothing 0.1**.
+Takeaways from the sweep:
+- **Soft targets (label smoothing 0.1)** improved FG macro precision by **+0.030** and recall by **+0.014** on average (macro F1 **+0.026**). Max gains reached +0.113 precision / +0.035 recall; worst-case deltas were small (≈‑0.03 precision, ≈‑0.001 recall).
+- Best overall in this sweep: **dinov3-vits16 + MLP 384/192 + smoothing 0.1** (FG macro F1 **0.8266**).
 
 ### CLIP Class Predictor Settings Tab
 - Activate a classifier by picking its `.pkl` artifacts or by selecting a completed training run; metadata auto-selects the correct encoder type/model and labelmap.

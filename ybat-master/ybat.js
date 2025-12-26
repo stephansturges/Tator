@@ -1235,6 +1235,12 @@
         mlpLrInput: null,
         mlpWeightDecayInput: null,
         mlpLabelSmoothingInput: null,
+        mlpLossTypeSelect: null,
+        mlpFocalGammaInput: null,
+        mlpFocalAlphaInput: null,
+        mlpSamplerSelect: null,
+        mlpMixupAlphaInput: null,
+        mlpNormalizeEmbeddingsCheckbox: null,
         mlpPatienceInput: null,
         classWeightSelect: null,
         deviceOverrideInput: null,
@@ -2955,9 +2961,20 @@ const sam3TrainState = {
         const classifierType = raw ? String(raw).toLowerCase().trim() : "logreg";
         const isMlp = classifierType === "mlp";
         const mlpOnlyFields = document.querySelectorAll(".mlp-only");
+        const focalOnlyFields = document.querySelectorAll(".mlp-focal-only");
         const logregOnlyFields = document.querySelectorAll(".logreg-only");
         mlpOnlyFields.forEach((el) => {
             el.hidden = !isMlp;
+        });
+        const lossTypeRaw = trainingElements.mlpLossTypeSelect ? trainingElements.mlpLossTypeSelect.value : "ce";
+        const lossType = lossTypeRaw ? String(lossTypeRaw).toLowerCase().trim() : "ce";
+        const showFocal = isMlp && lossType === "focal";
+        focalOnlyFields.forEach((el) => {
+            el.hidden = !showFocal;
+            const controls = el.querySelectorAll("input, select, textarea, button");
+            controls.forEach((control) => {
+                control.disabled = !showFocal;
+            });
         });
         logregOnlyFields.forEach((el) => {
             el.hidden = isMlp;
@@ -7420,6 +7437,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     summaryLines.push(`MLP lr: ${escapeHtml(formatNumber(art.mlp_lr, 6))}`);
                     summaryLines.push(`MLP weight decay: ${escapeHtml(formatNumber(art.mlp_weight_decay, 6))}`);
                     summaryLines.push(`MLP label smoothing: ${escapeHtml(formatNumber(art.mlp_label_smoothing, 3))}`);
+                    summaryLines.push(`MLP loss type: ${escapeHtml(art.mlp_loss_type || "ce")}`);
+                    if (String(art.mlp_loss_type || "").toLowerCase() === "focal") {
+                        summaryLines.push(`MLP focal gamma: ${escapeHtml(formatNumber(art.mlp_focal_gamma, 3))}`);
+                        if (art.mlp_focal_alpha !== null && art.mlp_focal_alpha !== undefined) {
+                            summaryLines.push(`MLP focal alpha: ${escapeHtml(formatNumber(art.mlp_focal_alpha, 3))}`);
+                        }
+                    }
+                    summaryLines.push(`MLP sampler: ${escapeHtml(art.mlp_sampler || "balanced")}`);
+                    summaryLines.push(`MLP mixup alpha: ${escapeHtml(formatNumber(art.mlp_mixup_alpha, 3))}`);
+                    summaryLines.push(`MLP normalize emb: ${escapeHtml(art.mlp_normalize_embeddings ? "yes" : "no")}`);
                     summaryLines.push(`MLP patience: ${escapeHtml(String(art.mlp_patience ?? "n/a"))}`);
                 }
                 const summaryHtml = summaryLines.map((line) => `<div>${line}</div>`).join("");
@@ -7695,6 +7722,27 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (trainingElements.mlpLabelSmoothingInput) {
             formData.append("mlp_label_smoothing", trainingElements.mlpLabelSmoothingInput.value || "0.05");
+        }
+        if (trainingElements.mlpLossTypeSelect) {
+            formData.append("mlp_loss_type", trainingElements.mlpLossTypeSelect.value || "ce");
+        }
+        if (trainingElements.mlpFocalGammaInput) {
+            formData.append("mlp_focal_gamma", trainingElements.mlpFocalGammaInput.value || "2.0");
+        }
+        if (trainingElements.mlpFocalAlphaInput) {
+            formData.append("mlp_focal_alpha", trainingElements.mlpFocalAlphaInput.value || "-1.0");
+        }
+        if (trainingElements.mlpSamplerSelect) {
+            formData.append("mlp_sampler", trainingElements.mlpSamplerSelect.value || "balanced");
+        }
+        if (trainingElements.mlpMixupAlphaInput) {
+            formData.append("mlp_mixup_alpha", trainingElements.mlpMixupAlphaInput.value || "0.1");
+        }
+        if (trainingElements.mlpNormalizeEmbeddingsCheckbox) {
+            formData.append(
+                "mlp_normalize_embeddings",
+                trainingElements.mlpNormalizeEmbeddingsCheckbox.checked ? "true" : "false",
+            );
         }
         if (trainingElements.mlpPatienceInput) {
             formData.append("mlp_patience", trainingElements.mlpPatienceInput.value || "6");
@@ -8212,6 +8260,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.mlpLrInput = document.getElementById("trainMlpLr");
         trainingElements.mlpWeightDecayInput = document.getElementById("trainMlpWeightDecay");
         trainingElements.mlpLabelSmoothingInput = document.getElementById("trainMlpLabelSmoothing");
+        trainingElements.mlpLossTypeSelect = document.getElementById("trainMlpLossType");
+        trainingElements.mlpFocalGammaInput = document.getElementById("trainMlpFocalGamma");
+        trainingElements.mlpFocalAlphaInput = document.getElementById("trainMlpFocalAlpha");
+        trainingElements.mlpSamplerSelect = document.getElementById("trainMlpSampler");
+        trainingElements.mlpMixupAlphaInput = document.getElementById("trainMlpMixupAlpha");
+        trainingElements.mlpNormalizeEmbeddingsCheckbox = document.getElementById("trainMlpNormalizeEmbeddings");
         trainingElements.mlpPatienceInput = document.getElementById("trainMlpPatience");
         trainingElements.classWeightSelect = document.getElementById("trainClassWeight");
         trainingElements.deviceOverrideInput = document.getElementById("trainDeviceOverride");
@@ -8239,6 +8293,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (trainingElements.classifierTypeSelect) {
             trainingElements.classifierTypeSelect.addEventListener("change", updateTrainingClassifierControls);
+        }
+        if (trainingElements.mlpLossTypeSelect) {
+            trainingElements.mlpLossTypeSelect.addEventListener("change", updateTrainingClassifierControls);
         }
         if (trainingElements.clipBackboneSelect) {
             trainingElements.clipBackboneSelect.addEventListener("change", () => applyRecommendedMlpHiddenSizes(false));

@@ -127,6 +127,44 @@ def parse_args() -> argparse.Namespace:
         help="Label smoothing for soft targets (0 disables).",
     )
     parser.add_argument(
+        "--mlp_loss_type",
+        type=str,
+        default="ce",
+        choices=["ce", "focal"],
+        help="Loss type for MLP heads.",
+    )
+    parser.add_argument(
+        "--mlp_focal_gamma",
+        type=float,
+        default=2.0,
+        help="Focal loss gamma (only used when loss type is focal).",
+    )
+    parser.add_argument(
+        "--mlp_focal_alpha",
+        type=float,
+        default=-1.0,
+        help="Optional focal loss alpha (negative disables extra scaling).",
+    )
+    parser.add_argument(
+        "--mlp_sampler",
+        type=str,
+        default="balanced",
+        choices=["balanced", "none", "shuffle"],
+        help="Sampling strategy for MLP training batches.",
+    )
+    parser.add_argument(
+        "--mlp_mixup_alpha",
+        type=float,
+        default=0.1,
+        help="Mixup alpha for embedding mixup (0 disables).",
+    )
+    parser.add_argument(
+        "--mlp_normalize_embeddings",
+        type=str,
+        default="true",
+        help="L2-normalize embeddings before MLP training (true/false).",
+    )
+    parser.add_argument(
         "--mlp_patience",
         type=int,
         default=6,
@@ -184,7 +222,7 @@ def parse_args() -> argparse.Namespace:
 def _print_matrix(matrix: Sequence[Sequence[int]], labels: Sequence[str]) -> None:
     if not matrix:
         print("Confusion matrix is empty.")
-        return
+    return
     header = "\t".join(["true\\pred"] + [str(lbl) for lbl in labels])
     print(header)
     for label, row in zip(labels, matrix):
@@ -194,6 +232,8 @@ def _print_matrix(matrix: Sequence[Sequence[int]], labels: Sequence[str]) -> Non
 
 def main() -> None:
     args = parse_args()
+
+    normalize_embeddings = str(args.mlp_normalize_embeddings).strip().lower() in {"1", "true", "yes", "on"}
 
     def emit(progress: float, message: str) -> None:
         print(f"[{progress * 100:5.1f}%] {message}")
@@ -223,6 +263,12 @@ def main() -> None:
             mlp_lr=args.mlp_lr,
             mlp_weight_decay=args.mlp_weight_decay,
             mlp_label_smoothing=args.mlp_label_smoothing,
+            mlp_loss_type=args.mlp_loss_type,
+            mlp_focal_gamma=args.mlp_focal_gamma,
+            mlp_focal_alpha=args.mlp_focal_alpha,
+            mlp_sampler=args.mlp_sampler,
+            mlp_mixup_alpha=args.mlp_mixup_alpha,
+            mlp_normalize_embeddings=normalize_embeddings,
             mlp_patience=args.mlp_patience,
             reuse_embeddings=args.reuse_embeddings,
             hard_example_mining=args.hard_example_mining,
@@ -254,6 +300,22 @@ def main() -> None:
     print(f"Converged           : {artifacts.converged}")
     print(f"Hard example mining : {'yes' if artifacts.hard_example_mining else 'no'}")
     print(f"Accuracy            : {artifacts.accuracy:.4f}")
+    if artifacts.classifier_type == "mlp":
+        hidden_sizes = artifacts.mlp_hidden_sizes
+        hidden_display = ",".join(str(x) for x in hidden_sizes) if isinstance(hidden_sizes, list) else str(hidden_sizes)
+        print(f"MLP hidden sizes    : {hidden_display}")
+        print(f"MLP dropout         : {artifacts.mlp_dropout}")
+        print(f"MLP epochs          : {artifacts.mlp_epochs}")
+        print(f"MLP lr              : {artifacts.mlp_lr}")
+        print(f"MLP weight decay    : {artifacts.mlp_weight_decay}")
+        print(f"MLP label smoothing : {artifacts.mlp_label_smoothing}")
+        print(f"MLP loss type       : {artifacts.mlp_loss_type}")
+        if artifacts.mlp_loss_type == "focal":
+            print(f"MLP focal gamma     : {artifacts.mlp_focal_gamma}")
+            print(f"MLP focal alpha     : {artifacts.mlp_focal_alpha}")
+        print(f"MLP sampler         : {artifacts.mlp_sampler}")
+        print(f"MLP mixup alpha     : {artifacts.mlp_mixup_alpha}")
+        print(f"MLP normalize emb   : {artifacts.mlp_normalize_embeddings}")
 
     print("\nClassification report:")
     print(artifacts.classification_report)

@@ -7,6 +7,7 @@ CLI script can share the same implementation.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -22,7 +23,7 @@ import clip
 import joblib
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from PIL import Image, ImageFile
 try:
     import albumentations as A
@@ -112,6 +113,12 @@ class TrainingArtifacts:
     mlp_lr: float
     mlp_weight_decay: float
     mlp_label_smoothing: float
+    mlp_loss_type: str
+    mlp_focal_gamma: float
+    mlp_focal_alpha: Optional[float]
+    mlp_sampler: str
+    mlp_mixup_alpha: float
+    mlp_normalize_embeddings: bool
     mlp_patience: int
 
 
@@ -152,6 +159,26 @@ def _ensure_cache_root() -> None:
     EMBED_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def _detect_dataset_signature(images_path: str, labels_path: str) -> Optional[str]:
+    candidates: List[Path] = []
+    for root in (Path(images_path), Path(labels_path)):
+        candidates.append(root / "metadata.json")
+        candidates.append(root / "dataset_meta.json")
+        candidates.append(root.parent / "metadata.json")
+        candidates.append(root.parent / "dataset_meta.json")
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+            signature = data.get("signature")
+            if signature:
+                return str(signature)
+        except Exception:
+            continue
+    return None
+
+
 def _compute_dataset_signature(
     images_path: str,
     labels_path: str,
@@ -182,6 +209,13 @@ def _compute_dataset_signature(
         entries.append(f"aug_policy:{aug_policy}")
     if oversample_policy:
         entries.append(f"oversample_policy:{oversample_policy}")
+    dataset_signature = _detect_dataset_signature(images_path, labels_path)
+    if dataset_signature:
+        entries.append(f"dataset_sig:{dataset_signature}")
+        entries.append(f"images_root:{Path(images_path).name}")
+        entries.append(f"labels_root:{Path(labels_path).name}")
+        digest = hashlib.sha256("|".join(entries).encode("utf-8")).hexdigest()
+        return digest
     image_root = Path(images_path)
     label_root = Path(labels_path)
 
@@ -663,6 +697,12 @@ def train_clip_from_yolo(
     mlp_lr: float = 1e-3,
     mlp_weight_decay: float = 1e-4,
     mlp_label_smoothing: float = 0.05,
+    mlp_loss_type: str = "ce",
+    mlp_focal_gamma: float = 2.0,
+    mlp_focal_alpha: float = -1.0,
+    mlp_sampler: str = "balanced",
+    mlp_mixup_alpha: float = 0.1,
+    mlp_normalize_embeddings: bool = True,
     mlp_patience: int = 6,
     reuse_embeddings: bool = False,
     hard_example_mining: bool = False,
@@ -712,6 +752,21 @@ def train_clip_from_yolo(
     mlp_lr = float(max(1e-6, mlp_lr))
     mlp_weight_decay = float(max(0.0, mlp_weight_decay))
     mlp_label_smoothing = float(max(0.0, min(0.3, mlp_label_smoothing)))
+    mlp_loss_type = str(mlp_loss_type or "ce").strip().lower()
+    if mlp_loss_type not in {"ce", "focal"}:
+        mlp_loss_type = "ce"
+    mlp_focal_gamma = float(max(0.0, mlp_focal_gamma))
+    mlp_focal_alpha = float(mlp_focal_alpha) if mlp_focal_alpha is not None else -1.0
+    if mlp_focal_alpha < 0:
+        mlp_focal_alpha = None
+    mlp_sampler = str(mlp_sampler or "balanced").strip().lower()
+    if mlp_sampler not in {"balanced", "none", "shuffle"}:
+        mlp_sampler = "balanced"
+    mlp_mixup_alpha = float(max(0.0, mlp_mixup_alpha))
+    if isinstance(mlp_normalize_embeddings, str):
+        mlp_normalize_embeddings = mlp_normalize_embeddings.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        mlp_normalize_embeddings = bool(mlp_normalize_embeddings)
     mlp_patience = int(max(1, mlp_patience))
 
     hard_mining_misclassified_weight = float(max(1.0, hard_mining_misclassified_weight))
@@ -1213,6 +1268,15 @@ def train_clip_from_yolo(
     X_test_mm.flush()
     X_train = np.asarray(X_train_mm)
     X_test = np.asarray(X_test_mm)
+    if classifier_type == "mlp" and mlp_normalize_embeddings:
+        _safe_progress(progress_cb, 0.40, "Normalizing embeddings ...")
+        train_norms = np.linalg.norm(X_train, axis=1, keepdims=True)
+        train_norms = np.maximum(train_norms, 1e-12)
+        X_train = X_train / train_norms
+        if X_test.size:
+            test_norms = np.linalg.norm(X_test, axis=1, keepdims=True)
+            test_norms = np.maximum(test_norms, 1e-12)
+            X_test = X_test / test_norms
     y_train = y_class_names_arr[train_idx]
     y_test = y_class_names_arr[test_idx]
 
@@ -1248,6 +1312,8 @@ def train_clip_from_yolo(
                     if count:
                         weights[idx] = total / (n_classes * float(count))
                 class_weights = torch.tensor(weights, device=resolved_device, dtype=torch.float32)
+            else:
+                weights = None
 
             input_dim = int(X_train.shape[1]) if X_train.size else 0
             if input_dim <= 0:
@@ -1266,14 +1332,51 @@ def train_clip_from_yolo(
                         mlp_layers.append(torch.nn.Dropout(mlp_dropout))
             model = torch.nn.Sequential(*mlp_layers).to(resolved_device)
             optimizer = torch.optim.AdamW(model.parameters(), lr=mlp_lr, weight_decay=mlp_weight_decay)
-            criterion = torch.nn.CrossEntropyLoss(weight=class_weights, label_smoothing=mlp_label_smoothing)
+            use_soft_targets = mlp_label_smoothing > 0 or mlp_mixup_alpha > 0 or mlp_loss_type == "focal"
+
+            def _build_targets(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
+                targets = torch.zeros((labels.shape[0], num_classes), device=labels.device, dtype=torch.float32)
+                targets.scatter_(1, labels.unsqueeze(1), 1.0)
+                if mlp_label_smoothing > 0:
+                    smooth = mlp_label_smoothing
+                    targets = targets * (1.0 - smooth) + smooth / float(num_classes)
+                return targets
+
+            def _compute_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+                log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+                loss = -(targets * log_probs).sum(dim=1)
+                if class_weights is not None:
+                    weight_vec = (targets * class_weights).sum(dim=1)
+                    loss = loss * weight_vec
+                if mlp_loss_type == "focal":
+                    probs = torch.exp(log_probs)
+                    pt = (targets * probs).sum(dim=1)
+                    focal_factor = (1.0 - pt).clamp(min=0.0) ** mlp_focal_gamma
+                    loss = loss * focal_factor
+                    if mlp_focal_alpha is not None and mlp_focal_alpha > 0:
+                        loss = loss * mlp_focal_alpha
+                return loss.mean()
 
             train_tensor = torch.tensor(X_train, dtype=torch.float32)
             train_labels = torch.tensor(y_train_idx, dtype=torch.long)
+            sampler = None
+            shuffle = False
+            if mlp_sampler == "balanced" and counts:
+                if weights is None:
+                    weights = np.ones(len(classes_list), dtype=np.float32)
+                    total = float(sum(counts.values()))
+                    for idx, count in counts.items():
+                        if count:
+                            weights[idx] = total / (len(classes_list) * float(count))
+                sample_weights = torch.tensor(weights[train_labels.numpy()], dtype=torch.float32)
+                sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+            elif mlp_sampler == "shuffle":
+                shuffle = True
             train_loader = DataLoader(
                 TensorDataset(train_tensor, train_labels),
                 batch_size=min(max(8, batch_size), len(train_tensor)),
-                shuffle=True,
+                shuffle=shuffle if sampler is None else False,
+                sampler=sampler,
             )
             val_loader = None
             if y_test.size and y_test_idx is not None:
@@ -1298,9 +1401,25 @@ def train_clip_from_yolo(
                 for batch_x, batch_y in train_loader:
                     batch_x = batch_x.to(resolved_device)
                     batch_y = batch_y.to(resolved_device)
+                    if mlp_mixup_alpha > 0:
+                        lam = np.random.beta(mlp_mixup_alpha, mlp_mixup_alpha, size=batch_x.size(0)).astype("float32")
+                        lam = torch.tensor(lam, device=batch_x.device).view(-1, 1)
+                        perm = torch.randperm(batch_x.size(0), device=batch_x.device)
+                        batch_x = lam * batch_x + (1.0 - lam) * batch_x[perm]
                     optimizer.zero_grad()
                     logits = model(batch_x)
-                    loss = criterion(logits, batch_y)
+                    if use_soft_targets:
+                        targets = _build_targets(batch_y, logits.shape[1])
+                        if mlp_mixup_alpha > 0:
+                            targets = lam * targets + (1.0 - lam) * targets[perm]
+                        loss = _compute_loss(logits, targets)
+                    else:
+                        loss = torch.nn.functional.cross_entropy(
+                            logits,
+                            batch_y,
+                            weight=class_weights,
+                            label_smoothing=mlp_label_smoothing,
+                        )
                     loss.backward()
                     optimizer.step()
                     running_loss += float(loss.item()) * batch_y.size(0)
@@ -1323,7 +1442,16 @@ def train_clip_from_yolo(
                             batch_x = batch_x.to(resolved_device)
                             batch_y = batch_y.to(resolved_device)
                             logits = model(batch_x)
-                            loss = criterion(logits, batch_y)
+                            if use_soft_targets:
+                                targets = _build_targets(batch_y, logits.shape[1])
+                                loss = _compute_loss(logits, targets)
+                            else:
+                                loss = torch.nn.functional.cross_entropy(
+                                    logits,
+                                    batch_y,
+                                    weight=class_weights,
+                                    label_smoothing=mlp_label_smoothing,
+                                )
                             val_running += float(loss.item()) * batch_y.size(0)
                             preds = logits.argmax(dim=1)
                             val_correct += int((preds == batch_y).sum().item())
@@ -1663,6 +1791,12 @@ def train_clip_from_yolo(
             "mlp_lr": mlp_lr,
             "mlp_weight_decay": mlp_weight_decay,
             "mlp_label_smoothing": mlp_label_smoothing,
+            "mlp_loss_type": mlp_loss_type,
+            "mlp_focal_gamma": mlp_focal_gamma,
+            "mlp_focal_alpha": mlp_focal_alpha,
+            "mlp_sampler": mlp_sampler,
+            "mlp_mixup_alpha": mlp_mixup_alpha,
+            "mlp_normalize_embeddings": mlp_normalize_embeddings,
             "mlp_patience": mlp_patience,
             "background_class_count": bg_class_count,
             "background_classes": list(background_classes),
@@ -1746,6 +1880,12 @@ def train_clip_from_yolo(
             mlp_lr=float(mlp_lr),
             mlp_weight_decay=float(mlp_weight_decay),
             mlp_label_smoothing=float(mlp_label_smoothing),
+            mlp_loss_type=str(mlp_loss_type),
+            mlp_focal_gamma=float(mlp_focal_gamma),
+            mlp_focal_alpha=None if mlp_focal_alpha is None else float(mlp_focal_alpha),
+            mlp_sampler=str(mlp_sampler),
+            mlp_mixup_alpha=float(mlp_mixup_alpha),
+            mlp_normalize_embeddings=bool(mlp_normalize_embeddings),
             mlp_patience=int(mlp_patience),
         )
 

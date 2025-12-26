@@ -451,6 +451,16 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
 - Added a concise methodology (`classifier_testing_methodology.md`) so future classifier runs are evaluated on the same split + metrics.
 - Updated the Train CLIP section with a quick summary table and the precision/recall tradeoffs from soft targets.
 
+## 2025-12-26 – MLP Training Improvements + Benchmarks
+- MLP training now supports **balanced sampling**, **mixup**, **L2-normalized embeddings**, and an optional **focal loss** path, with tuned defaults for recall-heavy behavior.
+- Embedding cache signatures now prefer dataset metadata signatures (when available) to avoid cache churn caused by file mtimes.
+- Refreshed the CLIP/DINOv3 benchmark sweep with mixup + balanced sampling + normalization and added a diff summary:
+  - `clip_dinov3_metrics_20241224.csv`
+  - `clip_dinov3_metrics_20241224.json`
+  - `clip_dinov3_metrics_20241224.txt` (includes analysis)
+  - `clip_mlp_diff_summary_20241224.txt`
+- Added a reusable benchmark runner (`tools/run_mlp_benchmarks.py`) that can drive the backend API to reuse GPU‑cached embeddings.
+
 ## 2025-12-20 – DINOv3 Heads + CLIP Model Management
 - Added **DINOv3 encoder support** for classifier heads (image-only alternative to CLIP). DINOv3 heads require `.meta.pkl` so the encoder model is known.
 - Consolidated **CLIP model management**: refresh/download/delete saved heads and labelmaps, upload local `.pkl` heads, and activate models from a single UI panel.

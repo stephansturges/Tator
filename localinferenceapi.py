@@ -21502,6 +21502,8 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                            min_per_class: int, class_weight: str, C: float, device_override: Optional[str],
                            solver: str, classifier_type: str, mlp_hidden_sizes: str, mlp_dropout: float,
                            mlp_epochs: int, mlp_lr: float, mlp_weight_decay: float, mlp_label_smoothing: float,
+                           mlp_loss_type: str, mlp_focal_gamma: float, mlp_focal_alpha: Optional[float],
+                           mlp_sampler: str, mlp_mixup_alpha: float, mlp_normalize_embeddings: bool,
                            mlp_patience: int, reuse_embeddings: bool, hard_example_mining: bool,
                            hard_mining_misclassified_weight: float,
                            hard_mining_low_conf_weight: float,
@@ -21549,6 +21551,12 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 mlp_lr=mlp_lr,
                 mlp_weight_decay=mlp_weight_decay,
                 mlp_label_smoothing=mlp_label_smoothing,
+                mlp_loss_type=mlp_loss_type,
+                mlp_focal_gamma=mlp_focal_gamma,
+                mlp_focal_alpha=mlp_focal_alpha,
+                mlp_sampler=mlp_sampler,
+                mlp_mixup_alpha=mlp_mixup_alpha,
+                mlp_normalize_embeddings=mlp_normalize_embeddings,
                 mlp_patience=mlp_patience,
                 reuse_embeddings=reuse_embeddings,
                 hard_example_mining=hard_example_mining,
@@ -21724,6 +21732,12 @@ async def start_clip_training(
     mlp_lr: float = Form(1e-3),
     mlp_weight_decay: float = Form(1e-4),
     mlp_label_smoothing: float = Form(0.05),
+    mlp_loss_type: str = Form("ce"),
+    mlp_focal_gamma: float = Form(2.0),
+    mlp_focal_alpha: float = Form(-1.0),
+    mlp_sampler: str = Form("balanced"),
+    mlp_mixup_alpha: float = Form(0.1),
+    mlp_normalize_embeddings: Optional[str] = Form("true"),
     mlp_patience: int = Form(6),
     reuse_embeddings: Optional[str] = Form(None),
     hard_example_mining: Optional[str] = Form(None),
@@ -21859,6 +21873,18 @@ async def start_clip_training(
     mlp_lr_f = _coerce_float(mlp_lr, 1e-3, minimum=1e-6)
     mlp_weight_decay_f = _coerce_float(mlp_weight_decay, 1e-4, minimum=0.0)
     mlp_label_smoothing_f = _coerce_float(mlp_label_smoothing, 0.05, minimum=0.0, maximum=0.3)
+    mlp_loss_type_norm = (mlp_loss_type or "ce").strip().lower()
+    if mlp_loss_type_norm not in {"ce", "focal"}:
+        mlp_loss_type_norm = "ce"
+    mlp_focal_gamma_f = _coerce_float(mlp_focal_gamma, 2.0, minimum=0.0)
+    mlp_focal_alpha_f = _coerce_float(mlp_focal_alpha, -1.0)
+    if mlp_focal_alpha_f < 0:
+        mlp_focal_alpha_f = None
+    mlp_sampler_norm = (mlp_sampler or "balanced").strip().lower()
+    if mlp_sampler_norm not in {"balanced", "none", "shuffle"}:
+        mlp_sampler_norm = "balanced"
+    mlp_mixup_alpha_f = _coerce_float(mlp_mixup_alpha, 0.1, minimum=0.0)
+    mlp_normalize_embeddings_flag = _parse_bool(mlp_normalize_embeddings)
     mlp_patience_i = _coerce_int(mlp_patience, 6, minimum=1)
     device_override_clean = (device_override or None)
     hard_mis_weight_f = _coerce_float(hard_mis_weight, 3.0, minimum=1.0)
@@ -21912,6 +21938,12 @@ async def start_clip_training(
         mlp_lr=mlp_lr_f,
         mlp_weight_decay=mlp_weight_decay_f,
         mlp_label_smoothing=mlp_label_smoothing_f,
+        mlp_loss_type=mlp_loss_type_norm,
+        mlp_focal_gamma=mlp_focal_gamma_f,
+        mlp_focal_alpha=mlp_focal_alpha_f,
+        mlp_sampler=mlp_sampler_norm,
+        mlp_mixup_alpha=mlp_mixup_alpha_f,
+        mlp_normalize_embeddings=mlp_normalize_embeddings_flag,
         mlp_patience=mlp_patience_i,
         reuse_embeddings=reuse_embeddings_flag,
         hard_example_mining=hard_example_flag,

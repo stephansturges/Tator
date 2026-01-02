@@ -14,6 +14,7 @@ import os
 import random
 import shutil
 import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +96,7 @@ class TrainingArtifacts:
     solver: str
     hard_example_mining: bool
     class_weight: str
+    effective_beta: float
     per_class_metrics: List[Dict[str, Optional[float]]]
     hard_mining_misclassified_weight: float
     hard_mining_low_conf_weight: float
@@ -120,6 +122,24 @@ class TrainingArtifacts:
     mlp_mixup_alpha: float
     mlp_normalize_embeddings: bool
     mlp_patience: int
+    mlp_activation: str
+    mlp_layer_norm: bool
+    mlp_hard_mining_epochs: int
+    logit_adjustment_mode: str
+    logit_adjustment_inference: bool
+    logit_adjustment: Optional[List[float]]
+    arcface_enabled: bool
+    arcface_margin: float
+    arcface_scale: float
+    supcon_weight: float
+    supcon_temperature: float
+    supcon_projection_dim: int
+    supcon_projection_hidden: int
+    embedding_center: bool
+    embedding_standardize: bool
+    calibration_mode: str
+    calibration_temperature: Optional[float]
+    phase_timings: Dict[str, float]
 
 
 def _safe_progress(progress_cb: Optional[ProgressCallback], value: float, message: str) -> None:
@@ -155,6 +175,57 @@ def _parse_hidden_sizes(raw: Optional[str]) -> List[int]:
     return sizes or [256]
 
 
+def _effective_number_weights(counts: Dict[int, int], beta: float) -> Dict[int, float]:
+    if not counts:
+        return {}
+    weights: Dict[int, float] = {}
+    for cls_id, count in counts.items():
+        if count <= 0:
+            weights[int(cls_id)] = 0.0
+            continue
+        effective_num = 1.0 - (beta ** float(count))
+        weight = (1.0 - beta) / max(effective_num, 1e-12)
+        weights[int(cls_id)] = float(weight)
+    mean_val = sum(weights.values()) / max(1, len(weights))
+    if mean_val > 0:
+        for key in list(weights.keys()):
+            weights[key] = weights[key] / mean_val
+    return weights
+
+
+def _logit_adjustment_from_counts(counts: Dict[int, int], num_classes: int) -> Optional[np.ndarray]:
+    if not counts or num_classes <= 0:
+        return None
+    prior = np.ones(num_classes, dtype=np.float32)
+    for idx in range(num_classes):
+        count = counts.get(idx, 0)
+        prior[idx] = max(1.0, float(count))
+    total = float(prior.sum())
+    if total <= 0:
+        return None
+    prior = prior / total
+    return -np.log(prior + 1e-12)
+
+
+def _effective_number_weight_map(labels: Sequence[object], beta: float) -> Dict[object, float]:
+    counts = Counter(labels)
+    if not counts:
+        return {}
+    weights: Dict[object, float] = {}
+    for label, count in counts.items():
+        if count <= 0:
+            weights[label] = 0.0
+            continue
+        effective_num = 1.0 - (beta ** float(count))
+        weight = (1.0 - beta) / max(effective_num, 1e-12)
+        weights[label] = float(weight)
+    mean_val = sum(weights.values()) / max(1, len(weights))
+    if mean_val > 0:
+        for key in list(weights.keys()):
+            weights[key] = weights[key] / mean_val
+    return weights
+
+
 def _ensure_cache_root() -> None:
     EMBED_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -179,6 +250,25 @@ def _detect_dataset_signature(images_path: str, labels_path: str) -> Optional[st
     return None
 
 
+def _label_fingerprint(label_root: Path) -> Optional[str]:
+    try:
+        count = 0
+        max_mtime = 0
+        total_size = 0
+        for label_file in sorted(label_root.glob("**/*.txt")):
+            try:
+                stat = label_file.stat()
+            except FileNotFoundError:
+                continue
+            count += 1
+            if stat.st_mtime_ns > max_mtime:
+                max_mtime = stat.st_mtime_ns
+            total_size += stat.st_size
+        return f"{count}:{max_mtime}:{total_size}"
+    except Exception:
+        return None
+
+
 def _compute_dataset_signature(
     images_path: str,
     labels_path: str,
@@ -191,6 +281,7 @@ def _compute_dataset_signature(
     bg_policy: Optional[str] = None,
     aug_policy: Optional[str] = None,
     oversample_policy: Optional[str] = None,
+    embed_norm: Optional[bool] = None,
 ) -> str:
     encoder_name = str(encoder_model or clip_model or "").strip()
     entries: List[str] = [f"encoder:{encoder_type}:{encoder_name}", f"bg:{bg_class_count}"]
@@ -209,15 +300,20 @@ def _compute_dataset_signature(
         entries.append(f"aug_policy:{aug_policy}")
     if oversample_policy:
         entries.append(f"oversample_policy:{oversample_policy}")
+    if embed_norm is not None:
+        entries.append(f"embed_norm:{int(bool(embed_norm))}")
     dataset_signature = _detect_dataset_signature(images_path, labels_path)
+    label_root = Path(labels_path)
     if dataset_signature:
         entries.append(f"dataset_sig:{dataset_signature}")
         entries.append(f"images_root:{Path(images_path).name}")
         entries.append(f"labels_root:{Path(labels_path).name}")
+        label_fp = _label_fingerprint(label_root)
+        if label_fp:
+            entries.append(f"labels_fp:{label_fp}")
         digest = hashlib.sha256("|".join(entries).encode("utf-8")).hexdigest()
         return digest
     image_root = Path(images_path)
-    label_root = Path(labels_path)
 
     for label_file in sorted(label_root.glob("**/*.txt")):
         try:
@@ -281,6 +377,7 @@ def _load_cached_embeddings(signature: str) -> Optional[Dict[str, object]]:
         "aug_policy": meta.get("aug_policy"),
         "oversample_policy": meta.get("oversample_policy"),
         "background_classes": meta.get("background_classes", []),
+        "embed_norm": meta.get("embed_norm"),
     }
 
 
@@ -297,7 +394,8 @@ def _write_cache_metadata(signature: str,
                           oversample_policy: Optional[Dict[str, float]] = None,
                           background_classes: Optional[List[str]] = None,
                           labelmap_path: Optional[str] = None,
-                          labelmap_hash: Optional[str] = None) -> None:
+                          labelmap_hash: Optional[str] = None,
+                          embed_norm: Optional[bool] = None) -> None:
     meta_path = chunk_dir / "metadata.joblib"
     rel_chunks = []
     for chunk_path, start, count in chunk_records:
@@ -320,6 +418,7 @@ def _write_cache_metadata(signature: str,
         "background_classes": list(background_classes or []),
         "labelmap_path": labelmap_path,
         "labelmap_hash": labelmap_hash,
+        "embed_norm": bool(embed_norm) if embed_norm is not None else None,
     }
     joblib.dump(payload, meta_path, compress=3)
 
@@ -345,10 +444,22 @@ def _load_labelmap(path: Optional[str]) -> Optional[List[str]]:
 def _resolve_device(requested: Optional[str]) -> str:
     if requested:
         req = requested.strip().lower()
-        if req in {"cpu", "cuda"}:
-            if req == "cuda" and not torch.cuda.is_available():
+        if req == "cpu":
+            return "cpu"
+        if req == "cuda":
+            if not torch.cuda.is_available():
                 raise TrainingError("CUDA requested but no GPU is available.")
-            return req
+            return "cuda"
+        if req.startswith("cuda:"):
+            if not torch.cuda.is_available():
+                raise TrainingError("CUDA requested but no GPU is available.")
+            try:
+                idx = int(req.split(":", 1)[1])
+            except Exception as exc:
+                raise TrainingError(f"Invalid CUDA device '{requested}'. Use cuda:0, cuda:1, etc.") from exc
+            if idx < 0 or idx >= torch.cuda.device_count():
+                raise TrainingError(f"CUDA device index {idx} is out of range.")
+            return f"cuda:{idx}"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -485,13 +596,16 @@ def _encode_batch(
     preprocess: Callable[[Image.Image], torch.Tensor],
     device: str,
     images: Sequence[Image.Image],
+    *,
+    normalize: bool = True,
 ) -> np.ndarray:
     if not images:
         return np.empty((0, 512), dtype=np.float32)
     with torch.no_grad():
         batch = torch.stack([preprocess(img) for img in images]).to(device)
         feats = clip_model.encode_image(batch)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
+        if normalize:
+            feats = feats / feats.norm(dim=-1, keepdim=True)
     return feats.detach().cpu().numpy().astype(np.float32)
 
 
@@ -500,6 +614,8 @@ def _encode_batch_dinov3(
     processor: Any,
     device: str,
     images: Sequence[Image.Image],
+    *,
+    normalize: bool = True,
 ) -> np.ndarray:
     if not images:
         hidden = int(getattr(getattr(model, "config", None), "hidden_size", 0) or 0)
@@ -516,7 +632,8 @@ def _encode_batch_dinov3(
             if feats is None:
                 raise TrainingError("DINOv3 output missing pooler_output/last_hidden_state.")
             feats = feats[:, 0, :]
-        feats = feats / feats.norm(dim=-1, keepdim=True)
+        if normalize:
+            feats = feats / feats.norm(dim=-1, keepdim=True)
     return feats.detach().cpu().numpy().astype(np.float32)
 
 
@@ -688,6 +805,7 @@ def train_clip_from_yolo(
     batch_size: int = 64,
     min_per_class: int = 2,
     class_weight: str = "balanced",
+    effective_beta: float = 0.9999,
     C: float = 1.0,
     solver: str = "saga",
     classifier_type: str = "logreg",
@@ -704,6 +822,24 @@ def train_clip_from_yolo(
     mlp_mixup_alpha: float = 0.1,
     mlp_normalize_embeddings: bool = True,
     mlp_patience: int = 6,
+    mlp_activation: str = "relu",
+    mlp_layer_norm: bool = False,
+    mlp_hard_mining_epochs: int = 5,
+    logit_adjustment_mode: str = "none",
+    logit_adjustment_inference: Optional[str] = None,
+    arcface_enabled: bool = False,
+    arcface_margin: float = 0.2,
+    arcface_scale: float = 30.0,
+    supcon_weight: float = 0.0,
+    supcon_temperature: float = 0.07,
+    supcon_projection_dim: int = 128,
+    supcon_projection_hidden: int = 0,
+    embedding_center: bool = False,
+    embedding_standardize: bool = False,
+    calibration_mode: str = "none",
+    calibration_max_iters: int = 50,
+    calibration_min_temp: float = 0.5,
+    calibration_max_temp: float = 5.0,
     reuse_embeddings: bool = False,
     hard_example_mining: bool = False,
     hard_mining_misclassified_weight: float = 3.0,
@@ -741,7 +877,7 @@ def train_clip_from_yolo(
         clip_model = encoder_model_name
 
     class_weight = (class_weight or "none").lower()
-    if class_weight not in {"none", "balanced"}:
+    if class_weight not in {"none", "balanced", "effective"}:
         class_weight = "none"
     classifier_type = (classifier_type or "logreg").strip().lower()
     if classifier_type not in {"logreg", "mlp"}:
@@ -768,6 +904,80 @@ def train_clip_from_yolo(
     else:
         mlp_normalize_embeddings = bool(mlp_normalize_embeddings)
     mlp_patience = int(max(1, mlp_patience))
+    mlp_activation = str(mlp_activation or "relu").strip().lower()
+    if mlp_activation not in {"relu", "gelu"}:
+        mlp_activation = "relu"
+    if isinstance(mlp_layer_norm, str):
+        mlp_layer_norm = mlp_layer_norm.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        mlp_layer_norm = bool(mlp_layer_norm)
+    mlp_hard_mining_epochs = int(max(1, mlp_hard_mining_epochs))
+    logit_adjustment_mode = str(logit_adjustment_mode or "none").strip().lower()
+    if logit_adjustment_mode not in {"none", "train", "infer", "both"}:
+        logit_adjustment_mode = "none"
+    logit_adjustment_inference_override = logit_adjustment_inference is not None
+    if isinstance(logit_adjustment_inference, str):
+        logit_adjustment_inference_flag = logit_adjustment_inference.strip().lower() in {"1", "true", "yes", "on"}
+    elif logit_adjustment_inference is None:
+        logit_adjustment_inference_flag = None
+    else:
+        logit_adjustment_inference_flag = bool(logit_adjustment_inference)
+    logit_adjustment_train = logit_adjustment_mode in {"train", "both"}
+    if logit_adjustment_inference_flag is None:
+        logit_adjustment_inference_flag = logit_adjustment_mode in {"infer", "both"}
+    if isinstance(arcface_enabled, str):
+        arcface_enabled = arcface_enabled.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        arcface_enabled = bool(arcface_enabled)
+    arcface_margin = float(max(0.0, arcface_margin))
+    arcface_scale = float(max(1.0, arcface_scale))
+    supcon_weight = float(max(0.0, supcon_weight))
+    supcon_temperature = float(max(1e-4, supcon_temperature))
+    supcon_projection_dim = int(max(0, supcon_projection_dim))
+    supcon_projection_hidden = int(max(0, supcon_projection_hidden))
+    if classifier_type != "mlp":
+        if arcface_enabled:
+            logger.warning("ArcFace is only supported for MLP heads; disabling ArcFace.")
+        arcface_enabled = False
+        supcon_weight = 0.0
+        if logit_adjustment_train:
+            logger.warning("Logit adjustment during training is only supported for MLP heads; disabling train-time adjustment.")
+            logit_adjustment_train = False
+            if logit_adjustment_mode == "train":
+                logit_adjustment_mode = "none"
+            elif logit_adjustment_mode == "both":
+                logit_adjustment_mode = "infer"
+            if not logit_adjustment_inference_override:
+                logit_adjustment_inference_flag = logit_adjustment_mode in {"infer", "both"}
+    if arcface_enabled:
+        if mlp_loss_type != "ce":
+            logger.warning("ArcFace requires CE loss; switching mlp_loss_type to 'ce'.")
+            mlp_loss_type = "ce"
+        if mlp_label_smoothing > 0:
+            logger.warning("ArcFace requires hard targets; disabling label smoothing.")
+            mlp_label_smoothing = 0.0
+        if mlp_mixup_alpha > 0:
+            logger.warning("ArcFace requires hard targets; disabling mixup.")
+            mlp_mixup_alpha = 0.0
+    if supcon_weight > 0 and mlp_mixup_alpha > 0:
+        logger.warning("SupCon with mixup is unsupported; disabling mixup.")
+        mlp_mixup_alpha = 0.0
+    if isinstance(embedding_center, str):
+        embedding_center = embedding_center.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        embedding_center = bool(embedding_center)
+    if isinstance(embedding_standardize, str):
+        embedding_standardize = embedding_standardize.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        embedding_standardize = bool(embedding_standardize)
+    if embedding_standardize:
+        embedding_center = True
+    calibration_mode = str(calibration_mode or "none").strip().lower()
+    if calibration_mode not in {"none", "temperature"}:
+        calibration_mode = "none"
+    calibration_max_iters = int(max(1, calibration_max_iters))
+    calibration_min_temp = float(max(1e-3, calibration_min_temp))
+    calibration_max_temp = float(max(calibration_min_temp, calibration_max_temp))
 
     hard_mining_misclassified_weight = float(max(1.0, hard_mining_misclassified_weight))
     hard_mining_low_conf_weight = float(max(1.0, hard_mining_low_conf_weight))
@@ -775,6 +985,10 @@ def train_clip_from_yolo(
     hard_mining_margin_threshold = float(max(0.0, hard_mining_margin_threshold))
     convergence_tol = float(max(1e-8, convergence_tol))
     bg_class_count = max(1, min(10, int(bg_class_count)))
+    effective_beta = float(max(0.5, min(0.99999, effective_beta)))
+    class_weight = str(class_weight or "none").strip().lower()
+    if class_weight not in {"balanced", "none", "effective"}:
+        class_weight = "none"
 
     bg_samples_per_image = 3
     bg_max_ratio = 0.4
@@ -818,6 +1032,8 @@ def train_clip_from_yolo(
             raise TrainingError(f"Output directory does not exist: {path}")
 
     _safe_progress(progress_cb, 0.0, "Loading configuration ...")
+    phase_timings: Dict[str, float] = {}
+    total_start = time.perf_counter()
 
     def _check_cancel() -> None:
         if should_cancel and should_cancel():
@@ -834,14 +1050,17 @@ def train_clip_from_yolo(
         except Exception:
             labelmap_hash = None
     resolved_device = _resolve_device(device)
+    normalize_embeddings = True
+    if classifier_type == "mlp":
+        normalize_embeddings = bool(mlp_normalize_embeddings)
     if encoder_type == "clip":
         clip_net, preprocess = _load_clip(clip_model, resolved_device)
         def encode_batch(images: Sequence[Image.Image]) -> np.ndarray:
-            return _encode_batch(clip_net, preprocess, resolved_device, images)
+            return _encode_batch(clip_net, preprocess, resolved_device, images, normalize=normalize_embeddings)
     else:
         dino_model, dino_processor = _load_dinov3(encoder_model_name, resolved_device)
         def encode_batch(images: Sequence[Image.Image]) -> np.ndarray:
-            return _encode_batch_dinov3(dino_model, dino_processor, resolved_device, images)
+            return _encode_batch_dinov3(dino_model, dino_processor, resolved_device, images, normalize=normalize_embeddings)
     augmenter = _build_clip_augmenter()
     aug_enabled = augmenter is not None
     aug_policy_signature = _clip_aug_signature(aug_enabled)
@@ -883,6 +1102,7 @@ def train_clip_from_yolo(
             bg_policy=bg_policy_signature,
             aug_policy=aug_policy_signature,
             oversample_policy=oversample_policy_signature,
+            embed_norm=normalize_embeddings,
         )
         _check_cancel()
         cache_payload = _load_cached_embeddings(cache_signature)
@@ -897,6 +1117,7 @@ def train_clip_from_yolo(
             logger.info("Embedding cache miss for signature %s", cache_signature)
 
     valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    scan_start = time.perf_counter()
     image_files: List[str] = []
     for dirpath, _dirnames, filenames in os.walk(images_path):
         for fname in filenames:
@@ -906,10 +1127,12 @@ def train_clip_from_yolo(
             rel_path = os.path.relpath(full_path, images_path)
             image_files.append(rel_path)
     image_files.sort()
+    phase_timings["scan"] = time.perf_counter() - scan_start
     _check_cancel()
     if not image_files:
         raise TrainingError("No supported images found in the provided folder.")
 
+    embed_start = time.perf_counter()
     chunk_records: List[Tuple[str, int, int]] = []
     y_class_names: List[str]
     y_numeric: List[int]
@@ -1268,6 +1491,7 @@ def train_clip_from_yolo(
     X_test_mm.flush()
     X_train = np.asarray(X_train_mm)
     X_test = np.asarray(X_test_mm)
+    phase_timings["embed"] = time.perf_counter() - embed_start
     if classifier_type == "mlp" and mlp_normalize_embeddings:
         _safe_progress(progress_cb, 0.40, "Normalizing embeddings ...")
         train_norms = np.linalg.norm(X_train, axis=1, keepdims=True)
@@ -1277,16 +1501,67 @@ def train_clip_from_yolo(
             test_norms = np.linalg.norm(X_test, axis=1, keepdims=True)
             test_norms = np.maximum(test_norms, 1e-12)
             X_test = X_test / test_norms
+    embedding_center_values: Optional[np.ndarray] = None
+    embedding_std_values: Optional[np.ndarray] = None
+    if embedding_center or embedding_standardize:
+        _safe_progress(progress_cb, 0.41, "Centering embeddings ...")
+        embedding_center_values = np.mean(X_train, axis=0).astype(np.float32)
+        X_train = X_train - embedding_center_values
+        if X_test.size:
+            X_test = X_test - embedding_center_values
+        if embedding_standardize:
+            _safe_progress(progress_cb, 0.42, "Standardizing embeddings ...")
+            embedding_std_values = np.std(X_train, axis=0).astype(np.float32)
+            embedding_std_values = np.maximum(embedding_std_values, 1e-6)
+            X_train = X_train / embedding_std_values
+            if X_test.size:
+                X_test = X_test / embedding_std_values
     y_train = y_class_names_arr[train_idx]
     y_test = y_class_names_arr[test_idx]
 
+    def _calibrate_temperature(
+        logits: np.ndarray,
+        labels: Sequence[int],
+        num_classes: int,
+    ) -> Optional[float]:
+        if calibration_mode != "temperature":
+            return None
+        if logits is None or not isinstance(logits, np.ndarray):
+            return None
+        if logits.ndim != 2 or logits.shape[0] == 0 or logits.shape[1] != num_classes:
+            return None
+        labels_arr = np.asarray(labels, dtype=int)
+        if labels_arr.shape[0] != logits.shape[0]:
+            return None
+        calib_start = time.perf_counter()
+        temps = np.linspace(calibration_min_temp, calibration_max_temp, num=max(3, calibration_max_iters), dtype=np.float64)
+        best_temp = 1.0
+        best_loss = None
+        for temp in temps:
+            scaled = logits / float(temp)
+            max_logit = np.max(scaled, axis=1, keepdims=True)
+            exp_logits = np.exp(scaled - max_logit)
+            denom = exp_logits.sum(axis=1, keepdims=True) + 1e-8
+            probs = exp_logits / denom
+            try:
+                loss = float(log_loss(labels_arr, probs, labels=list(range(num_classes))))
+            except Exception:
+                continue
+            if best_loss is None or loss < best_loss:
+                best_loss = loss
+                best_temp = float(temp)
+        phase_timings["calibration"] = time.perf_counter() - calib_start
+        return best_temp
+
+    train_start = time.perf_counter()
     convergence_trace: List[Dict[str, Optional[float]]] = []
     converged = False
     accuracy = 0.0
+    calibration_temperature: Optional[float] = None
     report = ""
     matrix: List[List[int]] = []
     label_list: List[str] = []
-    class_weight_param = None if class_weight == "none" else "balanced"
+    class_weight_param = "balanced" if class_weight == "balanced" else None
     classifier_solver = solver
     clf: Optional[object] = None
     labels_for_cm: List[str] = []
@@ -1295,6 +1570,7 @@ def train_clip_from_yolo(
     iterations_run = 0
 
     try:
+        logit_adjustment_vec: Optional[np.ndarray] = None
         if classifier_type == "mlp":
             _safe_progress(progress_cb, 0.45, "Training MLP head ...")
             classes_list = sorted(set(map(str, y_train)) | set(map(str, y_test)))
@@ -1304,7 +1580,16 @@ def train_clip_from_yolo(
 
             counts = Counter(y_train_idx.tolist())
             class_weights = None
-            if class_weight_param == "balanced" and counts:
+            weights = None
+            effective_weights = None
+            if class_weight == "effective" and counts:
+                effective_weights = _effective_number_weights(counts, effective_beta)
+                weights = np.array(
+                    [effective_weights.get(idx, 1.0) for idx in range(len(classes_list))],
+                    dtype=np.float32,
+                )
+                class_weights = torch.tensor(weights, device=resolved_device, dtype=torch.float32)
+            elif class_weight_param == "balanced" and counts:
                 n_classes = len(classes_list)
                 weights = np.ones(n_classes, dtype=np.float32)
                 total = float(sum(counts.values()))
@@ -1312,8 +1597,16 @@ def train_clip_from_yolo(
                     if count:
                         weights[idx] = total / (n_classes * float(count))
                 class_weights = torch.tensor(weights, device=resolved_device, dtype=torch.float32)
-            else:
-                weights = None
+            logit_adjustment_vec = None
+            logit_adjustment_tensor = None
+            if logit_adjustment_train or logit_adjustment_inference_flag:
+                logit_adjustment_vec = _logit_adjustment_from_counts(counts, len(classes_list))
+                if logit_adjustment_vec is not None:
+                    logit_adjustment_tensor = torch.tensor(
+                        logit_adjustment_vec,
+                        device=resolved_device,
+                        dtype=torch.float32,
+                    )
 
             input_dim = int(X_train.shape[1]) if X_train.size else 0
             if input_dim <= 0:
@@ -1322,17 +1615,121 @@ def train_clip_from_yolo(
                 raise TrainingError("Need at least two classes to train MLP classifier.")
 
             hidden_sizes = list(mlp_hidden_sizes_list or [256])
-            layer_dims = [input_dim] + hidden_sizes + [len(classes_list)]
-            mlp_layers: List[torch.nn.Module] = []
-            for idx in range(len(layer_dims) - 1):
-                mlp_layers.append(torch.nn.Linear(layer_dims[idx], layer_dims[idx + 1]))
-                if idx < len(layer_dims) - 2:
-                    mlp_layers.append(torch.nn.ReLU())
-                    if mlp_dropout > 0:
-                        mlp_layers.append(torch.nn.Dropout(mlp_dropout))
-            model = torch.nn.Sequential(*mlp_layers).to(resolved_device)
-            optimizer = torch.optim.AdamW(model.parameters(), lr=mlp_lr, weight_decay=mlp_weight_decay)
+            layer_dims = [input_dim] + hidden_sizes
+
+            class _MLPHead(torch.nn.Module):
+                def __init__(
+                    self,
+                    dims: List[int],
+                    output_dim: int,
+                    *,
+                    activation: str,
+                    dropout: float,
+                    layer_norm: bool,
+                    arcface: bool,
+                    arcface_scale: float,
+                ) -> None:
+                    super().__init__()
+                    self.hidden_linears = torch.nn.ModuleList()
+                    self.hidden_norms = torch.nn.ModuleList()
+                    self.hidden_dropouts = torch.nn.ModuleList()
+                    self.hidden_activations: List[str] = []
+                    for idx in range(len(dims) - 1):
+                        linear = torch.nn.Linear(dims[idx], dims[idx + 1])
+                        self.hidden_linears.append(linear)
+                        if layer_norm:
+                            self.hidden_norms.append(torch.nn.LayerNorm(dims[idx + 1]))
+                        else:
+                            self.hidden_norms.append(torch.nn.Identity())
+                        self.hidden_activations.append(activation)
+                        if dropout > 0:
+                            self.hidden_dropouts.append(torch.nn.Dropout(dropout))
+                        else:
+                            self.hidden_dropouts.append(torch.nn.Identity())
+                    self.output = torch.nn.Linear(dims[-1], output_dim, bias=not arcface)
+                    self.arcface_enabled = bool(arcface)
+                    self.arcface_scale = float(arcface_scale)
+
+                def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+                    out = x
+                    for linear, norm, act, drop in zip(
+                        self.hidden_linears,
+                        self.hidden_norms,
+                        self.hidden_activations,
+                        self.hidden_dropouts,
+                    ):
+                        out = linear(out)
+                        out = norm(out)
+                        if act == "gelu":
+                            out = torch.nn.functional.gelu(out)
+                        elif act == "relu":
+                            out = torch.nn.functional.relu(out)
+                        out = drop(out)
+                    return out
+
+                def forward_logits(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                    feats = self.forward_features(x)
+                    if self.arcface_enabled:
+                        feats_norm = torch.nn.functional.normalize(feats, dim=1)
+                        weight_norm = torch.nn.functional.normalize(self.output.weight, dim=1)
+                        logits = feats_norm @ weight_norm.t()
+                        logits = logits * self.arcface_scale
+                        return logits, feats
+                    logits = self.output(feats)
+                    return logits, feats
+
+                def forward(self, x: torch.Tensor) -> torch.Tensor:
+                    logits, _ = self.forward_logits(x)
+                    return logits
+
+            model = _MLPHead(
+                layer_dims,
+                len(classes_list),
+                activation=mlp_activation,
+                dropout=mlp_dropout,
+                layer_norm=mlp_layer_norm,
+                arcface=arcface_enabled,
+                arcface_scale=arcface_scale,
+            ).to(resolved_device)
+            projection_head: Optional[torch.nn.Module] = None
+            if supcon_weight > 0.0:
+                proj_in = layer_dims[-1]
+                if supcon_projection_dim <= 0:
+                    supcon_projection_dim = proj_in
+                if supcon_projection_hidden > 0:
+                    projection_head = torch.nn.Sequential(
+                        torch.nn.Linear(proj_in, supcon_projection_hidden),
+                        torch.nn.ReLU(),
+                        torch.nn.Linear(supcon_projection_hidden, supcon_projection_dim),
+                    ).to(resolved_device)
+                else:
+                    projection_head = torch.nn.Linear(proj_in, supcon_projection_dim).to(resolved_device)
+            optimizer_params = list(model.parameters())
+            if projection_head is not None:
+                optimizer_params += list(projection_head.parameters())
+            optimizer = torch.optim.AdamW(optimizer_params, lr=mlp_lr, weight_decay=mlp_weight_decay)
             use_soft_targets = mlp_label_smoothing > 0 or mlp_mixup_alpha > 0 or mlp_loss_type == "focal"
+
+            def predict_logits(data: np.ndarray) -> np.ndarray:
+                model.eval()
+                with torch.no_grad():
+                    tensor = torch.tensor(data, dtype=torch.float32, device=resolved_device)
+                    logits = model(tensor)
+                return logits.cpu().numpy()
+
+            def predict_probs(data: np.ndarray) -> np.ndarray:
+                logits = predict_logits(data)
+                if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                    try:
+                        adj = np.asarray(logit_adjustment_vec, dtype=np.float32).reshape(1, -1)
+                        if adj.shape[1] == logits.shape[1]:
+                            logits = logits + adj
+                    except Exception:
+                        pass
+                max_logit = np.max(logits, axis=1, keepdims=True)
+                exp_logits = np.exp(logits - max_logit)
+                denom = exp_logits.sum(axis=1, keepdims=True) + 1e-8
+                return (exp_logits / denom).astype(np.float32)
 
             def _build_targets(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
                 targets = torch.zeros((labels.shape[0], num_classes), device=labels.device, dtype=torch.float32)
@@ -1356,6 +1753,38 @@ def train_clip_from_yolo(
                     if mlp_focal_alpha is not None and mlp_focal_alpha > 0:
                         loss = loss * mlp_focal_alpha
                 return loss.mean()
+
+            arcface_cos_m = math.cos(arcface_margin) if arcface_enabled else 0.0
+            arcface_sin_m = math.sin(arcface_margin) if arcface_enabled else 0.0
+
+            def _apply_arcface_margin(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+                if not arcface_enabled or arcface_margin <= 0:
+                    return logits
+                if arcface_scale <= 0:
+                    return logits
+                cosine = logits / float(arcface_scale)
+                cosine = cosine.clamp(min=-1.0 + 1e-6, max=1.0 - 1e-6)
+                sine = torch.sqrt((1.0 - cosine ** 2).clamp(min=0.0))
+                phi = cosine * arcface_cos_m - sine * arcface_sin_m
+                output = cosine.clone()
+                idx = torch.arange(output.shape[0], device=output.device)
+                output[idx, labels] = phi[idx, labels]
+                return output * float(arcface_scale)
+
+            def _supcon_loss(features: torch.Tensor, labels: torch.Tensor) -> Optional[torch.Tensor]:
+                if features is None or features.ndim != 2 or features.shape[0] < 2:
+                    return None
+                labels = labels.view(-1, 1)
+                mask = torch.eq(labels, labels.T).float()
+                logits = torch.div(torch.matmul(features, features.T), float(supcon_temperature))
+                logits_max, _ = torch.max(logits, dim=1, keepdim=True)
+                logits = logits - logits_max.detach()
+                logits_mask = torch.ones_like(mask) - torch.eye(features.shape[0], device=features.device)
+                mask = mask * logits_mask
+                exp_logits = torch.exp(logits) * logits_mask
+                log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-8)
+                mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-8)
+                return -mean_log_prob_pos.mean()
 
             train_tensor = torch.tensor(X_train, dtype=torch.float32)
             train_labels = torch.tensor(y_train_idx, dtype=torch.long)
@@ -1391,6 +1820,7 @@ def train_clip_from_yolo(
             best_state = None
             best_val = None
             epochs_no_improve = 0
+            supcon_enabled = supcon_weight > 0.0 and projection_head is not None
 
             for epoch in range(1, mlp_epochs + 1):
                 _check_cancel()
@@ -1401,29 +1831,42 @@ def train_clip_from_yolo(
                 for batch_x, batch_y in train_loader:
                     batch_x = batch_x.to(resolved_device)
                     batch_y = batch_y.to(resolved_device)
+                    perm = None
+                    lam = None
                     if mlp_mixup_alpha > 0:
                         lam = np.random.beta(mlp_mixup_alpha, mlp_mixup_alpha, size=batch_x.size(0)).astype("float32")
                         lam = torch.tensor(lam, device=batch_x.device).view(-1, 1)
                         perm = torch.randperm(batch_x.size(0), device=batch_x.device)
                         batch_x = lam * batch_x + (1.0 - lam) * batch_x[perm]
                     optimizer.zero_grad()
-                    logits = model(batch_x)
+                    logits, feats = model.forward_logits(batch_x)
+                    logits_for_loss = _apply_arcface_margin(logits, batch_y)
+                    if logit_adjustment_train and logit_adjustment_tensor is not None:
+                        logits_for_loss = logits_for_loss + logit_adjustment_tensor
                     if use_soft_targets:
-                        targets = _build_targets(batch_y, logits.shape[1])
+                        targets = _build_targets(batch_y, logits_for_loss.shape[1])
                         if mlp_mixup_alpha > 0:
                             targets = lam * targets + (1.0 - lam) * targets[perm]
-                        loss = _compute_loss(logits, targets)
+                        loss = _compute_loss(logits_for_loss, targets)
                     else:
                         loss = torch.nn.functional.cross_entropy(
-                            logits,
+                            logits_for_loss,
                             batch_y,
                             weight=class_weights,
                             label_smoothing=mlp_label_smoothing,
                         )
+                    if supcon_enabled:
+                        proj_feats = feats
+                        if projection_head is not None:
+                            proj_feats = projection_head(feats)
+                        proj_feats = torch.nn.functional.normalize(proj_feats, dim=1)
+                        sup_loss = _supcon_loss(proj_feats, batch_y)
+                        if sup_loss is not None:
+                            loss = loss + supcon_weight * sup_loss
                     loss.backward()
                     optimizer.step()
                     running_loss += float(loss.item()) * batch_y.size(0)
-                    preds = logits.argmax(dim=1)
+                    preds = logits_for_loss.argmax(dim=1)
                     correct += int((preds == batch_y).sum().item())
                     total += int(batch_y.size(0))
 
@@ -1441,19 +1884,22 @@ def train_clip_from_yolo(
                         for batch_x, batch_y in val_loader:
                             batch_x = batch_x.to(resolved_device)
                             batch_y = batch_y.to(resolved_device)
-                            logits = model(batch_x)
+                            logits, _feats = model.forward_logits(batch_x)
+                            logits_for_loss = _apply_arcface_margin(logits, batch_y)
+                            if logit_adjustment_train and logit_adjustment_tensor is not None:
+                                logits_for_loss = logits_for_loss + logit_adjustment_tensor
                             if use_soft_targets:
-                                targets = _build_targets(batch_y, logits.shape[1])
-                                loss = _compute_loss(logits, targets)
+                                targets = _build_targets(batch_y, logits_for_loss.shape[1])
+                                loss = _compute_loss(logits_for_loss, targets)
                             else:
                                 loss = torch.nn.functional.cross_entropy(
-                                    logits,
+                                    logits_for_loss,
                                     batch_y,
                                     weight=class_weights,
                                     label_smoothing=mlp_label_smoothing,
                                 )
                             val_running += float(loss.item()) * batch_y.size(0)
-                            preds = logits.argmax(dim=1)
+                            preds = logits_for_loss.argmax(dim=1)
                             val_correct += int((preds == batch_y).sum().item())
                             val_total += int(batch_y.size(0))
                     val_loss = val_running / max(1, val_total)
@@ -1494,31 +1940,153 @@ def train_clip_from_yolo(
             if best_state:
                 model.load_state_dict(best_state)
 
+            if hard_example_mining:
+                _safe_progress(progress_cb, 0.62, "MLP hard mining: scoring training set ...")
+                proba_train = predict_probs(X_train)
+                train_pred_idx = np.argmax(proba_train, axis=1)
+                sample_weight = np.ones(len(y_train_idx), dtype=np.float32)
+
+                if hard_mining_misclassified_weight > 1.0:
+                    misclassified_mask = train_pred_idx != y_train_idx
+                    if np.any(misclassified_mask):
+                        sample_weight[misclassified_mask] = np.maximum(
+                            sample_weight[misclassified_mask], hard_mining_misclassified_weight
+                        )
+
+                if hard_mining_low_conf_weight > 1.0:
+                    top1 = proba_train.max(axis=1)
+                    low_conf_mask = np.zeros_like(top1, dtype=bool)
+                    if hard_mining_low_conf_threshold > 0.0:
+                        low_conf_mask |= top1 < hard_mining_low_conf_threshold
+                    if hard_mining_margin_threshold > 0.0 and proba_train.shape[1] > 1:
+                        second_best = np.partition(proba_train, -2, axis=1)[:, -2]
+                        margin_gap = top1 - second_best
+                        low_conf_mask |= margin_gap < hard_mining_margin_threshold
+                    if np.any(low_conf_mask):
+                        sample_weight[low_conf_mask] = np.maximum(
+                            sample_weight[low_conf_mask], hard_mining_low_conf_weight
+                        )
+
+                if not np.any(sample_weight != 1.0):
+                    _safe_progress(progress_cb, 0.64, "MLP hard mining skipped — no hard samples found.")
+                else:
+                    sampler = WeightedRandomSampler(
+                        torch.tensor(sample_weight, dtype=torch.float32),
+                        num_samples=len(sample_weight),
+                        replacement=True,
+                    )
+                    hard_loader = DataLoader(
+                        TensorDataset(train_tensor, train_labels),
+                        batch_size=min(max(8, batch_size), len(train_tensor)),
+                        shuffle=False,
+                        sampler=sampler,
+                    )
+                    for hard_epoch in range(1, mlp_hard_mining_epochs + 1):
+                        _check_cancel()
+                        model.train()
+                        running_loss = 0.0
+                        correct = 0
+                        total = 0
+                        for batch_x, batch_y in hard_loader:
+                            batch_x = batch_x.to(resolved_device)
+                            batch_y = batch_y.to(resolved_device)
+                            perm = None
+                            lam = None
+                            if mlp_mixup_alpha > 0:
+                                lam = np.random.beta(mlp_mixup_alpha, mlp_mixup_alpha, size=batch_x.size(0)).astype("float32")
+                                lam = torch.tensor(lam, device=batch_x.device).view(-1, 1)
+                                perm = torch.randperm(batch_x.size(0), device=batch_x.device)
+                                batch_x = lam * batch_x + (1.0 - lam) * batch_x[perm]
+                            optimizer.zero_grad()
+                            logits, feats = model.forward_logits(batch_x)
+                            logits_for_loss = _apply_arcface_margin(logits, batch_y)
+                            if logit_adjustment_train and logit_adjustment_tensor is not None:
+                                logits_for_loss = logits_for_loss + logit_adjustment_tensor
+                            if use_soft_targets:
+                                targets = _build_targets(batch_y, logits_for_loss.shape[1])
+                                if mlp_mixup_alpha > 0:
+                                    targets = lam * targets + (1.0 - lam) * targets[perm]
+                                loss = _compute_loss(logits_for_loss, targets)
+                            else:
+                                loss = torch.nn.functional.cross_entropy(
+                                    logits_for_loss,
+                                    batch_y,
+                                    weight=class_weights,
+                                    label_smoothing=mlp_label_smoothing,
+                                )
+                            if supcon_enabled:
+                                proj_feats = feats
+                                if projection_head is not None:
+                                    proj_feats = projection_head(feats)
+                                proj_feats = torch.nn.functional.normalize(proj_feats, dim=1)
+                                sup_loss = _supcon_loss(proj_feats, batch_y)
+                                if sup_loss is not None:
+                                    loss = loss + supcon_weight * sup_loss
+                            loss.backward()
+                            optimizer.step()
+                            running_loss += float(loss.item()) * batch_y.size(0)
+                            preds = logits_for_loss.argmax(dim=1)
+                            correct += int((preds == batch_y).sum().item())
+                            total += int(batch_y.size(0))
+                        train_loss = running_loss / max(1, total)
+                        train_acc = float(correct) / max(1, total)
+                        iterations_run += 1
+                        _safe_progress(
+                            progress_cb,
+                            0.62 + 0.02 * (hard_epoch / max(1, mlp_hard_mining_epochs)),
+                            f"MLP hard mining epoch {hard_epoch}: loss={train_loss:.4f}, acc={train_acc:.3f}",
+                        )
+
             classifier_solver = "mlp"
+            layer_specs: List[Dict[str, Any]] = []
+            try:
+                for idx, linear in enumerate(model.hidden_linears):
+                    layer_norm = model.hidden_norms[idx] if hasattr(model, "hidden_norms") else None
+                    activation = model.hidden_activations[idx] if hasattr(model, "hidden_activations") else mlp_activation
+                    layer_specs.append({
+                        "linear": linear,
+                        "activation": activation,
+                        "layer_norm": layer_norm if isinstance(layer_norm, torch.nn.LayerNorm) else None,
+                    })
+                layer_specs.append({
+                    "linear": model.output,
+                    "activation": "linear",
+                    "layer_norm": None,
+                })
+            except Exception:
+                layer_specs = []
             clf = {
                 "classifier_type": "mlp",
                 "classes": classes_list,
                 "layers": [],
+                "normalize_embeddings": bool(mlp_normalize_embeddings),
+                "embedding_center": bool(embedding_center),
+                "embedding_standardize": bool(embedding_standardize),
+                "embedding_center_values": embedding_center_values,
+                "embedding_std_values": embedding_std_values,
+                "calibration_temperature": calibration_temperature,
+                "logit_adjustment": logit_adjustment_vec,
+                "logit_adjustment_inference": bool(logit_adjustment_inference_flag),
+                "arcface": bool(arcface_enabled),
+                "arcface_margin": float(arcface_margin),
+                "arcface_scale": float(arcface_scale),
             }
-            linear_count = max(1, len(layer_dims) - 1)
-            linear_index = 0
-            for layer in model:
-                if isinstance(layer, torch.nn.Linear):
-                    activation = "relu" if linear_index < (linear_count - 1) else "linear"
-                    clf["layers"].append({
-                        "weight": layer.weight.detach().cpu().numpy(),
-                        "bias": layer.bias.detach().cpu().numpy(),
-                        "activation": activation,
-                    })
-                    linear_index += 1
-
-            def predict_probs(data: np.ndarray) -> np.ndarray:
-                model.eval()
-                with torch.no_grad():
-                    tensor = torch.tensor(data, dtype=torch.float32, device=resolved_device)
-                    logits = model(tensor)
-                    probs = torch.softmax(logits, dim=1)
-                return probs.cpu().numpy()
+            for spec in layer_specs:
+                linear = spec.get("linear")
+                activation = spec.get("activation")
+                layer_norm = spec.get("layer_norm")
+                if not isinstance(linear, torch.nn.Linear):
+                    continue
+                layer_entry: Dict[str, Any] = {
+                    "weight": linear.weight.detach().cpu().numpy(),
+                    "bias": linear.bias.detach().cpu().numpy() if linear.bias is not None else np.zeros(linear.weight.shape[0], dtype=np.float32),
+                    "activation": activation or "linear",
+                }
+                if isinstance(layer_norm, torch.nn.LayerNorm):
+                    layer_entry["layer_norm_weight"] = layer_norm.weight.detach().cpu().numpy()
+                    layer_entry["layer_norm_bias"] = layer_norm.bias.detach().cpu().numpy()
+                    layer_entry["layer_norm_eps"] = float(layer_norm.eps)
+                clf["layers"].append(layer_entry)
 
             _safe_progress(progress_cb, 0.65, "Evaluating classifier on validation split ...")
             if y_test.size:
@@ -1539,6 +2107,22 @@ def train_clip_from_yolo(
                 report = classification_report(y_train, train_pred, zero_division=0, digits=4)
                 labels_for_cm = sorted(set(y_train) | set(train_pred))
                 matrix = confusion_matrix(y_train, train_pred, labels=labels_for_cm).tolist()
+
+            if calibration_mode == "temperature":
+                calib_logits = predict_logits(X_test if y_test.size else X_train)
+                if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                    try:
+                        adj = np.asarray(logit_adjustment_vec, dtype=np.float32).reshape(1, -1)
+                        if adj.shape[1] == calib_logits.shape[1]:
+                            calib_logits = calib_logits + adj
+                    except Exception:
+                        pass
+                calib_labels = y_test_idx if y_test_idx is not None and y_test.size else y_train_idx
+                calibration_temperature = _calibrate_temperature(
+                    calib_logits,
+                    calib_labels,
+                    num_classes=len(classes_list),
+                )
         else:
             clf = LogisticRegression(
                 random_state=random_seed,
@@ -1558,13 +2142,53 @@ def train_clip_from_yolo(
             last_val_pred: Optional[np.ndarray] = None
             last_train_proba: Optional[np.ndarray] = None
             last_val_proba: Optional[np.ndarray] = None
+            effective_sample_weight: Optional[np.ndarray] = None
+
+            if class_weight == "effective":
+                weight_map = _effective_number_weight_map(y_train, effective_beta)
+                if weight_map:
+                    effective_sample_weight = np.array(
+                        [weight_map.get(label, 1.0) for label in y_train],
+                        dtype=np.float64,
+                    )
+
+            count_by_label = Counter([str(label) for label in y_train])
+            logit_adjustment_vec = None
+
+            def _resolve_logit_adjustment_vec(classes: Sequence[str]) -> Optional[np.ndarray]:
+                counts_idx: Dict[int, int] = {}
+                for idx, name in enumerate(classes):
+                    counts_idx[idx] = int(count_by_label.get(str(name), 0))
+                return _logit_adjustment_from_counts(counts_idx, len(classes))
+
+            def _predict_proba_with_adjustment(data: np.ndarray) -> np.ndarray:
+                raw_logits = clf.decision_function(data)
+                logits = np.asarray(raw_logits)
+                if logits.ndim == 1:
+                    logits = np.stack([np.zeros_like(logits), logits], axis=1)
+                if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                    adj = np.asarray(logit_adjustment_vec, dtype=np.float32).reshape(1, -1)
+                    if adj.shape[1] == logits.shape[1]:
+                        logits = logits + adj
+                max_logit = np.max(logits, axis=1, keepdims=True)
+                exp_logits = np.exp(logits - max_logit)
+                denom = exp_logits.sum(axis=1, keepdims=True) + 1e-8
+                return (exp_logits / denom).astype(np.float32)
 
             iteration_counter = 0
 
             for iteration in range(1, max_iter + 1):
                 _check_cancel()
-                clf.fit(X_train, y_train)
-                proba_train = clf.predict_proba(X_train)
+                if effective_sample_weight is not None:
+                    clf.fit(X_train, y_train, sample_weight=effective_sample_weight)
+                else:
+                    clf.fit(X_train, y_train)
+                if logit_adjustment_inference_flag and logit_adjustment_vec is None:
+                    logit_adjustment_vec = _resolve_logit_adjustment_vec(clf.classes_)
+                if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                    proba_train = _predict_proba_with_adjustment(X_train)
+                else:
+                    proba_train = clf.predict_proba(X_train)
                 train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
                 train_pred = clf.predict(X_train)
                 train_acc = float((train_pred == y_train).mean())
@@ -1574,7 +2198,10 @@ def train_clip_from_yolo(
                 val_loss: Optional[float] = None
                 val_acc: Optional[float] = None
                 if y_test.size:
-                    proba_val = clf.predict_proba(X_test)
+                    if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                        proba_val = _predict_proba_with_adjustment(X_test)
+                    else:
+                        proba_val = clf.predict_proba(X_test)
                     val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
                     val_pred = clf.predict(X_test)
                     val_acc = float((val_pred == y_test).mean())
@@ -1628,7 +2255,10 @@ def train_clip_from_yolo(
 
             if hard_example_mining and last_train_pred is not None and last_train_proba is not None:
                 _safe_progress(progress_cb, 0.66, "Starting hard example mining pass ...")
-                sample_weight = np.ones(len(y_train), dtype=np.float64)
+                if effective_sample_weight is not None:
+                    sample_weight = effective_sample_weight.copy()
+                else:
+                    sample_weight = np.ones(len(y_train), dtype=np.float64)
 
                 if hard_mining_misclassified_weight > 1.0:
                     misclassified_mask = last_train_pred != y_train
@@ -1729,6 +2359,28 @@ def train_clip_from_yolo(
                 labels_for_cm = sorted(set(y_train) | set(train_pred_final))
                 matrix = confusion_matrix(y_train, train_pred_final, labels=labels_for_cm).tolist()
 
+            if calibration_mode == "temperature":
+                try:
+                    raw_logits = clf.decision_function(X_test if y_test.size else X_train)
+                    logits = np.asarray(raw_logits)
+                    if logits.ndim == 1:
+                        logits = np.stack([np.zeros_like(logits), logits], axis=1)
+                    if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                        adj = np.asarray(logit_adjustment_vec, dtype=np.float32).reshape(1, -1)
+                        if adj.shape[1] == logits.shape[1]:
+                            logits = logits + adj
+                    classes_list = list(clf.classes_)
+                    class_to_idx = {str(name): idx for idx, name in enumerate(classes_list)}
+                    labels_raw = y_test if y_test.size else y_train
+                    labels_idx = [class_to_idx.get(str(name), 0) for name in labels_raw]
+                    calibration_temperature = _calibrate_temperature(
+                        logits,
+                        labels_idx,
+                        num_classes=len(classes_list),
+                    )
+                except Exception:
+                    calibration_temperature = None
+
         for label in labels_for_cm:
             key = str(label)
             metrics = report_dict.get(key) or report_dict.get(label)
@@ -1743,7 +2395,10 @@ def train_clip_from_yolo(
                 "support": int(support_value) if support_value is not None else None,
             })
 
+        phase_timings["train"] = time.perf_counter() - train_start
+
         _safe_progress(progress_cb, 0.75, f"Saving classifier to {model_output} and labelmap to {labelmap_output} ...")
+        save_start = time.perf_counter()
         _check_cancel()
         joblib.dump(clf, model_output, compress=3)
 
@@ -1766,6 +2421,7 @@ def train_clip_from_yolo(
         n_train = int(X_train.shape[0])
         n_test = int(X_test.shape[0])
         embedding_dim = int(X_train.shape[1]) if X_train.size else 0
+        phase_timings["save"] = time.perf_counter() - save_start
 
         meta = {
             "clip_model": clip_model,
@@ -1776,6 +2432,7 @@ def train_clip_from_yolo(
             "random_seed": random_seed,
             "min_per_class": min_per_class,
             "class_weight": class_weight,
+            "effective_beta": effective_beta,
             "C": C,
             "solver": classifier_solver,
             "classifier_type": classifier_type,
@@ -1798,11 +2455,32 @@ def train_clip_from_yolo(
             "mlp_mixup_alpha": mlp_mixup_alpha,
             "mlp_normalize_embeddings": mlp_normalize_embeddings,
             "mlp_patience": mlp_patience,
+            "mlp_activation": mlp_activation,
+            "mlp_layer_norm": mlp_layer_norm,
+            "mlp_hard_mining_epochs": mlp_hard_mining_epochs,
+            "logit_adjustment_mode": logit_adjustment_mode,
+            "logit_adjustment_train": bool(logit_adjustment_train),
+            "logit_adjustment_inference": bool(logit_adjustment_inference_flag),
+            "logit_adjustment": logit_adjustment_vec.tolist() if logit_adjustment_vec is not None else None,
+            "arcface_enabled": bool(arcface_enabled),
+            "arcface_margin": arcface_margin,
+            "arcface_scale": arcface_scale,
+            "supcon_weight": supcon_weight,
+            "supcon_temperature": supcon_temperature,
+            "supcon_projection_dim": supcon_projection_dim,
+            "supcon_projection_hidden": supcon_projection_hidden,
             "background_class_count": bg_class_count,
             "background_classes": list(background_classes),
             "negative_crop_policy": dict(bg_policy),
             "augmentation_policy": dict(aug_policy),
             "oversample_policy": dict(oversample_policy),
+            "embedding_center": embedding_center,
+            "embedding_standardize": embedding_standardize,
+            "embedding_center_values": embedding_center_values.tolist() if embedding_center_values is not None else None,
+            "embedding_std_values": embedding_std_values.tolist() if embedding_std_values is not None else None,
+            "calibration_mode": calibration_mode,
+            "calibration_temperature": calibration_temperature,
+            "phase_timings": dict(phase_timings),
             "labelmap_filename": os.path.basename(labelmap_output),
             "labelmap_path": labelmap_output,
             "n_classes_seen": len(encountered_sorted),
@@ -1832,6 +2510,7 @@ def train_clip_from_yolo(
                 background_classes=background_classes,
                 labelmap_path=input_labelmap,
                 labelmap_hash=labelmap_hash,
+                embed_norm=normalize_embeddings,
             )
             cache_persisted = True
 
@@ -1839,6 +2518,8 @@ def train_clip_from_yolo(
         torch.cuda.empty_cache() if resolved_device == "cuda" else None
 
         _safe_progress(progress_cb, 1.0, "Training completed.")
+        phase_timings["total"] = time.perf_counter() - total_start
+        logger.info("CLIP training timings: %s", phase_timings)
 
         result = TrainingArtifacts(
             model_path=model_output,
@@ -1862,6 +2543,7 @@ def train_clip_from_yolo(
             solver=classifier_solver,
             hard_example_mining=hard_example_mining,
             class_weight=class_weight,
+            effective_beta=float(effective_beta),
             per_class_metrics=per_class_metrics,
             hard_mining_misclassified_weight=hard_mining_misclassified_weight,
             hard_mining_low_conf_weight=hard_mining_low_conf_weight,
@@ -1887,6 +2569,24 @@ def train_clip_from_yolo(
             mlp_mixup_alpha=float(mlp_mixup_alpha),
             mlp_normalize_embeddings=bool(mlp_normalize_embeddings),
             mlp_patience=int(mlp_patience),
+            mlp_activation=str(mlp_activation),
+            mlp_layer_norm=bool(mlp_layer_norm),
+            mlp_hard_mining_epochs=int(mlp_hard_mining_epochs),
+            logit_adjustment_mode=str(logit_adjustment_mode),
+            logit_adjustment_inference=bool(logit_adjustment_inference_flag),
+            logit_adjustment=None if logit_adjustment_vec is None else [float(x) for x in logit_adjustment_vec],
+            arcface_enabled=bool(arcface_enabled),
+            arcface_margin=float(arcface_margin),
+            arcface_scale=float(arcface_scale),
+            supcon_weight=float(supcon_weight),
+            supcon_temperature=float(supcon_temperature),
+            supcon_projection_dim=int(supcon_projection_dim),
+            supcon_projection_hidden=int(supcon_projection_hidden),
+            embedding_center=bool(embedding_center),
+            embedding_standardize=bool(embedding_standardize),
+            calibration_mode=str(calibration_mode),
+            calibration_temperature=None if calibration_temperature is None else float(calibration_temperature),
+            phase_timings=dict(phase_timings),
         )
 
     finally:

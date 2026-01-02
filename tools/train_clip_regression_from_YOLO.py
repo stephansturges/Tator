@@ -67,8 +67,14 @@ def parse_args() -> argparse.Namespace:
         "--class_weight",
         type=str,
         default="balanced",
-        choices=["balanced", "none"],
+        choices=["balanced", "none", "effective"],
         help="Class weighting for Logistic Regression.",
+    )
+    parser.add_argument(
+        "--effective_beta",
+        type=float,
+        default=0.9999,
+        help="Effective-number beta (only used when class_weight=effective).",
     )
     parser.add_argument(
         "--C",
@@ -134,6 +140,19 @@ def parse_args() -> argparse.Namespace:
         help="Loss type for MLP heads.",
     )
     parser.add_argument(
+        "--mlp_activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu"],
+        help="Activation function for MLP hidden layers.",
+    )
+    parser.add_argument(
+        "--mlp_layer_norm",
+        type=str,
+        default="false",
+        help="Enable LayerNorm between MLP layers (true/false).",
+    )
+    parser.add_argument(
         "--mlp_focal_gamma",
         type=float,
         default=2.0,
@@ -169,6 +188,104 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=6,
         help="Early-stop patience for MLP validation loss.",
+    )
+    parser.add_argument(
+        "--mlp_hard_mining_epochs",
+        type=int,
+        default=5,
+        help="Extra MLP epochs for hard-example mining.",
+    )
+    parser.add_argument(
+        "--logit_adjustment_mode",
+        type=str,
+        default="none",
+        choices=["none", "train", "infer", "both"],
+        help="Apply logit adjustment during training and/or inference.",
+    )
+    parser.add_argument(
+        "--logit_adjustment_inference",
+        type=str,
+        default=None,
+        help="Optional override for inference-time logit adjustment (true/false).",
+    )
+    parser.add_argument(
+        "--arcface_enabled",
+        type=str,
+        default="false",
+        help="Enable ArcFace-style margin loss for MLP heads.",
+    )
+    parser.add_argument(
+        "--arcface_margin",
+        type=float,
+        default=0.2,
+        help="ArcFace angular margin (only used when arcface_enabled=true).",
+    )
+    parser.add_argument(
+        "--arcface_scale",
+        type=float,
+        default=30.0,
+        help="ArcFace scale factor (only used when arcface_enabled=true).",
+    )
+    parser.add_argument(
+        "--supcon_weight",
+        type=float,
+        default=0.0,
+        help="Weight for supervised contrastive loss (0 disables).",
+    )
+    parser.add_argument(
+        "--supcon_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for supervised contrastive loss.",
+    )
+    parser.add_argument(
+        "--supcon_projection_dim",
+        type=int,
+        default=128,
+        help="Projection dimension for supervised contrastive loss.",
+    )
+    parser.add_argument(
+        "--supcon_projection_hidden",
+        type=int,
+        default=0,
+        help="Hidden dimension for projection head (0 for single-layer).",
+    )
+    parser.add_argument(
+        "--embedding_center",
+        type=str,
+        default="false",
+        help="Center embeddings before training (true/false).",
+    )
+    parser.add_argument(
+        "--embedding_standardize",
+        type=str,
+        default="false",
+        help="Standardize embeddings before training (true/false).",
+    )
+    parser.add_argument(
+        "--calibration_mode",
+        type=str,
+        default="none",
+        choices=["none", "temperature"],
+        help="Post-training calibration mode.",
+    )
+    parser.add_argument(
+        "--calibration_min_temp",
+        type=float,
+        default=0.5,
+        help="Minimum temperature for calibration sweep.",
+    )
+    parser.add_argument(
+        "--calibration_max_temp",
+        type=float,
+        default=5.0,
+        help="Maximum temperature for calibration sweep.",
+    )
+    parser.add_argument(
+        "--calibration_max_iters",
+        type=int,
+        default=50,
+        help="Max calibration iterations (grid points).",
     )
     parser.add_argument(
         "--reuse-embeddings",
@@ -254,6 +371,7 @@ def main() -> None:
             batch_size=args.batch_size,
             min_per_class=args.min_per_class,
             class_weight=args.class_weight,
+            effective_beta=args.effective_beta,
             C=args.C,
             solver=args.solver,
             classifier_type=args.classifier_type,
@@ -264,12 +382,30 @@ def main() -> None:
             mlp_weight_decay=args.mlp_weight_decay,
             mlp_label_smoothing=args.mlp_label_smoothing,
             mlp_loss_type=args.mlp_loss_type,
+            mlp_activation=args.mlp_activation,
+            mlp_layer_norm=args.mlp_layer_norm,
             mlp_focal_gamma=args.mlp_focal_gamma,
             mlp_focal_alpha=args.mlp_focal_alpha,
             mlp_sampler=args.mlp_sampler,
             mlp_mixup_alpha=args.mlp_mixup_alpha,
             mlp_normalize_embeddings=normalize_embeddings,
             mlp_patience=args.mlp_patience,
+            mlp_hard_mining_epochs=args.mlp_hard_mining_epochs,
+            logit_adjustment_mode=args.logit_adjustment_mode,
+            logit_adjustment_inference=args.logit_adjustment_inference,
+            arcface_enabled=args.arcface_enabled,
+            arcface_margin=args.arcface_margin,
+            arcface_scale=args.arcface_scale,
+            supcon_weight=args.supcon_weight,
+            supcon_temperature=args.supcon_temperature,
+            supcon_projection_dim=args.supcon_projection_dim,
+            supcon_projection_hidden=args.supcon_projection_hidden,
+            embedding_center=args.embedding_center,
+            embedding_standardize=args.embedding_standardize,
+            calibration_mode=args.calibration_mode,
+            calibration_max_iters=args.calibration_max_iters,
+            calibration_min_temp=args.calibration_min_temp,
+            calibration_max_temp=args.calibration_max_temp,
             reuse_embeddings=args.reuse_embeddings,
             hard_example_mining=args.hard_example_mining,
             hard_mining_misclassified_weight=args.hard_misclassified_weight,

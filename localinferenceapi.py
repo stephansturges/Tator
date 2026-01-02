@@ -318,6 +318,9 @@ active_labelmap_path: Optional[str] = LABELMAP_DEFAULT_PATH if os.path.exists(LA
 active_label_list: List[str] = []
 active_encoder_type: str = "clip"
 active_encoder_model: Optional[str] = None
+active_classifier_meta: Dict[str, Any] = {}
+active_head_normalize_embeddings: bool = True
+active_classifier_head: Optional[Dict[str, Any]] = None
 if active_labelmap_path:
     try:
         if active_labelmap_path.lower().endswith(".pkl"):
@@ -340,11 +343,14 @@ try:
         if os.path.exists(meta_path):
             meta_obj = joblib.load(meta_path)
             if isinstance(meta_obj, dict):
+                active_classifier_meta = dict(meta_obj)
                 active_encoder_type = meta_obj.get("encoder_type") or "clip"
                 active_encoder_model = meta_obj.get("encoder_model") or meta_obj.get("clip_model")
+                active_head_normalize_embeddings = _resolve_active_head_normalize_embeddings(meta_obj, clf, default=True)
 except Exception:
     active_encoder_type = "clip"
     active_encoder_model = None
+    active_classifier_head = None
 
 # Keep default CLIP artifacts usable with path allowlists by mirroring them into uploads/.
 # This preserves older workflows that write my_logreg_model.pkl/my_label_list.pkl at repo root.
@@ -2629,6 +2635,7 @@ def resolve_image_payload(
 class Base64Payload(BaseModel):
     image_base64: str
     uuid: Optional[str] = None
+    background_guard: Optional[bool] = None
 
 
 class PredictResponse(BaseModel):
@@ -3092,6 +3099,7 @@ class ActiveModelRequest(BaseModel):
     classifier_path: Optional[str] = None
     labelmap_path: Optional[str] = None
     clip_model: Optional[str] = None
+    logit_adjustment_inference: Optional[bool] = None
 
 
 class ActiveModelResponse(BaseModel):
@@ -3102,6 +3110,7 @@ class ActiveModelResponse(BaseModel):
     labelmap_path: Optional[str]
     clip_ready: bool
     labelmap_entries: List[str] = []
+    logit_adjustment_inference: Optional[bool] = None
 
 
 class SegmentationBuildRequest(BaseModel):
@@ -4976,7 +4985,10 @@ def _persist_agent_recipe(
             "use_clip_fp_guard": recipe_body.get("use_clip_fp_guard", recipe.get("use_clip_fp_guard")),
             "use_negative_exemplars": recipe_body.get("use_negative_exemplars", recipe.get("use_negative_exemplars")),
             "negative_strength": recipe_body.get("negative_strength", recipe.get("negative_strength")),
+            "clip_head_background_guard": recipe_body.get("clip_head_background_guard", recipe.get("clip_head_background_guard")),
         }
+        if isinstance(params, dict) and "clip_head_background_guard" not in params:
+            params["clip_head_background_guard"] = recipe_body.get("clip_head_background_guard", recipe.get("clip_head_background_guard"))
         thresholds = sorted({float(s.get("threshold", 0.0)) for s in portable_steps if s.get("threshold") is not None})
         if thresholds:
             params["thresholds"] = thresholds
@@ -5819,6 +5831,7 @@ def _clip_encode_pil_batch(
     *,
     device_override: Optional[str] = None,
     clip_model_override: Optional[str] = None,
+    normalize: bool = True,
 ) -> Optional[np.ndarray]:
     """Encode a batch of PIL crops with raw CLIP, returning (N, D) float32 normalized embeddings."""
     if not crops:
@@ -5872,7 +5885,8 @@ def _clip_encode_pil_batch(
             if not chunks:
                 continue
             feats_all = torch.cat(chunks, dim=0)
-            feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
+            if normalize:
+                feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
             return feats_all.cpu().numpy()
         except torch.cuda.OutOfMemoryError as exc:
             last_error = exc
@@ -5896,6 +5910,7 @@ def _dinov3_encode_pil_batch(
     *,
     device_override: Optional[str] = None,
     model_name_override: Optional[str] = None,
+    normalize: bool = True,
 ) -> Optional[np.ndarray]:
     if not crops:
         return None
@@ -5945,7 +5960,8 @@ def _dinov3_encode_pil_batch(
             if not chunks:
                 continue
             feats_all = torch.cat(chunks, dim=0)
-            feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
+            if normalize:
+                feats_all = feats_all / (feats_all.norm(dim=-1, keepdim=True) + 1e-8)
             return feats_all.cpu().numpy()
         except torch.cuda.OutOfMemoryError as exc:
             last_error = exc
@@ -5970,11 +5986,54 @@ def _encode_pil_batch(
     encoder_type: str,
     encoder_model: Optional[str],
     device_override: Optional[str] = None,
+    normalize: bool = True,
 ) -> Optional[np.ndarray]:
     encoder_type_norm = str(encoder_type or "clip").strip().lower()
     if encoder_type_norm == "dinov3":
-        return _dinov3_encode_pil_batch(crops, device_override=device_override, model_name_override=encoder_model)
-    return _clip_encode_pil_batch(crops, device_override=device_override, clip_model_override=encoder_model)
+        return _dinov3_encode_pil_batch(
+            crops,
+            device_override=device_override,
+            model_name_override=encoder_model,
+            normalize=normalize,
+        )
+    return _clip_encode_pil_batch(
+        crops,
+        device_override=device_override,
+        clip_model_override=encoder_model,
+        normalize=normalize,
+    )
+
+
+def _apply_embedding_transform(
+    feats: Optional[np.ndarray],
+    *,
+    center_values: Optional[Sequence[float]] = None,
+    std_values: Optional[Sequence[float]] = None,
+) -> Optional[np.ndarray]:
+    if feats is None:
+        return None
+    try:
+        arr = np.asarray(feats, dtype=np.float32)
+    except Exception:
+        return feats
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return arr
+    if center_values is not None:
+        try:
+            center = np.asarray(center_values, dtype=np.float32)
+            if center.ndim == 1 and center.shape[0] == arr.shape[1]:
+                arr = arr - center.reshape(1, -1)
+        except Exception:
+            pass
+    if std_values is not None:
+        try:
+            scale = np.asarray(std_values, dtype=np.float32)
+            if scale.ndim == 1 and scale.shape[0] == arr.shape[1]:
+                safe = np.maximum(scale, 1e-6)
+                arr = arr / safe.reshape(1, -1)
+        except Exception:
+            pass
+    return arr
 
 
 def _encode_pil_batch_for_head(
@@ -5987,12 +6046,19 @@ def _encode_pil_batch_for_head(
     encoder_model = head.get("encoder_model")
     if not isinstance(encoder_model, str) or not encoder_model.strip():
         encoder_model = head.get("clip_model")
-    return _encode_pil_batch(
+    normalize = _resolve_head_normalize_embeddings(head, default=True)
+    feats = _encode_pil_batch(
         crops,
         encoder_type=encoder_type,
         encoder_model=str(encoder_model) if encoder_model is not None else None,
         device_override=device_override,
+        normalize=normalize,
     )
+    if feats is None:
+        return None
+    center_vals = head.get("embedding_center_values")
+    std_vals = head.get("embedding_std_values")
+    return _apply_embedding_transform(feats, center_values=center_vals, std_values=std_vals)
 
 
 def _encode_pil_batch_for_active(
@@ -6000,12 +6066,25 @@ def _encode_pil_batch_for_active(
     *,
     device_override: Optional[str] = None,
 ) -> Optional[np.ndarray]:
-    return _encode_pil_batch(
+    normalize = bool(active_head_normalize_embeddings)
+    feats = _encode_pil_batch(
         crops,
         encoder_type=active_encoder_type,
         encoder_model=active_encoder_model,
         device_override=device_override,
+        normalize=normalize,
     )
+    if feats is None:
+        return None
+    center_vals = None
+    std_vals = None
+    if active_classifier_head:
+        center_vals = active_classifier_head.get("embedding_center_values")
+        std_vals = active_classifier_head.get("embedding_std_values")
+    elif active_classifier_meta:
+        center_vals = active_classifier_meta.get("embedding_center_values")
+        std_vals = active_classifier_meta.get("embedding_std_values")
+    return _apply_embedding_transform(feats, center_values=center_vals, std_values=std_vals)
 
 
 def _clip_encode_text_batch(
@@ -6122,6 +6201,15 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
     encoder_model_used = None
     meta_found = False
     solver_used = None
+    normalize_embeddings: Optional[bool] = None
+    embedding_center_values: Optional[Sequence[float]] = None
+    embedding_std_values: Optional[Sequence[float]] = None
+    calibration_temperature: Optional[float] = None
+    logit_adjustment: Optional[Sequence[float]] = None
+    logit_adjustment_inference: bool = False
+    arcface_enabled: bool = False
+    arcface_margin: Optional[float] = None
+    arcface_scale: Optional[float] = None
     meta_path = os.path.splitext(str(classifier_path))[0] + ".meta.pkl"
     if os.path.exists(meta_path):
         try:
@@ -6132,6 +6220,36 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
                 encoder_type_used = meta_obj.get("encoder_type")
                 encoder_model_used = meta_obj.get("encoder_model")
                 solver_used = meta_obj.get("solver")
+                if meta_obj.get("mlp_normalize_embeddings") is not None:
+                    normalize_embeddings = bool(meta_obj.get("mlp_normalize_embeddings"))
+                if meta_obj.get("embedding_center_values") is not None:
+                    embedding_center_values = meta_obj.get("embedding_center_values")
+                if meta_obj.get("embedding_std_values") is not None:
+                    embedding_std_values = meta_obj.get("embedding_std_values")
+                if meta_obj.get("calibration_temperature") is not None:
+                    try:
+                        calibration_temperature = float(meta_obj.get("calibration_temperature"))
+                    except Exception:
+                        calibration_temperature = None
+                if meta_obj.get("logit_adjustment") is not None:
+                    logit_adjustment = meta_obj.get("logit_adjustment")
+                if meta_obj.get("logit_adjustment_inference") is not None:
+                    try:
+                        logit_adjustment_inference = bool(meta_obj.get("logit_adjustment_inference"))
+                    except Exception:
+                        logit_adjustment_inference = False
+                if meta_obj.get("arcface_enabled") is not None:
+                    arcface_enabled = bool(meta_obj.get("arcface_enabled"))
+                if meta_obj.get("arcface_margin") is not None:
+                    try:
+                        arcface_margin = float(meta_obj.get("arcface_margin"))
+                    except Exception:
+                        arcface_margin = None
+                if meta_obj.get("arcface_scale") is not None:
+                    try:
+                        arcface_scale = float(meta_obj.get("arcface_scale"))
+                    except Exception:
+                        arcface_scale = None
         except Exception:
             clip_model_used = None
             encoder_type_used = None
@@ -6171,11 +6289,21 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
                 activation = "linear" if idx == total_layers - 1 else "relu"
             if activation not in {"relu", "linear", "none", "identity"}:
                 activation = "relu" if idx < total_layers - 1 else "linear"
-            layers.append({
+            layer_entry: Dict[str, Any] = {
                 "weight": weight,
                 "bias": bias,
                 "activation": activation,
-            })
+            }
+            if layer.get("layer_norm_weight") is not None:
+                layer_entry["layer_norm_weight"] = np.asarray(layer.get("layer_norm_weight"), dtype=np.float32)
+                if layer.get("layer_norm_bias") is not None:
+                    layer_entry["layer_norm_bias"] = np.asarray(layer.get("layer_norm_bias"), dtype=np.float32)
+                if layer.get("layer_norm_eps") is not None:
+                    try:
+                        layer_entry["layer_norm_eps"] = float(layer.get("layer_norm_eps"))
+                    except Exception:
+                        pass
+            layers.append(layer_entry)
         if embedding_dim <= 0:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_clip_classifier_invalid_shape")
         bg_indices = _clip_head_background_indices(classes)
@@ -6184,6 +6312,7 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
             encoder_type_used = "clip"
         if not isinstance(encoder_model_used, str) or not encoder_model_used.strip():
             encoder_model_used = clip_model_used
+        normalize_flag = normalize_embeddings if normalize_embeddings is not None else _resolve_head_normalize_embeddings(clf_obj, default=True)
         return {
             "classes": classes,
             "background_indices": bg_indices,
@@ -6195,6 +6324,15 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
             "embedding_dim": int(embedding_dim),
             "proba_mode": "softmax",
             "classifier_type": "mlp",
+            "normalize_embeddings": bool(normalize_flag),
+            "embedding_center_values": embedding_center_values,
+            "embedding_std_values": embedding_std_values,
+            "temperature": calibration_temperature,
+            "logit_adjustment": logit_adjustment,
+            "logit_adjustment_inference": bool(logit_adjustment_inference),
+            "arcface": bool(arcface_enabled),
+            "arcface_margin": arcface_margin,
+            "arcface_scale": arcface_scale,
         }
 
     classes_raw = getattr(clf_obj, "classes_", None)
@@ -6277,6 +6415,8 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
 
     bg_indices = _clip_head_background_indices(classes)
     bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
+    if normalize_embeddings is None:
+        normalize_embeddings = True
 
     return {
         "classes": classes,
@@ -6290,7 +6430,20 @@ def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str,
         "embedding_dim": int(embedding_dim),
         "proba_mode": proba_mode,
         "classifier_type": "logreg",
+        "normalize_embeddings": bool(normalize_embeddings),
+        "embedding_center_values": embedding_center_values,
+        "embedding_std_values": embedding_std_values,
+        "temperature": calibration_temperature,
+        "logit_adjustment": logit_adjustment,
+        "logit_adjustment_inference": bool(logit_adjustment_inference),
     }
+
+
+try:
+    if active_classifier_path and active_classifier_head is None and os.path.isfile(active_classifier_path):
+        active_classifier_head = _load_clip_head_from_classifier(Path(active_classifier_path))
+except Exception:
+    active_classifier_head = None
 
 
 def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optional[np.ndarray]:
@@ -6306,12 +6459,25 @@ def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optiona
         return None
     if X.ndim != 2:
         return None
+    temperature = head.get("temperature")
+    try:
+        temperature_val = float(temperature) if temperature is not None else None
+    except Exception:
+        temperature_val = None
+    if temperature_val is not None and temperature_val <= 0:
+        temperature_val = None
     if isinstance(head.get("classifier_type"), str) and head.get("classifier_type") == "mlp" or head.get("layers"):
         layers = head.get("layers")
         if not isinstance(layers, list) or not layers:
             return None
+        arcface_enabled = bool(head.get("arcface"))
+        try:
+            arcface_scale = float(head.get("arcface_scale") or 1.0)
+        except Exception:
+            arcface_scale = 1.0
         out = X
         total_layers = len(layers)
+        last_weight = None
         for idx, layer in enumerate(layers):
             try:
                 W = np.asarray(layer.get("weight"), dtype=np.float32)
@@ -6320,18 +6486,57 @@ def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optiona
                 return None
             if W.ndim != 2 or b.ndim != 1 or W.shape[0] != b.shape[0] or out.shape[1] != W.shape[1]:
                 return None
+            is_last = idx == total_layers - 1
+            if arcface_enabled and is_last:
+                last_weight = W
+                break
             out = out @ W.T + b.reshape(1, -1)
+            ln_weight = layer.get("layer_norm_weight")
+            ln_bias = layer.get("layer_norm_bias")
+            if ln_weight is not None:
+                try:
+                    gamma = np.asarray(ln_weight, dtype=np.float32).reshape(1, -1)
+                    beta = np.asarray(ln_bias, dtype=np.float32).reshape(1, -1) if ln_bias is not None else 0.0
+                    eps = float(layer.get("layer_norm_eps") or 1e-5)
+                    mean = np.mean(out, axis=1, keepdims=True)
+                    var = np.mean((out - mean) ** 2, axis=1, keepdims=True)
+                    out = (out - mean) / np.sqrt(var + eps)
+                    out = out * gamma + beta
+                except Exception:
+                    pass
             activation = str(layer.get("activation") or "").strip().lower()
             if not activation:
-                activation = "linear" if idx == total_layers - 1 else "relu"
+                activation = "linear" if is_last else "relu"
             if activation == "relu":
                 out = np.maximum(out, 0.0)
+            elif activation == "gelu":
+                out = 0.5 * out * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (out + 0.044715 * (out ** 3))))
             elif activation in {"linear", "none", "identity"}:
                 pass
             else:
                 out = np.maximum(out, 0.0)
+        if arcface_enabled:
+            if last_weight is None:
+                return None
+            if out.shape[1] != last_weight.shape[1]:
+                return None
+            feats = out
+            feat_norm = feats / (np.linalg.norm(feats, axis=1, keepdims=True) + 1e-8)
+            weight_norm = last_weight / (np.linalg.norm(last_weight, axis=1, keepdims=True) + 1e-8)
+            out = feat_norm @ weight_norm.T
+            out = out * float(arcface_scale)
         if out.shape[1] != len(classes):
             return None
+        logit_adj = head.get("logit_adjustment")
+        if head.get("logit_adjustment_inference") and logit_adj is not None:
+            try:
+                adj = np.asarray(logit_adj, dtype=np.float32).reshape(1, -1)
+                if adj.shape[1] == out.shape[1]:
+                    out = out + adj
+            except Exception:
+                pass
+        if temperature_val is not None and temperature_val != 1.0:
+            out = out / temperature_val
         max_logit = np.max(out, axis=1, keepdims=True)
         exp_logits = np.exp(out - max_logit)
         denom = exp_logits.sum(axis=1, keepdims=True) + 1e-8
@@ -6353,6 +6558,16 @@ def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optiona
         if len(classes) != 2 or W.shape[0] != 1 or b.shape[0] != 1:
             return None
         logits = (X @ W[0].reshape(-1, 1)).reshape(-1) + float(b[0])
+        logit_adj = head.get("logit_adjustment")
+        if head.get("logit_adjustment_inference") and logit_adj is not None:
+            try:
+                adj = np.asarray(logit_adj, dtype=np.float32).reshape(-1)
+                if adj.shape[0] == 2:
+                    logits = logits + adj[1]
+            except Exception:
+                pass
+        if temperature_val is not None and temperature_val != 1.0:
+            logits = logits / temperature_val
         probs_1 = 1.0 / (1.0 + np.exp(-logits))
         probs_0 = 1.0 - probs_1
         return np.stack([probs_0, probs_1], axis=1).astype(np.float32)
@@ -6362,6 +6577,16 @@ def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optiona
         logits = logits + b.reshape(1, -1)
     else:
         return None
+    logit_adj = head.get("logit_adjustment")
+    if head.get("logit_adjustment_inference") and logit_adj is not None:
+        try:
+            adj = np.asarray(logit_adj, dtype=np.float32).reshape(1, -1)
+            if adj.shape[1] == logits.shape[1]:
+                logits = logits + adj
+        except Exception:
+            pass
+    if temperature_val is not None and temperature_val != 1.0:
+        logits = logits / temperature_val
 
     if proba_mode == "ovr":
         probs = 1.0 / (1.0 + np.exp(-logits))
@@ -6382,6 +6607,7 @@ def _clip_head_keep_mask(
     min_prob: float,
     margin: float,
     background_indices: Optional[Sequence[int]] = None,
+    background_guard: bool = False,
 ) -> Optional[np.ndarray]:
     """Return boolean keep mask for rows in proba."""
     try:
@@ -6404,15 +6630,15 @@ def _clip_head_keep_mask(
     p_target = probs[:, target_index]
     keep = p_target >= min_prob_f
 
-    # Always compare against background classes if present, even when margin=0.
-    bg_indices: List[int] = []
-    if background_indices:
-        for idx in background_indices:
-            if isinstance(idx, int) and 0 <= idx < probs.shape[1] and idx != target_index:
-                bg_indices.append(idx)
-    if bg_indices:
-        p_bg = np.max(probs[:, bg_indices], axis=1)
-        keep &= p_target >= p_bg
+    if background_guard:
+        bg_indices: List[int] = []
+        if background_indices:
+            for idx in background_indices:
+                if isinstance(idx, int) and 0 <= idx < probs.shape[1] and idx != target_index:
+                    bg_indices.append(idx)
+        if bg_indices:
+            p_bg = np.max(probs[:, bg_indices], axis=1)
+            keep &= p_target >= p_bg
 
     # "Margin" is optional: a value of 0 disables the margin check (i.e., do not require the target
     # class to be the argmax). When enabled, require p(target) >= p(best_other) + margin.
@@ -6452,6 +6678,7 @@ def _save_clip_head_artifacts(
         arrays: Dict[str, np.ndarray] = {}
         layers_meta: List[Dict[str, str]] = []
         total_layers = len(layers)
+        normalize_flag = _resolve_head_normalize_embeddings(head, default=True)
         for idx, layer in enumerate(layers):
             try:
                 weight = np.asarray(layer.get("weight"), dtype=np.float32)
@@ -6491,6 +6718,15 @@ def _save_clip_head_artifacts(
             "classifier_type": "mlp",
             "classes": [str(c) for c in classes],
             "layers": layers_meta,
+            "normalize_embeddings": bool(normalize_flag),
+            "embedding_center_values": head.get("embedding_center_values").tolist() if isinstance(head.get("embedding_center_values"), np.ndarray) else head.get("embedding_center_values"),
+            "embedding_std_values": head.get("embedding_std_values").tolist() if isinstance(head.get("embedding_std_values"), np.ndarray) else head.get("embedding_std_values"),
+            "calibration_temperature": head.get("temperature") if head.get("temperature") is not None else head.get("calibration_temperature"),
+            "logit_adjustment": head.get("logit_adjustment"),
+            "logit_adjustment_inference": bool(head.get("logit_adjustment_inference")),
+            "arcface": bool(head.get("arcface")),
+            "arcface_margin": head.get("arcface_margin"),
+            "arcface_scale": head.get("arcface_scale"),
             "min_prob": float(min_prob),
             "margin": float(margin),
         }
@@ -6513,6 +6749,7 @@ def _save_clip_head_artifacts(
         encoder_model = head.get("encoder_model")
         if not isinstance(encoder_model, str) or not encoder_model.strip():
             encoder_model = head.get("clip_model")
+        normalize_flag = _resolve_head_normalize_embeddings(head, default=True)
         meta = {
             "clip_model": head.get("clip_model"),
             "encoder_type": encoder_type,
@@ -6520,6 +6757,12 @@ def _save_clip_head_artifacts(
             "proba_mode": head.get("proba_mode"),
             "classifier_type": "logreg",
             "classes": [str(c) for c in classes],
+            "normalize_embeddings": bool(normalize_flag),
+            "embedding_center_values": head.get("embedding_center_values").tolist() if isinstance(head.get("embedding_center_values"), np.ndarray) else head.get("embedding_center_values"),
+            "embedding_std_values": head.get("embedding_std_values").tolist() if isinstance(head.get("embedding_std_values"), np.ndarray) else head.get("embedding_std_values"),
+            "calibration_temperature": head.get("temperature") if head.get("temperature") is not None else head.get("calibration_temperature"),
+            "logit_adjustment": head.get("logit_adjustment"),
+            "logit_adjustment_inference": bool(head.get("logit_adjustment_inference")),
             "min_prob": float(min_prob),
             "margin": float(margin),
         }
@@ -6568,6 +6811,17 @@ def _load_clip_head_artifacts(
     margin = meta.get("margin")
     classifier_type = str(meta.get("classifier_type") or "").strip().lower()
     layers_meta = meta.get("layers") if isinstance(meta.get("layers"), list) else None
+    normalize_flag = meta.get("normalize_embeddings")
+    center_vals = meta.get("embedding_center_values")
+    std_vals = meta.get("embedding_std_values")
+    temperature_val = meta.get("calibration_temperature")
+    logit_adjustment = meta.get("logit_adjustment")
+    logit_adjustment_inference = meta.get("logit_adjustment_inference")
+    arcface_flag = meta.get("arcface")
+    if arcface_flag is None:
+        arcface_flag = meta.get("arcface_enabled")
+    arcface_margin = meta.get("arcface_margin")
+    arcface_scale = meta.get("arcface_scale")
 
     min_prob_val: Optional[float] = None
     margin_val: Optional[float] = None
@@ -6639,6 +6893,15 @@ def _load_clip_head_artifacts(
             "embedding_dim": embedding_dim,
             "proba_mode": "softmax",
             "classifier_type": "mlp",
+            "normalize_embeddings": bool(normalize_flag) if normalize_flag is not None else True,
+            "embedding_center_values": center_vals,
+            "embedding_std_values": std_vals,
+            "temperature": temperature_val,
+            "logit_adjustment": logit_adjustment,
+            "logit_adjustment_inference": bool(logit_adjustment_inference),
+            "arcface": bool(arcface_flag),
+            "arcface_margin": arcface_margin,
+            "arcface_scale": arcface_scale,
             "min_prob": min_prob_val,
             "margin": margin_val,
         }
@@ -6678,6 +6941,12 @@ def _load_clip_head_artifacts(
         "encoder_model": encoder_model,
         "proba_mode": proba_mode,
         "classifier_type": "logreg",
+        "normalize_embeddings": bool(normalize_flag) if normalize_flag is not None else True,
+        "embedding_center_values": center_vals,
+        "embedding_std_values": std_vals,
+        "temperature": temperature_val,
+        "logit_adjustment": logit_adjustment,
+        "logit_adjustment_inference": bool(logit_adjustment_inference),
         "min_prob": min_prob_val,
         "margin": margin_val,
     }
@@ -6716,17 +6985,26 @@ def _find_clip_head_target_index(classes: Sequence[str], class_name: Optional[st
     return None
 
 
-def _clip_auto_predict_label(feats_np: np.ndarray) -> Tuple[str, Optional[float], Optional[str]]:
+def _clip_auto_predict_label(
+    feats_np: np.ndarray,
+    *,
+    background_guard: bool = False,
+) -> Tuple[str, Optional[float], Optional[str]]:
     """Return (label, probability, error) for auto-classification using the active CLIP head."""
     if clf is None:
         return "unknown", None, "clip_unavailable"
+    head = active_classifier_head if isinstance(active_classifier_head, dict) else None
     classes_raw = getattr(clf, "classes_", None)
-    if classes_raw is None and isinstance(clf, dict):
+    if head is not None:
+        classes = [str(c) for c in list(head.get("classes") or [])]
+    elif classes_raw is None and isinstance(clf, dict):
         classes = [str(c) for c in list(clf.get("classes") or [])]
     else:
         classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
     proba_arr: Optional[np.ndarray] = None
-    if hasattr(clf, "predict_proba"):
+    if head is not None:
+        proba_arr = _clip_head_predict_proba(feats_np, head)
+    elif hasattr(clf, "predict_proba"):
         try:
             proba = clf.predict_proba(feats_np)
             proba_arr = np.asarray(proba, dtype=np.float32)
@@ -6743,9 +7021,10 @@ def _clip_auto_predict_label(feats_np: np.ndarray) -> Tuple[str, Optional[float]
                 return "unknown", float(np.max(row)) if row.size else None, "clip_background"
             best_non_bg = non_bg_indices[int(np.argmax(row[non_bg_indices]))]
             p_non_bg = float(row[best_non_bg])
-            p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
-            if p_bg >= p_non_bg:
-                return "unknown", p_bg, "clip_background"
+            if background_guard:
+                p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
+                if p_bg >= p_non_bg:
+                    return "unknown", p_bg, "clip_background"
             return str(classes[best_non_bg]), p_non_bg, None
         best_idx = int(np.argmax(row))
         return str(classes[best_idx]), float(row[best_idx]), None
@@ -6759,7 +7038,11 @@ def _clip_auto_predict_label(feats_np: np.ndarray) -> Tuple[str, Optional[float]
     return label, None, None
 
 
-def _clip_auto_predict_details(feats_np: np.ndarray) -> Dict[str, Optional[object]]:
+def _clip_auto_predict_details(
+    feats_np: np.ndarray,
+    *,
+    background_guard: bool = False,
+) -> Dict[str, Optional[object]]:
     if clf is None:
         return {
             "label": "unknown",
@@ -6769,13 +7052,18 @@ def _clip_auto_predict_details(feats_np: np.ndarray) -> Dict[str, Optional[objec
             "margin": None,
             "error": "clip_unavailable",
         }
+    head = active_classifier_head if isinstance(active_classifier_head, dict) else None
     classes_raw = getattr(clf, "classes_", None)
-    if classes_raw is None and isinstance(clf, dict):
+    if head is not None:
+        classes = [str(c) for c in list(head.get("classes") or [])]
+    elif classes_raw is None and isinstance(clf, dict):
         classes = [str(c) for c in list(clf.get("classes") or [])]
     else:
         classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
     proba_arr: Optional[np.ndarray] = None
-    if hasattr(clf, "predict_proba"):
+    if head is not None:
+        proba_arr = _clip_head_predict_proba(feats_np, head)
+    elif hasattr(clf, "predict_proba"):
         try:
             proba = clf.predict_proba(feats_np)
             proba_arr = np.asarray(proba, dtype=np.float32)
@@ -6809,16 +7097,17 @@ def _clip_auto_predict_details(feats_np: np.ndarray) -> Dict[str, Optional[objec
                     "margin": None,
                     "error": "clip_background",
                 }
-            p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
-            if p_bg >= best_val:
-                return {
-                    "label": "unknown",
-                    "proba": p_bg,
-                    "second_label": str(classes[best_idx]),
-                    "second_proba": best_val,
-                    "margin": float(p_bg - best_val),
-                    "error": "clip_background",
-                }
+            if background_guard:
+                p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
+                if p_bg >= best_val:
+                    return {
+                        "label": "unknown",
+                        "proba": p_bg,
+                        "second_label": str(classes[best_idx]),
+                        "second_proba": best_val,
+                        "margin": float(p_bg - best_val),
+                        "error": "clip_background",
+                    }
             margin = float(best_val - second_val) if second_val is not None else None
             return {
                 "label": str(classes[best_idx]),
@@ -7159,6 +7448,8 @@ def _apply_agent_recipe_to_image(
         except Exception:
             return default
 
+    clip_head_background_guard = _bool_param("clip_head_background_guard", False)
+
     # Config knobs (recipe params override request params; request params are passed via function args).
     use_clip_guard = _bool_param("use_clip_fp_guard", True)
     use_negatives = _bool_param("use_negative_exemplars", True)
@@ -7418,6 +7709,7 @@ def _apply_agent_recipe_to_image(
                     min_prob=float(head_min_prob),
                     margin=float(head_margin),
                     background_indices=clip_head_bg_indices,
+                    background_guard=clip_head_background_guard,
                 )
                 if head_keep is not None:
                     keep_mask &= head_keep
@@ -7544,6 +7836,7 @@ def _apply_agent_recipe_to_image(
                 clip_head_target_index=int(clip_head_target_index) if use_head else None,
                 clip_head_min_prob=float(seed_head_min),
                 clip_head_margin=float(seed_head_margin),
+                clip_head_background_guard=clip_head_background_guard,
                 final_similarity_floor=float(final_sim_floor),
                 final_clip_head_min_prob=float(final_head_min),
                 final_clip_head_margin=float(final_head_margin),
@@ -7574,6 +7867,7 @@ def _apply_agent_recipe_to_image(
                     clip_head_target_index=None,
                     clip_head_min_prob=0.0,
                     clip_head_margin=0.0,
+                    clip_head_background_guard=False,
                     state=state,
                 )
             if not dets_step:
@@ -7676,6 +7970,7 @@ def _apply_agent_recipe_to_image(
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
                         background_indices=clip_head_bg_indices,
+                        background_guard=clip_head_background_guard,
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
@@ -7817,6 +8112,7 @@ def _apply_agent_recipe_to_image(
                                 min_prob=float(extra_min),
                                 margin=float(extra_mar),
                                 background_indices=extra_bg_indices,
+                                background_guard=clip_head_background_guard,
                             )
                             if proba is not None
                             else None
@@ -7874,6 +8170,7 @@ def _infer_sam3_greedy_recipe_on_image(
     clip_head_target_index: Optional[int] = None,
     clip_head_min_prob: float = 0.5,
     clip_head_margin: float = 0.0,
+    clip_head_background_guard: bool = False,
     final_similarity_floor: Optional[float] = None,
     final_clip_head_min_prob: Optional[float] = None,
     final_clip_head_margin: Optional[float] = None,
@@ -7974,6 +8271,7 @@ def _infer_sam3_greedy_recipe_on_image(
             min_prob=float(clip_head_min_prob),
             margin=float(clip_head_margin),
             background_indices=clip_head_bg_indices,
+            background_guard=clip_head_background_guard,
         )
 
     seed_dets: List[QwenDetection] = []
@@ -8074,6 +8372,7 @@ def _infer_sam3_greedy_recipe_on_image(
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
                         background_indices=clip_head_bg_indices,
+                        background_guard=clip_head_background_guard,
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
@@ -8199,6 +8498,7 @@ def _infer_sam3_greedy_recipe_on_image(
                         min_prob=float(final_clip_head_min_prob),
                         margin=float(final_clip_head_margin),
                         background_indices=clip_head_bg_indices,
+                        background_guard=clip_head_background_guard,
                     )
                     if head_keep2 is not None:
                         keep_mask2 &= head_keep2
@@ -8510,28 +8810,29 @@ def _evaluate_sam3_greedy_recipe(
                     pil_img = img.convert("RGB")
             except Exception:
                 continue
-            dets = _infer_sam3_greedy_recipe_on_image(
-                pil_img=pil_img,
-                processor=processor,
-                text_prompts=text_prompts,
-                exemplar_embeddings=exemplar_embeddings,
-                negative_embeddings=negative_embeddings,
-                seed_threshold=payload.seed_threshold,
-                expand_threshold=payload.expand_threshold,
-                max_visual_seeds=payload.max_visual_seeds,
-                seed_dedupe_iou=payload.seed_dedupe_iou,
-                out_dedupe_iou=payload.dedupe_iou,
-                mask_threshold=payload.mask_threshold,
-                min_size=payload.min_size,
-                simplify_epsilon=payload.simplify_epsilon,
-                max_results=payload.max_results,
-                negative_strength=payload.negative_strength,
-                similarity_floor=payload.similarity_score,
-                clip_head=clip_head,
-                clip_head_target_index=clip_head_target_index,
-                clip_head_min_prob=0.0,
-                clip_head_margin=0.0,
-            )
+                dets = _infer_sam3_greedy_recipe_on_image(
+                    pil_img=pil_img,
+                    processor=processor,
+                    text_prompts=text_prompts,
+                    exemplar_embeddings=exemplar_embeddings,
+                    negative_embeddings=negative_embeddings,
+                    seed_threshold=payload.seed_threshold,
+                    expand_threshold=payload.expand_threshold,
+                    max_visual_seeds=payload.max_visual_seeds,
+                    seed_dedupe_iou=payload.seed_dedupe_iou,
+                    out_dedupe_iou=payload.dedupe_iou,
+                    mask_threshold=payload.mask_threshold,
+                    min_size=payload.min_size,
+                    simplify_epsilon=payload.simplify_epsilon,
+                    max_results=payload.max_results,
+                    negative_strength=payload.negative_strength,
+                    similarity_floor=payload.similarity_score,
+                    clip_head=clip_head,
+                    clip_head_target_index=clip_head_target_index,
+                    clip_head_min_prob=0.0,
+                    clip_head_margin=0.0,
+                    clip_head_background_guard=payload.clip_head_background_guard,
+                )
             gt_boxes = (gt_by_image_cat.get(int(img_id)) or {}).get(int(cat_id)) or []
             gt_xyxy = [_xywh_to_xyxy(b) for b in gt_boxes]
             rows: List[Tuple[float, float, float, Optional[int]]] = []
@@ -8690,6 +8991,7 @@ def _evaluate_sam3_greedy_recipe(
             clip_head_target_index=clip_head_target_index,
             clip_head_min_prob=clip_head_min_prob,
             clip_head_margin=clip_head_margin,
+            clip_head_background_guard=payload.clip_head_background_guard,
         )
         if dets:
             det_images += 1
@@ -8892,6 +9194,7 @@ class _Sam3GreedyEvalWorker:
                         clip_head_target_index=head_target_index,
                         clip_head_min_prob=clip_head_min_prob,
                         clip_head_margin=clip_head_margin,
+                        clip_head_background_guard=payload.clip_head_background_guard,
                         state=state,
                         clip_device_override=clip_device_override,
                     )
@@ -11240,6 +11543,7 @@ def _tune_clip_head_for_selected_steps_image_first(
                                 clip_head_target_index=int(clip_head_target_index),
                                 clip_head_min_prob=0.0,
                                 clip_head_margin=0.0,
+                                clip_head_background_guard=payload.clip_head_background_guard,
                                 stats_out=flow_stats,
                                 state=state,
                                 clip_device_override=clip_device_override,
@@ -16406,6 +16710,13 @@ class AgentMiningRequest(BaseModel):
             "the sampled images (higher = fewer false positives, lower recall)."
         ),
     )
+    clip_head_background_guard: bool = Field(
+        False,
+        description=(
+            "When enabled, reject detections if a background class scores higher than the target class "
+            "(uses the __bg_* classes trained from negative crops)."
+        ),
+    )
 
     # Greedy SAM3 recipe parameters.
     seed_threshold: float = Field(
@@ -18213,6 +18524,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             "min_size": int(eval_payload.min_size),
                             "simplify_epsilon": float(eval_payload.simplify_epsilon),
                             "max_results": int(tuned_max_results),
+                            "clip_head_background_guard": bool(getattr(eval_payload, "clip_head_background_guard", False)),
                         },
                         "summary": {
                             **(summary or {}),
@@ -20995,6 +21307,11 @@ def _current_active_payload() -> Dict[str, Any]:
         "encoder_model": active_encoder_model,
         "encoder_ready": encoder_ready,
         "encoder_error": encoder_error,
+        "logit_adjustment_inference": (
+            bool(active_classifier_head.get("logit_adjustment_inference"))
+            if isinstance(active_classifier_head, dict)
+            else None
+        ),
     }
 
 
@@ -21004,6 +21321,36 @@ def _active_encoder_ready() -> bool:
     if str(active_encoder_type or "").strip().lower() == "dinov3":
         return bool(dinov3_initialized and dinov3_model is not None and dinov3_processor is not None)
     return bool(clip_initialized and clip_model is not None and clip_preprocess is not None)
+
+
+def _resolve_head_normalize_embeddings(head: Optional[Dict[str, Any]], *, default: bool = True) -> bool:
+    if not head:
+        return default
+    raw = head.get("normalize_embeddings")
+    if raw is None:
+        raw = head.get("mlp_normalize_embeddings")
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
+
+
+def _resolve_active_head_normalize_embeddings(
+    meta_obj: Optional[Dict[str, Any]],
+    clf_obj: Optional[object],
+    *,
+    default: bool = True,
+) -> bool:
+    if isinstance(clf_obj, dict):
+        head_type = str(clf_obj.get("classifier_type") or clf_obj.get("head_type") or "").lower()
+        if head_type == "mlp":
+            return _resolve_head_normalize_embeddings(clf_obj, default=default)
+    if isinstance(meta_obj, dict) and str(meta_obj.get("classifier_type") or "").lower() == "mlp":
+        raw = meta_obj.get("mlp_normalize_embeddings")
+        if raw is not None:
+            return bool(raw)
+    return default
 
 def mask_to_bounding_box(mask: np.ndarray) -> tuple[int,int,int,int]:
     rows = np.any(mask, axis=1)
@@ -21178,7 +21525,8 @@ def predict_base64(payload: Base64Payload):
     feats_np = _encode_pil_batch_for_active([pil_img])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
         return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable")
-    details = _clip_auto_predict_details(feats_np)
+    bg_guard = bool(payload.background_guard) if payload.background_guard is not None else False
+    details = _clip_auto_predict_details(feats_np, background_guard=bg_guard)
     return PredictResponse(
         prediction=str(details.get("label") or "unknown"),
         proba=details.get("proba"),
@@ -21499,12 +21847,18 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                            clip_name: str, encoder_type: str, encoder_model: Optional[str],
                            output_dir: str, labelmap_dir: str, model_filename: str, labelmap_filename: str,
                            test_size: float, random_seed: int, batch_size: int, max_iter: int,
-                           min_per_class: int, class_weight: str, C: float, device_override: Optional[str],
+                           min_per_class: int, class_weight: str, effective_beta: float, C: float, device_override: Optional[str],
                            solver: str, classifier_type: str, mlp_hidden_sizes: str, mlp_dropout: float,
                            mlp_epochs: int, mlp_lr: float, mlp_weight_decay: float, mlp_label_smoothing: float,
                            mlp_loss_type: str, mlp_focal_gamma: float, mlp_focal_alpha: Optional[float],
                            mlp_sampler: str, mlp_mixup_alpha: float, mlp_normalize_embeddings: bool,
-                           mlp_patience: int, reuse_embeddings: bool, hard_example_mining: bool,
+                           mlp_patience: int, mlp_activation: str, mlp_layer_norm: bool, mlp_hard_mining_epochs: int,
+                           logit_adjustment_mode: str, logit_adjustment_inference: Optional[bool],
+                           arcface_enabled: bool, arcface_margin: float, arcface_scale: float,
+                           supcon_weight: float, supcon_temperature: float, supcon_projection_dim: int, supcon_projection_hidden: int,
+                           embedding_center: bool, embedding_standardize: bool,
+                           calibration_mode: str, calibration_max_iters: int, calibration_min_temp: float, calibration_max_temp: float,
+                           reuse_embeddings: bool, hard_example_mining: bool,
                            hard_mining_misclassified_weight: float,
                            hard_mining_low_conf_weight: float,
                            hard_mining_low_conf_threshold: float,
@@ -21542,6 +21896,7 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 max_iter=max_iter,
                 min_per_class=min_per_class,
                 class_weight=class_weight,
+                effective_beta=effective_beta,
                 C=C,
                 solver=solver,
                 classifier_type=classifier_type,
@@ -21558,6 +21913,24 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 mlp_mixup_alpha=mlp_mixup_alpha,
                 mlp_normalize_embeddings=mlp_normalize_embeddings,
                 mlp_patience=mlp_patience,
+                mlp_activation=mlp_activation,
+                mlp_layer_norm=mlp_layer_norm,
+                mlp_hard_mining_epochs=mlp_hard_mining_epochs,
+                logit_adjustment_mode=logit_adjustment_mode,
+                logit_adjustment_inference=logit_adjustment_inference,
+                arcface_enabled=arcface_enabled,
+                arcface_margin=arcface_margin,
+                arcface_scale=arcface_scale,
+                supcon_weight=supcon_weight,
+                supcon_temperature=supcon_temperature,
+                supcon_projection_dim=supcon_projection_dim,
+                supcon_projection_hidden=supcon_projection_hidden,
+                embedding_center=embedding_center,
+                embedding_standardize=embedding_standardize,
+                calibration_mode=calibration_mode,
+                calibration_max_iters=calibration_max_iters,
+                calibration_min_temp=calibration_min_temp,
+                calibration_max_temp=calibration_max_temp,
                 reuse_embeddings=reuse_embeddings,
                 hard_example_mining=hard_example_mining,
                 hard_mining_misclassified_weight=hard_mining_misclassified_weight,
@@ -21719,6 +22092,7 @@ async def start_clip_training(
     max_iter: int = Form(1000),
     min_per_class: int = Form(2),
     class_weight: str = Form("balanced"),
+    effective_beta: float = Form(0.9999),
     C: float = Form(1.0),
     device_override: Optional[str] = Form(None),
     images_path_native: Optional[str] = Form(None),
@@ -21739,6 +22113,24 @@ async def start_clip_training(
     mlp_mixup_alpha: float = Form(0.1),
     mlp_normalize_embeddings: Optional[str] = Form("true"),
     mlp_patience: int = Form(6),
+    mlp_activation: str = Form("relu"),
+    mlp_layer_norm: Optional[str] = Form("false"),
+    mlp_hard_mining_epochs: int = Form(5),
+    logit_adjustment_mode: str = Form("none"),
+    logit_adjustment_inference: Optional[str] = Form(None),
+    arcface_enabled: Optional[str] = Form("false"),
+    arcface_margin: float = Form(0.2),
+    arcface_scale: float = Form(30.0),
+    supcon_weight: float = Form(0.0),
+    supcon_temperature: float = Form(0.07),
+    supcon_projection_dim: int = Form(128),
+    supcon_projection_hidden: int = Form(0),
+    embedding_center: Optional[str] = Form("false"),
+    embedding_standardize: Optional[str] = Form("false"),
+    calibration_mode: str = Form("none"),
+    calibration_max_iters: int = Form(50),
+    calibration_min_temp: float = Form(0.5),
+    calibration_max_temp: float = Form(5.0),
     reuse_embeddings: Optional[str] = Form(None),
     hard_example_mining: Optional[str] = Form(None),
     hard_mis_weight: float = Form(3.0),
@@ -21865,9 +22257,10 @@ async def start_clip_training(
     max_iter_i = _coerce_int(max_iter, 1000, minimum=1)
     min_per_class_i = _coerce_int(min_per_class, 2, minimum=1)
     class_weight_norm = (class_weight or "none").lower()
-    if class_weight_norm not in {"balanced", "none"}:
+    if class_weight_norm not in {"balanced", "none", "effective"}:
         class_weight_norm = "none"
     C_f = _coerce_float(C, 1.0, minimum=0.0001)
+    effective_beta_f = _coerce_float(effective_beta, 0.9999, minimum=0.5, maximum=0.99999)
     mlp_dropout_f = _coerce_float(mlp_dropout, 0.1, minimum=0.0, maximum=0.9)
     mlp_epochs_i = _coerce_int(mlp_epochs, 50, minimum=1)
     mlp_lr_f = _coerce_float(mlp_lr, 1e-3, minimum=1e-6)
@@ -21886,6 +22279,32 @@ async def start_clip_training(
     mlp_mixup_alpha_f = _coerce_float(mlp_mixup_alpha, 0.1, minimum=0.0)
     mlp_normalize_embeddings_flag = _parse_bool(mlp_normalize_embeddings)
     mlp_patience_i = _coerce_int(mlp_patience, 6, minimum=1)
+    mlp_activation_norm = (mlp_activation or "relu").strip().lower()
+    if mlp_activation_norm not in {"relu", "gelu"}:
+        mlp_activation_norm = "relu"
+    mlp_layer_norm_flag = _parse_bool(mlp_layer_norm)
+    mlp_hard_mining_epochs_i = _coerce_int(mlp_hard_mining_epochs, 5, minimum=1)
+    logit_adjustment_mode_norm = (logit_adjustment_mode or "none").strip().lower()
+    if logit_adjustment_mode_norm not in {"none", "train", "infer", "both"}:
+        logit_adjustment_mode_norm = "none"
+    logit_adjustment_inference_flag = None
+    if logit_adjustment_inference is not None:
+        logit_adjustment_inference_flag = _parse_bool(logit_adjustment_inference)
+    arcface_enabled_flag = _parse_bool(arcface_enabled)
+    arcface_margin_f = _coerce_float(arcface_margin, 0.2, minimum=0.0)
+    arcface_scale_f = _coerce_float(arcface_scale, 30.0, minimum=1.0)
+    supcon_weight_f = _coerce_float(supcon_weight, 0.0, minimum=0.0)
+    supcon_temperature_f = _coerce_float(supcon_temperature, 0.07, minimum=0.0001)
+    supcon_projection_dim_i = _coerce_int(supcon_projection_dim, 128, minimum=0)
+    supcon_projection_hidden_i = _coerce_int(supcon_projection_hidden, 0, minimum=0)
+    embedding_center_flag = _parse_bool(embedding_center)
+    embedding_standardize_flag = _parse_bool(embedding_standardize)
+    calibration_mode_norm = (calibration_mode or "none").strip().lower()
+    if calibration_mode_norm not in {"none", "temperature"}:
+        calibration_mode_norm = "none"
+    calibration_max_iters_i = _coerce_int(calibration_max_iters, 50, minimum=1)
+    calibration_min_temp_f = _coerce_float(calibration_min_temp, 0.5, minimum=0.01)
+    calibration_max_temp_f = _coerce_float(calibration_max_temp, 5.0, minimum=calibration_min_temp_f)
     device_override_clean = (device_override or None)
     hard_mis_weight_f = _coerce_float(hard_mis_weight, 3.0, minimum=1.0)
     hard_low_conf_weight_f = _coerce_float(hard_low_conf_weight, 2.0, minimum=1.0)
@@ -21899,6 +22318,8 @@ async def start_clip_training(
 
     extras = [solver_name]
     extras.append(classifier_type_norm)
+    if class_weight_norm and class_weight_norm != "none":
+        extras.append(f"class_weight={class_weight_norm}")
     if reuse_embeddings_flag:
         extras.append("cache")
     if hard_example_flag:
@@ -21928,6 +22349,7 @@ async def start_clip_training(
         max_iter=max_iter_i,
         min_per_class=min_per_class_i,
         class_weight=class_weight_norm,
+        effective_beta=effective_beta_f,
         C=C_f,
         device_override=device_override_clean,
         solver=solver_name,
@@ -21945,6 +22367,24 @@ async def start_clip_training(
         mlp_mixup_alpha=mlp_mixup_alpha_f,
         mlp_normalize_embeddings=mlp_normalize_embeddings_flag,
         mlp_patience=mlp_patience_i,
+        mlp_activation=mlp_activation_norm,
+        mlp_layer_norm=mlp_layer_norm_flag,
+        mlp_hard_mining_epochs=mlp_hard_mining_epochs_i,
+        logit_adjustment_mode=logit_adjustment_mode_norm,
+        logit_adjustment_inference=logit_adjustment_inference_flag,
+        arcface_enabled=arcface_enabled_flag,
+        arcface_margin=arcface_margin_f,
+        arcface_scale=arcface_scale_f,
+        supcon_weight=supcon_weight_f,
+        supcon_temperature=supcon_temperature_f,
+        supcon_projection_dim=supcon_projection_dim_i,
+        supcon_projection_hidden=supcon_projection_hidden_i,
+        embedding_center=embedding_center_flag,
+        embedding_standardize=embedding_standardize_flag,
+        calibration_mode=calibration_mode_norm,
+        calibration_max_iters=calibration_max_iters_i,
+        calibration_min_temp=calibration_min_temp_f,
+        calibration_max_temp=calibration_max_temp_f,
         reuse_embeddings=reuse_embeddings_flag,
         hard_example_mining=hard_example_flag,
         hard_mining_misclassified_weight=hard_mis_weight_f,
@@ -22581,6 +23021,7 @@ def set_active_model(payload: ActiveModelRequest):
     global active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
     global active_encoder_type, active_encoder_model
     global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized
+    global active_classifier_meta, active_head_normalize_embeddings, active_classifier_head
 
     classifier_path = _normalise_optional_path(payload.classifier_path) or active_classifier_path
     labelmap_path = _normalise_optional_path(payload.labelmap_path)
@@ -22607,11 +23048,13 @@ def set_active_model(payload: ActiveModelRequest):
     meta_encoder_type = "clip"
     meta_encoder_model = None
     meta_found = False
+    meta_obj: Optional[Dict[str, Any]] = None
     meta_path = os.path.splitext(classifier_path_abs)[0] + ".meta.pkl"
     if os.path.exists(meta_path):
         try:
-            meta_obj = joblib.load(meta_path)
-            if isinstance(meta_obj, dict):
+            meta_candidate = joblib.load(meta_path)
+            if isinstance(meta_candidate, dict):
+                meta_obj = meta_candidate
                 meta_found = True
                 meta_clip_model = meta_obj.get("clip_model")
                 meta_encoder_type = meta_obj.get("encoder_type") or "clip"
@@ -22742,6 +23185,14 @@ def set_active_model(payload: ActiveModelRequest):
         active_label_list = labelmap_entries
         active_encoder_type = encoder_type_norm
         active_encoder_model = encoder_model_for_active
+        active_classifier_meta = dict(meta_obj) if isinstance(meta_obj, dict) else {}
+        active_head_normalize_embeddings = _resolve_active_head_normalize_embeddings(meta_obj, new_clf, default=True)
+        try:
+            active_classifier_head = _load_clip_head_from_classifier(Path(classifier_path_abs))
+        except Exception:
+            active_classifier_head = None
+        if payload.logit_adjustment_inference is not None and isinstance(active_classifier_head, dict):
+            active_classifier_head["logit_adjustment_inference"] = bool(payload.logit_adjustment_inference)
         clip_last_error = None
     if encoder_type_norm == "dinov3":
         with dinov3_lock:

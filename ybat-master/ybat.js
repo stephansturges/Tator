@@ -1236,14 +1236,22 @@
         mlpWeightDecayInput: null,
         mlpLabelSmoothingInput: null,
         mlpLossTypeSelect: null,
+        mlpActivationSelect: null,
         mlpFocalGammaInput: null,
         mlpFocalAlphaInput: null,
         mlpSamplerSelect: null,
         mlpMixupAlphaInput: null,
         mlpNormalizeEmbeddingsCheckbox: null,
         mlpPatienceInput: null,
+        mlpLayerNormCheckbox: null,
+        mlpHardMiningEpochsInput: null,
         classWeightSelect: null,
+        effectiveBetaInput: null,
+        logitAdjustmentToggle: null,
         deviceOverrideInput: null,
+        calibrationModeSelect: null,
+        embeddingCenterCheckbox: null,
+        embeddingStandardizeCheckbox: null,
         bgClassCountInput: null,
         startButton: null,
         cancelButton: null,
@@ -2990,6 +2998,43 @@ const sam3TrainState = {
             trainingElements.regCInput.disabled = isMlp;
         }
         applyRecommendedMlpHiddenSizes(false);
+    }
+
+    function updateTrainingHardMiningControls() {
+        const enabled = Boolean(trainingElements.hardMiningCheckbox && trainingElements.hardMiningCheckbox.checked);
+        const hardFields = document.querySelectorAll(".hard-mining-only");
+        hardFields.forEach((el) => {
+            el.hidden = !enabled;
+            const controls = el.querySelectorAll("input, select, textarea, button");
+            controls.forEach((control) => {
+                control.disabled = !enabled;
+            });
+        });
+    }
+
+    function updateTrainingClassWeightControls() {
+        const mode = trainingElements.classWeightSelect ? trainingElements.classWeightSelect.value : "none";
+        const showEffective = String(mode || "").toLowerCase().trim() === "effective";
+        if (trainingElements.effectiveBetaInput) {
+            const wrapper = trainingElements.effectiveBetaInput.closest("div");
+            if (wrapper) {
+                wrapper.hidden = !showEffective;
+            }
+            trainingElements.effectiveBetaInput.disabled = !showEffective;
+        }
+    }
+
+    function updateEmbeddingStandardizeControls() {
+        if (!trainingElements.embeddingStandardizeCheckbox || !trainingElements.embeddingCenterCheckbox) {
+            return;
+        }
+        const standardize = trainingElements.embeddingStandardizeCheckbox.checked;
+        if (standardize) {
+            trainingElements.embeddingCenterCheckbox.checked = true;
+            trainingElements.embeddingCenterCheckbox.disabled = true;
+        } else {
+            trainingElements.embeddingCenterCheckbox.disabled = false;
+        }
     }
 
     let mlpHiddenSizesTouched = false;
@@ -7419,6 +7464,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     `Augmentations: ${escapeHtml(augInfo)}`,
                     `Classifier head: ${escapeHtml(classifierType)}`,
                     `Class weight: ${escapeHtml(art.class_weight || 'none')}`,
+                    ...(art.logit_adjustment_mode && String(art.logit_adjustment_mode).toLowerCase() !== "none"
+                        ? [`Logit adjustment: ${escapeHtml(String(art.logit_adjustment_mode))}${art.logit_adjustment_inference ? " (infer on)" : ""}`]
+                        : []),
                     `Solver: ${escapeHtml(art.solver || 'saga')}`,
                     `Iterations: ${escapeHtml(String(iterationsInfo))}`,
                     `Converged: ${escapeHtml(convergedInfo)}`,
@@ -7726,6 +7774,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (trainingElements.mlpLossTypeSelect) {
             formData.append("mlp_loss_type", trainingElements.mlpLossTypeSelect.value || "ce");
         }
+        if (trainingElements.mlpActivationSelect) {
+            formData.append("mlp_activation", trainingElements.mlpActivationSelect.value || "relu");
+        }
+        if (trainingElements.mlpLayerNormCheckbox) {
+            formData.append(
+                "mlp_layer_norm",
+                trainingElements.mlpLayerNormCheckbox.checked ? "true" : "false",
+            );
+        }
         if (trainingElements.mlpFocalGammaInput) {
             formData.append("mlp_focal_gamma", trainingElements.mlpFocalGammaInput.value || "2.0");
         }
@@ -7744,11 +7801,34 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 trainingElements.mlpNormalizeEmbeddingsCheckbox.checked ? "true" : "false",
             );
         }
+        if (trainingElements.embeddingCenterCheckbox) {
+            formData.append(
+                "embedding_center",
+                trainingElements.embeddingCenterCheckbox.checked ? "true" : "false",
+            );
+        }
+        if (trainingElements.embeddingStandardizeCheckbox) {
+            formData.append(
+                "embedding_standardize",
+                trainingElements.embeddingStandardizeCheckbox.checked ? "true" : "false",
+            );
+        }
         if (trainingElements.mlpPatienceInput) {
             formData.append("mlp_patience", trainingElements.mlpPatienceInput.value || "6");
         }
+        if (trainingElements.mlpHardMiningEpochsInput) {
+            formData.append("mlp_hard_mining_epochs", trainingElements.mlpHardMiningEpochsInput.value || "5");
+        }
         if (trainingElements.classWeightSelect) {
             formData.append("class_weight", trainingElements.classWeightSelect.value || "none");
+        }
+        if (trainingElements.effectiveBetaInput) {
+            formData.append("effective_beta", trainingElements.effectiveBetaInput.value || "0.9999");
+        }
+        if (trainingElements.logitAdjustmentToggle) {
+            const enabled = trainingElements.logitAdjustmentToggle.checked;
+            formData.append("logit_adjustment_mode", enabled ? "both" : "none");
+            formData.append("logit_adjustment_inference", enabled ? "true" : "false");
         }
         if (trainingElements.hardMisWeightInput) {
             formData.append("hard_mis_weight", trainingElements.hardMisWeightInput.value || "3.0");
@@ -7771,6 +7851,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (trainingElements.deviceOverrideInput && trainingElements.deviceOverrideInput.value.trim()) {
             formData.append("device_override", trainingElements.deviceOverrideInput.value.trim());
+        }
+        if (trainingElements.calibrationModeSelect) {
+            formData.append("calibration_mode", trainingElements.calibrationModeSelect.value || "none");
         }
         if (trainingElements.solverSelect) {
             formData.append("solver", trainingElements.solverSelect.value || "saga");
@@ -8261,14 +8344,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         trainingElements.mlpWeightDecayInput = document.getElementById("trainMlpWeightDecay");
         trainingElements.mlpLabelSmoothingInput = document.getElementById("trainMlpLabelSmoothing");
         trainingElements.mlpLossTypeSelect = document.getElementById("trainMlpLossType");
+        trainingElements.mlpActivationSelect = document.getElementById("trainMlpActivation");
         trainingElements.mlpFocalGammaInput = document.getElementById("trainMlpFocalGamma");
         trainingElements.mlpFocalAlphaInput = document.getElementById("trainMlpFocalAlpha");
         trainingElements.mlpSamplerSelect = document.getElementById("trainMlpSampler");
         trainingElements.mlpMixupAlphaInput = document.getElementById("trainMlpMixupAlpha");
         trainingElements.mlpNormalizeEmbeddingsCheckbox = document.getElementById("trainMlpNormalizeEmbeddings");
         trainingElements.mlpPatienceInput = document.getElementById("trainMlpPatience");
+        trainingElements.mlpLayerNormCheckbox = document.getElementById("trainMlpLayerNorm");
+        trainingElements.mlpHardMiningEpochsInput = document.getElementById("trainMlpHardMiningEpochs");
         trainingElements.classWeightSelect = document.getElementById("trainClassWeight");
+        trainingElements.effectiveBetaInput = document.getElementById("trainEffectiveBeta");
+        trainingElements.logitAdjustmentToggle = document.getElementById("trainLogitAdjustmentMode");
         trainingElements.deviceOverrideInput = document.getElementById("trainDeviceOverride");
+        trainingElements.calibrationModeSelect = document.getElementById("trainCalibrationMode");
+        trainingElements.embeddingCenterCheckbox = document.getElementById("trainEmbeddingCenter");
+        trainingElements.embeddingStandardizeCheckbox = document.getElementById("trainEmbeddingStandardize");
         trainingElements.hardMisWeightInput = document.getElementById("trainHardMisWeight");
         trainingElements.hardLowConfWeightInput = document.getElementById("trainHardLowConfWeight");
         trainingElements.hardLowConfThresholdInput = document.getElementById("trainHardLowConfThreshold");
@@ -8297,6 +8388,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (trainingElements.mlpLossTypeSelect) {
             trainingElements.mlpLossTypeSelect.addEventListener("change", updateTrainingClassifierControls);
         }
+        if (trainingElements.classWeightSelect) {
+            trainingElements.classWeightSelect.addEventListener("change", updateTrainingClassWeightControls);
+        }
+        if (trainingElements.hardMiningCheckbox) {
+            trainingElements.hardMiningCheckbox.addEventListener("change", updateTrainingHardMiningControls);
+        }
+        if (trainingElements.embeddingStandardizeCheckbox) {
+            trainingElements.embeddingStandardizeCheckbox.addEventListener("change", updateEmbeddingStandardizeControls);
+        }
+        if (trainingElements.embeddingCenterCheckbox) {
+            trainingElements.embeddingCenterCheckbox.addEventListener("change", updateEmbeddingStandardizeControls);
+        }
         if (trainingElements.clipBackboneSelect) {
             trainingElements.clipBackboneSelect.addEventListener("change", () => applyRecommendedMlpHiddenSizes(false));
         }
@@ -8317,6 +8420,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         populateDinov3Backbones();
         updateTrainingClassifierControls();
+        updateTrainingHardMiningControls();
+        updateTrainingClassWeightControls();
+        updateEmbeddingStandardizeControls();
 
         const applyDatasetSelection = (datasetId) => {
             const item = clipDatasetState.items.find((d) => d.id === datasetId);

@@ -376,8 +376,8 @@
                         <div class="training-field">
                             <label for="trainClassifierType">Classifier head</label>
                             <select id="trainClassifierType">
-                                <option value="logreg" selected>LogReg (fast, linear)</option>
-                                <option value="mlp">MLP (nonlinear, slower)</option>
+                                <option value="logreg">LogReg (fast, linear)</option>
+                                <option value="mlp" selected>MLP (nonlinear, slower)</option>
                             </select>
                             <div class="training-help">MLP can improve class separation at the cost of extra training time. LogReg is fast and stable.</div>
                             <div class="training-help">MLP input size equals the encoder embedding size (CLIP ViT-B = 512, ViT-L = 768, DINOv3 varies). Use hidden sizes around 0.5–1.0× the embedding for best results.</div>
@@ -475,7 +475,7 @@
                             </div>
                             <div class="mlp-only" hidden>
                                 <label for="trainMlpLabelSmoothing">Soft targets (label smoothing)</label>
-                                <input type="number" id="trainMlpLabelSmoothing" value="0.05" min="0" max="0.3" step="0.01" />
+                                <input type="number" id="trainMlpLabelSmoothing" value="0.1" min="0" max="0.3" step="0.01" />
                                 <div class="training-help">Softens targets to improve class separation (0 disables).</div>
                             </div>
                             <div class="mlp-only" hidden>
@@ -485,6 +485,22 @@
                                     <option value="focal">Focal loss (hard examples)</option>
                                 </select>
                                 <div class="training-help">Focal loss downweights easy examples so the head focuses on harder mistakes.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpActivation">MLP activation</label>
+                                <select id="trainMlpActivation">
+                                    <option value="relu">ReLU (fast)</option>
+                                    <option value="gelu" selected>GELU (smoother)</option>
+                                </select>
+                                <div class="training-help">GELU can improve separation but is a bit slower.</div>
+                            </div>
+                            <div class="mlp-only" hidden>
+                                <label for="trainMlpLayerNorm">MLP layer norm</label>
+                                <div class="training-toggle-row" style="margin: 6px 0 0;">
+                                    <input type="checkbox" id="trainMlpLayerNorm" checked />
+                                    <span>Normalize each hidden layer</span>
+                                </div>
+                                <div class="training-help">Helps stabilize training when embeddings vary a lot.</div>
                             </div>
                             <div class="mlp-only mlp-focal-only" hidden>
                                 <label for="trainMlpFocalGamma">Focal gamma</label>
@@ -518,39 +534,82 @@
                                 </div>
                                 <div class="training-help">Stabilizes MLP training when embedding scales vary.</div>
                             </div>
+                            <div>
+                                <label for="trainEmbeddingCenter">Center embeddings</label>
+                                <div class="training-toggle-row" style="margin: 6px 0 0;">
+                                    <input type="checkbox" id="trainEmbeddingCenter" />
+                                    <span>Subtract mean (per-dimension)</span>
+                                </div>
+                                <div class="training-help">Reduces CLIP/DINO embedding anisotropy.</div>
+                            </div>
+                            <div>
+                                <label for="trainEmbeddingStandardize">Standardize embeddings</label>
+                                <div class="training-toggle-row" style="margin: 6px 0 0;">
+                                    <input type="checkbox" id="trainEmbeddingStandardize" checked />
+                                    <span>Divide by per-dimension std</span>
+                                </div>
+                                <div class="training-help">Acts like whitening; can boost separation for hard classes.</div>
+                            </div>
                             <div class="mlp-only" hidden>
                                 <label for="trainMlpPatience">MLP early-stop patience</label>
                                 <input type="number" id="trainMlpPatience" value="6" min="1" step="1" />
                                 <div class="training-help">Stop when val loss stops improving.</div>
                             </div>
+                            <div class="mlp-only hard-mining-only" hidden>
+                                <label for="trainMlpHardMiningEpochs">MLP hard-mining epochs</label>
+                                <input type="number" id="trainMlpHardMiningEpochs" value="5" min="1" step="1" />
+                                <div class="training-help">Extra epochs that focus on misclassified / low-confidence samples.</div>
+                            </div>
                             <div>
                                 <label for="trainClassWeight">Class Weight</label>
                                 <select id="trainClassWeight">
                                     <option value="none">None</option>
-                                    <option value="balanced" selected>Balanced</option>
+                                    <option value="balanced">Balanced</option>
+                                    <option value="effective" selected>Effective-number (rare class focus)</option>
                                 </select>
-                                <div class="training-help">`balanced` reweights rare classes; `none` leaves raw counts.</div>
+                                <div class="training-help">`balanced` reweights rare classes; `effective` uses the effective-number formula; `none` leaves raw counts.</div>
+                            </div>
+                            <div>
+                                <label for="trainEffectiveBeta">Effective beta</label>
+                                <input type="number" id="trainEffectiveBeta" value="0.9999" min="0.5" max="0.99999" step="0.0001" />
+                                <div class="training-help">Only used when Class Weight is “Effective”. Higher = more weight on rare classes.</div>
+                            </div>
+                            <div>
+                                <label for="trainLogitAdjustmentMode">Long-tail mode (logit adjustment)</label>
+                                <div class="training-toggle-row" style="margin: 6px 0 0;">
+                                    <input type="checkbox" id="trainLogitAdjustmentMode" />
+                                    <span>Enable logit adjustment (train + inference)</span>
+                                </div>
+                                <div class="training-help">Adds a class-prior adjustment to logits so rare classes are less suppressed. Turn on for heavily imbalanced datasets.</div>
                             </div>
                             <div>
                                 <label for="trainDeviceOverride">Device Override</label>
                                 <input type="text" id="trainDeviceOverride" placeholder="cpu or cuda" />
                             </div>
-                            <div class="logreg-only">
+                            <div>
+                                <label for="trainCalibrationMode">Calibration</label>
+                                <select id="trainCalibrationMode">
+                                    <option value="none">None</option>
+                                    <option value="temperature" selected>Temperature scaling</option>
+                                </select>
+                                <div class="training-help">Calibrates probabilities after training (does not change argmax classes).</div>
+                            </div>
+                            <div class="hard-mining-only">
                                 <label for="trainHardMisWeight">Hard W (misclass)</label>
                                 <input type="number" id="trainHardMisWeight" value="3.0" min="1" step="0.1" />
                                 <div class="training-help">Multiplier applied to misclassified samples in hard mining.</div>
                             </div>
-                            <div class="logreg-only">
+                            <div class="hard-mining-only">
                                 <label for="trainHardLowConfWeight">Hard W (low conf)</label>
                                 <input type="number" id="trainHardLowConfWeight" value="2.0" min="1" step="0.1" />
                                 <div class="training-help">Multiplier for low-confidence samples (below the thresholds).</div>
                             </div>
-                            <div class="logreg-only">
+                            <div class="hard-mining-only">
                                 <label for="trainHardLowConfThreshold">Low-conf threshold</label>
                                 <input type="number" id="trainHardLowConfThreshold" value="0.65" min="0" max="0.9999" step="0.01" />
                                 <div class="training-help">Samples with max probability below this value get boosted.</div>
                             </div>
-                            <div class="logreg-only">
+                            <div class="hard-mining-only">
                                 <label for="trainHardMarginThreshold">Margin threshold</label>
                                 <input type="number" id="trainHardMarginThreshold" value="0.15" min="0" max="1" step="0.01" />
                                 <div class="training-help">Boost samples whose top-1 vs top-2 gap falls under this margin.</div>
@@ -571,8 +630,8 @@
                         </div>
                         <button type="button" id="startTrainingBtn">Start Training</button>
                         <div class="training-toggle-row">
-                            <label><input type="checkbox" id="trainReuseEmbeddings" checked /> Cache and reuse embeddings</label>
-                            <label class="logreg-only"><input type="checkbox" id="trainHardMining" /> Hard example mining</label>
+                            <label title="Speeds up repeat runs by reusing cached embeddings. If you change labels or class definitions, disable this once to rebuild the cache."><input type="checkbox" id="trainReuseEmbeddings" checked /> Cache and reuse embeddings</label>
+                            <label><input type="checkbox" id="trainHardMining" checked /> Hard example mining</label>
                         </div>
                         <div class="training-message" id="trainingMessage" role="status"></div>
                     </section>

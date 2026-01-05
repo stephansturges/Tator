@@ -949,6 +949,11 @@ def train_clip_from_yolo(
                 logit_adjustment_mode = "infer"
             if not logit_adjustment_inference_override:
                 logit_adjustment_inference_flag = logit_adjustment_mode in {"infer", "both"}
+    if arcface_enabled and (logit_adjustment_train or logit_adjustment_inference_flag):
+        logger.warning("ArcFace is incompatible with logit adjustment; disabling logit adjustment.")
+        logit_adjustment_train = False
+        logit_adjustment_inference_flag = False
+        logit_adjustment_mode = "none"
     if arcface_enabled:
         if mlp_loss_type != "ce":
             logger.warning("ArcFace requires CE loss; switching mlp_loss_type to 'ce'.")

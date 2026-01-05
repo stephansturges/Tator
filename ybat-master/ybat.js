@@ -7827,7 +7827,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (trainingElements.logitAdjustmentToggle) {
             const enabled = trainingElements.logitAdjustmentToggle.checked;
-            formData.append("logit_adjustment_mode", enabled ? "both" : "none");
+            const classifierType = trainingElements.classifierTypeSelect
+                ? String(trainingElements.classifierTypeSelect.value || "logreg").toLowerCase().trim()
+                : "logreg";
+            const mode = enabled ? (classifierType === "mlp" ? "both" : "infer") : "none";
+            formData.append("logit_adjustment_mode", mode);
             formData.append("logit_adjustment_inference", enabled ? "true" : "false");
         }
         if (trainingElements.hardMisWeightInput) {

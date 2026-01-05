@@ -6527,8 +6527,8 @@ def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optiona
             out = out * float(arcface_scale)
         if out.shape[1] != len(classes):
             return None
-        logit_adj = head.get("logit_adjustment")
-        if head.get("logit_adjustment_inference") and logit_adj is not None:
+        logit_adj = None if arcface_enabled else head.get("logit_adjustment")
+        if not arcface_enabled and head.get("logit_adjustment_inference") and logit_adj is not None:
             try:
                 adj = np.asarray(logit_adj, dtype=np.float32).reshape(1, -1)
                 if adj.shape[1] == out.shape[1]:

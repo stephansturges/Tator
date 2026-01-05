@@ -578,9 +578,9 @@
                                 <label for="trainLogitAdjustmentMode">Long-tail mode (logit adjustment)</label>
                                 <div class="training-toggle-row" style="margin: 6px 0 0;">
                                     <input type="checkbox" id="trainLogitAdjustmentMode" />
-                                    <span>Enable logit adjustment (train + inference)</span>
+                                    <span>Enable logit adjustment (MLP trains + inference; LogReg inference only)</span>
                                 </div>
-                                <div class="training-help">Adds a class-prior adjustment to logits so rare classes are less suppressed. Turn on for heavily imbalanced datasets.</div>
+                                <div class="training-help">Adds a class-prior adjustment to logits so rare classes are less suppressed. For LogReg, only inference is adjusted.</div>
                             </div>
                             <div>
                                 <label for="trainDeviceOverride">Device Override</label>

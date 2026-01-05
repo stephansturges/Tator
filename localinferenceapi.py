@@ -8465,6 +8465,11 @@ def _infer_sam3_greedy_recipe_on_image(
     if ex_mat is not None and head_encoder_type != "clip":
         ex_mat = None
         neg_mat = None
+    classes_list = clip_head.get("classes") if isinstance(clip_head, dict) and isinstance(clip_head.get("classes"), list) else []
+    clip_head_bg_indices = _clip_head_background_indices(classes_list)
+    bg_margin = max(0.0, min(1.0, float(clip_head_background_margin)))
+    bg_guard_seed = bool(clip_head_background_guard_seed)
+    bg_guard_final = bool(clip_head_background_guard_final)
 
     def _clip_score(feats: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         pos = np.zeros((feats.shape[0],), dtype=np.float32)

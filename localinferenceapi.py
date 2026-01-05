@@ -2898,6 +2898,8 @@ class QwenDetection(BaseModel):
     class_name: Optional[str] = None
     clip_head_prob: Optional[float] = None
     clip_head_margin: Optional[float] = None
+    clip_head_bg_prob: Optional[float] = None
+    clip_head_bg_margin: Optional[float] = None
 
 
 class QwenInferenceRequest(BaseModel):
@@ -3299,6 +3301,8 @@ CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
 DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+CLIP_NEGATIVE_REPLAY_ROOT = UPLOAD_ROOT / "clip_negative_replay"
+CLIP_NEGATIVE_REPLAY_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _prune_job_registry(registry: Dict[str, Any], lock: threading.Lock, ttl_hours: Optional[int] = None) -> None:
@@ -4597,6 +4601,119 @@ def _save_exemplar_crop(
     return enriched
 
 
+def _export_hard_negative_replay(
+    *,
+    dataset_id: str,
+    class_id: int,
+    class_name: str,
+    entries: Sequence[Dict[str, Any]],
+    max_crops: int,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Optional[Dict[str, Any]]:
+    if max_crops <= 0 or not entries:
+        return None
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(class_name or "").strip()).strip("_")
+    if not safe_name:
+        safe_name = f"class_{int(class_id)}"
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    run_dir = (CLIP_NEGATIVE_REPLAY_ROOT / str(dataset_id) / f"{int(class_id):03d}_{safe_name}" / stamp).resolve()
+    if not _path_is_within_root(run_dir, CLIP_NEGATIVE_REPLAY_ROOT):
+        return None
+    crops_dir = run_dir / "crops"
+    crops_dir.mkdir(parents=True, exist_ok=True)
+
+    def _score(entry: Dict[str, Any]) -> float:
+        try:
+            return float(entry.get("score") or 0.0)
+        except Exception:
+            return 0.0
+
+    entries_sorted = sorted([e for e in entries if isinstance(e, dict)], key=_score, reverse=True)
+    seen_keys: set[Tuple[int, Tuple[float, float, float, float]]] = set()
+    saved: List[Dict[str, Any]] = []
+    for entry in entries_sorted:
+        if len(saved) >= int(max_crops):
+            break
+        try:
+            img_id = int(entry.get("image_id"))
+        except Exception:
+            continue
+        bbox = entry.get("bbox_xyxy")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        try:
+            bbox_key = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        except Exception:
+            continue
+        dedupe_key = (int(img_id), bbox_key)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        image_path = entry.get("image_path")
+        if not isinstance(image_path, str) or not image_path:
+            continue
+        try:
+            with Image.open(image_path) as img:
+                pil_img = img.convert("RGB")
+        except Exception:
+            continue
+        x1, y1, x2, y2 = bbox_key
+        if x2 <= x1 or y2 <= y1:
+            continue
+        try:
+            crop = pil_img.crop((x1, y1, x2, y2))
+        except Exception:
+            continue
+        filename = f"hn_{len(saved):05d}.png"
+        crop_path = crops_dir / filename
+        try:
+            crop.save(crop_path, format="PNG")
+        except Exception:
+            continue
+        saved.append(
+            {
+                "image_id": int(img_id),
+                "image_path": str(image_path),
+                "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
+                "score": float(entry.get("score") or 0.0),
+                "clip_prob": entry.get("clip_prob"),
+                "clip_bg_prob": entry.get("clip_bg_prob"),
+                "clip_margin": entry.get("clip_margin"),
+                "prompt": entry.get("prompt"),
+                "crop_path": str(Path("crops") / crop_path.name),
+            }
+        )
+
+    if not saved:
+        return None
+
+    manifest = {
+        "dataset_id": str(dataset_id),
+        "class_id": int(class_id),
+        "class_name": str(class_name or f"class_{class_id}"),
+        "created_at": float(time.time()),
+        "count": int(len(saved)),
+        "entries": saved,
+    }
+    try:
+        with (run_dir / "manifest.json").open("w", encoding="utf-8") as fp:
+            json.dump(manifest, fp, indent=2)
+    except Exception:
+        return None
+    if log_fn:
+        try:
+            log_fn(f"[steps] Hard-negative export: saved {len(saved)}/{len(entries_sorted)} crops to {run_dir}")
+        except Exception:
+            pass
+    return {
+        "enabled": True,
+        "count": int(len(saved)),
+        "max_crops": int(max_crops),
+        "root": str(run_dir),
+        "manifest": str(run_dir / "manifest.json"),
+    }
+
+
 def _persist_agent_recipe(
     dataset_id: Optional[str],
     class_id: Optional[int],
@@ -4986,9 +5103,18 @@ def _persist_agent_recipe(
             "use_negative_exemplars": recipe_body.get("use_negative_exemplars", recipe.get("use_negative_exemplars")),
             "negative_strength": recipe_body.get("negative_strength", recipe.get("negative_strength")),
             "clip_head_background_guard": recipe_body.get("clip_head_background_guard", recipe.get("clip_head_background_guard")),
+            "clip_head_background_margin": recipe_body.get("clip_head_background_margin", recipe.get("clip_head_background_margin")),
+            "clip_head_background_apply": recipe_body.get("clip_head_background_apply", recipe.get("clip_head_background_apply")),
+            "clip_head_background_penalty": recipe_body.get("clip_head_background_penalty", recipe.get("clip_head_background_penalty")),
         }
         if isinstance(params, dict) and "clip_head_background_guard" not in params:
             params["clip_head_background_guard"] = recipe_body.get("clip_head_background_guard", recipe.get("clip_head_background_guard"))
+        if isinstance(params, dict) and "clip_head_background_margin" not in params:
+            params["clip_head_background_margin"] = recipe_body.get("clip_head_background_margin", recipe.get("clip_head_background_margin"))
+        if isinstance(params, dict) and "clip_head_background_apply" not in params:
+            params["clip_head_background_apply"] = recipe_body.get("clip_head_background_apply", recipe.get("clip_head_background_apply"))
+        if isinstance(params, dict) and "clip_head_background_penalty" not in params:
+            params["clip_head_background_penalty"] = recipe_body.get("clip_head_background_penalty", recipe.get("clip_head_background_penalty"))
         thresholds = sorted({float(s.get("threshold", 0.0)) for s in portable_steps if s.get("threshold") is not None})
         if thresholds:
             params["thresholds"] = thresholds
@@ -6608,6 +6734,7 @@ def _clip_head_keep_mask(
     margin: float,
     background_indices: Optional[Sequence[int]] = None,
     background_guard: bool = False,
+    background_margin: float = 0.0,
 ) -> Optional[np.ndarray]:
     """Return boolean keep mask for rows in proba."""
     try:
@@ -6630,6 +6757,11 @@ def _clip_head_keep_mask(
     p_target = probs[:, target_index]
     keep = p_target >= min_prob_f
 
+    try:
+        bg_margin_f = float(background_margin)
+    except Exception:
+        bg_margin_f = 0.0
+
     if background_guard:
         bg_indices: List[int] = []
         if background_indices:
@@ -6638,7 +6770,7 @@ def _clip_head_keep_mask(
                     bg_indices.append(idx)
         if bg_indices:
             p_bg = np.max(probs[:, bg_indices], axis=1)
-            keep &= p_target >= p_bg
+            keep &= p_target >= (p_bg + max(0.0, bg_margin_f))
 
     # "Margin" is optional: a value of 0 disables the margin check (i.e., do not require the target
     # class to be the argmax). When enabled, require p(target) >= p(best_other) + margin.
@@ -6975,6 +7107,26 @@ def _clip_head_background_indices(classes: Sequence[str]) -> List[int]:
     return [idx for idx, label in enumerate(classes) if _is_background_class_name(label)]
 
 
+def _resolve_clip_head_background_settings(payload: "AgentMiningRequest") -> Tuple[bool, bool, float, str]:
+    try:
+        guard = bool(getattr(payload, "clip_head_background_guard", False))
+    except Exception:
+        guard = False
+    try:
+        apply_raw = str(getattr(payload, "clip_head_background_apply", "final") or "final").strip().lower()
+    except Exception:
+        apply_raw = "final"
+    apply_mode = apply_raw if apply_raw in {"seed", "final", "both"} else "final"
+    try:
+        margin_val = float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0)
+    except Exception:
+        margin_val = 0.0
+    margin_val = max(0.0, min(1.0, margin_val))
+    guard_seed = bool(guard and apply_mode in {"seed", "both"})
+    guard_final = bool(guard and apply_mode in {"final", "both"})
+    return guard_seed, guard_final, float(margin_val), apply_mode
+
+
 def _find_clip_head_target_index(classes: Sequence[str], class_name: Optional[str]) -> Optional[int]:
     target = _normalize_class_name_for_match(class_name)
     if not target:
@@ -7203,6 +7355,7 @@ def _score_detections_with_clip_head(
     if proba is None:
         return None
 
+    bg_indices = _clip_head_background_indices(classes)
     scores: Dict[int, float] = {}
     for det, row in zip(det_refs, proba):
         label = det.class_name or det.qwen_label
@@ -7221,8 +7374,17 @@ def _score_detections_with_clip_head(
                 p_other = float(np.max(other))
         except Exception:
             p_other = 0.0
+        p_bg: Optional[float] = None
+        if bg_indices:
+            try:
+                p_bg = float(np.max(row[bg_indices]))
+            except Exception:
+                p_bg = None
         det.clip_head_prob = p_t
         det.clip_head_margin = float(p_t - p_other)
+        if p_bg is not None:
+            det.clip_head_bg_prob = float(p_bg)
+            det.clip_head_bg_margin = float(p_t - p_bg)
         score = p_t if score_mode == "clip_head_prob" else float(p_t - p_other)
         scores[id(det)] = float(score)
     return scores
@@ -7448,7 +7610,24 @@ def _apply_agent_recipe_to_image(
         except Exception:
             return default
 
-    clip_head_background_guard = _bool_param("clip_head_background_guard", False)
+    def _str_param(key: str, default: str) -> str:
+        raw = _recipe_param(key)
+        if raw is None:
+            return default
+        try:
+            val = str(raw).strip()
+        except Exception:
+            return default
+        return val if val else default
+
+    clip_head_background_guard = _bool_param("clip_head_background_guard", True)
+    clip_head_background_margin = _float_param("clip_head_background_margin", 0.0)
+    clip_head_background_apply = _str_param("clip_head_background_apply", "final").lower()
+    if clip_head_background_apply not in {"seed", "final", "both"}:
+        clip_head_background_apply = "final"
+    clip_head_background_margin = max(0.0, min(1.0, float(clip_head_background_margin)))
+    bg_guard_seed = bool(clip_head_background_guard and clip_head_background_apply in {"seed", "both"})
+    bg_guard_final = bool(clip_head_background_guard and clip_head_background_apply in {"final", "both"})
 
     # Config knobs (recipe params override request params; request params are passed via function args).
     use_clip_guard = _bool_param("use_clip_fp_guard", True)
@@ -7643,6 +7822,9 @@ def _apply_agent_recipe_to_image(
 
     classes_list = clip_head.get("classes") if isinstance(clip_head, dict) and isinstance(clip_head.get("classes"), list) else []
     clip_head_bg_indices = _clip_head_background_indices(classes_list)
+    bg_margin = max(0.0, min(1.0, float(clip_head_background_margin)))
+    bg_guard_seed = bool(clip_head_background_guard_seed)
+    bg_guard_final = bool(clip_head_background_guard_final)
 
     def _final_clip_filter(
         dets_in: List[QwenDetection],
@@ -7698,9 +7880,23 @@ def _apply_agent_recipe_to_image(
                         p_other = np.max(masked, axis=1)
                     else:
                         p_other = np.zeros_like(p_target)
-                    for det_obj, p_t, p_o in zip(det_refs, p_target.tolist(), p_other.tolist()):
+                    p_bg = None
+                    if clip_head_bg_indices:
+                        try:
+                            p_bg = np.max(proba[:, clip_head_bg_indices], axis=1)
+                        except Exception:
+                            p_bg = None
+                    for det_obj, p_t, p_o, bg in zip(
+                        det_refs,
+                        p_target.tolist(),
+                        p_other.tolist(),
+                        p_bg.tolist() if p_bg is not None else [None] * len(det_refs),
+                    ):
                         det_obj.clip_head_prob = float(p_t)
                         det_obj.clip_head_margin = float(p_t - p_o)
+                        if bg is not None:
+                            det_obj.clip_head_bg_prob = float(bg)
+                            det_obj.clip_head_bg_margin = float(p_t - float(bg))
                 except Exception:
                     pass
                 head_keep = _clip_head_keep_mask(
@@ -7709,7 +7905,8 @@ def _apply_agent_recipe_to_image(
                     min_prob=float(head_min_prob),
                     margin=float(head_margin),
                     background_indices=clip_head_bg_indices,
-                    background_guard=clip_head_background_guard,
+                    background_guard=bg_guard_final,
+                    background_margin=clip_head_background_margin,
                 )
                 if head_keep is not None:
                     keep_mask &= head_keep
@@ -7836,7 +8033,9 @@ def _apply_agent_recipe_to_image(
                 clip_head_target_index=int(clip_head_target_index) if use_head else None,
                 clip_head_min_prob=float(seed_head_min),
                 clip_head_margin=float(seed_head_margin),
-                clip_head_background_guard=clip_head_background_guard,
+                clip_head_background_guard_seed=bg_guard_seed,
+                clip_head_background_guard_final=bg_guard_final,
+                clip_head_background_margin=clip_head_background_margin,
                 final_similarity_floor=float(final_sim_floor),
                 final_clip_head_min_prob=float(final_head_min),
                 final_clip_head_margin=float(final_head_margin),
@@ -7867,7 +8066,9 @@ def _apply_agent_recipe_to_image(
                     clip_head_target_index=None,
                     clip_head_min_prob=0.0,
                     clip_head_margin=0.0,
-                    clip_head_background_guard=False,
+                    clip_head_background_guard_seed=False,
+                    clip_head_background_guard_final=False,
+                    clip_head_background_margin=0.0,
                     state=state,
                 )
             if not dets_step:
@@ -7959,9 +8160,23 @@ def _apply_agent_recipe_to_image(
                             p_other = np.max(masked, axis=1)
                         else:
                             p_other = np.zeros_like(p_target)
-                        for det_obj, p_t, p_o in zip(seed_keep_refs, p_target.tolist(), p_other.tolist()):
+                        p_bg = None
+                        if clip_head_bg_indices:
+                            try:
+                                p_bg = np.max(proba[:, clip_head_bg_indices], axis=1)
+                            except Exception:
+                                p_bg = None
+                        for det_obj, p_t, p_o, bg in zip(
+                            seed_keep_refs,
+                            p_target.tolist(),
+                            p_other.tolist(),
+                            p_bg.tolist() if p_bg is not None else [None] * len(seed_keep_refs),
+                        ):
                             det_obj.clip_head_prob = float(p_t)
                             det_obj.clip_head_margin = float(p_t - p_o)
+                            if bg is not None:
+                                det_obj.clip_head_bg_prob = float(bg)
+                                det_obj.clip_head_bg_margin = float(p_t - float(bg))
                     except Exception:
                         pass
                     head_keep = _clip_head_keep_mask(
@@ -7970,7 +8185,8 @@ def _apply_agent_recipe_to_image(
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
                         background_indices=clip_head_bg_indices,
-                        background_guard=clip_head_background_guard,
+                        background_guard=bg_guard_seed,
+                        background_margin=clip_head_background_margin,
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
@@ -8112,7 +8328,8 @@ def _apply_agent_recipe_to_image(
                                 min_prob=float(extra_min),
                                 margin=float(extra_mar),
                                 background_indices=extra_bg_indices,
-                                background_guard=clip_head_background_guard,
+                                background_guard=bg_guard_final,
+                                background_margin=clip_head_background_margin,
                             )
                             if proba is not None
                             else None
@@ -8170,7 +8387,9 @@ def _infer_sam3_greedy_recipe_on_image(
     clip_head_target_index: Optional[int] = None,
     clip_head_min_prob: float = 0.5,
     clip_head_margin: float = 0.0,
-    clip_head_background_guard: bool = False,
+    clip_head_background_guard_seed: bool = False,
+    clip_head_background_guard_final: bool = False,
+    clip_head_background_margin: float = 0.0,
     final_similarity_floor: Optional[float] = None,
     final_clip_head_min_prob: Optional[float] = None,
     final_clip_head_margin: Optional[float] = None,
@@ -8197,6 +8416,10 @@ def _infer_sam3_greedy_recipe_on_image(
         "final_seed_total": 0,
         "final_expanded_total": 0,
         "final_total": 0,
+        "seed_bg_checked": 0,
+        "seed_bg_veto": 0,
+        "final_bg_checked": 0,
+        "final_bg_veto": 0,
     }
 
     def _emit_stats() -> None:
@@ -8271,7 +8494,8 @@ def _infer_sam3_greedy_recipe_on_image(
             min_prob=float(clip_head_min_prob),
             margin=float(clip_head_margin),
             background_indices=clip_head_bg_indices,
-            background_guard=clip_head_background_guard,
+            background_guard=bg_guard_seed,
+            background_margin=bg_margin,
         )
 
     seed_dets: List[QwenDetection] = []
@@ -8353,6 +8577,7 @@ def _infer_sam3_greedy_recipe_on_image(
                 if proba is not None:
                     t_idx = int(clip_head_target_index)
                     p_target: Optional[np.ndarray] = None
+                    p_other: Optional[np.ndarray] = None
                     try:
                         p_target = proba[:, t_idx]
                         if proba.shape[1] > 1:
@@ -8361,18 +8586,45 @@ def _infer_sam3_greedy_recipe_on_image(
                             p_other = np.max(masked, axis=1)
                         else:
                             p_other = np.zeros_like(p_target)
-                        for det_obj, p_t, p_o in zip(seed_refs, p_target.tolist(), p_other.tolist()):
+                        p_bg = None
+                        if clip_head_bg_indices:
+                            try:
+                                p_bg = np.max(proba[:, clip_head_bg_indices], axis=1)
+                            except Exception:
+                                p_bg = None
+                        for det_obj, p_t, p_o, bg in zip(
+                            seed_refs,
+                            p_target.tolist(),
+                            p_other.tolist(),
+                            p_bg.tolist() if p_bg is not None else [None] * len(seed_refs),
+                        ):
                             det_obj.clip_head_prob = float(p_t)
                             det_obj.clip_head_margin = float(p_t - p_o)
+                            if bg is not None:
+                                det_obj.clip_head_bg_prob = float(bg)
+                                det_obj.clip_head_bg_margin = float(p_t - float(bg))
                     except Exception:
                         pass
+                    if p_target is not None and p_other is not None:
+                        base_keep = p_target >= float(clip_head_min_prob)
+                        if float(clip_head_margin) > 0.0:
+                            base_keep &= p_target >= (p_other + float(clip_head_margin))
+                        if bg_guard_seed and clip_head_bg_indices:
+                            try:
+                                p_bg = np.max(proba[:, clip_head_bg_indices], axis=1)
+                                bg_fail = p_target < (p_bg + float(bg_margin))
+                                counts["seed_bg_checked"] = int(counts.get("seed_bg_checked", 0)) + int(np.sum(base_keep))
+                                counts["seed_bg_veto"] = int(counts.get("seed_bg_veto", 0)) + int(np.sum(base_keep & bg_fail))
+                            except Exception:
+                                pass
                     head_keep = _clip_head_keep_mask(
                         proba,
                         target_index=t_idx,
                         min_prob=float(clip_head_min_prob),
                         margin=float(clip_head_margin),
                         background_indices=clip_head_bg_indices,
-                        background_guard=clip_head_background_guard,
+                        background_guard=bg_guard_seed,
+                        background_margin=bg_margin,
                     )
                     if head_keep is not None:
                         keep_mask &= head_keep
@@ -8479,6 +8731,7 @@ def _infer_sam3_greedy_recipe_on_image(
                     proba2 = None
                 if proba2 is not None:
                     t_idx = int(clip_head_target_index)
+                    p_other: Optional[np.ndarray] = None
                     try:
                         p_target = proba2[:, t_idx]
                         if proba2.shape[1] > 1:
@@ -8487,18 +8740,45 @@ def _infer_sam3_greedy_recipe_on_image(
                             p_other = np.max(masked, axis=1)
                         else:
                             p_other = np.zeros_like(p_target)
-                        for det_obj, p_t, p_o in zip(det_refs, p_target.tolist(), p_other.tolist()):
+                        p_bg = None
+                        if clip_head_bg_indices:
+                            try:
+                                p_bg = np.max(proba2[:, clip_head_bg_indices], axis=1)
+                            except Exception:
+                                p_bg = None
+                        for det_obj, p_t, p_o, bg in zip(
+                            det_refs,
+                            p_target.tolist(),
+                            p_other.tolist(),
+                            p_bg.tolist() if p_bg is not None else [None] * len(det_refs),
+                        ):
                             det_obj.clip_head_prob = float(p_t)
                             det_obj.clip_head_margin = float(p_t - p_o)
+                            if bg is not None:
+                                det_obj.clip_head_bg_prob = float(bg)
+                                det_obj.clip_head_bg_margin = float(p_t - float(bg))
                     except Exception:
                         pass
+                    if p_target is not None and p_other is not None:
+                        base_keep = p_target >= float(final_clip_head_min_prob)
+                        if float(final_clip_head_margin) > 0.0:
+                            base_keep &= p_target >= (p_other + float(final_clip_head_margin))
+                        if bg_guard_final and clip_head_bg_indices:
+                            try:
+                                p_bg = np.max(proba2[:, clip_head_bg_indices], axis=1)
+                                bg_fail = p_target < (p_bg + float(bg_margin))
+                                counts["final_bg_checked"] = int(counts.get("final_bg_checked", 0)) + int(np.sum(base_keep))
+                                counts["final_bg_veto"] = int(counts.get("final_bg_veto", 0)) + int(np.sum(base_keep & bg_fail))
+                            except Exception:
+                                pass
                     head_keep2 = _clip_head_keep_mask(
                         proba2,
                         target_index=t_idx,
                         min_prob=float(final_clip_head_min_prob),
                         margin=float(final_clip_head_margin),
                         background_indices=clip_head_bg_indices,
-                        background_guard=clip_head_background_guard,
+                        background_guard=bg_guard_final,
+                        background_margin=bg_margin,
                     )
                     if head_keep2 is not None:
                         keep_mask2 &= head_keep2
@@ -8524,8 +8804,10 @@ def _build_clip_head_sweep_grid(
     *,
     base_min_prob: float,
     base_margin: float,
-) -> Tuple[List[float], List[float], float]:
-    """Return (min_prob candidates, margin candidates, target_precision)."""
+    base_bg_margin: float,
+    allow_bg_tune: bool,
+) -> Tuple[List[float], List[float], List[float], float]:
+    """Return (min_prob candidates, margin candidates, bg_margin candidates, target_precision)."""
     try:
         base_min = float(base_min_prob)
     except Exception:
@@ -8534,8 +8816,13 @@ def _build_clip_head_sweep_grid(
         base_mar = float(base_margin)
     except Exception:
         base_mar = 0.0
+    try:
+        base_bg = float(base_bg_margin)
+    except Exception:
+        base_bg = 0.0
     base_min = max(0.0, min(1.0, base_min))
     base_mar = max(0.0, min(1.0, base_mar))
+    base_bg = max(0.0, min(1.0, base_bg))
     try:
         target_precision = float(getattr(payload, "clip_head_target_precision", 0.9))
     except Exception:
@@ -8547,9 +8834,14 @@ def _build_clip_head_sweep_grid(
         auto_tune = bool(getattr(payload, "clip_head_auto_tune", True))
     except Exception:
         auto_tune = True
+    bg_auto_tune = True
+    try:
+        bg_auto_tune = bool(getattr(payload, "clip_head_background_auto_tune", True))
+    except Exception:
+        bg_auto_tune = True
 
     if not auto_tune:
-        return [base_min], [base_mar], target_precision
+        return [base_min], [base_mar], [base_bg], target_precision
 
     # IMPORTANT: For some classes, head probabilities cluster very close to 0 (especially when crops are small).
     # A coarse 0.05 grid can miss the useful operating region entirely, making auto-tune look “broken”.
@@ -8569,7 +8861,12 @@ def _build_clip_head_sweep_grid(
     margins = [0.0, 0.05, 0.1, 0.2]
     margins.append(base_mar)
     margins = sorted({float(max(0.0, min(1.0, m))) for m in margins})
-    return min_probs, margins, target_precision
+    bg_margins = [0.0, 0.02, 0.05, 0.1, 0.2]
+    bg_margins.append(base_bg)
+    bg_margins = sorted({float(max(0.0, min(1.0, m))) for m in bg_margins})
+    if not allow_bg_tune or not bg_auto_tune:
+        bg_margins = [base_bg]
+    return min_probs, margins, bg_margins, target_precision
 
 
 def _score_head_tuning_candidate(
@@ -8579,21 +8876,22 @@ def _score_head_tuning_candidate(
     precision: float,
     min_prob: float,
     margin: float,
+    bg_margin: float,
     target_precision: float,
 ) -> Tuple[int, float, int, float, float, float]:
     meets_target = bool(matched > 0 and precision >= float(target_precision))
     if meets_target:
         # Priority: reach target precision, then maximize matches (coverage), then minimize FPs.
         # Tie-breaker: prefer the least-restrictive thresholds that still hit the target (more robust).
-        return (1, float(matched), -int(fps), float(precision), -float(min_prob), -float(margin))
+        return (1, float(matched), -int(fps), float(precision), -float(min_prob), -float(margin), -float(bg_margin))
     # If nothing hits the target, pick the best precision we can get, then maximize matches.
-    return (0, float(precision), int(matched), -int(fps), -float(min_prob), -float(margin))
+    return (0, float(precision), int(matched), -int(fps), -float(min_prob), -float(margin), -float(bg_margin))
 
 
 def _update_best_clip_head_sweep_summary(
     *,
     best_summary: Optional[Dict[str, Any]],
-    best_key: Optional[Tuple[int, float, int, float, float, float]],
+    best_key: Optional[Tuple[int, float, int, float, float, float, float]],
     total_gt: int,
     total_images: int,
     matched: int,
@@ -8603,9 +8901,10 @@ def _update_best_clip_head_sweep_summary(
     det_images: int,
     min_prob: float,
     margin: float,
+    bg_margin: float,
     target_precision: float,
     debug: Optional[Dict[str, Any]] = None,
-) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[int, float, int, float, float, float]]]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[int, float, int, float, float, float, float]]]:
     recall = matched / total_gt if total_gt else 0.0
     precision = matched / max(1, matched + fps)
     det_rate = det_images / total_images if total_images else 0.0
@@ -8615,6 +8914,7 @@ def _update_best_clip_head_sweep_summary(
         precision=float(precision),
         min_prob=float(min_prob),
         margin=float(margin),
+        bg_margin=float(bg_margin),
         target_precision=float(target_precision),
     )
     if best_key is not None and key <= best_key:
@@ -8631,6 +8931,7 @@ def _update_best_clip_head_sweep_summary(
         "det_rate": float(det_rate),
         "clip_head_min_prob": float(min_prob),
         "clip_head_margin": float(margin),
+        "clip_head_background_margin": float(bg_margin),
         "clip_head_target_precision": float(target_precision),
         "clip_head_meets_target_precision": bool(float(precision) >= float(target_precision)),
     }
@@ -8783,17 +9084,42 @@ def _evaluate_sam3_greedy_recipe(
     for img_id in image_ids:
         total_gt += len((gt_by_image_cat.get(int(img_id)) or {}).get(int(cat_id)) or [])
 
+    bg_guard_seed, bg_guard_final, bg_margin, _bg_apply = _resolve_clip_head_background_settings(payload)
+    classes_list = clip_head.get("classes") if isinstance(clip_head, dict) and isinstance(clip_head.get("classes"), list) else []
+    bg_indices = _clip_head_background_indices(classes_list)
+    allow_bg_tune = bool(bg_indices and getattr(payload, "clip_head_background_guard", False))
+    hard_neg_cfg = _resolve_steps_hard_negative_export_config(payload) if export_hard_negatives else {"enabled": False}
+    hard_neg_enabled = bool(hard_neg_cfg.get("enabled"))
+    try:
+        hard_neg_min_prob = float(hard_neg_cfg.get("min_prob") or 0.0)
+    except Exception:
+        hard_neg_min_prob = 0.0
+    try:
+        hard_neg_max_crops = int(hard_neg_cfg.get("max_crops") or 0)
+    except Exception:
+        hard_neg_max_crops = 0
+    hard_neg_entries: List[Dict[str, Any]] = []
+    hard_neg_lock = threading.Lock()
+    classes_list = clip_head.get("classes") if isinstance(clip_head, dict) and isinstance(clip_head.get("classes"), list) else []
+    bg_indices = _clip_head_background_indices(classes_list)
+    allow_bg_tune = bool(bg_indices and getattr(payload, "clip_head_background_guard", False))
+
     head_active = bool(isinstance(clip_head, dict) and clip_head_target_index is not None)
     if head_active:
         # Sweep head thresholds without re-running SAM3: run the greedy recipe once with no head thresholding,
         # keep per-detection head probabilities, then apply different thresholds during scoring.
-        sweep_min_probs, sweep_margins, target_precision = _build_clip_head_sweep_grid(
+        classes_list = clip_head.get("classes") if isinstance(clip_head, dict) and isinstance(clip_head.get("classes"), list) else []
+        bg_indices = _clip_head_background_indices(classes_list)
+        allow_bg_tune = bool(bg_indices and getattr(payload, "clip_head_background_guard", False))
+        sweep_min_probs, sweep_margins, sweep_bg_margins, target_precision = _build_clip_head_sweep_grid(
             payload,
             base_min_prob=float(clip_head_min_prob),
             base_margin=float(clip_head_margin),
+            base_bg_margin=float(bg_margin),
+            allow_bg_tune=allow_bg_tune,
         )
 
-        per_image_rows: Dict[int, List[Tuple[float, float, float, Optional[int]]]] = {}
+        per_image_rows: Dict[int, List[Tuple[float, float, float, Optional[float], Optional[int]]]] = {}
         observed_prob_min: Optional[float] = None
         observed_prob_max: Optional[float] = None
         observed_rows = 0
@@ -8810,32 +9136,34 @@ def _evaluate_sam3_greedy_recipe(
                     pil_img = img.convert("RGB")
             except Exception:
                 continue
-                dets = _infer_sam3_greedy_recipe_on_image(
-                    pil_img=pil_img,
-                    processor=processor,
-                    text_prompts=text_prompts,
-                    exemplar_embeddings=exemplar_embeddings,
-                    negative_embeddings=negative_embeddings,
-                    seed_threshold=payload.seed_threshold,
-                    expand_threshold=payload.expand_threshold,
-                    max_visual_seeds=payload.max_visual_seeds,
-                    seed_dedupe_iou=payload.seed_dedupe_iou,
-                    out_dedupe_iou=payload.dedupe_iou,
-                    mask_threshold=payload.mask_threshold,
-                    min_size=payload.min_size,
-                    simplify_epsilon=payload.simplify_epsilon,
-                    max_results=payload.max_results,
-                    negative_strength=payload.negative_strength,
-                    similarity_floor=payload.similarity_score,
-                    clip_head=clip_head,
-                    clip_head_target_index=clip_head_target_index,
-                    clip_head_min_prob=0.0,
-                    clip_head_margin=0.0,
-                    clip_head_background_guard=payload.clip_head_background_guard,
-                )
+            dets = _infer_sam3_greedy_recipe_on_image(
+                pil_img=pil_img,
+                processor=processor,
+                text_prompts=text_prompts,
+                exemplar_embeddings=exemplar_embeddings,
+                negative_embeddings=negative_embeddings,
+                seed_threshold=payload.seed_threshold,
+                expand_threshold=payload.expand_threshold,
+                max_visual_seeds=payload.max_visual_seeds,
+                seed_dedupe_iou=payload.seed_dedupe_iou,
+                out_dedupe_iou=payload.dedupe_iou,
+                mask_threshold=payload.mask_threshold,
+                min_size=payload.min_size,
+                simplify_epsilon=payload.simplify_epsilon,
+                max_results=payload.max_results,
+                negative_strength=payload.negative_strength,
+                similarity_floor=payload.similarity_score,
+                clip_head=clip_head,
+                clip_head_target_index=clip_head_target_index,
+                clip_head_min_prob=0.0,
+                clip_head_margin=0.0,
+                clip_head_background_guard_seed=bg_guard_seed,
+                clip_head_background_guard_final=bg_guard_final,
+                clip_head_background_margin=bg_margin,
+            )
             gt_boxes = (gt_by_image_cat.get(int(img_id)) or {}).get(int(cat_id)) or []
             gt_xyxy = [_xywh_to_xyxy(b) for b in gt_boxes]
-            rows: List[Tuple[float, float, float, Optional[int]]] = []
+            rows: List[Tuple[float, float, float, Optional[float], Optional[int]]] = []
             for det in dets:
                 bbox = det.bbox or []
                 if len(bbox) < 4:
@@ -8853,7 +9181,8 @@ def _evaluate_sam3_greedy_recipe(
                         best_idx = j
                 prob = float(det.clip_head_prob) if det.clip_head_prob is not None else 0.0
                 margin = float(det.clip_head_margin) if det.clip_head_margin is not None else 0.0
-                rows.append((prob, margin, float(best_iou), best_idx))
+                bg_prob = float(det.clip_head_bg_prob) if det.clip_head_bg_prob is not None else None
+                rows.append((prob, margin, float(best_iou), bg_prob, best_idx))
                 observed_rows += 1
                 if det.clip_head_prob is not None:
                     observed_with_prob += 1
@@ -8878,49 +9207,54 @@ def _evaluate_sam3_greedy_recipe(
                 pass
 
         best_summary: Optional[Dict[str, Any]] = None
-        best_key: Optional[Tuple[int, float, int, float, float, float]] = None
+        best_key: Optional[Tuple[int, float, int, float, float, float, float]] = None
         for margin_thr in sweep_margins:
             for min_prob in sweep_min_probs:
-                matched = 0
-                fps = 0
-                duplicates = 0
-                preds = 0
-                det_images = 0
-                for img_id in image_ids:
-                    rows = per_image_rows.get(int(img_id)) or []
-                    used: set[int] = set()
-                    any_det = False
-                    for prob, margin, best_iou, best_idx in rows:
-                        if prob < float(min_prob):
-                            continue
-                        if float(margin_thr) > 0.0 and margin < float(margin_thr):
-                            continue
-                        any_det = True
-                        preds += 1
-                        if best_idx is not None and best_iou >= float(payload.iou_threshold):
-                            if best_idx in used:
-                                duplicates += 1
+                for bg_margin_thr in sweep_bg_margins:
+                    matched = 0
+                    fps = 0
+                    duplicates = 0
+                    preds = 0
+                    det_images = 0
+                    for img_id in image_ids:
+                        rows = per_image_rows.get(int(img_id)) or []
+                        used: set[int] = set()
+                        any_det = False
+                        for prob, margin, best_iou, bg_prob, best_idx in rows:
+                            if prob < float(min_prob):
+                                continue
+                            if float(margin_thr) > 0.0 and margin < float(margin_thr):
+                                continue
+                            if allow_bg_tune and float(bg_margin_thr) > 0.0 and bg_prob is not None:
+                                if prob < float(bg_prob) + float(bg_margin_thr):
+                                    continue
+                            any_det = True
+                            preds += 1
+                            if best_idx is not None and best_iou >= float(payload.iou_threshold):
+                                if best_idx in used:
+                                    duplicates += 1
+                                else:
+                                    used.add(best_idx)
+                                    matched += 1
                             else:
-                                used.add(best_idx)
-                                matched += 1
-                        else:
-                            fps += 1
-                    if any_det:
-                        det_images += 1
-                best_summary, best_key = _update_best_clip_head_sweep_summary(
-                    best_summary=best_summary,
-                    best_key=best_key,
-                    total_gt=int(total_gt),
-                    total_images=int(len(image_ids)),
-                    matched=int(matched),
-                    fps=int(fps),
-                    duplicates=int(duplicates),
-                    preds=int(preds),
-                    det_images=int(det_images),
-                    min_prob=float(min_prob),
-                    margin=float(margin_thr),
-                    target_precision=float(target_precision),
-                )
+                                fps += 1
+                        if any_det:
+                            det_images += 1
+                    best_summary, best_key = _update_best_clip_head_sweep_summary(
+                        best_summary=best_summary,
+                        best_key=best_key,
+                        total_gt=int(total_gt),
+                        total_images=int(len(image_ids)),
+                        matched=int(matched),
+                        fps=int(fps),
+                        duplicates=int(duplicates),
+                        preds=int(preds),
+                        det_images=int(det_images),
+                        min_prob=float(min_prob),
+                        margin=float(margin_thr),
+                        bg_margin=float(bg_margin_thr),
+                        target_precision=float(target_precision),
+                    )
         if log_fn and total_gt and best_summary is not None:
             try:
                 if int(best_summary.get("preds") or 0) == 0 and observed_rows > 0:
@@ -8948,6 +9282,7 @@ def _evaluate_sam3_greedy_recipe(
                 "det_rate": 0.0,
                 "clip_head_min_prob": float(clip_head_min_prob),
                 "clip_head_margin": float(clip_head_margin),
+                "clip_head_background_margin": float(bg_margin),
                 "clip_head_target_precision": float(target_precision),
                 "clip_head_meets_target_precision": False,
             }
@@ -8991,7 +9326,9 @@ def _evaluate_sam3_greedy_recipe(
             clip_head_target_index=clip_head_target_index,
             clip_head_min_prob=clip_head_min_prob,
             clip_head_margin=clip_head_margin,
-            clip_head_background_guard=payload.clip_head_background_guard,
+            clip_head_background_guard_seed=bg_guard_seed,
+            clip_head_background_guard_final=bg_guard_final,
+            clip_head_background_margin=bg_margin,
         )
         if dets:
             det_images += 1
@@ -9091,6 +9428,7 @@ class _Sam3GreedyEvalWorker:
 
         out: Dict[int, Dict[str, Any]] = {}
         gt_for_image = gt_by_image_cat.get(int(image_id)) or {}
+        bg_guard_seed, bg_guard_final, bg_margin, _bg_apply = _resolve_clip_head_background_settings(payload)
 
         def _counts_init() -> Dict[str, int]:
             return {"matches": 0, "fps": 0, "duplicates": 0, "preds": 0, "det_images": 0}
@@ -9194,7 +9532,9 @@ class _Sam3GreedyEvalWorker:
                         clip_head_target_index=head_target_index,
                         clip_head_min_prob=clip_head_min_prob,
                         clip_head_margin=clip_head_margin,
-                        clip_head_background_guard=payload.clip_head_background_guard,
+                        clip_head_background_guard_seed=bg_guard_seed,
+                        clip_head_background_guard_final=bg_guard_final,
+                        clip_head_background_margin=bg_margin,
                         state=state,
                         clip_device_override=clip_device_override,
                     )
@@ -9363,10 +9703,13 @@ def _evaluate_sam3_greedy_recipes_image_first(
     if total_images <= 0:
         return {}
 
-    head_sweep_min_probs, head_sweep_margins, head_target_precision = _build_clip_head_sweep_grid(
+    # Global greedy sweeps keep background margin fixed to avoid bloating the evaluation grid.
+    head_sweep_min_probs, head_sweep_margins, _head_sweep_bg_margins, head_target_precision = _build_clip_head_sweep_grid(
         payload,
         base_min_prob=float(payload.clip_head_min_prob),
         base_margin=float(payload.clip_head_margin),
+        base_bg_margin=float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
+        allow_bg_tune=False,
     )
 
     # Build image entries upfront (id, path).
@@ -9605,7 +9948,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
         total_gt = int(data.get("total_gt") or 0)
         if data.get("head_active"):
             best_summary: Optional[Dict[str, Any]] = None
-            best_key: Optional[Tuple[int, float, int, float, float, float]] = None
+            best_key: Optional[Tuple[int, float, int, float, float, float, float]] = None
             by_margin = data.get("by_margin") or {}
             for margin_thr in head_sweep_margins:
                 by_prob = by_margin.get(float(margin_thr)) if isinstance(by_margin, dict) else None
@@ -9632,6 +9975,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
                         det_images=int(det_images),
                         min_prob=float(min_prob),
                         margin=float(margin_thr),
+                        bg_margin=float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
                         target_precision=float(head_target_precision),
                     )
             if best_summary is None:
@@ -9647,6 +9991,7 @@ def _evaluate_sam3_greedy_recipes_image_first(
                     "det_rate": 0.0,
                     "clip_head_min_prob": float(payload.clip_head_min_prob),
                     "clip_head_margin": float(payload.clip_head_margin),
+                    "clip_head_background_margin": float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
                     "clip_head_target_precision": float(head_target_precision),
                     "clip_head_meets_target_precision": False,
                 }
@@ -10215,6 +10560,18 @@ def _select_steps_from_seed_prompt_stats(
         prompt = str(cand.get("prompt") or "").strip()
         if not prompt:
             continue
+        if cand.get("bg_drop"):
+            if log_fn:
+                try:
+                    bg_rate = float(cand.get("bg_veto_rate") or 0.0)
+                    bg_checked = int(cand.get("bg_checked") or 0)
+                    log_fn(
+                        f"[steps] prompt bg-drop: skip '{prompt}' "
+                        f"(bg_veto_rate={bg_rate:.2f}, checked={bg_checked})"
+                    )
+                except Exception:
+                    pass
+            continue
 
         curve = cand.get("seed_threshold_curve") if isinstance(cand.get("seed_threshold_curve"), list) else None
         curve_points = curve or []
@@ -10773,6 +11130,10 @@ def _mine_seed_prompt_stats_image_first(
     images: Dict[int, Dict[str, Any]],
     gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
     payload: "AgentMiningRequest",
+    clip_head: Optional[Dict[str, Any]] = None,
+    clip_head_target_index: Optional[int] = None,
+    clip_head_bg_indices: Optional[Sequence[int]] = None,
+    prompt_bg_drop_cfg: Optional[Dict[str, Any]] = None,
     workers: Sequence["_Sam3GreedyEvalWorker"],
     log_every: int = 50,
     log_fn: Optional[Callable[[str], None]] = None,
@@ -10810,6 +11171,18 @@ def _mine_seed_prompt_stats_image_first(
         except Exception:
             pass
 
+    bg_cfg = prompt_bg_drop_cfg or {}
+    bg_drop_enabled = bool(
+        bg_cfg.get("enabled")
+        and isinstance(clip_head, dict)
+        and clip_head_target_index is not None
+        and clip_head_bg_indices
+    )
+    try:
+        bg_margin = float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0)
+    except Exception:
+        bg_margin = 0.0
+
     # Global prompt stats. We keep additional per-prompt score distributions so we can build
     # seed-threshold curves without extra SAM3 runs.
     agg: List[Dict[str, Any]] = [
@@ -10822,6 +11195,8 @@ def _mine_seed_prompt_stats_image_first(
             "duplicates": 0,
             "preds": 0,
             "det_images": 0,
+            "bg_checked": 0,
+            "bg_veto": 0,
         }
         for p in prompt_list
     ]
@@ -10858,6 +11233,20 @@ def _mine_seed_prompt_stats_image_first(
         local_dups = [0 for _ in prompt_list]
         local_preds = [0 for _ in prompt_list]
         local_det_imgs = [0 for _ in prompt_list]
+        local_bg_checked = [0 for _ in prompt_list]
+        local_bg_veto = [0 for _ in prompt_list]
+        clip_device_override: Optional[str] = None
+        if bg_drop_enabled:
+            try:
+                raw_clip_dev = os.environ.get("AGENT_MINING_CLIP_DEVICE")
+            except Exception:
+                raw_clip_dev = None
+            if raw_clip_dev is not None and str(raw_clip_dev).strip():
+                mode = str(raw_clip_dev).strip().lower()
+                if mode in {"worker", "per_worker", "per-device", "per_device"}:
+                    clip_device_override = str(worker.device)
+                else:
+                    clip_device_override = str(raw_clip_dev).strip()
 
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -10913,6 +11302,44 @@ def _mine_seed_prompt_stats_image_first(
                         dets = []
                     if dets:
                         local_det_imgs[p_idx] += 1
+                    if bg_drop_enabled and dets and isinstance(clip_head, dict):
+                        det_crops: List[Image.Image] = []
+                        for det in dets:
+                            bbox = det.bbox or []
+                            if len(bbox) < 4:
+                                continue
+                            try:
+                                det_xyxy = yolo_to_corners(bbox, pil_img.width, pil_img.height)
+                            except Exception:
+                                continue
+                            x1, y1, x2, y2 = det_xyxy
+                            if x2 <= x1 or y2 <= y1:
+                                continue
+                            try:
+                                det_crops.append(pil_img.crop((x1, y1, x2, y2)))
+                            except Exception:
+                                continue
+                        if det_crops and clip_head_target_index is not None and clip_head_bg_indices:
+                            try:
+                                feats = _encode_pil_batch_for_head(
+                                    det_crops, head=clip_head, device_override=clip_device_override
+                                )
+                            except Exception:
+                                feats = None
+                            if feats is not None and feats.size:
+                                try:
+                                    proba = _clip_head_predict_proba(feats, clip_head)
+                                except Exception:
+                                    proba = None
+                                if proba is not None:
+                                    try:
+                                        t_idx = int(clip_head_target_index)
+                                        p_target = proba[:, t_idx]
+                                        p_bg = np.max(proba[:, clip_head_bg_indices], axis=1)
+                                        local_bg_checked[p_idx] += int(p_target.shape[0])
+                                        local_bg_veto[p_idx] += int(np.sum(p_target < (p_bg + float(bg_margin))))
+                                    except Exception:
+                                        pass
                     used: set[int] = set()
                     for det in dets or []:
                         local_preds[p_idx] += 1
@@ -10991,6 +11418,8 @@ def _mine_seed_prompt_stats_image_first(
                 agg[i]["duplicates"] = int(agg[i]["duplicates"] or 0) + int(local_dups[i])
                 agg[i]["preds"] = int(agg[i]["preds"] or 0) + int(local_preds[i])
                 agg[i]["det_images"] = int(agg[i]["det_images"] or 0) + int(local_det_imgs[i])
+                agg[i]["bg_checked"] = int(agg[i]["bg_checked"] or 0) + int(local_bg_checked[i])
+                agg[i]["bg_veto"] = int(agg[i]["bg_veto"] or 0) + int(local_bg_veto[i])
 
     max_workers = max(1, len(workers))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -11010,6 +11439,17 @@ def _mine_seed_prompt_stats_image_first(
         duplicates = int(item.get("duplicates") or 0)
         precision = matches / max(1, matches + fps)
         det_rate = det_images / total_images if total_images else 0.0
+        bg_checked = int(item.get("bg_checked") or 0)
+        bg_veto = int(item.get("bg_veto") or 0)
+        bg_veto_rate = float(bg_veto) / float(bg_checked) if bg_checked else 0.0
+        bg_drop = False
+        bg_drop_reason = None
+        if bg_drop_enabled:
+            min_checked = int(bg_cfg.get("min_checked") or 0)
+            drop_rate = float(bg_cfg.get("drop_rate") or 0.0)
+            if bg_checked >= min_checked and bg_veto_rate >= drop_rate:
+                bg_drop = True
+                bg_drop_reason = "background_rate"
         curve_summary = _summarize_seed_threshold_curve_for_prompt(
             gt_best_scores=gt_best_scores,
             fp_scores=fp_scores,
@@ -11026,6 +11466,11 @@ def _mine_seed_prompt_stats_image_first(
                 "preds": preds,
                 "precision": precision,
                 "det_rate": det_rate,
+                "bg_checked": bg_checked,
+                "bg_veto": bg_veto,
+                "bg_veto_rate": bg_veto_rate,
+                "bg_drop": bg_drop,
+                "bg_drop_reason": bg_drop_reason,
                 "seed_eval_threshold_used": float(seed_eval_threshold),
                 "seed_eval_max_results_used": int(seed_eval_max_results),
                 **(curve_summary or {}),
@@ -11091,6 +11536,55 @@ def _resolve_steps_prompt_prefilter_config(
     }
 
 
+def _resolve_steps_prompt_bg_drop_config(
+    payload: "AgentMiningRequest",
+    *,
+    allow_drop: bool = True,
+) -> Dict[str, Any]:
+    requested = bool(getattr(payload, "steps_prompt_bg_drop", False))
+    enabled = bool(requested and allow_drop)
+    disabled_reason = None
+    if requested and not allow_drop:
+        disabled_reason = "no_background_classes"
+    mode = str(getattr(payload, "steps_prompt_bg_drop_mode", "balanced") or "balanced").lower().strip()
+    if mode not in {"conservative", "balanced", "aggressive"}:
+        mode = "balanced"
+    mode_map = {
+        "conservative": {"min_checked": 60, "drop_rate": 0.75},
+        "balanced": {"min_checked": 40, "drop_rate": 0.6},
+        "aggressive": {"min_checked": 20, "drop_rate": 0.45},
+    }
+    cfg = mode_map[mode]
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "min_checked": int(cfg["min_checked"]),
+        "drop_rate": float(cfg["drop_rate"]),
+        "requested": requested,
+        "disabled_reason": disabled_reason,
+    }
+
+
+def _resolve_steps_hard_negative_export_config(payload: "AgentMiningRequest") -> Dict[str, Any]:
+    enabled = bool(getattr(payload, "steps_hard_negative_export", False))
+    try:
+        max_crops = int(getattr(payload, "steps_hard_negative_max_crops", 0) or 0)
+    except Exception:
+        max_crops = 0
+    max_crops = max(0, int(max_crops))
+    try:
+        min_prob = float(getattr(payload, "steps_hard_negative_min_prob", 0.0) or 0.0)
+    except Exception:
+        min_prob = 0.0
+    min_prob = max(0.0, min(1.0, float(min_prob)))
+    enabled = bool(enabled and max_crops > 0)
+    return {
+        "enabled": enabled,
+        "max_crops": int(max_crops),
+        "min_prob": float(min_prob),
+    }
+
+
 def _estimate_steps_speed_factor(payload: "AgentMiningRequest", *, allow_prefilter: bool = True) -> float:
     early_enabled = bool(getattr(payload, "steps_early_stop", False))
     early_mode = str(getattr(payload, "steps_early_stop_mode", "balanced") or "balanced").lower().strip()
@@ -11100,13 +11594,20 @@ def _estimate_steps_speed_factor(payload: "AgentMiningRequest", *, allow_prefilt
     prefilter_mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower().strip()
     if prefilter_mode not in {"conservative", "balanced", "aggressive"}:
         prefilter_mode = "balanced"
+    bg_drop_enabled = bool(getattr(payload, "steps_prompt_bg_drop", False))
+    bg_drop_mode = str(getattr(payload, "steps_prompt_bg_drop_mode", "balanced") or "balanced").lower().strip()
+    if bg_drop_mode not in {"conservative", "balanced", "aggressive"}:
+        bg_drop_mode = "balanced"
     early_factor = 1.0
     if early_enabled:
         early_factor = 0.9 if early_mode == "conservative" else 0.65 if early_mode == "aggressive" else 0.8
     prefilter_factor = 1.0
     if prefilter_enabled:
         prefilter_factor = 0.85 if prefilter_mode == "conservative" else 0.55 if prefilter_mode == "aggressive" else 0.7
-    return float(early_factor * prefilter_factor)
+    bg_drop_factor = 1.0
+    if bg_drop_enabled:
+        bg_drop_factor = 0.92 if bg_drop_mode == "conservative" else 0.7 if bg_drop_mode == "aggressive" else 0.82
+    return float(early_factor * prefilter_factor * bg_drop_factor)
 
 
 def _estimate_agent_global_optimizer_image_evals(
@@ -11384,6 +11885,7 @@ def _normalize_steps_for_head_tuning(
 def _tune_clip_head_for_selected_steps_image_first(
     *,
     cat_id: int,
+    class_name: Optional[str] = None,
     steps: Sequence[Dict[str, Any]],
     val_ids: Sequence[int],
     images: Dict[int, Dict[str, Any]],
@@ -11396,6 +11898,7 @@ def _tune_clip_head_for_selected_steps_image_first(
     log_fn: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    export_hard_negatives: bool = True,
 ) -> Dict[str, Any]:
     """
     Run the full step pipeline (seed->diverse->expand) for the selected prompts, then sweep CLIP-head
@@ -11419,6 +11922,23 @@ def _tune_clip_head_for_selected_steps_image_first(
     for img_id in val_ids:
         total_gt += len((gt_by_image_cat.get(int(img_id)) or {}).get(int(cat_id)) or [])
 
+    bg_guard_seed, bg_guard_final, bg_margin, _bg_apply = _resolve_clip_head_background_settings(payload)
+    classes_list = clip_head.get("classes") if isinstance(clip_head, dict) and isinstance(clip_head.get("classes"), list) else []
+    bg_indices = _clip_head_background_indices(classes_list)
+    allow_bg_tune = bool(bg_indices and getattr(payload, "clip_head_background_guard", False))
+    hard_neg_cfg = _resolve_steps_hard_negative_export_config(payload) if export_hard_negatives else {"enabled": False}
+    hard_neg_enabled = bool(hard_neg_cfg.get("enabled"))
+    try:
+        hard_neg_min_prob = float(hard_neg_cfg.get("min_prob") or 0.0)
+    except Exception:
+        hard_neg_min_prob = 0.0
+    try:
+        hard_neg_max_crops = int(hard_neg_cfg.get("max_crops") or 0)
+    except Exception:
+        hard_neg_max_crops = 0
+    hard_neg_entries: List[Dict[str, Any]] = []
+    hard_neg_lock = threading.Lock()
+
     flow_keys = (
         "text_candidates_total",
         "candidates_after_dedupe",
@@ -11428,21 +11948,30 @@ def _tune_clip_head_for_selected_steps_image_first(
         "final_seed_total",
         "final_expanded_total",
         "final_total",
+        "seed_bg_checked",
+        "seed_bg_veto",
+        "final_bg_checked",
+        "final_bg_veto",
     )
     step_flow_totals: List[Dict[str, Any]] = []
     for step_cfg in steps_norm:
         step_flow_totals.append({"prompt": str(step_cfg.get("prompt") or ""), **{k: 0 for k in flow_keys}})
 
-    sweep_min_probs, sweep_margins, target_precision = _build_clip_head_sweep_grid(
+    sweep_min_probs, sweep_margins, sweep_bg_margins, target_precision = _build_clip_head_sweep_grid(
         payload,
         base_min_prob=float(payload.clip_head_min_prob),
         base_margin=float(payload.clip_head_margin),
+        base_bg_margin=float(bg_margin),
+        allow_bg_tune=allow_bg_tune,
     )
 
     def _counts_init() -> Dict[str, int]:
         return {"matches": 0, "fps": 0, "duplicates": 0, "preds": 0, "det_images": 0}
 
-    agg: Dict[float, Dict[float, Dict[str, int]]] = {float(m): {float(p): _counts_init() for p in sweep_min_probs} for m in sweep_margins}
+    agg: Dict[float, Dict[float, Dict[float, Dict[str, int]]]] = {
+        float(m): {float(bg): {float(p): _counts_init() for p in sweep_min_probs} for bg in sweep_bg_margins}
+        for m in sweep_margins
+    }
     debug = {"base_dets": 0, "with_prob": 0, "prob_min": None, "prob_max": None}
 
     agg_lock = threading.Lock()
@@ -11481,10 +12010,17 @@ def _tune_clip_head_for_selected_steps_image_first(
         return str(raw).strip()
 
     def _worker_loop(worker: "_Sam3GreedyEvalWorker") -> None:
-        local: Dict[float, Dict[float, Dict[str, int]]] = {float(m): {float(p): _counts_init() for p in sweep_min_probs} for m in sweep_margins}
+        local: Dict[float, Dict[float, Dict[float, Dict[str, int]]]] = {
+            float(m): {float(bg): {float(p): _counts_init() for p in sweep_min_probs} for bg in sweep_bg_margins}
+            for m in sweep_margins
+        }
         local_debug = {"base_dets": 0, "with_prob": 0, "prob_min": None, "prob_max": None}
         local_step_flow: List[Dict[str, int]] = [{k: 0 for k in flow_keys} for _ in steps_norm]
+        local_set_image_failures = 0
+        local_infer_failures = 0
         clip_device_override = _resolve_clip_device(worker.device)
+        local_hard_negs: List[Dict[str, Any]] = []
+        local_hard_cap = max(0, int(hard_neg_max_crops)) * 2 if hard_neg_enabled else 0
 
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -11507,11 +12043,17 @@ def _tune_clip_head_for_selected_steps_image_first(
             gt_boxes = (gt_by_image_cat.get(int(img_id)) or {}).get(int(cat_id)) or []
             gt_xyxy = [_xywh_to_xyxy(b) for b in gt_boxes]
 
-            rows: List[Tuple[float, float, float, Optional[int]]] = []
+            rows: List[Tuple[float, float, float, Optional[float], Optional[int]]] = []
             with worker.lock:
                 try:
                     state = worker.processor.set_image(pil_img)
-                except Exception:
+                except Exception as exc:
+                    if log_fn and local_set_image_failures < 3:
+                        local_set_image_failures += 1
+                        try:
+                            log_fn(f"[steps] Final tune: set_image failed on {worker.device} for img {img_id}: {exc}")
+                        except Exception:
+                            pass
                     state = None
                 if state is not None:
                     for step_idx, step_cfg in enumerate(steps_norm):
@@ -11543,12 +12085,20 @@ def _tune_clip_head_for_selected_steps_image_first(
                                 clip_head_target_index=int(clip_head_target_index),
                                 clip_head_min_prob=0.0,
                                 clip_head_margin=0.0,
-                                clip_head_background_guard=payload.clip_head_background_guard,
+                                clip_head_background_guard_seed=bg_guard_seed,
+                                clip_head_background_guard_final=bg_guard_final,
+                                clip_head_background_margin=bg_margin,
                                 stats_out=flow_stats,
                                 state=state,
                                 clip_device_override=clip_device_override,
                             )
-                        except Exception:
+                        except Exception as exc:
+                            if log_fn and local_infer_failures < 3:
+                                local_infer_failures += 1
+                                try:
+                                    log_fn(f"[steps] Final tune: step failed for '{prompt}' on img {img_id}: {exc}")
+                                except Exception:
+                                    pass
                             dets_step = []
                         if 0 <= step_idx < len(local_step_flow):
                             for key in flow_keys:
@@ -11573,7 +12123,33 @@ def _tune_clip_head_for_selected_steps_image_first(
                                     best_idx = j
                             prob = float(det.clip_head_prob) if det.clip_head_prob is not None else 0.0
                             margin = float(det.clip_head_margin) if det.clip_head_margin is not None else 0.0
-                            rows.append((prob, margin, float(best_iou), best_idx))
+                            bg_prob = float(det.clip_head_bg_prob) if det.clip_head_bg_prob is not None else None
+                            if hard_neg_enabled and hard_neg_max_crops > 0:
+                                is_fp = best_idx is None or float(best_iou) < float(payload.iou_threshold)
+                                if is_fp:
+                                    score = prob
+                                    if det.clip_head_prob is None:
+                                        try:
+                                            score = float(det.score) if det.score is not None else 0.0
+                                        except Exception:
+                                            score = 0.0
+                                    if float(score) >= float(hard_neg_min_prob):
+                                        local_hard_negs.append(
+                                            {
+                                                "image_id": int(img_id),
+                                                "image_path": str(path),
+                                                "bbox_xyxy": [float(det_xyxy[0]), float(det_xyxy[1]), float(det_xyxy[2]), float(det_xyxy[3])],
+                                                "score": float(score),
+                                                "clip_prob": float(prob) if det.clip_head_prob is not None else None,
+                                                "clip_bg_prob": float(bg_prob) if bg_prob is not None else None,
+                                                "clip_margin": float(margin) if det.clip_head_margin is not None else None,
+                                                "prompt": str(prompt),
+                                            }
+                                        )
+                                        if local_hard_cap and len(local_hard_negs) > local_hard_cap:
+                                            local_hard_negs.sort(key=lambda e: float(e.get("score") or 0.0), reverse=True)
+                                            local_hard_negs[:] = local_hard_negs[:local_hard_cap]
+                            rows.append((prob, margin, float(best_iou), bg_prob, best_idx))
                             local_debug["base_dets"] += 1
                             if det.clip_head_prob is not None:
                                 local_debug["with_prob"] += 1
@@ -11589,27 +12165,31 @@ def _tune_clip_head_for_selected_steps_image_first(
                                     local_debug["prob_max"] = prob
 
             for margin_thr in sweep_margins:
-                for min_prob in sweep_min_probs:
-                    counts = local[float(margin_thr)][float(min_prob)]
-                    used: set[int] = set()
-                    any_det = False
-                    for prob, margin, best_iou, best_idx in rows:
-                        if prob < float(min_prob):
-                            continue
-                        if float(margin_thr) > 0.0 and margin < float(margin_thr):
-                            continue
-                        any_det = True
-                        counts["preds"] += 1
-                        if best_idx is not None and best_iou >= float(payload.iou_threshold):
-                            if best_idx in used:
-                                counts["duplicates"] += 1
+                for bg_margin_thr in sweep_bg_margins:
+                    for min_prob in sweep_min_probs:
+                        counts = local[float(margin_thr)][float(bg_margin_thr)][float(min_prob)]
+                        used: set[int] = set()
+                        any_det = False
+                        for prob, margin, best_iou, bg_prob, best_idx in rows:
+                            if prob < float(min_prob):
+                                continue
+                            if float(margin_thr) > 0.0 and margin < float(margin_thr):
+                                continue
+                            if allow_bg_tune and float(bg_margin_thr) > 0.0 and bg_prob is not None:
+                                if prob < float(bg_prob) + float(bg_margin_thr):
+                                    continue
+                            any_det = True
+                            counts["preds"] += 1
+                            if best_idx is not None and best_iou >= float(payload.iou_threshold):
+                                if best_idx in used:
+                                    counts["duplicates"] += 1
+                                else:
+                                    used.add(best_idx)
+                                    counts["matches"] += 1
                             else:
-                                used.add(best_idx)
-                                counts["matches"] += 1
-                        else:
-                            counts["fps"] += 1
-                    if any_det:
-                        counts["det_images"] += 1
+                                counts["fps"] += 1
+                        if any_det:
+                            counts["det_images"] += 1
 
             try:
                 work_q.task_done()
@@ -11618,14 +12198,15 @@ def _tune_clip_head_for_selected_steps_image_first(
             _mark_progress()
 
         with agg_lock:
-            for m, by_prob in local.items():
-                for p, counts in by_prob.items():
-                    dst = agg[m][p]
-                    for k in ("matches", "fps", "duplicates", "preds", "det_images"):
-                        try:
-                            dst[k] = int(dst.get(k, 0)) + int(counts.get(k, 0))
-                        except Exception:
-                            continue
+            for m, by_bg in local.items():
+                for bg, by_prob in by_bg.items():
+                    for p, counts in by_prob.items():
+                        dst = agg[float(m)][float(bg)][float(p)]
+                        for k in ("matches", "fps", "duplicates", "preds", "det_images"):
+                            try:
+                                dst[k] = int(dst.get(k, 0)) + int(counts.get(k, 0))
+                            except Exception:
+                                continue
             for idx, stats in enumerate(local_step_flow):
                 if idx >= len(step_flow_totals):
                     continue
@@ -11660,6 +12241,12 @@ def _tune_clip_head_for_selected_steps_image_first(
                         debug[bound] = float(max(float(cur), val_f))
                 except Exception:
                     debug[bound] = val_f
+            if hard_neg_enabled and local_hard_negs:
+                with hard_neg_lock:
+                    hard_neg_entries.extend(local_hard_negs)
+                    if hard_neg_max_crops and len(hard_neg_entries) > hard_neg_max_crops:
+                        hard_neg_entries.sort(key=lambda e: float(e.get("score") or 0.0), reverse=True)
+                        hard_neg_entries[:] = hard_neg_entries[: int(hard_neg_max_crops)]
 
     max_workers = max(1, len(workers))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -11668,30 +12255,32 @@ def _tune_clip_head_for_selected_steps_image_first(
             fut.result()
 
     best_summary: Optional[Dict[str, Any]] = None
-    best_key: Optional[Tuple[int, float, int, float, float, float]] = None
+    best_key: Optional[Tuple[int, float, int, float, float, float, float]] = None
     for margin_thr in sweep_margins:
-        for min_prob in sweep_min_probs:
-            counts = agg.get(float(margin_thr), {}).get(float(min_prob)) or {}
-            matched = int(counts.get("matches") or 0)
-            fps = int(counts.get("fps") or 0)
-            duplicates = int(counts.get("duplicates") or 0)
-            preds = int(counts.get("preds") or 0)
-            det_images = int(counts.get("det_images") or 0)
-            best_summary, best_key = _update_best_clip_head_sweep_summary(
-                best_summary=best_summary,
-                best_key=best_key,
-                total_gt=int(total_gt),
-                total_images=int(total_images),
-                matched=int(matched),
-                fps=int(fps),
-                duplicates=int(duplicates),
-                preds=int(preds),
-                det_images=int(det_images),
-                min_prob=float(min_prob),
-                margin=float(margin_thr),
-                target_precision=float(target_precision),
-                debug=debug,
-            )
+        for bg_margin_thr in sweep_bg_margins:
+            for min_prob in sweep_min_probs:
+                counts = agg.get(float(margin_thr), {}).get(float(bg_margin_thr), {}).get(float(min_prob)) or {}
+                matched = int(counts.get("matches") or 0)
+                fps = int(counts.get("fps") or 0)
+                duplicates = int(counts.get("duplicates") or 0)
+                preds = int(counts.get("preds") or 0)
+                det_images = int(counts.get("det_images") or 0)
+                best_summary, best_key = _update_best_clip_head_sweep_summary(
+                    best_summary=best_summary,
+                    best_key=best_key,
+                    total_gt=int(total_gt),
+                    total_images=int(total_images),
+                    matched=int(matched),
+                    fps=int(fps),
+                    duplicates=int(duplicates),
+                    preds=int(preds),
+                    det_images=int(det_images),
+                    min_prob=float(min_prob),
+                    margin=float(margin_thr),
+                    bg_margin=float(bg_margin_thr),
+                    target_precision=float(target_precision),
+                    debug=debug,
+                )
     if best_summary is None:
         best_summary = {
             "gts": total_gt,
@@ -11705,6 +12294,7 @@ def _tune_clip_head_for_selected_steps_image_first(
             "det_rate": 0.0,
             "clip_head_min_prob": float(payload.clip_head_min_prob),
             "clip_head_margin": float(payload.clip_head_margin),
+            "clip_head_background_margin": float(bg_margin),
             "clip_head_target_precision": float(target_precision),
             "clip_head_meets_target_precision": False,
             "debug": debug,
@@ -11714,6 +12304,17 @@ def _tune_clip_head_for_selected_steps_image_first(
             "images": int(total_images),
             "steps": step_flow_totals,
         }
+        try:
+            seed_bg_checked = sum(int(entry.get("seed_bg_checked") or 0) for entry in step_flow_totals)
+            seed_bg_veto = sum(int(entry.get("seed_bg_veto") or 0) for entry in step_flow_totals)
+            final_bg_checked = sum(int(entry.get("final_bg_checked") or 0) for entry in step_flow_totals)
+            final_bg_veto = sum(int(entry.get("final_bg_veto") or 0) for entry in step_flow_totals)
+            best_summary["bg_veto_seed"] = int(seed_bg_veto)
+            best_summary["bg_veto_final"] = int(final_bg_veto)
+            best_summary["bg_veto_rate_seed"] = float(seed_bg_veto) / float(seed_bg_checked) if seed_bg_checked else 0.0
+            best_summary["bg_veto_rate_final"] = float(final_bg_veto) / float(final_bg_checked) if final_bg_checked else 0.0
+        except Exception:
+            pass
         if log_fn and total_images > 0:
             try:
                 for entry in step_flow_totals:
@@ -11727,6 +12328,17 @@ def _tune_clip_head_for_selected_steps_image_first(
                     final_seed_total = int(entry.get("final_seed_total") or 0)
                     final_expanded_total = int(entry.get("final_expanded_total") or 0)
                     final_total = int(entry.get("final_total") or 0)
+                    seed_bg_checked = int(entry.get("seed_bg_checked") or 0)
+                    seed_bg_veto = int(entry.get("seed_bg_veto") or 0)
+                    final_bg_checked = int(entry.get("final_bg_checked") or 0)
+                    final_bg_veto = int(entry.get("final_bg_veto") or 0)
+                    bg_bits = ""
+                    if seed_bg_checked > 0 or final_bg_checked > 0:
+                        bg_bits = (
+                            f" bg_seed={seed_bg_veto}/{seed_bg_checked} "
+                            f"bg_final={final_bg_veto}/{final_bg_checked}"
+                        )
+                    no_text = " (no text candidates)" if text_total == 0 else ""
                     log_fn(
                         "[steps] Similarity flow "
                         f"'{prompt}': text={text_total} kept={kept_total} "
@@ -11739,9 +12351,44 @@ def _tune_clip_head_for_selected_steps_image_first(
                         f"final_seed={final_seed_total/total_images:.2f} "
                         f"final_expanded={final_expanded_total/total_images:.2f} "
                         f"final={final_total/total_images:.2f})"
+                        + bg_bits
+                        + no_text
                     )
             except Exception:
                 pass
+    if hard_neg_enabled:
+        export_info = _export_hard_negative_replay(
+            dataset_id=str(payload.dataset_id),
+            class_id=int(cat_id),
+            class_name=str(class_name or f"class_{cat_id}"),
+            entries=hard_neg_entries,
+            max_crops=int(hard_neg_max_crops),
+            log_fn=log_fn,
+        )
+        if isinstance(export_info, dict):
+            best_summary["hard_negative_export"] = export_info
+        else:
+            best_summary["hard_negative_export"] = {
+                "enabled": True,
+                "count": 0,
+                "max_crops": int(hard_neg_max_crops),
+            }
+    elif export_hard_negatives and isinstance(best_summary, dict):
+        best_summary["hard_negative_export"] = {
+            "enabled": False,
+            "count": 0,
+            "max_crops": int(hard_neg_max_crops),
+        }
+    try:
+        best_summary["clip_head_background_guard"] = bool(getattr(payload, "clip_head_background_guard", False))
+        if best_summary.get("clip_head_background_margin") is None:
+            best_summary["clip_head_background_margin"] = float(
+                getattr(payload, "clip_head_background_margin", 0.0) or 0.0
+            )
+        best_summary["clip_head_background_apply"] = str(getattr(payload, "clip_head_background_apply", "final") or "final")
+        best_summary["clip_head_background_penalty"] = float(getattr(payload, "clip_head_background_penalty", 0.0) or 0.0)
+    except Exception:
+        pass
     return best_summary
 
 
@@ -11886,10 +12533,12 @@ def _tune_steps_tier1_knobs_image_first(
     stage1 = max(1, int(eval_cap // 4))
     budgets = [int(eval_cap)] if stage1 >= eval_cap else [int(stage1), int(eval_cap)]
 
-    _, _, target_precision = _build_clip_head_sweep_grid(
+    _, _, _, target_precision = _build_clip_head_sweep_grid(
         payload,
         base_min_prob=float(payload.clip_head_min_prob),
         base_margin=float(payload.clip_head_margin),
+        base_bg_margin=float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
+        allow_bg_tune=False,
     )
 
     def _apply_candidate(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -11920,6 +12569,7 @@ def _tune_steps_tier1_knobs_image_first(
         subset = val_ids[: max(1, min(int(budget), int(total_val)))]
         summary = _tune_clip_head_for_selected_steps_image_first(
             cat_id=cat_id,
+            class_name=None,
             steps=steps_candidate,
             val_ids=subset,
             images=images,
@@ -11932,6 +12582,7 @@ def _tune_steps_tier1_knobs_image_first(
             log_fn=None,
             cancel_event=cancel_event,
             progress_callback=None,
+            export_hard_negatives=False,
         )
         try:
             matched = int(summary.get("matches") or 0)
@@ -11945,6 +12596,24 @@ def _tune_steps_tier1_knobs_image_first(
             precision = float(summary.get("precision") or 0.0)
         except Exception:
             precision = 0.0
+        bg_penalty = 0.0
+        try:
+            bg_penalty = float(getattr(payload, "clip_head_background_penalty", 0.0) or 0.0)
+        except Exception:
+            bg_penalty = 0.0
+        bg_rate = 0.0
+        try:
+            bg_rate = float(summary.get("bg_veto_rate_final") or 0.0)
+        except Exception:
+            bg_rate = 0.0
+        precision_adj = float(precision)
+        if bg_penalty > 0.0 and bg_rate > 0.0:
+            precision_adj = max(0.0, float(precision) - float(bg_penalty) * float(bg_rate))
+            try:
+                summary["bg_penalty_applied"] = float(bg_penalty)
+                summary["bg_penalty_precision"] = float(precision_adj)
+            except Exception:
+                pass
         try:
             min_prob = float(summary.get("clip_head_min_prob") or 0.0)
         except Exception:
@@ -11956,7 +12625,7 @@ def _tune_steps_tier1_knobs_image_first(
         key = _score_head_tuning_candidate(
             matched=matched,
             fps=fps,
-            precision=precision,
+            precision=precision_adj,
             min_prob=min_prob,
             margin=margin,
             target_precision=float(target_precision),
@@ -12171,10 +12840,12 @@ def _tune_steps_tier2_knobs_image_first(
     stage1 = max(1, int(eval_cap // 4))
     budgets = [int(eval_cap)] if stage1 >= eval_cap else [int(stage1), int(eval_cap)]
 
-    _, _, target_precision = _build_clip_head_sweep_grid(
+    _, _, _, target_precision = _build_clip_head_sweep_grid(
         payload,
         base_min_prob=float(payload.clip_head_min_prob),
         base_margin=float(payload.clip_head_margin),
+        base_bg_margin=float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
+        allow_bg_tune=False,
     )
 
     def _apply_candidate(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -12206,6 +12877,7 @@ def _tune_steps_tier2_knobs_image_first(
         subset = val_ids[: max(1, min(int(budget), int(total_val)))]
         summary = _tune_clip_head_for_selected_steps_image_first(
             cat_id=cat_id,
+            class_name=None,
             steps=steps_candidate,
             val_ids=subset,
             images=images,
@@ -12218,6 +12890,7 @@ def _tune_steps_tier2_knobs_image_first(
             log_fn=None,
             cancel_event=cancel_event,
             progress_callback=None,
+            export_hard_negatives=False,
         )
         try:
             matched = int(summary.get("matches") or 0)
@@ -12811,10 +13484,12 @@ def _tune_steps_global_optimizer_image_first(
     enable_max_results = bool(getattr(payload, "steps_optimize_global_enable_max_results", False))
     enable_ordering = bool(getattr(payload, "steps_optimize_global_enable_ordering", False))
 
-    _, _, target_precision = _build_clip_head_sweep_grid(
+    _, _, _, target_precision = _build_clip_head_sweep_grid(
         payload,
         base_min_prob=float(payload.clip_head_min_prob),
         base_margin=float(payload.clip_head_margin),
+        base_bg_margin=float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
+        allow_bg_tune=False,
     )
 
     # Precompute deterministic val subsets for each budget.
@@ -12853,6 +13528,7 @@ def _tune_steps_global_optimizer_image_first(
         subset = val_subsets.get(int(budget)) or list(val_ids)[: max(1, min(int(budget), int(total_val)))]
         summary = _tune_clip_head_for_selected_steps_image_first(
             cat_id=cat_id,
+            class_name=None,
             steps=steps_c,
             val_ids=subset,
             images=images,
@@ -12865,6 +13541,7 @@ def _tune_steps_global_optimizer_image_first(
             log_fn=None,
             cancel_event=cancel_event,
             progress_callback=None,
+            export_hard_negatives=False,
         )
         try:
             matched = int(summary.get("matches") or 0)
@@ -16569,6 +17246,19 @@ class AgentMiningRequest(BaseModel):
             "Balanced is a good default."
         ),
     )
+    steps_prompt_bg_drop: bool = Field(
+        True,
+        description=(
+            "When search_mode='steps', drop prompts that mostly trigger CLIP background classes "
+            "(auto-skip noisy prompts before building steps). Requires a head with __bg_* classes."
+        ),
+    )
+    steps_prompt_bg_drop_mode: Literal["conservative", "balanced", "aggressive"] = Field(
+        "balanced",
+        description=(
+            "Background-drop strictness: conservative drops fewer prompts, aggressive drops more."
+        ),
+    )
     steps_optimize_tier2: bool = Field(
         False,
         description=(
@@ -16711,11 +17401,61 @@ class AgentMiningRequest(BaseModel):
         ),
     )
     clip_head_background_guard: bool = Field(
-        False,
+        True,
         description=(
-            "When enabled, reject detections if a background class scores higher than the target class "
+            "When enabled, reject detections that score higher for a background class than the target class "
             "(uses the __bg_* classes trained from negative crops)."
         ),
+    )
+    clip_head_background_margin: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional margin when using background suppression: require the target class to beat the best "
+            "background class by at least this amount."
+        ),
+    )
+    clip_head_background_auto_tune: bool = Field(
+        True,
+        description=(
+            "When using a pretrained CLIP head, auto-tune per-class background margin during recipe mining "
+            "(recommended when __bg_* classes are present)."
+        ),
+    )
+    clip_head_background_apply: Literal["seed", "final", "both"] = Field(
+        "final",
+        description=(
+            "Where to apply background suppression: seed candidates only, final detections only, or both."
+        ),
+    )
+    clip_head_background_penalty: float = Field(
+        0.0,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Optional penalty weight applied during optimization to prefer recipes with lower background confusion."
+        ),
+    )
+
+    steps_hard_negative_export: bool = Field(
+        True,
+        description=(
+            "Export a capped set of hard-negative crops (false positives) during recipe mining so they can be "
+            "replayed as background examples in future CLIP training."
+        ),
+    )
+    steps_hard_negative_max_crops: int = Field(
+        200,
+        ge=0,
+        le=5000,
+        description="Maximum hard-negative crops to export per class (0 disables export).",
+    )
+    steps_hard_negative_min_prob: float = Field(
+        0.1,
+        ge=0.0,
+        le=1.0,
+        description="Minimum CLIP target probability for a false positive to be exported as a hard negative.",
     )
 
     # Greedy SAM3 recipe parameters.
@@ -17929,7 +18669,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             + f"cand_iou={payload.seed_dedupe_iou} out_iou={payload.dedupe_iou} "
             + f"mask_thr={payload.mask_threshold} max_results={payload.max_results} iou_eval={payload.iou_threshold} "
             + f"llm_prompts={payload.prompt_llm_max_prompts} workers_per_gpu={getattr(payload, 'max_workers_per_device', 1)} "
-            + f"steps(max_steps={int(payload.steps_max_steps_per_recipe)}, candidates/step={int(payload.steps_max_visual_seeds_per_step)})"
+            + f"steps(max_steps={int(payload.steps_max_steps_per_recipe)}, candidates/step={int(payload.steps_max_visual_seeds_per_step)}) "
+            + f"bg_guard={bool(payload.clip_head_background_guard)} "
+            + f"bg_apply={getattr(payload, 'clip_head_background_apply', 'final')} "
+            + f"bg_margin={getattr(payload, 'clip_head_background_margin', 0.0)} "
+            + f"bg_penalty={getattr(payload, 'clip_head_background_penalty', 0.0)}"
         )
 
         # Pretrained CLIP head (LogReg) is required for Agent Mining (recipe mining).
@@ -17939,6 +18683,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         clip_head = _load_clip_head_from_classifier(clip_head_path)
         if not isinstance(clip_head, dict):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
+        head_encoder_type = str(clip_head.get("encoder_type") or "clip").lower().strip()
+        if not head_encoder_type:
+            head_encoder_type = "clip"
+        prefilter_allowed = head_encoder_type == "clip"
         head_mode_bits = ""
         try:
             if bool(getattr(payload, "clip_head_auto_tune", True)):
@@ -18043,6 +18791,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             )
         elif prefilter_cfg.get("requested") and not prefilter_allowed:
             _log(f"CLIP prompt prefilter disabled: head encoder_type={head_encoder_type}")
+
+        bg_indices = _clip_head_background_indices(classes_list) if clip_head else []
+        prompt_bg_drop_cfg = _resolve_steps_prompt_bg_drop_config(payload, allow_drop=bool(bg_indices))
+        if prompt_bg_drop_cfg.get("enabled"):
+            _log(
+                "Prompt background drop enabled: "
+                f"mode={prompt_bg_drop_cfg.get('mode')} min_checked={prompt_bg_drop_cfg.get('min_checked')} "
+                f"drop_rate={float(prompt_bg_drop_cfg.get('drop_rate') or 0.0):.2f}"
+            )
+        elif prompt_bg_drop_cfg.get("requested") and prompt_bg_drop_cfg.get("disabled_reason") == "no_background_classes":
+            _log("Prompt background drop disabled: no __bg_* classes in CLIP head.")
 
         prepared_prompts: Dict[int, List[str]] = {}
         prompt_prefilter_stats: Dict[int, Dict[str, Any]] = {}
@@ -18223,12 +18982,29 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         images=images,
                         gt_by_image_cat=gt_by_image_cat,
                         payload=eval_payload,
+                        clip_head=clip_head,
+                        clip_head_target_index=head_target_index,
+                        clip_head_bg_indices=bg_indices,
+                        prompt_bg_drop_cfg=prompt_bg_drop_cfg,
                         workers=eval_workers,
                         log_every=eval_log_every,
                         log_fn=_log,
                         cancel_event=job.cancel_event,
                         progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Candidate eval"),
                     )
+                    prompt_bg_drop_summary: Optional[Dict[str, Any]] = None
+                    if isinstance(prompt_bg_drop_cfg, dict) and (prompt_bg_drop_cfg.get("enabled") or prompt_bg_drop_cfg.get("requested")):
+                        dropped = sum(1 for s in (seed_stats or []) if isinstance(s, dict) and s.get("bg_drop"))
+                        prompt_bg_drop_summary = {
+                            "enabled": bool(prompt_bg_drop_cfg.get("enabled")),
+                            "mode": str(prompt_bg_drop_cfg.get("mode") or "balanced"),
+                            "min_checked": int(prompt_bg_drop_cfg.get("min_checked") or 0),
+                            "drop_rate": float(prompt_bg_drop_cfg.get("drop_rate") or 0.0),
+                            "total": int(len(seed_stats or [])),
+                            "dropped": int(dropped),
+                            "requested": bool(prompt_bg_drop_cfg.get("requested")),
+                            "disabled_reason": prompt_bg_drop_cfg.get("disabled_reason"),
+                        }
                     target_prec = (
                         float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0)
                         if (clip_head is not None and head_target_index is not None)
@@ -18335,6 +19111,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         job.updated_at = time.time()
                         summary = _tune_clip_head_for_selected_steps_image_first(
                             cat_id=cid,
+                            class_name=name,
                             steps=step_list,
                             val_ids=eval_ids,
                             images=images,
@@ -18347,6 +19124,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             log_fn=_log,
                             cancel_event=job.cancel_event,
                             progress_callback=_mk_phase_cb(class_base + seed_span, tune_span, "[steps] Final tune"),
+                            export_hard_negatives=True,
                         )
                         if tier1_info and isinstance(summary, dict):
                             summary["tier1_tuning"] = tier1_info
@@ -18360,6 +19138,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             prefilter_summary = prompt_prefilter_stats.get(int(cid))
                             if isinstance(prefilter_summary, dict):
                                 summary["prompt_prefilter"] = prefilter_summary
+                            if isinstance(prompt_bg_drop_summary, dict):
+                                summary["prompt_bg_drop"] = prompt_bg_drop_summary
                             if isinstance(early_stop_info, dict):
                                 summary["early_stop"] = early_stop_info
                     else:
@@ -18380,15 +19160,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         prefilter_summary = prompt_prefilter_stats.get(int(cid))
                         if isinstance(prefilter_summary, dict):
                             summary["prompt_prefilter"] = prefilter_summary
+                        if isinstance(prompt_bg_drop_summary, dict):
+                            summary["prompt_bg_drop"] = prompt_bg_drop_summary
                         if isinstance(early_stop_info, dict):
                             summary["early_stop"] = early_stop_info
 
                     summaries[cid] = summary
                     tuned_min_prob = None
                     tuned_margin = None
+                    tuned_bg_margin = None
                     if isinstance(summary, dict):
                         tuned_min_prob = summary.get("clip_head_min_prob")
                         tuned_margin = summary.get("clip_head_margin")
+                        tuned_bg_margin = summary.get("clip_head_background_margin")
                     try:
                         final_min_prob = float(tuned_min_prob) if tuned_min_prob is not None else float(payload.clip_head_min_prob)
                     except Exception:
@@ -18397,6 +19181,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         final_margin = float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin)
                     except Exception:
                         final_margin = float(payload.clip_head_margin)
+                    try:
+                        final_bg_margin = float(tuned_bg_margin) if tuned_bg_margin is not None else float(payload.clip_head_background_margin)
+                    except Exception:
+                        final_bg_margin = float(payload.clip_head_background_margin)
                     if step_list:
                         for step in step_list:
                             if not isinstance(step, dict):
@@ -18525,6 +19313,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             "simplify_epsilon": float(eval_payload.simplify_epsilon),
                             "max_results": int(tuned_max_results),
                             "clip_head_background_guard": bool(getattr(eval_payload, "clip_head_background_guard", False)),
+                            "clip_head_background_margin": float(final_bg_margin),
+                            "clip_head_background_apply": str(getattr(eval_payload, "clip_head_background_apply", "final") or "final"),
+                            "clip_head_background_penalty": float(getattr(eval_payload, "clip_head_background_penalty", 0.0) or 0.0),
                         },
                         "summary": {
                             **(summary or {}),
@@ -18592,6 +19383,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         "classes": clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else [],
                         "min_prob": float(tuned_min_prob) if tuned_min_prob is not None else float(payload.clip_head_min_prob),
                         "margin": float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin),
+                        "background_margin": float(tuned_bg_margin)
+                        if tuned_bg_margin is not None
+                        else float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
                         "auto_tuned": bool(getattr(payload, "clip_head_auto_tune", True)),
                         "target_precision": float(getattr(payload, "clip_head_target_precision", 0.9)),
                     }

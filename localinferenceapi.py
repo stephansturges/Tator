@@ -6563,7 +6563,7 @@ def _clip_head_predict_proba(feats: np.ndarray, head: Dict[str, Any]) -> Optiona
             try:
                 adj = np.asarray(logit_adj, dtype=np.float32).reshape(-1)
                 if adj.shape[0] == 2:
-                    logits = logits + adj[1]
+                    logits = logits + (adj[1] - adj[0])
             except Exception:
                 pass
         if temperature_val is not None and temperature_val != 1.0:

@@ -1054,7 +1054,6 @@
         "sam-similarity": "sam3",
         "sam3-batch": "sam3",
         "sam3-cascade": "sam3",
-        "sam3-cascade-batch": "sam3",
         "clip-auto": "clip",
         "recipe-apply": "recipe",
         "recipe-cascade": "recipe-cascade",
@@ -1136,15 +1135,13 @@
         maxResultsInput: null,
         runButton: null,
         autoButton: null,
+        cascadeToggleButton: null,
+        cascadePanel: null,
         cascadeSteps: null,
         cascadeAddButton: null,
         cascadeRunButton: null,
         cascadeStopButton: null,
         cascadeClearButton: null,
-        cascadeBatchCountInput: null,
-        cascadeBatchIncludeCurrentToggle: null,
-        cascadeBatchRunButton: null,
-        cascadeBatchStopButton: null,
         batchCountInput: null,
         batchIncludeCurrentToggle: null,
         batchAutoToggle: null,
@@ -1212,8 +1209,7 @@
     let sam3TextBatchCancel = false;
     let sam3TextCascadeActive = false;
     let sam3TextCascadeCancel = false;
-    let sam3TextCascadeBatchActive = false;
-    let sam3TextCascadeBatchCancel = false;
+    let sam3TextCascadeEnabled = false;
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
     const qwenModelState = {
@@ -10100,15 +10096,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
+        sam3TextElements.cascadeToggleButton = document.getElementById("sam3TextCascadeToggle");
+        sam3TextElements.cascadePanel = document.getElementById("sam3TextCascadePanel");
         sam3TextElements.cascadeSteps = document.getElementById("sam3TextCascadeSteps");
         sam3TextElements.cascadeAddButton = document.getElementById("sam3TextCascadeAdd");
         sam3TextElements.cascadeRunButton = document.getElementById("sam3TextCascadeRun");
         sam3TextElements.cascadeStopButton = document.getElementById("sam3TextCascadeStop");
         sam3TextElements.cascadeClearButton = document.getElementById("sam3TextCascadeClear");
-        sam3TextElements.cascadeBatchCountInput = document.getElementById("sam3TextCascadeBatchCount");
-        sam3TextElements.cascadeBatchIncludeCurrentToggle = document.getElementById("sam3TextCascadeBatchIncludeCurrent");
-        sam3TextElements.cascadeBatchRunButton = document.getElementById("sam3TextCascadeBatchRun");
-        sam3TextElements.cascadeBatchStopButton = document.getElementById("sam3TextCascadeBatchStop");
         sam3TextElements.batchCountInput = document.getElementById("sam3BatchCount");
         sam3TextElements.batchIncludeCurrentToggle = document.getElementById("sam3BatchIncludeCurrent");
         sam3TextElements.batchAutoToggle = document.getElementById("sam3BatchAuto");
@@ -10144,6 +10138,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
         }
+        if (sam3TextElements.cascadeToggleButton) {
+            sam3TextElements.cascadeToggleButton.addEventListener("click", () => toggleSam3TextCascade());
+        }
         if (sam3TextElements.cascadeAddButton) {
             sam3TextElements.cascadeAddButton.addEventListener("click", () => addSam3TextCascadeStep());
         }
@@ -10156,12 +10153,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextElements.cascadeClearButton) {
             sam3TextElements.cascadeClearButton.addEventListener("click", () => clearSam3TextCascade());
         }
-        if (sam3TextElements.cascadeBatchRunButton) {
-            sam3TextElements.cascadeBatchRunButton.addEventListener("click", () => startSam3TextCascadeBatch());
-        }
-        if (sam3TextElements.cascadeBatchStopButton) {
-            sam3TextElements.cascadeBatchStopButton.addEventListener("click", () => stopSam3TextCascadeBatch());
-        }
         if (sam3TextElements.batchRunButton) {
             sam3TextElements.batchRunButton.addEventListener("click", () => startSam3TextBatch());
         }
@@ -10171,9 +10162,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextElements.similarityButton) {
             sam3TextElements.similarityButton.addEventListener("click", handleSam3SimilarityPrompt);
         }
-        if (sam3TextElements.cascadeSteps && !sam3TextElements.cascadeSteps.children.length) {
-            addSam3TextCascadeStep({ useCurrentDefaults: true });
-        }
+        setSam3TextCascadeEnabled(false);
         if (sam3RecipeElements.fileInput) {
             sam3RecipeElements.fileInput.addEventListener("change", handleSam3RecipeFile);
         }
@@ -11529,19 +11518,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const busy = sam3TextRequestActive
             || sam3SimilarityRequestActive
             || sam3TextBatchActive
-            || sam3TextCascadeActive
-            || sam3TextCascadeBatchActive;
+            || sam3TextCascadeActive;
         setButtonDisabled(sam3TextElements.runButton, busy);
         setButtonDisabled(sam3TextElements.autoButton, busy);
         setButtonDisabled(sam3TextElements.similarityButton, busy);
+        setButtonDisabled(sam3TextElements.cascadeToggleButton, busy);
         setButtonDisabled(sam3TextElements.cascadeAddButton, busy);
         setButtonDisabled(sam3TextElements.cascadeRunButton, busy);
         setButtonDisabled(sam3TextElements.cascadeClearButton, busy);
         setButtonDisabled(sam3TextElements.cascadeStopButton, !sam3TextCascadeActive);
-        setButtonDisabled(sam3TextElements.cascadeBatchCountInput, busy);
-        setButtonDisabled(sam3TextElements.cascadeBatchIncludeCurrentToggle, busy);
-        setButtonDisabled(sam3TextElements.cascadeBatchRunButton, busy);
-        setButtonDisabled(sam3TextElements.cascadeBatchStopButton, !sam3TextCascadeBatchActive);
         setButtonDisabled(sam3TextElements.batchRunButton, busy);
         setButtonDisabled(sam3TextElements.batchCountInput, busy);
         setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, busy);
@@ -11561,9 +11546,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (sam3TextElements.cascadeRunButton) {
             sam3TextElements.cascadeRunButton.textContent = sam3TextCascadeActive ? "Running cascade…" : "Run cascade";
-        }
-        if (sam3TextElements.cascadeBatchRunButton) {
-            sam3TextElements.cascadeBatchRunButton.textContent = sam3TextCascadeBatchActive ? "Running batch…" : "Run cascade batch";
         }
         if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
             setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
@@ -12133,7 +12115,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         steps.forEach((step, idx) => {
             const title = step.querySelector(".sam3-text-cascade__step-title");
             if (title) {
-                title.textContent = `Step ${idx + 1}`;
+                title.textContent = sam3TextCascadeEnabled ? `Step ${idx + 2}` : `Step ${idx + 1}`;
             }
         });
     }
@@ -12262,12 +12244,33 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         refreshSam3TextCascadeStepTitles();
     }
 
+    function setSam3TextCascadeEnabled(enabled) {
+        sam3TextCascadeEnabled = !!enabled;
+        if (sam3TextElements.cascadePanel) {
+            sam3TextElements.cascadePanel.hidden = !sam3TextCascadeEnabled;
+        }
+        if (sam3TextElements.cascadeToggleButton) {
+            sam3TextElements.cascadeToggleButton.textContent = sam3TextCascadeEnabled ? "Exit cascade" : "Start cascade";
+        }
+        if (sam3TextCascadeEnabled && sam3TextElements.cascadeSteps && !sam3TextElements.cascadeSteps.children.length) {
+            addSam3TextCascadeStep({ useCurrentDefaults: true });
+        }
+        refreshSam3TextCascadeStepTitles();
+        updateSam3TextButtons();
+    }
+
+    function toggleSam3TextCascade() {
+        setSam3TextCascadeEnabled(!sam3TextCascadeEnabled);
+    }
+
     function clearSam3TextCascade() {
         if (!sam3TextElements.cascadeSteps) {
             return;
         }
         sam3TextElements.cascadeSteps.innerHTML = "";
-        addSam3TextCascadeStep({ useCurrentDefaults: true });
+        if (sam3TextCascadeEnabled) {
+            addSam3TextCascadeStep({ useCurrentDefaults: true });
+        }
     }
 
     function readSam3TextCascadeStep(step) {
@@ -12299,10 +12302,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         };
     }
 
-    function collectSam3TextCascadeSnapshots() {
+    function collectSam3TextCascadeSnapshots({ includeBase = false } = {}) {
         const steps = getSam3TextCascadeStepElements();
         const snapshots = [];
         let skipped = 0;
+        if (includeBase) {
+            const baseSnapshot = buildSam3TextSnapshot({ auto: false });
+            if (baseSnapshot.prompt && baseSnapshot.targetClass) {
+                snapshots.push(baseSnapshot);
+            } else {
+                skipped += 1;
+            }
+        }
         steps.forEach((step) => {
             const snapshot = readSam3TextCascadeStep(step);
             if (!snapshot.prompt || (!snapshot.auto && !snapshot.targetClass)) {
@@ -12311,7 +12322,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
             snapshots.push(snapshot);
         });
-        return { snapshots, skipped, total: steps.length };
+        return { snapshots, skipped, total: steps.length + (includeBase ? 1 : 0) };
     }
 
     async function runSam3TextCascadeSnapshots(snapshots, { shouldCancel = null, statusPrefix = "Cascade step" } = {}) {
@@ -12328,7 +12339,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function runSam3TextCascade() {
-        if (sam3TextCascadeActive || sam3TextCascadeBatchActive || sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
+        if (sam3TextCascadeActive || sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
             setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
             return;
         }
@@ -12336,7 +12347,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSam3TextStatus("Load an image before running a cascade.", "warn");
             return;
         }
-        const { snapshots, skipped, total } = collectSam3TextCascadeSnapshots();
+        const { snapshots, skipped, total } = collectSam3TextCascadeSnapshots({ includeBase: true });
         if (!snapshots.length) {
             setSam3TextStatus("Add at least one valid cascade step first.", "warn");
             return;
@@ -12377,31 +12388,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         setSam3TextStatus("Stopping cascade after current step…", "warn");
     }
 
-    async function startSam3TextCascadeBatch() {
-        if (sam3TextCascadeBatchActive || sam3TextCascadeActive || sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
-            setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
-            return;
-        }
-        if (!currentImage || !currentImage.name) {
-            setSam3TextStatus("Load an image before running a cascade batch.", "warn");
-            return;
-        }
+    function getSam3TextCascadeBatchConfig() {
         const imageList = document.getElementById("imageList");
         if (!imageList || !imageList.options.length) {
-            setSam3TextStatus("Load images before running a cascade batch.", "warn");
-            return;
+            return null;
         }
-        const countRaw = parseInt(sam3TextElements.cascadeBatchCountInput?.value || "1", 10);
+        const includeCurrent = !!sam3TextElements.batchIncludeCurrentToggle?.checked;
+        const countRaw = parseInt(sam3TextElements.batchCountInput?.value || "1", 10);
         const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(999, countRaw)) : 1;
-        const includeCurrent = !!sam3TextElements.cascadeBatchIncludeCurrentToggle?.checked;
-        const { snapshots, skipped } = collectSam3TextCascadeSnapshots();
-        if (!snapshots.length) {
-            setSam3TextStatus("Add at least one valid cascade step first.", "warn");
-            return;
-        }
-        if (skipped) {
-            setSam3TextStatus(`Skipping ${skipped} empty step${skipped === 1 ? "" : "s"} in cascade.`, "warn");
-        }
         const startIndex = Math.max(0, imageList.selectedIndex || 0);
         const names = [];
         for (let i = 0; i < count; i += 1) {
@@ -12414,66 +12408,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 names.push(name);
             }
         }
-        if (!names.length) {
-            setSam3TextStatus("No images found for the cascade batch range.", "warn");
-            return;
-        }
-        const originalName = currentImage.name;
-        const taskId = enqueueTask({ kind: "sam3-cascade-batch", imageName: originalName, detail: { count: names.length } });
-        sam3TextCascadeBatchActive = true;
-        sam3TextCascadeBatchCancel = false;
-        updateSam3TextButtons();
-        let totalAdded = 0;
-        try {
-            for (let idx = 0; idx < names.length; idx += 1) {
-                if (sam3TextCascadeBatchCancel) {
-                    break;
-                }
-                const name = names[idx];
-                setSam3TextStatus(`Cascade batch ${idx + 1}/${names.length}: ${name}`, "info");
-                const record = images[name];
-                if (!record) {
-                    continue;
-                }
-                await ensureImageRecordReady(record);
-                if (!currentImage || currentImage.name !== name) {
-                    setCurrentImage(record);
-                }
-                const ready = await waitForCurrentImageReady(name);
-                if (!ready) {
-                    setSam3TextStatus(`Cascade batch ${idx + 1}/${names.length}: failed to load ${name}`, "warn");
-                    continue;
-                }
-                const added = await runSam3TextCascadeSnapshots(snapshots, {
-                    shouldCancel: () => sam3TextCascadeBatchCancel,
-                    statusPrefix: "Cascade step",
-                });
-                totalAdded += Number(added || 0);
-            }
-        } catch (error) {
-            console.error("SAM3 cascade batch failed", error);
-            setSam3TextStatus(`Cascade batch error: ${error.message || error}`, "error");
-        } finally {
-            sam3TextCascadeBatchActive = false;
-            updateSam3TextButtons();
-            completeTask(taskId);
-            if (originalName && images[originalName] && (!currentImage || currentImage.name !== originalName)) {
-                setCurrentImage(images[originalName]);
-            }
-            const doneMessage = sam3TextCascadeBatchCancel
-                ? "Cascade batch cancelled."
-                : `Cascade batch complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}.`;
-            setSam3TextStatus(doneMessage, sam3TextCascadeBatchCancel ? "warn" : "success");
-            enqueueTaskNotice(doneMessage, { durationMs: 4500 });
-        }
-    }
-
-    function stopSam3TextCascadeBatch() {
-        if (!sam3TextCascadeBatchActive) {
-            return;
-        }
-        sam3TextCascadeBatchCancel = true;
-        setSam3TextStatus("Stopping cascade batch after current image…", "warn");
+        return names.length ? { names, includeCurrent } : null;
     }
 
     async function waitForCurrentImageReady(imageName, timeoutMs = 15000) {
@@ -12488,7 +12423,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function startSam3TextBatch() {
-        if (sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextCascadeActive || sam3TextCascadeBatchActive) {
+        if (sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextCascadeActive) {
             setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
             return;
         }
@@ -12496,47 +12431,50 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSam3TextStatus("Load an image before starting a batch run.", "warn");
             return;
         }
-        const imageList = document.getElementById("imageList");
-        if (!imageList || !imageList.options.length) {
-            setSam3TextStatus("Load images before starting a batch run.", "warn");
-            return;
-        }
-        const includeCurrent = !!sam3TextElements.batchIncludeCurrentToggle?.checked;
-        const auto = !!sam3TextElements.batchAutoToggle?.checked;
-        const countRaw = parseInt(sam3TextElements.batchCountInput?.value || "1", 10);
-        const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(999, countRaw)) : 1;
-        const snapshot = buildSam3TextSnapshot({ auto });
-        if (!snapshot.prompt) {
-            setSam3TextStatus("Enter a prompt before running a batch.", "warn");
-            sam3TextElements.promptInput?.focus();
-            return;
-        }
-        if (!auto && !snapshot.targetClass) {
-            setSam3TextStatus("Pick a class before running a batch.", "warn");
-            return;
-        }
-        const startIndex = Math.max(0, imageList.selectedIndex || 0);
-        const names = [];
-        for (let i = 0; i < count; i += 1) {
-            const idx = includeCurrent ? startIndex + i : startIndex + i + 1;
-            if (idx >= imageList.options.length) {
-                break;
-            }
-            const name = getOptionImageName(imageList.options[idx]);
-            if (name) {
-                names.push(name);
-            }
-        }
-        if (!names.length) {
+        const batchConfig = getSam3TextCascadeBatchConfig();
+        if (!batchConfig) {
             setSam3TextStatus("No images found for the batch range.", "warn");
             return;
         }
+        const { names } = batchConfig;
         const originalName = currentImage.name;
-        const batchTaskId = enqueueTask({ kind: "sam3-batch", imageName: originalName, detail: { count: names.length } });
+        const batchTaskId = enqueueTask({ kind: sam3TextCascadeEnabled ? "sam3-cascade" : "sam3-batch", imageName: originalName, detail: { count: names.length } });
         sam3TextBatchActive = true;
         sam3TextBatchCancel = false;
         updateSam3TextButtons();
         let totalAdded = 0;
+        const cascadeConfig = sam3TextCascadeEnabled ? collectSam3TextCascadeSnapshots({ includeBase: true }) : null;
+        if (sam3TextCascadeEnabled) {
+            if (!cascadeConfig.snapshots.length) {
+                setSam3TextStatus("Add at least one valid cascade step first.", "warn");
+                sam3TextBatchActive = false;
+                updateSam3TextButtons();
+                completeTask(batchTaskId);
+                return;
+            }
+            if (cascadeConfig.skipped) {
+                setSam3TextStatus(`Skipping ${cascadeConfig.skipped} empty step${cascadeConfig.skipped === 1 ? "" : "s"} in cascade.`, "warn");
+            }
+        }
+        const baseAuto = !!sam3TextElements.batchAutoToggle?.checked;
+        const baseSnapshot = sam3TextCascadeEnabled ? null : buildSam3TextSnapshot({ auto: baseAuto });
+        if (!sam3TextCascadeEnabled) {
+            if (!baseSnapshot.prompt) {
+                setSam3TextStatus("Enter a prompt before running a batch.", "warn");
+                sam3TextElements.promptInput?.focus();
+                sam3TextBatchActive = false;
+                updateSam3TextButtons();
+                completeTask(batchTaskId);
+                return;
+            }
+            if (!baseAuto && !baseSnapshot.targetClass) {
+                setSam3TextStatus("Pick a class before running a batch.", "warn");
+                sam3TextBatchActive = false;
+                updateSam3TextButtons();
+                completeTask(batchTaskId);
+                return;
+            }
+        }
         try {
             for (let idx = 0; idx < names.length; idx += 1) {
                 if (sam3TextBatchCancel) {
@@ -12559,8 +12497,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     continue;
                 }
                 try {
-                    const result = await runSam3TextPromptSnapshot(snapshot);
-                    totalAdded += Number(result?.added || 0);
+                    if (sam3TextCascadeEnabled) {
+                        const added = await runSam3TextCascadeSnapshots(cascadeConfig.snapshots, {
+                            shouldCancel: () => sam3TextBatchCancel,
+                            statusPrefix: "Cascade step",
+                        });
+                        totalAdded += Number(added || 0);
+                    } else {
+                        const result = await runSam3TextPromptSnapshot(baseSnapshot);
+                        totalAdded += Number(result?.added || 0);
+                    }
                 } catch (err) {
                     console.error("SAM3 batch step failed", err);
                     setSam3TextStatus(`Batch error on ${name}: ${err.message || err}`, "error");
@@ -12593,7 +12539,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextRequestActive) {
             return;
         }
-        if (sam3TextBatchActive || sam3TextCascadeActive || sam3TextCascadeBatchActive) {
+        if (sam3TextBatchActive || sam3TextCascadeActive) {
             setSam3TextStatus("Batch or cascade is running; wait for it to finish.", "warn");
             return;
         }
@@ -12628,7 +12574,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function handleSam3SimilarityPrompt() {
-        if (sam3SimilarityRequestActive || sam3TextRequestActive || sam3TextBatchActive || sam3TextCascadeActive || sam3TextCascadeBatchActive) {
+        if (sam3SimilarityRequestActive || sam3TextRequestActive || sam3TextBatchActive || sam3TextCascadeActive) {
             setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
             return;
         }

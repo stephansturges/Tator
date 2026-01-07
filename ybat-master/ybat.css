@@ -720,12 +720,6 @@ hr {
     gap: 6px;
 }
 
-.sam3-text-cascade__batch {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
 .sam3-text-cascade__steps {
     display: flex;
     flex-direction: column;

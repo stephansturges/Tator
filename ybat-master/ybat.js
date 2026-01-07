@@ -1053,6 +1053,7 @@
         sam: "bbox",
         "sam-similarity": "sam3",
         "sam3-batch": "sam3",
+        "sam3-cascade": "sam3",
         "clip-auto": "clip",
         "recipe-apply": "recipe",
         "recipe-cascade": "recipe-cascade",
@@ -1134,6 +1135,11 @@
         maxResultsInput: null,
         runButton: null,
         autoButton: null,
+        cascadeSteps: null,
+        cascadeAddButton: null,
+        cascadeRunButton: null,
+        cascadeStopButton: null,
+        cascadeClearButton: null,
         batchCountInput: null,
         batchIncludeCurrentToggle: null,
         batchAutoToggle: null,
@@ -1199,6 +1205,8 @@
     let sam3SimilarityRequestActive = false;
     let sam3TextBatchActive = false;
     let sam3TextBatchCancel = false;
+    let sam3TextCascadeActive = false;
+    let sam3TextCascadeCancel = false;
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
     const qwenModelState = {
@@ -10085,6 +10093,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
+        sam3TextElements.cascadeSteps = document.getElementById("sam3TextCascadeSteps");
+        sam3TextElements.cascadeAddButton = document.getElementById("sam3TextCascadeAdd");
+        sam3TextElements.cascadeRunButton = document.getElementById("sam3TextCascadeRun");
+        sam3TextElements.cascadeStopButton = document.getElementById("sam3TextCascadeStop");
+        sam3TextElements.cascadeClearButton = document.getElementById("sam3TextCascadeClear");
         sam3TextElements.batchCountInput = document.getElementById("sam3BatchCount");
         sam3TextElements.batchIncludeCurrentToggle = document.getElementById("sam3BatchIncludeCurrent");
         sam3TextElements.batchAutoToggle = document.getElementById("sam3BatchAuto");
@@ -10120,6 +10133,18 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
         }
+        if (sam3TextElements.cascadeAddButton) {
+            sam3TextElements.cascadeAddButton.addEventListener("click", () => addSam3TextCascadeStep());
+        }
+        if (sam3TextElements.cascadeRunButton) {
+            sam3TextElements.cascadeRunButton.addEventListener("click", () => runSam3TextCascade());
+        }
+        if (sam3TextElements.cascadeStopButton) {
+            sam3TextElements.cascadeStopButton.addEventListener("click", () => stopSam3TextCascade());
+        }
+        if (sam3TextElements.cascadeClearButton) {
+            sam3TextElements.cascadeClearButton.addEventListener("click", () => clearSam3TextCascade());
+        }
         if (sam3TextElements.batchRunButton) {
             sam3TextElements.batchRunButton.addEventListener("click", () => startSam3TextBatch());
         }
@@ -10128,6 +10153,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (sam3TextElements.similarityButton) {
             sam3TextElements.similarityButton.addEventListener("click", handleSam3SimilarityPrompt);
+        }
+        if (sam3TextElements.cascadeSteps && !sam3TextElements.cascadeSteps.children.length) {
+            addSam3TextCascadeStep({ useCurrentDefaults: true });
         }
         if (sam3RecipeElements.fileInput) {
             sam3RecipeElements.fileInput.addEventListener("change", handleSam3RecipeFile);
@@ -11481,10 +11509,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     function updateSam3TextButtons() {
         refreshSam3SimilarityVisibility();
-        const busy = sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextBatchActive;
+        const busy = sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextBatchActive || sam3TextCascadeActive;
         setButtonDisabled(sam3TextElements.runButton, busy);
         setButtonDisabled(sam3TextElements.autoButton, busy);
         setButtonDisabled(sam3TextElements.similarityButton, busy);
+        setButtonDisabled(sam3TextElements.cascadeAddButton, busy);
+        setButtonDisabled(sam3TextElements.cascadeRunButton, busy);
+        setButtonDisabled(sam3TextElements.cascadeClearButton, busy);
+        setButtonDisabled(sam3TextElements.cascadeStopButton, !sam3TextCascadeActive);
         setButtonDisabled(sam3TextElements.batchRunButton, busy);
         setButtonDisabled(sam3TextElements.batchCountInput, busy);
         setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, busy);
@@ -11501,6 +11533,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (sam3TextElements.batchRunButton) {
             sam3TextElements.batchRunButton.textContent = sam3TextBatchActive ? "Running batch…" : "Run batch";
+        }
+        if (sam3TextElements.cascadeRunButton) {
+            sam3TextElements.cascadeRunButton.textContent = sam3TextCascadeActive ? "Running cascade…" : "Run cascade";
         }
         if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
             setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
@@ -11607,6 +11642,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (resetOverride && classNames.length) {
             sam3TextElements.classSelect.value = targetValue;
         }
+        refreshSam3TextCascadeClassOptions({ preserveSelection });
         renderSam3CascadeSteps();
     }
 
@@ -12057,6 +12093,244 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return { added: applied, detections: Array.isArray(result?.detections) ? result.detections.length : 0, warnings: result?.warnings || [] };
     }
 
+    function getSam3TextCascadeStepElements() {
+        if (!sam3TextElements.cascadeSteps) {
+            return [];
+        }
+        return Array.from(sam3TextElements.cascadeSteps.querySelectorAll(".sam3-text-cascade__step"));
+    }
+
+    function refreshSam3TextCascadeStepTitles() {
+        const steps = getSam3TextCascadeStepElements();
+        steps.forEach((step, idx) => {
+            const title = step.querySelector(".sam3-text-cascade__step-title");
+            if (title) {
+                title.textContent = `Step ${idx + 1}`;
+            }
+        });
+    }
+
+    function refreshSam3TextCascadeClassOptions({ preserveSelection = true } = {}) {
+        const classNames = orderedClassNames();
+        const steps = getSam3TextCascadeStepElements();
+        steps.forEach((step) => {
+            const select = step.querySelector(".sam3-text-cascade__class");
+            const autoToggle = step.querySelector(".sam3-text-cascade__auto");
+            if (!select) {
+                return;
+            }
+            const previous = preserveSelection ? select.value : null;
+            select.innerHTML = "";
+            if (!classNames.length) {
+                const placeholder = document.createElement("option");
+                placeholder.textContent = "Load classes first";
+                placeholder.value = "";
+                select.appendChild(placeholder);
+                select.disabled = true;
+                return;
+            }
+            classNames.forEach((name) => {
+                const option = document.createElement("option");
+                option.value = name;
+                option.textContent = name;
+                select.appendChild(option);
+            });
+            let targetValue = null;
+            if (preserveSelection && previous && classNames.includes(previous)) {
+                targetValue = previous;
+            } else if (currentClass && classNames.includes(currentClass)) {
+                targetValue = currentClass;
+            } else {
+                targetValue = classNames[0];
+            }
+            select.value = targetValue;
+            select.disabled = !!autoToggle?.checked;
+        });
+    }
+
+    function createSam3TextCascadeStep({ useCurrentDefaults = false } = {}) {
+        const promptDefault = useCurrentDefaults ? (sam3TextElements.promptInput?.value || "").trim() : "";
+        const thresholdDefault = parseFloat(sam3TextElements.thresholdInput?.value || "0.5");
+        const maskDefault = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
+        const minSizeDefault = parseInt(sam3TextElements.minSizeInput?.value || "0", 10);
+        const maxResultsDefault = parseInt(sam3TextElements.maxResultsInput?.value || "20", 10);
+        const epsilonDefault = parseFloat(sam3TextElements.epsilonInput?.value || "1.0");
+        const step = document.createElement("div");
+        step.className = "sam3-text-cascade__step";
+        step.innerHTML = `
+            <div class="sam3-text-cascade__step-header">
+                <span class="sam3-text-cascade__step-title">Step</span>
+                <button type="button" class="training-button secondary sam3-text-cascade__remove">Remove</button>
+            </div>
+            <label>Prompt</label>
+            <input type="text" class="sam3-text-cascade__prompt" placeholder="e.g., red helmet" />
+            <div class="sam3-text-cascade__step-grid">
+                <div>
+                    <label>Assign class</label>
+                    <select class="sam3-text-cascade__class"></select>
+                </div>
+                <div class="sam3-text-cascade__option">
+                    <input type="checkbox" class="sam3-text-cascade__auto" />
+                    Auto-class (CLIP)
+                </div>
+                <div>
+                    <label>Score threshold</label>
+                    <input type="number" class="sam3-text-cascade__threshold" step="0.05" min="0" max="1" />
+                </div>
+                <div>
+                    <label>Mask threshold</label>
+                    <input type="number" class="sam3-text-cascade__mask" step="0.05" min="0" max="1" />
+                </div>
+                <div>
+                    <label>Max results</label>
+                    <input type="number" class="sam3-text-cascade__max-results" min="1" max="100" />
+                </div>
+                <div>
+                    <label>Min size (px²)</label>
+                    <input type="number" class="sam3-text-cascade__min-size" min="0" />
+                </div>
+                <div>
+                    <label>Simplify epsilon (px)</label>
+                    <input type="number" class="sam3-text-cascade__epsilon" min="0" step="0.1" />
+                </div>
+            </div>
+        `;
+        const promptInput = step.querySelector(".sam3-text-cascade__prompt");
+        const thresholdInput = step.querySelector(".sam3-text-cascade__threshold");
+        const maskInput = step.querySelector(".sam3-text-cascade__mask");
+        const maxResultsInput = step.querySelector(".sam3-text-cascade__max-results");
+        const minSizeInput = step.querySelector(".sam3-text-cascade__min-size");
+        const epsilonInput = step.querySelector(".sam3-text-cascade__epsilon");
+        const autoToggle = step.querySelector(".sam3-text-cascade__auto");
+        const classSelect = step.querySelector(".sam3-text-cascade__class");
+        if (promptInput) promptInput.value = promptDefault;
+        if (thresholdInput) thresholdInput.value = Number.isFinite(thresholdDefault) ? thresholdDefault : 0.5;
+        if (maskInput) maskInput.value = Number.isFinite(maskDefault) ? maskDefault : 0.5;
+        if (maxResultsInput) maxResultsInput.value = Number.isFinite(maxResultsDefault) ? maxResultsDefault : 20;
+        if (minSizeInput) minSizeInput.value = Number.isFinite(minSizeDefault) ? minSizeDefault : 0;
+        if (epsilonInput) epsilonInput.value = Number.isFinite(epsilonDefault) ? epsilonDefault : 1.0;
+        const removeButton = step.querySelector(".sam3-text-cascade__remove");
+        if (removeButton) {
+            removeButton.addEventListener("click", () => {
+                step.remove();
+                refreshSam3TextCascadeStepTitles();
+            });
+        }
+        if (autoToggle && classSelect) {
+            autoToggle.addEventListener("change", () => {
+                classSelect.disabled = autoToggle.checked;
+            });
+        }
+        return step;
+    }
+
+    function addSam3TextCascadeStep(options = {}) {
+        if (!sam3TextElements.cascadeSteps) {
+            return;
+        }
+        const step = createSam3TextCascadeStep(options);
+        sam3TextElements.cascadeSteps.appendChild(step);
+        refreshSam3TextCascadeClassOptions();
+        refreshSam3TextCascadeStepTitles();
+    }
+
+    function clearSam3TextCascade() {
+        if (!sam3TextElements.cascadeSteps) {
+            return;
+        }
+        sam3TextElements.cascadeSteps.innerHTML = "";
+        addSam3TextCascadeStep({ useCurrentDefaults: true });
+    }
+
+    function readSam3TextCascadeStep(step) {
+        const prompt = (step.querySelector(".sam3-text-cascade__prompt")?.value || "").trim();
+        let threshold = parseFloat(step.querySelector(".sam3-text-cascade__threshold")?.value || "0.5");
+        if (Number.isNaN(threshold)) threshold = 0.5;
+        threshold = Math.min(Math.max(threshold, 0), 1);
+        let maskThreshold = parseFloat(step.querySelector(".sam3-text-cascade__mask")?.value || "0.5");
+        if (Number.isNaN(maskThreshold)) maskThreshold = 0.5;
+        maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
+        let maxResults = parseInt(step.querySelector(".sam3-text-cascade__max-results")?.value || "20", 10);
+        if (Number.isNaN(maxResults)) maxResults = 20;
+        maxResults = Math.min(Math.max(maxResults, 1), 100);
+        let minSize = parseInt(step.querySelector(".sam3-text-cascade__min-size")?.value || "0", 10);
+        if (Number.isNaN(minSize) || minSize < 0) minSize = 0;
+        let simplifyEps = parseFloat(step.querySelector(".sam3-text-cascade__epsilon")?.value || "1.0");
+        if (Number.isNaN(simplifyEps) || simplifyEps < 0) simplifyEps = 1.0;
+        const auto = !!step.querySelector(".sam3-text-cascade__auto")?.checked;
+        const targetClass = auto ? null : (step.querySelector(".sam3-text-cascade__class")?.value || "");
+        return {
+            prompt,
+            threshold,
+            maskThreshold,
+            minSize,
+            maxResults,
+            simplifyEps,
+            auto,
+            targetClass,
+        };
+    }
+
+    async function runSam3TextCascade() {
+        if (sam3TextCascadeActive || sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
+            setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSam3TextStatus("Load an image before running a cascade.", "warn");
+            return;
+        }
+        const steps = getSam3TextCascadeStepElements();
+        if (!steps.length) {
+            setSam3TextStatus("Add at least one cascade step first.", "warn");
+            return;
+        }
+        sam3TextCascadeActive = true;
+        sam3TextCascadeCancel = false;
+        updateSam3TextButtons();
+        const taskId = enqueueTask({ kind: "sam3-cascade", imageName: currentImage.name, detail: { count: steps.length } });
+        let totalAdded = 0;
+        try {
+            for (let idx = 0; idx < steps.length; idx += 1) {
+                if (sam3TextCascadeCancel) {
+                    break;
+                }
+                const snapshot = readSam3TextCascadeStep(steps[idx]);
+                if (!snapshot.prompt) {
+                    setSam3TextStatus(`Step ${idx + 1}: missing prompt; skipped.`, "warn");
+                    continue;
+                }
+                if (!snapshot.auto && !snapshot.targetClass) {
+                    setSam3TextStatus(`Step ${idx + 1}: pick a class or enable auto-class.`, "warn");
+                    continue;
+                }
+                setSam3TextStatus(`Cascade step ${idx + 1}/${steps.length}…`, "info");
+                const result = await runSam3TextPromptSnapshot(snapshot);
+                totalAdded += Number(result?.added || 0);
+            }
+        } catch (error) {
+            console.error("SAM3 cascade failed", error);
+            setSam3TextStatus(`Cascade error: ${error.message || error}`, "error");
+        } finally {
+            sam3TextCascadeActive = false;
+            updateSam3TextButtons();
+            completeTask(taskId);
+            const doneMessage = sam3TextCascadeCancel
+                ? "Cascade cancelled."
+                : `Cascade complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}.`;
+            setSam3TextStatus(doneMessage, sam3TextCascadeCancel ? "warn" : "success");
+            enqueueTaskNotice(doneMessage, { durationMs: 4500 });
+        }
+    }
+
+    function stopSam3TextCascade() {
+        if (!sam3TextCascadeActive) {
+            return;
+        }
+        sam3TextCascadeCancel = true;
+        setSam3TextStatus("Stopping cascade after current step…", "warn");
+    }
+
     async function waitForCurrentImageReady(imageName, timeoutMs = 15000) {
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
@@ -12069,7 +12343,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function startSam3TextBatch() {
-        if (sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
+        if (sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextCascadeActive) {
             setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
             return;
         }
@@ -12174,8 +12448,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (sam3TextRequestActive) {
             return;
         }
-        if (sam3TextBatchActive) {
-            setSam3TextStatus("Batch is running; wait for it to finish.", "warn");
+        if (sam3TextBatchActive || sam3TextCascadeActive) {
+            setSam3TextStatus("Batch or cascade is running; wait for it to finish.", "warn");
             return;
         }
         if (!currentImage || !currentImage.name) {
@@ -12209,7 +12483,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function handleSam3SimilarityPrompt() {
-        if (sam3SimilarityRequestActive || sam3TextRequestActive || sam3TextBatchActive) {
+        if (sam3SimilarityRequestActive || sam3TextRequestActive || sam3TextBatchActive || sam3TextCascadeActive) {
             setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
             return;
         }

@@ -238,16 +238,32 @@
 	                                            <button type="button" id="sam3BatchStopButton" class="training-button danger" disabled>Stop batch</button>
 	                                        </div>
 	                                    </div>
-	                                    <p class="training-help" style="margin-top: 6px;">
-	                                        Runs the current prompt sequentially across the next N images. Uses the same thresholds and optional auto-class.
-	                                    </p>
-	                                    <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). New recipe zips contain recipe.json + embedded pretrained CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">Import recipe (zip)</label>
-	                                    <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
-	                                    <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
+                                    <p class="training-help" style="margin-top: 6px;">
+                                        Runs the current prompt sequentially across the next N images. Uses the same thresholds and optional auto-class.
+                                    </p>
+                                    <div class="sam3-text-cascade">
+                                        <div class="sam3-text-cascade__header">
+                                            <strong>Text prompt cascade</strong>
+                                            <div class="sam3-text-cascade__actions">
+                                                <button type="button" id="sam3TextCascadeAdd" class="training-button secondary">+ Add step</button>
+                                                <button type="button" id="sam3TextCascadeRun" class="training-button">Run cascade</button>
+                                                <button type="button" id="sam3TextCascadeStop" class="training-button danger" disabled>Stop</button>
+                                                <button type="button" id="sam3TextCascadeClear" class="training-button secondary">Clear</button>
+                                            </div>
+                                        </div>
+                                        <p class="training-help" style="margin-top: 4px;">
+                                            Chain multiple SAM3 text prompts with their own thresholds and target classes. Steps run in order on the current image.
+                                        </p>
+                                        <div id="sam3TextCascadeSteps" class="sam3-text-cascade__steps"></div>
+                                    </div>
+                                    <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). New recipe zips contain recipe.json + embedded pretrained CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">Import recipe (zip)</label>
+                                    <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
+                                    <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
 
-		                                        <div class="training-help" style="margin-top: 8px;">
-		                                            <strong>Recipe cascade:</strong> run multiple saved recipes in order. Each step can re-label its outputs and choose whether it participates in cross-class de-dupe.
-		                                        </div>
+                                    <div id="sam3RecipeCascade" hidden>
+                                        <div class="training-help" style="margin-top: 8px;">
+                                            <strong>Recipe cascade:</strong> run multiple saved recipes in order. Each step can re-label its outputs and choose whether it participates in cross-class de-dupe.
+                                        </div>
 
 		                                        <div id="sam3CascadeSteps"></div>
 		                                        <button type="button" id="sam3CascadeAddStep" class="training-button secondary" title="Add another recipe to the cascade (you can reorder steps).">+ Add recipe step</button>
@@ -303,6 +319,7 @@
 			                                            <button type="button" id="sam3CascadeApplyButton" class="training-button secondary" title="Run every enabled step on the current image and add the final detections.">Apply cascade to image</button>
 			                                        </div>
                                         <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
+                                    </div>
                                 </section>
                             </section>
                             <br />

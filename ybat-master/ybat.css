@@ -695,6 +695,87 @@ hr {
     gap: 8px;
 }
 
+.sam3-text-cascade {
+    margin-top: 8px;
+    padding: 10px;
+    border: 1px dashed #cbd5f5;
+    border-radius: 10px;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.sam3-text-cascade__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.sam3-text-cascade__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.sam3-text-cascade__steps {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.sam3-text-cascade__step {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px;
+    background: #ffffff;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.sam3-text-cascade__step-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.sam3-text-cascade__step-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px 12px;
+}
+
+.sam3-text-cascade__step-grid label {
+    font-size: 12px;
+    color: #475569;
+}
+
+.sam3-text-cascade__step-grid input[type="number"],
+.sam3-text-cascade__step-grid input[type="text"],
+.sam3-text-cascade__step-grid select {
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 13px;
+    background: #f8fafc;
+    box-sizing: border-box;
+}
+
+.sam3-text-cascade__option {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+}
+
 .sam3-text-batch {
     display: flex;
     flex-direction: column;

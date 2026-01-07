@@ -696,10 +696,10 @@ hr {
 }
 
 .sam3-text-batch {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 10px 12px;
-    align-items: end;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
 }
 
 .sam3-text-batch__options {
@@ -725,6 +725,7 @@ hr {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+    justify-content: flex-start;
 }
 
 .sam3-text-batch__actions .training-button {

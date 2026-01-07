@@ -1,0 +1,310 @@
+Using a DINOv3 Model as a Frozen Image Encoder for Classification
+Introduction
+
+DINOv3 is a state-of-the-art self-supervised vision model (developed by Meta AI) that produces high-quality image features without any task-specific fine-tuning
+huggingface.co
+. In this guide, we will use a pre-trained DINOv3 model as a frozen image encoder and train a simple linear classifier on top of its embeddings for an image classification task. By freezing the DINOv3 backbone (i.e. not updating its weights), we leverage its rich pre-trained features and only learn the weights of a lightweight classifier. This approach often achieves competitive results on classification with far less training time and data
+huggingface.co
+. We will use Hugging Face Transformers (for loading the model and preprocessing) and PyTorch (for defining and training the linear head).
+
+What we’ll cover:
+
+Finding and loading a pre-trained DINOv3 model from Hugging Face.
+
+Preprocessing input images using the DINOv3 image processor.
+
+Extracting image feature embeddings in batches using the frozen DINOv3 encoder.
+
+Implementing a linear classification head in PyTorch and training it on the extracted embeddings.
+
+Example code for the embedding extraction, training loop, and evaluation.
+
+Model-specific notes (embedding dimensions, preprocessing details, and GPU memory considerations).
+
+Throughout the guide, the DINOv3 backbone will remain frozen (no fine-tuning), and we will train only the linear classifier on top of the extracted features. Let’s dive in.
+
+1. Finding and Loading a Pre-trained DINOv3 Model
+
+Choosing a DINOv3 model: Meta AI has released multiple DINOv3 models (Vision Transformers of various sizes and ConvNeXt backbones) trained on a large web image dataset (LVD-1689M)
+huggingface.co
+. These models are available on the Hugging Face Hub under the facebook/dinov3- namespace (see the [DINOv3 collection]
+huggingface.co
+). For example, some Vision Transformer variants include:
+
+facebook/dinov3-vits16-pretrain-lvd1689m – ViT-Small (embedding dim 384, ~21M params)
+huggingface.co
+
+facebook/dinov3-vitb16-pretrain-lvd1689m – ViT-Base (embedding dim 768, ~86M params)
+huggingface.co
+
+facebook/dinov3-vitl16-pretrain-lvd1689m – ViT-Large (embedding dim 1024, ~300M params)
+huggingface.co
+
+(“16” in the name refers to a 16×16 patch size, and all ViT models use 4 additional register tokens in DINOv3
+huggingface.co
+.)
+
+In this guide, we’ll use the ViT-Base model (dinov3-vitb16) as an example for its balanced size and strong performance. Note: To download these models from Hugging Face, you may need to agree to the model license on the Hub (the DINOv3 repositories are gated and require accepting terms)
+huggingface.co
+. Ensure you have a Hugging Face account and have accepted the model's usage terms before proceeding.
+
+Loading the model and processor: We use the Hugging Face Transformers API to load the pre-trained model and its corresponding image processor. The image processor will handle necessary preprocessing (resizing, normalization, etc.), and the model will provide the feature extraction functionality.
+
+import torch
+from transformers import AutoImageProcessor, AutoModel
+
+model_name = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+
+# Load the DINOv3 image processor and model
+processor = AutoImageProcessor.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
+
+
+This will download the model weights and configuration from the Hub (assuming you have access). Under the hood, AutoModel will instantiate a DINOv3Model tailored to this checkpoint. If you are using 🤗 Transformers v4.56.0 or later, DINOv3 is supported natively
+github.com
+; otherwise, you might need to set trust_remote_code=True in the from_pretrained call (since the model was added in recent versions).
+
+Freezing the model: Before using the model as a fixed feature extractor, set it to evaluation mode and disable gradient updates for all its parameters:
+
+model.eval()  # set model to eval mode (disables dropout, etc.)
+for param in model.parameters():
+    param.requires_grad_(False)  # freeze the backbone
+
+
+This ensures the DINOv3 encoder’s weights will not be modified during training of the classifier. All learning will happen only in the classification head.
+
+Device placement: If a GPU is available, move the model to GPU for faster inference:
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+
+(For very large models like ViT-H or ViT-7B, you may need multiple GPUs or use device_map="auto" to automatically distribute the model layers across devices
+huggingface.co
+. In this example with ViT-Base, a single GPU or CPU is sufficient.)
+
+2. Preprocessing Images with the DINOv3 Image Processor
+
+Raw images need to be preprocessed into the format the model expects. The Hugging Face AutoImageProcessor for DINOv3 handles this for us. It performs operations like resizing the image to the required resolution, center-cropping if needed, converting to tensor, and normalizing pixel values to match DINOv3’s training distribution.
+
+DINOv3 Vision Transformer models are generally trained on 224×224 images (patch size 16, yielding 14×14 patches)
+huggingface.co
+. The image processor will resize input images to 224×224 by default. (The models can accept larger images as long as dimensions are multiples of 16; otherwise, the model will internally crop to the nearest smaller multiple of 16
+huggingface.co
+.)
+
+Here's how to preprocess an image (or batch of images) using the processor:
+
+from PIL import Image
+
+# Load an example image
+image = Image.open("path/to/image.jpg").convert("RGB")
+
+# Preprocess the image
+inputs = processor(images=image, return_tensors="pt")
+print(inputs.keys())        # e.g. dict_keys(['pixel_values'])
+print(inputs['pixel_values'].shape)  # e.g. torch.Size([1, 3, 224, 224])
+
+
+The processor outputs a dictionary containing a pixel_values tensor of shape [batch_size, 3, height, width]. In this example, height=width=224 after resizing. If you have a list of images, you can pass images=[img1, img2, ...] to preprocess a batch in one call (the resulting tensor will have batch_size > 1).
+
+Before feeding the inputs to the model, ensure they are on the same device as the model. For example:
+
+inputs = processor(images=batch_of_pil_images, return_tensors="pt")
+inputs = {k: v.to(device) for k, v in inputs.items()}
+
+
+This will move the pixel_values tensor to the GPU if using one (so the model, now on GPU, can process it without device mismatch). The DINOv3 processor by default will also normalize pixel intensities (DINOv3 expects normalized pixel values, similar to ImageNet mean/std). With the images prepped, we’re ready to extract features.
+
+3. Extracting Frozen Image Embeddings in Batches
+
+Using the frozen DINOv3 model, we can extract image embeddings (feature vectors) for our input images. Typically, for classification tasks with Vision Transformers, we use the [CLS] token embedding as the image representation. In DINOv3’s output, the first token in the sequence is a global image token (analogous to a CLS token) which serves as a holistic image descriptor
+huggingface.co
+. Hugging Face's DINOv3 model outputs provide this conveniently as pooler_output – a tensor of shape (batch_size, hidden_dim) representing the whole-image embedding for each input image.
+
+Let's obtain the embeddings for a batch of images:
+
+# Assume inputs is already prepared and on the correct device (from the previous step)
+with torch.no_grad():  # no gradient computation, since we're just encoding
+    outputs = model(**inputs)
+
+# outputs is a BaseModelOutput, which includes:
+embeddings = outputs.pooler_output        # shape: [batch_size, hidden_dim]
+# Alternatively, you could get the CLS token from last_hidden_state:
+# embeddings = outputs.last_hidden_state[:, 0, :]
+print("Embedding tensor shape:", embeddings.shape)  
+# For ViT-Base, hidden_dim=768, so e.g. (batch_size, 768)
+
+
+Using torch.no_grad() or model.eval() ensures we do not store gradients for these operations (since the model is frozen). The resulting embeddings tensor contains one feature vector per image. We can detach it from the graph (though with no grad, it’s already not tracking gradients) and convert to CPU if needed for further processing. For example:
+
+image_features = embeddings.cpu().numpy()  # convert to NumPy array if needed
+
+
+Batch processing: In practice, you'll loop over your dataset in batches to extract features (especially if it doesn’t fit in memory all at once). For example, using a PyTorch DataLoader, you might do:
+
+all_embeddings = []
+all_labels = []
+for images, labels in dataloader:           # your DataLoader yields a batch of PIL images and labels
+    inputs = processor(images=images, return_tensors="pt").to(device)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    batch_embeds = outputs.pooler_output    # [batch_size, hidden_dim]
+    all_embeddings.append(batch_embeds.cpu())
+    all_labels.append(labels)
+# Concatenate all batches
+all_embeddings = torch.cat(all_embeddings, dim=0)
+all_labels = torch.cat(all_labels, dim=0)
+
+
+You could then train a classifier using all_embeddings and all_labels. However, you don’t necessarily need to precompute all embeddings upfront; you can integrate the feature extraction into the training loop of the classifier (extracting features on the fly for each batch). We’ll illustrate the integrated approach next.
+
+4. Implementing a Linear Classification Head (PyTorch)
+
+With image embeddings of dimension D (where D = 768 for ViT-Base DINOv3
+huggingface.co
+), we can train a simple linear classifier to predict image labels. The classifier is just a single fully-connected layer (plus maybe a softmax, which is handled inside the loss function in PyTorch).
+
+Define the linear layer: Suppose we have num_classes distinct classes in our dataset. We create a linear layer that maps the D-dimensional embedding to num_classes outputs:
+
+import torch.nn as nn
+
+hidden_dim = model.config.hidden_size  # e.g. 768 for ViT-Base
+num_classes = 10  # example number of classes
+
+classifier = nn.Linear(hidden_dim, num_classes)
+classifier.to(device)
+
+
+This classification head will output a vector of size num_classes for each image, which we can interpret as logits for each class. We typically won’t apply an activation here, because we’ll use PyTorch’s CrossEntropyLoss which expects raw logits.
+
+Optimizer and loss: Set up an optimizer to train the classifier’s parameters. Since the backbone is frozen, we’ll only pass the classifier’s parameters to the optimizer:
+
+optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()  # for multi-class classification
+
+
+You can adjust learning rate and try different optimizers as needed. Now we’re ready to train the classifier.
+
+5. Training Loop and Evaluation
+
+Below is an example training loop that ties everything together. This loop will iterate over the training dataset, use the frozen DINOv3 model to get embeddings, and update the linear classifier based on the classification loss.
+
+num_epochs = 5  # number of epochs to train
+for epoch in range(num_epochs):
+    model.eval()                # ensure encoder stays in eval mode
+    classifier.train()          # classifier in train mode
+    running_loss = 0.0
+    for images, labels in train_loader:   # iterate over training batches
+        # Move images and labels to device
+        inputs = processor(images=images, return_tensors="pt").to(device)
+        labels = labels.to(device)
+        
+        # Forward pass: extract features and then classify
+        with torch.no_grad():
+            features = model(**inputs).pooler_output  # [batch, hidden_dim]
+        logits = classifier(features)                 # [batch, num_classes]
+        
+        # Compute loss
+        loss = criterion(logits, labels)
+        
+        # Backpropagate on the classifier (frozen encoder has no grad)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item() * labels.size(0)  # accumulate loss (optional)
+    
+    epoch_loss = running_loss / len(train_dataset)
+    print(f"Epoch {epoch+1}: Training loss = {epoch_loss:.4f}")
+
+
+A few things to note in this training loop:
+
+We wrap the feature extraction with torch.no_grad() to avoid gradient computation for the encoder. The DINOv3 model’s parameters remain unchanged during training.
+
+Only the classifier’s parameters get updated by loss.backward().
+
+We call .to(device) on the inputs and labels to ensure they’re on the same device as the model and classifier.
+
+We keep track of the running loss for monitoring training progress.
+
+Evaluation: After training, you can evaluate the classifier on a validation or test set. The process is similar, except we do not update any weights:
+
+model.eval()
+classifier.eval()
+correct = 0
+total = 0
+with torch.no_grad():
+    for images, labels in test_loader:
+        inputs = processor(images=images, return_tensors="pt").to(device)
+        labels = labels.to(device)
+        features = model(**inputs).pooler_output
+        logits = classifier(features)
+        predictions = torch.argmax(logits, dim=1)
+        
+        correct += (predictions == labels).sum().item()
+        total += labels.size(0)
+
+accuracy = correct / total
+print(f"Test set accuracy: {accuracy*100:.2f}%")
+
+
+This will output the classification accuracy on the test set. You could also compute other metrics (precision, recall, etc.) as needed, but accuracy gives a basic indication of performance.
+
+6. Model-Specific Notes and Considerations
+
+Embedding dimension: Ensure the linear layer’s input dimension matches the DINOv3 model’s embedding size. For example, ViT-S/16 has a 384-dim output, ViT-B/16 has 768-dim, ViT-L/16 is 1024-dim, and so on
+huggingface.co
+. The table below (from the DINOv3 model card) summarizes a few variants:
+
+ViT-S/16: ~21M params, embedding dimension = 384
+huggingface.co
+
+ViT-B/16: ~86M params, embedding dimension = 768
+huggingface.co
+
+ViT-L/16: ~300M params, embedding dimension = 1024
+huggingface.co
+
+ViT-H+/16: ~840M params, embedding dimension = 1280
+huggingface.co
+
+(ConvNeXt backbones have no explicit “CLS token”; the HF model’s pooler_output in that case is derived by a spatial pooling of the conv features
+huggingface.co
+. The usage is similar, but the embed dim corresponds to the conv feature dimensionality.)
+
+Image preprocessing specifics: DINOv3 models expect images of size divisible by 16 (due to 16×16 patches). The default is 224×224 for Vision Transformers
+huggingface.co
+. The AutoImageProcessor will by default resize images to the model’s image_size (224 for ViTs) and apply the necessary normalization. If you feed non-224 images without resizing, the model will automatically center-crop them to the largest 16-multiple (e.g., a 230×230 image would be cropped to 224×224 internally)
+huggingface.co
+. It’s usually safest to let the processor handle resizing to avoid unexpected cropping. Also, remember to convert images to RGB (3-channel) as required (the processor will not handle non-RGB images by default).
+
+GPU memory and speed: Using a frozen encoder is memory-efficient compared to fine-tuning, but the DINOv3 model size can still be significant. ViT-Base (86M params) is manageable on a single GPU (a few hundred MB of VRAM), but larger models like ViT-H (840M) or ViT-7B (~6.7B params) are extremely heavy
+huggingface.co
+. For those, you might need high-end GPUs (the ViT-7B was trained on clusters of NVIDIA H100 GPUs
+huggingface.co
+) or to use model parallelism/CPU offloading. If you only have a CPU, prefer the smaller models (ViT-S or ViT-B) to keep inference time reasonable. You can also enable half-precision or bfloat16 to save memory – e.g., .to(torch.float16) on the model or use dtype=torch.bfloat16 when loading (if your hardware supports it)
+huggingface.co
+. Hugging Face’s device_map="auto" option (as shown earlier) can automatically distribute large models across available devices or CPU RAM
+huggingface.co
+.
+
+Using CLS token vs. patch features: In our classifier, we used the CLS token embedding (pooler_output) as the image feature. This is a common choice for image classification. For DINOv3, an alternative is to combine the CLS token with the average of patch tokens to form the feature vector (the DINOv3 authors note that using both can improve performance slightly)
+huggingface.co
+. For simplicity, we used only the CLS token here. You can experiment with concatenating or averaging the patch features (outputs.last_hidden_state[:, 1:, :]) for potentially better results, at the cost of a slightly higher-dimensional input to the classifier.
+
+Evaluation protocol: Because the encoder is frozen, you can treat the feature extraction + linear classifier as a fixed feature classification pipeline. This means you could also train the linear classifier with standard tools (even a scikit-learn logistic regression on the embeddings) if you wanted. We demonstrated end-to-end training in PyTorch for flexibility and clarity. During evaluation or deployment, the process is: preprocess image → extract embedding via DINOv3 → predict class with the linear layer.
+
+Conclusion
+
+By leveraging a pre-trained DINOv3 model as a frozen encoder, we can build an efficient image classification pipeline with minimal training. The heavy lifting is done by the DINOv3 backbone, which provides powerful image representations, while a lightweight linear layer learns to map those representations to your task-specific labels
+huggingface.co
+. This approach often yields strong performance without the need for expensive model fine-tuning. We covered how to load the model and processor from Hugging Face, preprocess images, extract embeddings in batches, and train/evaluate a linear classifier in PyTorch. With the provided code examples and considerations, you should be able to adapt this to your own dataset and experiment with different DINOv3 variants or training settings. Good luck with your DINOv3-powered classification project!
+
+Sources: DINOv3 model card and documentation on Hugging Face
+huggingface.co
+huggingface.co
+, DINOv3 GitHub README
+github.com
+, and official Meta AI release notes. All code examples above are based on the Hugging Face Transformers API and PyTorch 2.x.

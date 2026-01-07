@@ -1,0 +1,65 @@
+CLIP Upgrade Brief (next phase)
+Date: 2025-12-20
+
+Goal
+- After fixing the current CLIP issues (dataset parsing, auto-class guard, UI clarity), explore a more expressive head that supports soft targets and better class separation.
+
+Current prerequisites (must be done before this brief)
+- CLIP training handles YOLO bbox + YOLO polygon labels correctly.
+- CLIP auto-class warnings + ambiguity guard are in the UI and wired to inference.
+- CLIP training + model management are stable (refresh, download zip, delete, upload).
+
+Scope: Soft Targets + Optional MLP Head
+
+Why
+- Logistic regression on frozen CLIP embeddings is fast, but it struggles with fine-grained class separation and ambiguous classes.
+- Soft targets (label smoothing / soft labels) and a small MLP can improve margins without needing a full CLIP fine-tune.
+
+Design options
+1) Soft targets with current logreg (low risk)
+   - Add label smoothing to the training labels (e.g., 0.05–0.15) so the classifier learns softer boundaries.
+   - Keep the existing logreg head; output format stays the same.
+   - Expect slightly lower peak precision but better calibration and fewer “knife-edge” decisions.
+
+2) Small MLP head (medium risk)
+   - Train a 1–2 layer MLP on top of frozen CLIP embeddings.
+   - Use dropout + weight decay for stability.
+   - Output logits over classes, then softmax. Keep class order identical to labelmap + background classes.
+   - Export as a small Torch state dict (or ONNX) and include metadata so inference can load it.
+   - Provide a simple compatibility layer so recipe mining + inference can score with either logreg or MLP.
+
+3) MLP + soft targets (most expressive)
+   - Train MLP using label smoothing (or temperature-scaled soft targets) for better class separation.
+   - Optional margin loss (additive margin between top-1 and top-2) for ambiguous classes.
+
+Key questions
+- Should soft targets be on by default or only in “Advanced”? (Recommend: advanced toggle.)
+- Do we want the MLP head to replace logreg or sit alongside it as an optional choice?
+- How to package MLP head in a portable way (pytorch state dict + meta.json)?
+
+Implementation plan (commit-sized steps)
+1) Meta + schema extension
+   - Extend CLIP head metadata to include `head_type` = "logreg" | "mlp" and soft-target params.
+   - Ensure recipe mining and inference read this field and route to the correct scorer.
+
+2) Training pipeline (MLP optional)
+   - Add a training path for an MLP head using frozen CLIP embeddings.
+   - Add soft-target option (label smoothing).
+   - Save model to a stable format (torch state dict + meta.json).
+
+3) Inference support
+   - Add MLP scorer for CLIP auto-class + recipe mining / filtering.
+   - Keep logreg path unchanged for backward compatibility.
+
+4) UI controls (Advanced)
+   - Toggle: “Use MLP head” (advanced).
+   - Slider: “Soft targets (label smoothing)”
+   - Explain tradeoffs and defaults in the info panel.
+
+5) Validation
+   - Run a small A/B test: logreg vs MLP on the same dataset.
+   - Compare precision/recall + confusion between similar classes.
+
+Notes
+- This brief is *not* the current fix list. It starts after the current issues are resolved.
+- Keep default simple; only expose MLP/soft targets in Advanced.

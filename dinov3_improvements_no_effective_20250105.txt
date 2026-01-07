@@ -1,0 +1,21 @@
+Comparison summary (accuracy + F1, FG-only excludes __bg_* classes)
+
+label, encoder_model, acc, macro_f1_fg, weighted_f1_fg
+qwen_dataset_dinov3_vitl16_mlp1024_512_mix0p1_balnorm_ls0p1_logit_both_bg5, facebook/dinov3-vitl16-pretrain-lvd1689m, 0.9080, 0.8495, 0.9049
+qwen_dataset_dinov3_vitl16_mlp768_384_mix0p1_balnorm_ls0p1_logit_both_bg5, facebook/dinov3-vitl16-pretrain-lvd1689m, 0.9066, 0.8490, 0.9036
+qwen_dataset_dinov3_vitl16_mlp768_384_mix0p1_balnorm_ls0p1_arcface_bg5, facebook/dinov3-vitl16-pretrain-lvd1689m, 0.9020, 0.8382, 0.8984
+qwen_dataset_dinov3_vitb16_mlp512_mix0p1_balnorm_ls0p1_logit_both_bg5, facebook/dinov3-vitb16-pretrain-lvd1689m, 0.8975, 0.8359, 0.8945
+qwen_dataset_dinov3_vitb16_mlp768_mix0p1_balnorm_ls0p1_logit_both_bg5, facebook/dinov3-vitb16-pretrain-lvd1689m, 0.9000, 0.8315, 0.8953
+qwen_dataset_dinov3_vitb16_mlp768_mix0p1_balnorm_ls0p1_arcface_bg5, facebook/dinov3-vitb16-pretrain-lvd1689m, 0.8967, 0.8279, 0.8938
+qwen_dataset_dinov3_vitl16_mlp1024_512_mix0p1_balnorm_ls0p1_arcface_bg5, facebook/dinov3-vitl16-pretrain-lvd1689m, 0.8969, 0.8254, 0.8941
+qwen_dataset_dinov3_vitb16_mlp512_mix0p1_balnorm_ls0p1_arcface_bg5, facebook/dinov3-vitb16-pretrain-lvd1689m, 0.8937, 0.8224, 0.8909
+qwen_dataset_dinov3_vits16_mlp384_mix0p1_balnorm_ls0p1_logit_both_bg5, facebook/dinov3-vits16-pretrain-lvd1689m, 0.8917, 0.8207, 0.8884
+qwen_dataset_dinov3_vits16_mlp256_mix0p1_balnorm_ls0p1_logit_both_bg5, facebook/dinov3-vits16-pretrain-lvd1689m, 0.8928, 0.8184, 0.8892
+qwen_dataset_dinov3_vits16_mlp384_mix0p1_balnorm_ls0p1_arcface_bg5, facebook/dinov3-vits16-pretrain-lvd1689m, 0.8864, 0.8093, 0.8847
+qwen_dataset_dinov3_vitl16_mlp768_384_mix0p1_balnorm_ls0p1_logit_train_bg5, facebook/dinov3-vitl16-pretrain-lvd1689m, 0.8881, 0.8010, 0.8800
+qwen_dataset_dinov3_vits16_mlp256_mix0p1_balnorm_ls0p1_arcface_bg5, facebook/dinov3-vits16-pretrain-lvd1689m, 0.8770, 0.7985, 0.8765
+qwen_dataset_dinov3_vitl16_mlp1024_512_mix0p1_balnorm_ls0p1_logit_train_bg5, facebook/dinov3-vitl16-pretrain-lvd1689m, 0.8896, 0.7975, 0.8818
+qwen_dataset_dinov3_vitb16_mlp512_mix0p1_balnorm_ls0p1_logit_train_bg5, facebook/dinov3-vitb16-pretrain-lvd1689m, 0.8707, 0.7532, 0.8600
+qwen_dataset_dinov3_vitb16_mlp768_mix0p1_balnorm_ls0p1_logit_train_bg5, facebook/dinov3-vitb16-pretrain-lvd1689m, 0.8712, 0.7530, 0.8601
+qwen_dataset_dinov3_vits16_mlp384_mix0p1_balnorm_ls0p1_logit_train_bg5, facebook/dinov3-vits16-pretrain-lvd1689m, 0.8691, 0.7508, 0.8572
+qwen_dataset_dinov3_vits16_mlp256_mix0p1_balnorm_ls0p1_logit_train_bg5, facebook/dinov3-vits16-pretrain-lvd1689m, 0.8640, 0.7437, 0.8527

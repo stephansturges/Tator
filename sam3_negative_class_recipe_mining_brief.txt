@@ -1,0 +1,150 @@
+SAM3 Recipe Mining — Background (Negative) Class Integration Brief
+=================================================================
+Date: 2025-01-04
+Owner: Codex (implementation agent)
+Status: Draft plan only (no code changes yet)
+
+Goal
+----
+Use the new CLIP/DINOv3 background classes ("__bg_*") to suppress false positives during SAM3
+recipe mining and inference. The intent is to keep recall high while making background rejections
+explicit, measurable, and tunable.
+
+Context (current state)
+-----------------------
+- CLIP/DINOv3 training adds background classes named "__bg_0", "__bg_1", ...
+- The mining pipeline already carries clip_head_background_guard and background_indices.
+- Inference paths (sam3_steps) already pass clip_head_background_guard into
+  _infer_sam3_greedy_recipe_on_image.
+- There is no explicit background margin threshold, background-aware objective term,
+  or background reporting in recipe mining results.
+
+Key Concepts (proposed)
+-----------------------
+1) Background veto (hard gate)
+   - If a background class scores higher than the target class, reject the candidate.
+2) Background margin (soft gate)
+   - Require: (target_prob - best_bg_prob) >= bg_margin.
+3) Background-aware optimization
+   - Penalize recipes whose detections are often flagged as background.
+4) Background reporting
+   - Track background veto rates per step to show whether negative classes are working.
+
+Implementation Plan (commit-sized steps)
+---------------------------------------
+Commit 1 — Schema + config plumbing
+  - Add new mining params:
+    - clip_head_background_margin (float, default 0.0)
+    - clip_head_background_apply (enum: "seed", "final", "both", default "final")
+    - clip_head_background_penalty (float, default 0.0)
+  - Extend recipe schema v2 to store these settings so recipes are portable.
+  - Ensure normalization passes through:
+    - AgentMiningRequest → job payload → recipe export/import
+  - Backward-compat: if not provided, treat as off (margin 0.0, apply="final").
+  - Acceptance: config round-trips through save/export/import without error.
+
+Commit 2 — Background veto at seed stage
+  - In candidate selection (seed stage), if clip_head_background_apply includes "seed":
+    - Compute CLIP proba for candidates (already available when clip_head is used).
+    - Reject any candidate with background guard or margin fail.
+  - Provide fallback behavior:
+    - If all seeds are rejected, retry with background guard disabled once
+      (consistent with current CLIP fallback behavior) and log a warning.
+  - Acceptance: seed selection logs include background veto stats.
+
+Commit 3 — Background veto at final stage
+  - Apply background guard + margin in final filtering stage (before final dedupe),
+    when clip_head_background_apply includes "final".
+  - Explicitly record background rejections (count + rate).
+  - Acceptance: final detection count decreases when bg guard/margin is enabled,
+    while precision improves on a test run.
+
+Commit 4 — Background-aware optimizer objective
+  - Add metrics during mining:
+    - bg_veto_rate_seed, bg_veto_rate_final
+    - bg_confusion_rate (fraction of detections where top-1 is background)
+  - Add a penalty term to the optimizer score:
+    - score' = score - (clip_head_background_penalty * bg_confusion_rate)
+  - Default penalty = 0.0 (off) for backward compat.
+  - Acceptance: enabling penalty changes chosen steps on a test run.
+
+Commit 5 — UI controls (simple + advanced)
+  - Add a compact control group:
+    - Background suppression: Off / On
+    - Strength slider: Low / Balanced / Strict (maps to bg_margin)
+  - Advanced fields:
+    - Apply to seeds / final / both
+    - Exact bg_margin value
+    - Background penalty weight
+  - Tooltips for laymen:
+    - “If a detection looks more like background than the class, drop it.”
+  - Acceptance: settings flow into mining payload and are reflected in the run summary.
+
+Commit 6 — Reporting + logs
+  - Add to run summary:
+    - Background guard status
+    - Background margin
+    - Seed-stage and final-stage bg veto rates
+  - Add per-step logs:
+    - “bg veto: X/Y seeds dropped”
+  - Acceptance: logs clearly show negative-class impact per step.
+
+Commit 7 — Prompt-level background filter (cool idea)
+  - Before expensive expansion, drop prompts whose seed candidates are mostly background.
+  - Heuristic: if >80% of seed candidates are vetoed by background, drop prompt.
+  - Add toggle + threshold in advanced UI.
+  - Acceptance: reduces runtime on noisy prompts without losing recall in smoke tests.
+
+Commit 8 — Hard negative replay (cool idea)
+  - Collect false positives with high background scores into a "negatives" cache.
+  - Provide “Export negatives for CLIP training” action.
+  - Store as small YOLO dataset under uploads/clip_negative_cache/<dataset_id>/.
+  - Acceptance: negatives export creates dataset with crops + labelmap.
+
+Commit 9 — Per-class background margin auto-tune (cool idea)
+  - When clip_head_auto_tune is on:
+    - Tune bg_margin per class alongside min_prob/margin to hit target precision.
+  - Store per-class background margin in recipe head metadata.
+  - Acceptance: shows per-class background margins in recipe summary.
+
+Commit 10 — Benchmarks + verification
+  - Run A/B comparisons on a subset:
+    - Baseline (no bg guard) vs bg guard (seed + final) vs bg guard + margin
+  - Measure: precision, coverage, bg_veto_rate.
+  - Update classifier_training_report.txt or a new mining report with findings.
+
+Implementation Notes (where to modify)
+--------------------------------------
+- localinferenceapi.py
+  - AgentMiningRequest / recipe schema v2
+  - _infer_sam3_greedy_recipe_on_image (seed/final gate)
+  - _clip_head_keep_mask for background margin support
+  - Optimizer scoring logic in recipe mining
+- ybat-master/ybat.html / ybat-master/ybat.js
+  - New UI controls + tooltips
+  - Run summary + result rendering
+
+Data/Schema Additions
+---------------------
+- clip_head_background_margin (float)
+- clip_head_background_apply ("seed" | "final" | "both")
+- clip_head_background_penalty (float)
+- bg_veto_rate_seed, bg_veto_rate_final, bg_confusion_rate
+
+Risks / Mitigations
+-------------------
+- Risk: background guard wipes all seeds on rare classes.
+  Mitigation: single fallback re-run without guard and log warning.
+- Risk: background margin too strict reduces recall.
+  Mitigation: default margin = 0.0; use presets; auto-tune per class.
+- Risk: confusion around background classes in model metadata.
+  Mitigation: detect via __bg_* naming only; if none found, disable guard automatically.
+
+Deliverables
+------------
+- Updated mining pipeline with background veto + margin support.
+- UI controls with clear tooltips (simple + advanced).
+- Logging + run summaries with bg metrics.
+- Optional hard negative replay flow.
+- Benchmark report comparing baseline vs background suppression.
+

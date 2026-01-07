@@ -2177,6 +2177,210 @@ def _run_sam3_visual_inference(
     return (detections, aligned_masks) if return_masks else detections
 
 
+def _run_sam3_visual_inference_multi(
+    pil_img: Image.Image,
+    bboxes_xywh: List[Tuple[float, float, float, float]],
+    bbox_labels: Optional[List[bool]],
+    threshold: float,
+    mask_threshold: float,
+    limit: Optional[int],
+    *,
+    return_masks: bool = False,
+    min_size: Optional[float] = None,
+    simplify_epsilon: Optional[float] = None,
+    processor_override: Optional[Any] = None,
+    state: Optional[Any] = None,
+) -> List[QwenDetection] | Tuple[List[QwenDetection], Optional[List[np.ndarray]]]:
+    """
+    Run SAM3 with multiple positive visual (box) prompts. Uses a shared image state
+    to accumulate prompts and returns detections from the combined prompt set.
+    """
+    if processor_override is not None:
+        processor = processor_override
+    else:
+        _, processor, _ = _ensure_sam3_text_runtime()
+    try:
+        processor.set_confidence_threshold(float(threshold))
+    except Exception:
+        pass
+    normalized_limit: Optional[int]
+    if limit is None:
+        normalized_limit = None
+    else:
+        try:
+            normalized_limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            normalized_limit = None
+    if not bboxes_xywh:
+        empty = ([], []) if return_masks else []
+        return empty
+    labels: List[bool]
+    if bbox_labels is None:
+        labels = [True] * len(bboxes_xywh)
+    else:
+        labels = list(bbox_labels)
+        if len(labels) < len(bboxes_xywh):
+            labels.extend([True] * (len(bboxes_xywh) - len(labels)))
+        elif len(labels) > len(bboxes_xywh):
+            labels = labels[: len(bboxes_xywh)]
+    img_state = state if state is not None else processor.set_image(pil_img)
+    img_w, img_h = float(pil_img.width), float(pil_img.height)
+    output = None
+    for bbox_xywh, label in zip(bboxes_xywh, labels):
+        x, y, w, h = bbox_xywh
+        cx = (x + w / 2.0) / img_w
+        cy = (y + h / 2.0) / img_h
+        w_norm = w / img_w
+        h_norm = h / img_h
+        try:
+            output = processor.add_geometric_prompt([cx, cy, w_norm, h_norm], bool(label), state=img_state)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_prompt_failed:{exc}") from exc
+    masks_arr: Optional[np.ndarray] = None
+    mask_logits = None
+    if isinstance(output, Mapping):
+        if "masks_logits" in output and output.get("masks_logits") is not None:
+            mask_logits = output.get("masks_logits")
+        elif "masks" in output and output.get("masks") is not None:
+            mask_logits = output.get("masks")
+    if mask_logits is None and isinstance(img_state, Mapping):
+        if "masks_logits" in img_state and img_state.get("masks_logits") is not None:
+            mask_logits = img_state.get("masks_logits")
+        elif "masks" in img_state and img_state.get("masks") is not None:
+            mask_logits = img_state.get("masks")
+    try:
+        threshold_val = float(mask_threshold)
+    except Exception:
+        threshold_val = 0.5
+    threshold_val = max(0.0, min(1.0, threshold_val))
+    try:
+        def _sigmoid_np(arr: np.ndarray) -> np.ndarray:
+            try:
+                return 1.0 / (1.0 + np.exp(-np.clip(arr, -50, 50)))
+            except Exception:
+                return 1.0 / (1.0 + np.exp(-arr))
+
+        if isinstance(mask_logits, (list, tuple)):
+            if any(isinstance(m, torch.Tensor) for m in mask_logits):
+                stacked = [m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m) for m in mask_logits]
+                mask_logits = np.stack(stacked)
+            else:
+                mask_logits = np.asarray(mask_logits)
+        if isinstance(mask_logits, torch.Tensor):
+            try:
+                probs = mask_logits
+                try:
+                    min_v = float(probs.min())
+                    max_v = float(probs.max())
+                    if not (0.0 <= min_v <= 1.0 and 0.0 <= max_v <= 1.0):
+                        probs = torch.sigmoid(probs)
+                except Exception:
+                    probs = torch.sigmoid(probs)
+                masks_arr = (probs > threshold_val).cpu().numpy()
+            except Exception:
+                masks_arr = mask_logits.detach().cpu().numpy()
+        elif mask_logits is not None:
+            masks_np = np.asarray(mask_logits)
+            if masks_np.dtype == bool or (
+                np.issubdtype(masks_np.dtype, np.floating)
+                and np.nanmin(masks_np) >= 0.0
+                and np.nanmax(masks_np) <= 1.0
+            ):
+                probs_np = masks_np
+            else:
+                probs_np = _sigmoid_np(masks_np)
+            masks_arr = probs_np > threshold_val
+        if masks_arr is not None:
+            masks_arr = np.asarray(masks_arr)
+            if masks_arr.dtype == object:
+                flattened = [np.asarray(m) for m in masks_arr]
+                masks_arr = np.stack(flattened)
+            if masks_arr.ndim == 2:
+                masks_arr = masks_arr[None, ...]
+            elif masks_arr.ndim == 4 and masks_arr.shape[1] == 1:
+                masks_arr = masks_arr[:, 0, ...]
+            elif masks_arr.ndim == 4 and masks_arr.shape[-1] == 1:
+                masks_arr = masks_arr[..., 0]
+    except Exception:
+        masks_arr = None
+    def _to_numpy_safe(val: Any) -> Optional[np.ndarray]:
+        if val is None:
+            return None
+        if isinstance(val, torch.Tensor):
+            try:
+                return val.detach().cpu().numpy()
+            except Exception:
+                return None
+        try:
+            return np.asarray(val)
+        except Exception:
+            return None
+
+    payload_for_detection: Dict[str, Any] = {}
+    if isinstance(output, Mapping):
+        boxes_val = _to_numpy_safe(output.get("boxes"))
+        scores_val = _to_numpy_safe(output.get("scores"))
+        masks_val = _to_numpy_safe(output.get("masks"))
+        if boxes_val is not None:
+            payload_for_detection["boxes"] = boxes_val
+        if scores_val is not None:
+            payload_for_detection["scores"] = scores_val
+        if masks_val is not None:
+            payload_for_detection["masks"] = masks_val
+    collected_masks: Optional[List[np.ndarray]] = [] if return_masks else None
+    detections = _sam3_text_detections(
+        pil_img,
+        payload_for_detection,
+        "visual",
+        normalized_limit,
+        min_score=float(threshold),
+        masks_arr=masks_arr,
+        min_size=min_size,
+        simplify_epsilon=simplify_epsilon,
+        collected_masks=collected_masks,
+    )
+    seed_boxes_xyxy = [
+        (bx[0], bx[1], bx[0] + bx[2], bx[1] + bx[3])
+        for bx in bboxes_xywh
+    ]
+    def _iou(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(0.0, (ax2 - ax1)) * max(0.0, (ay2 - ay1))
+        area_b = max(0.0, (bx2 - bx1)) * max(0.0, (by2 - by1))
+        denom = area_a + area_b - inter
+        return inter / denom if denom > 0 else 0.0
+
+    aligned_masks: Optional[List[np.ndarray]]
+    if collected_masks is None:
+        aligned_masks = None
+    else:
+        aligned_masks = collected_masks
+    if detections:
+        filtered_dets: List[QwenDetection] = []
+        filtered_masks: List[np.ndarray] = []
+        for det_idx, det in enumerate(detections):
+            bbox = det.bbox or []
+            if len(bbox) < 4:
+                continue
+            det_xyxy = yolo_to_corners(bbox, pil_img.width, pil_img.height)
+            if any(_iou(seed_xyxy, det_xyxy) > 0.9 for seed_xyxy in seed_boxes_xyxy):
+                continue
+            filtered_dets.append(det)
+            if aligned_masks is not None and det_idx < len(aligned_masks):
+                filtered_masks.append(aligned_masks[det_idx])
+        detections = filtered_dets
+        if aligned_masks is not None:
+            aligned_masks = filtered_masks
+    return (detections, aligned_masks) if return_masks else detections
+
+
 def _ensure_qwen_ready():
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
     if QWEN_IMPORT_ERROR is not None or Qwen2_5_VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
@@ -2832,10 +3036,12 @@ class Sam3TextPrompt(BaseModel):
 class Sam3VisualPrompt(BaseModel):
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
-    bbox_left: float
-    bbox_top: float
-    bbox_width: float
-    bbox_height: float
+    bbox_left: Optional[float] = None
+    bbox_top: Optional[float] = None
+    bbox_width: Optional[float] = None
+    bbox_height: Optional[float] = None
+    bboxes: Optional[List[List[float]]] = None
+    bbox_labels: Optional[List[bool]] = None
     threshold: float = 0.5
     mask_threshold: float = 0.5
     simplify_epsilon: Optional[float] = None
@@ -2848,14 +3054,63 @@ class Sam3VisualPrompt(BaseModel):
     def _validate_visual_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
-        for key in ("bbox_left", "bbox_top", "bbox_width", "bbox_height"):
-            raw = values.get(key)
-            try:
-                values[key] = float(raw)
-            except (TypeError, ValueError):
-                raise ValueError(f"invalid_{key}")
-        if values["bbox_width"] <= 0 or values["bbox_height"] <= 0:
-            raise ValueError("invalid_bbox_dims")
+        raw_bboxes = values.get("bboxes")
+        cleaned_bboxes: List[Tuple[float, float, float, float]] = []
+        if isinstance(raw_bboxes, list) and raw_bboxes:
+            for entry in raw_bboxes:
+                coords = None
+                if isinstance(entry, Mapping):
+                    coords = [
+                        entry.get("left", entry.get("x")),
+                        entry.get("top", entry.get("y")),
+                        entry.get("width", entry.get("w")),
+                        entry.get("height", entry.get("h")),
+                    ]
+                else:
+                    coords = entry
+                if not isinstance(coords, (list, tuple)) or len(coords) < 4:
+                    continue
+                try:
+                    cleaned = tuple(float(coords[idx]) for idx in range(4))
+                except (TypeError, ValueError):
+                    continue
+                if cleaned[2] <= 0 or cleaned[3] <= 0:
+                    continue
+                cleaned_bboxes.append(cleaned)
+        if cleaned_bboxes:
+            values["bboxes"] = cleaned_bboxes
+        else:
+            values["bboxes"] = None
+            for key in ("bbox_left", "bbox_top", "bbox_width", "bbox_height"):
+                raw = values.get(key)
+                try:
+                    values[key] = float(raw)
+                except (TypeError, ValueError):
+                    raise ValueError(f"invalid_{key}")
+            if values["bbox_width"] <= 0 or values["bbox_height"] <= 0:
+                raise ValueError("invalid_bbox_dims")
+        raw_labels = values.get("bbox_labels")
+        cleaned_labels: Optional[List[bool]] = None
+        if isinstance(raw_labels, (list, tuple)):
+            cleaned_labels = []
+            for entry in raw_labels:
+                if isinstance(entry, bool):
+                    cleaned_labels.append(entry)
+                elif isinstance(entry, (int, float)):
+                    cleaned_labels.append(bool(entry))
+                elif isinstance(entry, str):
+                    cleaned_labels.append(entry.strip().lower() in {"1", "true", "yes", "pos", "positive"})
+                else:
+                    cleaned_labels.append(True)
+        if values.get("bboxes"):
+            if cleaned_labels is None:
+                values["bbox_labels"] = None
+            else:
+                if len(cleaned_labels) < len(values["bboxes"]):
+                    cleaned_labels.extend([True] * (len(values["bboxes"]) - len(cleaned_labels)))
+                values["bbox_labels"] = cleaned_labels[: len(values["bboxes"])]
+        else:
+            values["bbox_labels"] = None
         min_size = values.get("min_size")
         if min_size is not None:
             try:
@@ -24421,21 +24676,34 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
     pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
     effective_limit = payload.max_results if payload.max_results is not None else 20
     try:
-        detections, masks_arr = _run_sam3_visual_inference(
-            pil_img,
-            (
-                float(payload.bbox_left),
-                float(payload.bbox_top),
-                float(payload.bbox_width),
-                float(payload.bbox_height),
-            ),
-            payload.threshold,
-            payload.mask_threshold,
-            effective_limit,
-            return_masks=True,
-            min_size=payload.min_size,
-            simplify_epsilon=payload.simplify_epsilon,
-        )
+        if payload.bboxes:
+            detections, masks_arr = _run_sam3_visual_inference_multi(
+                pil_img,
+                [tuple(bx) for bx in payload.bboxes],
+                payload.bbox_labels,
+                payload.threshold,
+                payload.mask_threshold,
+                effective_limit,
+                return_masks=True,
+                min_size=payload.min_size,
+                simplify_epsilon=payload.simplify_epsilon,
+            )
+        else:
+            detections, masks_arr = _run_sam3_visual_inference(
+                pil_img,
+                (
+                    float(payload.bbox_left),
+                    float(payload.bbox_top),
+                    float(payload.bbox_width),
+                    float(payload.bbox_height),
+                ),
+                payload.threshold,
+                payload.mask_threshold,
+                effective_limit,
+                return_masks=True,
+                min_size=payload.min_size,
+                simplify_epsilon=payload.simplify_epsilon,
+            )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

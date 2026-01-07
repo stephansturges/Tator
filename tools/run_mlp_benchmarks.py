@@ -141,6 +141,12 @@ def _write_csv(path: Path, payload: List[Dict[str, Any]]) -> None:
         "job_id",
         "macro_precision_fg",
         "macro_recall_fg",
+        "phase_total",
+        "phase_scan",
+        "phase_embed",
+        "phase_train",
+        "phase_save",
+        "phase_calibration",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -173,8 +179,155 @@ def _write_summary(path: Path, payload: List[Dict[str, Any]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def build_experiments(dataset_name: str, bg_classes: int) -> List[Dict[str, Any]]:
+def build_experiments(dataset_name: str, bg_classes: int, *, suite: str = "legacy") -> List[Dict[str, Any]]:
     experiments: List[Dict[str, Any]] = []
+    suite = (suite or "legacy").strip().lower()
+    if suite == "improvements":
+        base_cfg = {
+            "embedding_standardize": True,
+            "class_weight": "effective",
+            "effective_beta": 0.9999,
+            "hard_example_mining": True,
+            "mlp_activation": "gelu",
+            "mlp_layer_norm": True,
+            "calibration_mode": "temperature",
+        }
+        profiles = [
+            ("full", dict(base_cfg)),
+            ("logit_train", {**base_cfg, "logit_adjustment_mode": "train"}),
+            ("logit_infer", {**base_cfg, "logit_adjustment_mode": "infer"}),
+            ("logit_both", {**base_cfg, "logit_adjustment_mode": "both"}),
+            ("arcface", {**base_cfg, "arcface_enabled": True, "arcface_margin": 0.2, "arcface_scale": 30.0}),
+            ("supcon", {**base_cfg, "supcon_weight": 0.1, "supcon_temperature": 0.07, "supcon_projection_dim": 128}),
+        ]
+        dinov3 = [
+            ("vits16", "facebook/dinov3-vits16-pretrain-lvd1689m", [[256], [384]]),
+            ("vitb16", "facebook/dinov3-vitb16-pretrain-lvd1689m", [[512], [768]]),
+            ("vitl16", "facebook/dinov3-vitl16-pretrain-lvd1689m", [[768, 384], [1024, 512]]),
+        ]
+        smoothing_vals = (0.1,)
+        for smoothing in smoothing_vals:
+            ls_tag = "0p1" if smoothing > 0 else "0"
+            for profile_name, profile_cfg in profiles:
+                for short, model, sizes_list in dinov3:
+                    for sizes in sizes_list:
+                        label = (
+                            f"{dataset_name}_dinov3_{short}_mlp{_format_sizes(sizes)}"
+                            f"_mix0p1_balnorm_ls{ls_tag}_{profile_name}_bg{bg_classes}"
+                        )
+                        experiments.append({
+                            "label": label,
+                            "encoder_type": "dinov3",
+                            "encoder_model": model,
+                            "clip_model": model,
+                            "mlp_sizes": sizes,
+                            "label_smoothing": smoothing,
+                            "bg_classes": bg_classes,
+                            **profile_cfg,
+                        })
+        return experiments
+    if suite == "improvements_no_effective":
+        base_cfg = {
+            "embedding_standardize": True,
+            "class_weight": "balanced",
+            "hard_example_mining": True,
+            "mlp_activation": "gelu",
+            "mlp_layer_norm": True,
+            "calibration_mode": "temperature",
+        }
+        profiles = [
+            ("full_no_effective", dict(base_cfg)),
+            ("logit_train", {**base_cfg, "logit_adjustment_mode": "train"}),
+            ("logit_infer", {**base_cfg, "logit_adjustment_mode": "infer"}),
+            ("logit_both", {**base_cfg, "logit_adjustment_mode": "both"}),
+            ("arcface", {**base_cfg, "arcface_enabled": True, "arcface_margin": 0.2, "arcface_scale": 30.0}),
+            ("supcon", {**base_cfg, "supcon_weight": 0.1, "supcon_temperature": 0.07, "supcon_projection_dim": 128}),
+        ]
+        dinov3 = [
+            ("vits16", "facebook/dinov3-vits16-pretrain-lvd1689m", [[256], [384]]),
+            ("vitb16", "facebook/dinov3-vitb16-pretrain-lvd1689m", [[512], [768]]),
+            ("vitl16", "facebook/dinov3-vitl16-pretrain-lvd1689m", [[768, 384], [1024, 512]]),
+        ]
+        smoothing_vals = (0.1,)
+        for smoothing in smoothing_vals:
+            ls_tag = "0p1" if smoothing > 0 else "0"
+            for profile_name, profile_cfg in profiles:
+                for short, model, sizes_list in dinov3:
+                    for sizes in sizes_list:
+                        label = (
+                            f"{dataset_name}_dinov3_{short}_mlp{_format_sizes(sizes)}"
+                            f"_mix0p1_balnorm_ls{ls_tag}_{profile_name}_bg{bg_classes}"
+                        )
+                        experiments.append({
+                            "label": label,
+                            "encoder_type": "dinov3",
+                            "encoder_model": model,
+                            "clip_model": model,
+                            "mlp_sizes": sizes,
+                            "label_smoothing": smoothing,
+                            "bg_classes": bg_classes,
+                            **profile_cfg,
+                        })
+        return experiments
+    if suite == "improvements_minimal":
+        base_cfg = {
+            "class_weight": "balanced",
+            "mlp_activation": "relu",
+            "mlp_layer_norm": False,
+            "calibration_mode": "none",
+        }
+        profiles = [
+            ("baseline_minimal", dict(base_cfg)),
+            ("logit_train", {**base_cfg, "logit_adjustment_mode": "train"}),
+            ("logit_infer", {**base_cfg, "logit_adjustment_mode": "infer"}),
+            ("logit_both", {**base_cfg, "logit_adjustment_mode": "both"}),
+            ("arcface", {**base_cfg, "arcface_enabled": True, "arcface_margin": 0.2, "arcface_scale": 30.0}),
+            ("supcon", {**base_cfg, "supcon_weight": 0.1, "supcon_temperature": 0.07, "supcon_projection_dim": 128}),
+        ]
+        dinov3 = [
+            ("vits16", "facebook/dinov3-vits16-pretrain-lvd1689m", [[256], [384]]),
+            ("vitb16", "facebook/dinov3-vitb16-pretrain-lvd1689m", [[512], [768]]),
+            ("vitl16", "facebook/dinov3-vitl16-pretrain-lvd1689m", [[768, 384], [1024, 512]]),
+        ]
+        smoothing_vals = (0.1,)
+        for smoothing in smoothing_vals:
+            ls_tag = "0p1" if smoothing > 0 else "0"
+            for profile_name, profile_cfg in profiles:
+                for short, model, sizes_list in dinov3:
+                    for sizes in sizes_list:
+                        label = (
+                            f"{dataset_name}_dinov3_{short}_mlp{_format_sizes(sizes)}"
+                            f"_mix0p1_balnorm_ls{ls_tag}_{profile_name}_bg{bg_classes}"
+                        )
+                        experiments.append({
+                            "label": label,
+                            "encoder_type": "dinov3",
+                            "encoder_model": model,
+                            "clip_model": model,
+                            "mlp_sizes": sizes,
+                            "label_smoothing": smoothing,
+                            "bg_classes": bg_classes,
+                            **profile_cfg,
+                        })
+        return experiments
+
+    profiles = [
+        ("base", {}),
+        ("center_std", {"embedding_standardize": True}),
+        ("effective", {"class_weight": "effective", "effective_beta": 0.9999}),
+        ("hardmine", {"hard_example_mining": True}),
+        ("gelu_ln", {"mlp_activation": "gelu", "mlp_layer_norm": True}),
+        ("calib", {"calibration_mode": "temperature"}),
+        ("full", {
+            "embedding_standardize": True,
+            "class_weight": "effective",
+            "effective_beta": 0.9999,
+            "hard_example_mining": True,
+            "mlp_activation": "gelu",
+            "mlp_layer_norm": True,
+            "calibration_mode": "temperature",
+        }),
+    ]
     dinov3 = [
         (
             "vits16",
@@ -209,36 +362,39 @@ def build_experiments(dataset_name: str, bg_classes: int) -> List[Dict[str, Any]
     ]
     for smoothing in (0.0, 0.1):
         ls_tag = "0p1" if smoothing > 0 else "0"
-        for short, model, sizes_list in dinov3:
-            for sizes in sizes_list:
-                label = (
-                    f"{dataset_name}_dinov3_{short}_mlp{_format_sizes(sizes)}"
-                    f"_mix0p1_balnorm_ls{ls_tag}_bg{bg_classes}"
-                )
-                experiments.append({
-                    "label": label,
-                    "encoder_type": "dinov3",
-                    "encoder_model": model,
-                    "clip_model": model,
-                    "mlp_sizes": sizes,
-                    "label_smoothing": smoothing,
-                    "bg_classes": bg_classes,
-                })
-        for short, model, sizes_list in clip:
-            for sizes in sizes_list:
-                label = (
-                    f"{dataset_name}_clip_{short}_mlp{_format_sizes(sizes)}"
-                    f"_mix0p1_balnorm_ls{ls_tag}_bg{bg_classes}"
-                )
-                experiments.append({
-                    "label": label,
-                    "encoder_type": "clip",
-                    "encoder_model": model,
-                    "clip_model": model,
-                    "mlp_sizes": sizes,
-                    "label_smoothing": smoothing,
-                    "bg_classes": bg_classes,
-                })
+        for profile_name, profile_cfg in profiles:
+            for short, model, sizes_list in dinov3:
+                for sizes in sizes_list:
+                    label = (
+                        f"{dataset_name}_dinov3_{short}_mlp{_format_sizes(sizes)}"
+                        f"_mix0p1_balnorm_ls{ls_tag}_{profile_name}_bg{bg_classes}"
+                    )
+                    experiments.append({
+                        "label": label,
+                        "encoder_type": "dinov3",
+                        "encoder_model": model,
+                        "clip_model": model,
+                        "mlp_sizes": sizes,
+                        "label_smoothing": smoothing,
+                        "bg_classes": bg_classes,
+                        **profile_cfg,
+                    })
+            for short, model, sizes_list in clip:
+                for sizes in sizes_list:
+                    label = (
+                        f"{dataset_name}_clip_{short}_mlp{_format_sizes(sizes)}"
+                        f"_mix0p1_balnorm_ls{ls_tag}_{profile_name}_bg{bg_classes}"
+                    )
+                    experiments.append({
+                        "label": label,
+                        "encoder_type": "clip",
+                        "encoder_model": model,
+                        "clip_model": model,
+                        "mlp_sizes": sizes,
+                        "label_smoothing": smoothing,
+                        "bg_classes": bg_classes,
+                        **profile_cfg,
+                    })
     return experiments
 
 
@@ -297,13 +453,37 @@ def _run_api_experiment(
         "mlp_sampler": "balanced",
         "mlp_mixup_alpha": "0.1",
         "mlp_normalize_embeddings": "true",
+        "mlp_activation": exp.get("mlp_activation", "relu"),
+        "mlp_layer_norm": "true" if exp.get("mlp_layer_norm") else "false",
+        "mlp_hard_mining_epochs": str(exp.get("mlp_hard_mining_epochs", 5)),
+        "logit_adjustment_mode": exp.get("logit_adjustment_mode", "none"),
+        "arcface_enabled": "true" if exp.get("arcface_enabled") else "false",
+        "arcface_margin": str(exp.get("arcface_margin", 0.2)),
+        "arcface_scale": str(exp.get("arcface_scale", 30.0)),
+        "supcon_weight": str(exp.get("supcon_weight", 0.0)),
+        "supcon_temperature": str(exp.get("supcon_temperature", 0.07)),
+        "supcon_projection_dim": str(exp.get("supcon_projection_dim", 128)),
+        "supcon_projection_hidden": str(exp.get("supcon_projection_hidden", 0)),
+        "embedding_center": "true" if exp.get("embedding_center") else "false",
+        "embedding_standardize": "true" if exp.get("embedding_standardize") else "false",
+        "calibration_mode": exp.get("calibration_mode", "none"),
+        "calibration_min_temp": str(exp.get("calibration_min_temp", 0.5)),
+        "calibration_max_temp": str(exp.get("calibration_max_temp", 5.0)),
+        "calibration_max_iters": str(exp.get("calibration_max_iters", 50)),
         "class_weight": "balanced",
+        "effective_beta": str(exp.get("effective_beta", 0.9999)),
         "bg_class_count": str(exp["bg_classes"]),
         "batch_size": str(batch_size),
         "random_seed": "42",
         "test_size": "0.2",
         "min_per_class": "2",
     }
+    if exp.get("class_weight"):
+        data["class_weight"] = exp.get("class_weight")
+    if "logit_adjustment_inference" in exp:
+        data["logit_adjustment_inference"] = "true" if exp.get("logit_adjustment_inference") else "false"
+    if exp.get("hard_example_mining"):
+        data["hard_example_mining"] = "true"
     if reuse_embeddings:
         data["reuse_embeddings"] = "true"
     if device:
@@ -330,7 +510,15 @@ def main() -> None:
     parser.add_argument("--reuse-embeddings", action="store_true")
     parser.add_argument("--device", default=None)
     parser.add_argument("--api-root", default=None, help="If set, run via backend API (e.g., http://127.0.0.1:8000).")
+    parser.add_argument(
+        "--suite",
+        default="legacy",
+        choices=["legacy", "improvements", "improvements_no_effective", "improvements_minimal"],
+        help="Benchmark suite: legacy (full grid) or improvements (DINOv3 LVD + new head features).",
+    )
     parser.add_argument("--skip-existing", action="store_true", default=True)
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
     args = parser.parse_args()
 
     metrics_base = Path(args.metrics_base)
@@ -340,7 +528,17 @@ def main() -> None:
 
     payload = _load_metrics(json_path)
     seen_labels = {row.get("label") for row in payload}
-    experiments = build_experiments(args.dataset_name, args.bg_classes)
+    experiments = build_experiments(args.dataset_name, args.bg_classes, suite=args.suite)
+    shard_count = max(1, int(args.shard_count))
+    shard_index = int(args.shard_index)
+    if shard_index < 0 or shard_index >= shard_count:
+        raise SystemExit(f"--shard-index must be between 0 and {shard_count - 1}")
+    experiments = sorted(experiments, key=lambda exp: exp["label"])
+    if shard_count > 1:
+        experiments = [
+            exp for idx, exp in enumerate(experiments)
+            if (idx % shard_count) == shard_index
+        ]
 
     os.makedirs("uploads/classifiers", exist_ok=True)
     os.makedirs("uploads/labelmaps", exist_ok=True)
@@ -381,10 +579,30 @@ def main() -> None:
                     mlp_sampler="balanced",
                     mlp_mixup_alpha=0.1,
                     mlp_normalize_embeddings=True,
-                    class_weight="balanced",
+                    mlp_activation=exp.get("mlp_activation", "relu"),
+                    mlp_layer_norm=bool(exp.get("mlp_layer_norm")),
+                    mlp_hard_mining_epochs=int(exp.get("mlp_hard_mining_epochs", 5)),
+                    logit_adjustment_mode=str(exp.get("logit_adjustment_mode", "none")),
+                    logit_adjustment_inference=exp.get("logit_adjustment_inference"),
+                    arcface_enabled=bool(exp.get("arcface_enabled")),
+                    arcface_margin=float(exp.get("arcface_margin", 0.2)),
+                    arcface_scale=float(exp.get("arcface_scale", 30.0)),
+                    supcon_weight=float(exp.get("supcon_weight", 0.0)),
+                    supcon_temperature=float(exp.get("supcon_temperature", 0.07)),
+                    supcon_projection_dim=int(exp.get("supcon_projection_dim", 128)),
+                    supcon_projection_hidden=int(exp.get("supcon_projection_hidden", 0)),
+                    embedding_center=bool(exp.get("embedding_center")),
+                    embedding_standardize=bool(exp.get("embedding_standardize")),
+                    calibration_mode=str(exp.get("calibration_mode", "none")),
+                    calibration_min_temp=float(exp.get("calibration_min_temp", 0.5)),
+                    calibration_max_temp=float(exp.get("calibration_max_temp", 5.0)),
+                    calibration_max_iters=int(exp.get("calibration_max_iters", 50)),
+                    class_weight=str(exp.get("class_weight", "balanced")),
+                    effective_beta=float(exp.get("effective_beta", 0.9999)),
                     bg_class_count=exp["bg_classes"],
                     reuse_embeddings=args.reuse_embeddings,
                     device=args.device,
+                    hard_example_mining=bool(exp.get("hard_example_mining")),
                 )
         except TrainingError as exc:
             print(f"[fail] {label}: {exc}")
@@ -400,6 +618,11 @@ def main() -> None:
         all_metrics = _compute_metrics(per_class_metrics, fg_only=False)
         fg_metrics = _compute_metrics(per_class_metrics, fg_only=True)
         job_id = uuid.uuid4().hex
+        phase_timings = artifacts.get("phase_timings") if isinstance(artifacts, dict) else artifacts.phase_timings
+        phase_timings = phase_timings if isinstance(phase_timings, dict) else {}
+        def _phase(name: str) -> Optional[float]:
+            val = phase_timings.get(name)
+            return float(val) if isinstance(val, (int, float)) else None
         row = {
             "label": label,
             "encoder_type": artifacts.get("encoder_type") if isinstance(artifacts, dict) else artifacts.encoder_type,
@@ -418,6 +641,12 @@ def main() -> None:
             "job_id": job_id,
             "macro_precision_fg": fg_metrics["macro_precision"],
             "macro_recall_fg": fg_metrics["macro_recall"],
+            "phase_total": _phase("total"),
+            "phase_scan": _phase("scan"),
+            "phase_embed": _phase("embed"),
+            "phase_train": _phase("train"),
+            "phase_save": _phase("save"),
+            "phase_calibration": _phase("calibration"),
         }
         payload.append(row)
         seen_labels.add(label)

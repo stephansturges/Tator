@@ -9635,6 +9635,198 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
+    function clearSelectedBboxes({ keepCurrent = false } = {}) {
+        selectedBboxes.clear();
+        negativeBboxes.clear();
+        if (!keepCurrent && currentBbox && currentBbox.bbox) {
+            currentBbox.bbox.marked = false;
+        }
+    }
+
+    function selectBboxRecord(bboxRecord, { additive = false, negative = false } = {}) {
+        if (!bboxRecord) {
+            return;
+        }
+        if (!additive) {
+            selectedBboxes.clear();
+            negativeBboxes.clear();
+        }
+        if (!bboxRecord.uuid) {
+            bboxRecord.uuid = generateUUID();
+        }
+        const uuid = bboxRecord.uuid;
+        if (!uuid) {
+            return;
+        }
+        if (negative) {
+            if (additive && negativeBboxes.has(uuid)) {
+                negativeBboxes.delete(uuid);
+            } else {
+                negativeBboxes.add(uuid);
+                selectedBboxes.delete(uuid);
+            }
+        } else {
+            if (additive && selectedBboxes.has(uuid)) {
+                selectedBboxes.delete(uuid);
+            } else {
+                selectedBboxes.add(uuid);
+                negativeBboxes.delete(uuid);
+            }
+        }
+    }
+
+    function getSelectedBboxRecords({ negative = false } = {}) {
+        if (!currentImage || !bboxes[currentImage.name]) {
+            return [];
+        }
+        const records = [];
+        const buckets = bboxes[currentImage.name];
+        Object.keys(buckets).forEach((className) => {
+            (buckets[className] || []).forEach((bboxRecord) => {
+                if (!bboxRecord || !bboxRecord.uuid) {
+                    return;
+                }
+                if (negative ? negativeBboxes.has(bboxRecord.uuid) : selectedBboxes.has(bboxRecord.uuid)) {
+                    records.push(bboxRecord);
+                }
+            });
+        });
+        return records;
+    }
+
+    function deleteSelectedBboxes() {
+        if (!currentImage || !bboxes[currentImage.name]) {
+            return 0;
+        }
+        const records = [...getSelectedBboxRecords({ negative: false }), ...getSelectedBboxRecords({ negative: true })];
+        if (!records.length) {
+            return 0;
+        }
+        const byClass = new Map();
+        records.forEach((rec) => {
+            if (!rec || !rec.class || !rec.uuid) {
+                return;
+            }
+            if (!byClass.has(rec.class)) {
+                byClass.set(rec.class, new Set());
+            }
+            byClass.get(rec.class).add(rec.uuid);
+        });
+        let removed = 0;
+        byClass.forEach((uuidSet, className) => {
+            const bucket = bboxes[currentImage.name][className];
+            if (!bucket) {
+                return;
+            }
+            const remaining = bucket.filter((bx) => !bx.uuid || !uuidSet.has(bx.uuid));
+            removed += bucket.length - remaining.length;
+            if (remaining.length) {
+                bboxes[currentImage.name][className] = remaining;
+            } else {
+                delete bboxes[currentImage.name][className];
+            }
+        });
+        if (
+            currentBbox &&
+            currentBbox.bbox &&
+            currentBbox.bbox.uuid &&
+            (selectedBboxes.has(currentBbox.bbox.uuid) || negativeBboxes.has(currentBbox.bbox.uuid))
+        ) {
+            currentBbox = null;
+            document.body.style.cursor = "default";
+        }
+        clearSelectedBboxes();
+        return removed;
+    }
+
+    function selectBboxesInRect(rect, { additive = true, negative = false } = {}) {
+        if (!currentImage || !bboxes[currentImage.name]) {
+            return 0;
+        }
+        if (!additive) {
+            clearSelectedBboxes();
+        }
+        const { x, y, width, height } = rect;
+        const rectX2 = x + width;
+        const rectY2 = y + height;
+        const currentBxs = bboxes[currentImage.name];
+        let selectedCount = 0;
+        let firstSelected = null;
+        Object.keys(currentBxs).forEach((className) => {
+            currentBxs[className].forEach((bx, i) => {
+                if (!bx) return;
+                const isPoly = bx.type === "polygon" || (Array.isArray(bx.points) && bx.points.length >= 3);
+                let bxRect = null;
+                let centroid = null;
+                if (isPoly) {
+                    const xs = bx.points.map((p) => p.x);
+                    const ys = bx.points.map((p) => p.y);
+                    const minX = Math.min(...xs);
+                    const maxX = Math.max(...xs);
+                    const minY = Math.min(...ys);
+                    const maxY = Math.max(...ys);
+                    bxRect = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+                    centroid = polygonCentroid(bx.points);
+                } else {
+                    bxRect = { x: bx.x, y: bx.y, width: bx.width, height: bx.height };
+                }
+                const center = centroid || {
+                    x: bxRect.x + bxRect.width / 2,
+                    y: bxRect.y + bxRect.height / 2,
+                };
+                const inside =
+                    center.x >= rect.x &&
+                    center.x <= rectX2 &&
+                    center.y >= rect.y &&
+                    center.y <= rectY2;
+                if (!inside) {
+                    return;
+                }
+                selectBboxRecord(bx, { additive: true, negative });
+                selectedCount += 1;
+                if (!firstSelected) {
+                    firstSelected = { bbox: bx, index: i };
+                }
+            });
+        });
+        if (!negative && !currentBbox && firstSelected) {
+            currentBbox = {
+                bbox: firstSelected.bbox,
+                index: firstSelected.index,
+                originalX: firstSelected.bbox.x,
+                originalY: firstSelected.bbox.y,
+                originalWidth: firstSelected.bbox.width,
+                originalHeight: firstSelected.bbox.height,
+                moving: false,
+                resizing: null
+            };
+        }
+        return selectedCount;
+    }
+
+    function polygonCentroid(points) {
+        if (!Array.isArray(points) || points.length < 3) {
+            return null;
+        }
+        let area = 0;
+        let cx = 0;
+        let cy = 0;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+            const p1 = points[j];
+            const p2 = points[i];
+            const cross = (p1.x * p2.y) - (p2.x * p1.y);
+            area += cross;
+            cx += (p1.x + p2.x) * cross;
+            cy += (p1.y + p2.y) * cross;
+        }
+        area *= 0.5;
+        if (Math.abs(area) < 1e-6) {
+            return null;
+        }
+        const factor = 1 / (6 * area);
+        return { x: cx * factor, y: cy * factor };
+    }
+
     function updateSlotHighlights(statusList) {
         latestSlotStatuses = Array.isArray(statusList) ? statusList : [];
         applySlotStatusClasses();
@@ -11542,7 +11734,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             sam3TextElements.autoButton.textContent = busy ? "Running…" : "Run SAM3 + Auto Class";
         }
         if (sam3TextElements.similarityButton) {
-            sam3TextElements.similarityButton.textContent = busy ? "Running…" : "SAM3 similarity prompt (use selected box)";
+            sam3TextElements.similarityButton.textContent = busy ? "Running…" : "SAM3 similarity prompt (use selected box(es))";
         }
         if (sam3TextElements.batchRunButton) {
             sam3TextElements.batchRunButton.textContent = sam3TextBatchActive ? "Running batch…" : "Run batch";
@@ -12588,24 +12780,70 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSam3TextStatus("Load an image and select a bbox to use as the exemplar.", "warn");
             return;
         }
-        const exemplar = currentBbox && currentBbox.bbox ? currentBbox.bbox : null;
-        if (!exemplar) {
+        const selectedRecords = getSelectedBboxRecords({ negative: false });
+        const negativeRecords = getSelectedBboxRecords({ negative: true });
+        const currentUuid = currentBbox && currentBbox.bbox ? currentBbox.bbox.uuid : null;
+        const isCurrentNegative = currentUuid ? negativeBboxes.has(currentUuid) : false;
+        const primary = currentBbox && currentBbox.bbox && !isCurrentNegative
+            ? currentBbox.bbox
+            : (selectedRecords[0] || null);
+        if (!primary) {
             setSam3TextStatus("Select or draw a bbox to use as the similarity prompt.", "warn");
             return;
         }
-        const targetClass = exemplar.class || null;
+        const targetClass = primary.class || null;
         if (!targetClass || typeof classes[targetClass] === "undefined") {
             setSam3TextStatus("The selected bbox has no valid class; pick a labeled bbox first.", "warn");
             return;
         }
-        const width = Math.abs(exemplar.width);
-        const height = Math.abs(exemplar.height);
-        if (width < minBBoxWidth || height < minBBoxHeight) {
-            setSam3TextStatus("Exemplar bbox is too small to use for similarity.", "warn");
+        const promptCandidates = selectedRecords.length ? selectedRecords : [primary];
+        const promptRects = [];
+        const promptLabels = [];
+        const seenUuids = new Set();
+        promptCandidates.forEach((bbox) => {
+            if (!bbox || bbox.class !== targetClass) {
+                return;
+            }
+            if (bbox.uuid && seenUuids.has(bbox.uuid)) {
+                return;
+            }
+            const width = Math.abs(bbox.width);
+            const height = Math.abs(bbox.height);
+            if (width < minBBoxWidth || height < minBBoxHeight) {
+                return;
+            }
+            const left = Math.min(bbox.x, bbox.x + bbox.width);
+            const top = Math.min(bbox.y, bbox.y + bbox.height);
+            promptRects.push({ x: left, y: top, width, height });
+            promptLabels.push(true);
+            if (bbox.uuid) {
+                seenUuids.add(bbox.uuid);
+            }
+        });
+        negativeRecords.forEach((bbox) => {
+            if (!bbox) {
+                return;
+            }
+            if (bbox.uuid && seenUuids.has(bbox.uuid)) {
+                return;
+            }
+            const width = Math.abs(bbox.width);
+            const height = Math.abs(bbox.height);
+            if (width < minBBoxWidth || height < minBBoxHeight) {
+                return;
+            }
+            const left = Math.min(bbox.x, bbox.x + bbox.width);
+            const top = Math.min(bbox.y, bbox.y + bbox.height);
+            promptRects.push({ x: left, y: top, width, height });
+            promptLabels.push(false);
+            if (bbox.uuid) {
+                seenUuids.add(bbox.uuid);
+            }
+        });
+        if (!promptRects.length) {
+            setSam3TextStatus("Exemplar bbox is too small or missing for similarity.", "warn");
             return;
         }
-        const left = Math.min(exemplar.x, exemplar.x + exemplar.width);
-        const top = Math.min(exemplar.y, exemplar.y + exemplar.height);
         let threshold = parseFloat(sam3TextElements.similarityThresholdInput?.value ?? sam3TextElements.thresholdInput?.value ?? "0.5");
         if (Number.isNaN(threshold)) threshold = 0.5;
         threshold = Math.min(Math.max(threshold, 0), 1);
@@ -12672,15 +12910,16 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
         sam3SimilarityRequestActive = true;
         updateSam3TextButtons();
-        setSam3TextStatus("Running SAM3 similarity prompt…", "info");
+        const posCount = promptLabels.filter(Boolean).length;
+        const negCount = promptLabels.length - posCount;
+        const promptCountLabel = promptLabels.length > 1 ? ` (${posCount} pos / ${negCount} neg)` : "";
+        setSam3TextStatus(`Running SAM3 similarity prompt${promptCountLabel}…`, "info");
         const similarityTaskId = enqueueTask({ kind: "sam-similarity", imageName: currentImage.name, detail: targetClass });
-        const statusToken = beginSamActionStatus("Running SAM3 similarity prompt…", { variant: "info" });
+        const statusToken = beginSamActionStatus(`Running SAM3 similarity prompt${promptCountLabel}…`, { variant: "info" });
         try {
             const result = await invokeSam3VisualPrompt({
-                bbox_left: left,
-                bbox_top: top,
-                bbox_width: width,
-                bbox_height: height,
+                bboxes: promptRects.map((rect) => [rect.x, rect.y, rect.width, rect.height]),
+                bbox_labels: promptLabels,
                 threshold,
                 mask_threshold: maskThreshold,
                 min_size: minSize,
@@ -12692,10 +12931,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
             let detections = Array.isArray(result?.detections) ? result.detections.slice() : [];
             if (detections.length) {
-                const exemplarRect = { x: left, y: top, width, height };
-                const exemplarCx = exemplarRect.x + exemplarRect.width / 2;
-                const exemplarCy = exemplarRect.y + exemplarRect.height / 2;
-                const exemplarMaxDim = Math.max(exemplarRect.width, exemplarRect.height);
+                const exemplarInfos = promptRects.map((rect) => ({
+                    rect,
+                    cx: rect.x + rect.width / 2,
+                    cy: rect.y + rect.height / 2,
+                    maxDim: Math.max(rect.width, rect.height),
+                }));
                 const existingRects = existingAnnotationRects();
                 detections = detections.filter((det) => {
                     if (!det || !det.bbox) return false;
@@ -12703,12 +12944,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     if (!rect) return true;
                     const rectCx = rect.x + rect.width / 2;
                     const rectCy = rect.y + rect.height / 2;
-                    const dist = Math.hypot(rectCx - exemplarCx, rectCy - exemplarCy);
-                    const iou = rectIoU(rect, exemplarRect);
-                    const nearCenter = dist <= exemplarMaxDim * 0.1;
-                    const highOverlap = iou >= 0.85;
-                    if (nearCenter || highOverlap) {
-                        return false;
+                    for (const info of exemplarInfos) {
+                        const dist = Math.hypot(rectCx - info.cx, rectCy - info.cy);
+                        const iou = rectIoU(rect, info.rect);
+                        const nearCenter = dist <= info.maxDim * 0.1;
+                        const highOverlap = iou >= 0.85;
+                        if (nearCenter || highOverlap) {
+                            return false;
+                        }
                     }
                     for (const existing of existingRects) {
                         const overlap = rectIoU(rect, existing);
@@ -12755,11 +12998,17 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSamStatus("Load an image before running SAM3 similarity.", { variant: "warn", duration: 2500 });
             return;
         }
-        if (!currentBbox || !currentBbox.bbox) {
+        const selectedRecords = getSelectedBboxRecords({ negative: false });
+        const currentUuid = currentBbox && currentBbox.bbox ? currentBbox.bbox.uuid : null;
+        const isCurrentNegative = currentUuid ? negativeBboxes.has(currentUuid) : false;
+        const exemplar = currentBbox && currentBbox.bbox && !isCurrentNegative
+            ? currentBbox.bbox
+            : (selectedRecords[0] || null);
+        if (!exemplar) {
             setSamStatus("Select a bbox before running SAM3 similarity.", { variant: "warn", duration: 2500 });
             return;
         }
-        const targetClass = currentBbox.bbox.class;
+        const targetClass = exemplar.class;
         if (!targetClass || typeof classes[targetClass] === "undefined") {
             setSamStatus("Selected bbox has no valid class; pick a labeled bbox first.", { variant: "warn", duration: 2500 });
             return;
@@ -12867,6 +13116,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             payload.image_name = imageNameForRequest;
         }
         payload.sam_variant = variantForRequest;
+        if (Array.isArray(requestFields.bbox_labels) && !requestFields.bbox_labels.length) {
+            delete requestFields.bbox_labels;
+        }
         let resp = await fetch(`${API_ROOT}/sam3/visual_prompt`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -17866,6 +18118,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     let currentImage = null;
     let currentClass = null;
     let currentBbox = null;
+    const selectedBboxes = new Set();
+    const negativeBboxes = new Set();
     let imageListIndex = 0;
     let classListIndex = 0;
     let scale = defaultScale;
@@ -17881,7 +18135,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         buttonL: false,
         buttonR: false,
         startRealX: 0,
-        startRealY: 0
+        startRealY: 0,
+        shiftSelectHit: false,
+        shiftKeyActive: false,
+        shiftSelectDrag: false,
+        shiftSelectKind: "pos",
+        shiftSelectStartRealX: 0,
+        shiftSelectStartRealY: 0,
+        shiftSelectEndRealX: 0,
+        shiftSelectEndRealY: 0
     };
 
     document.addEventListener("contextmenu", function (e) {
@@ -17939,6 +18201,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 drawImage(context);
                 drawNewBbox(context);
                 drawExistingBboxes(context);
+                drawSelectionRect(context);
                 drawMultiPointMarkers(context);
                 drawCross(context);
             } else {
@@ -17977,6 +18240,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     const drawNewBbox = (context) => {
         const isSegDataset = datasetType === "seg";
         const segBboxMode = isSegDataset && !polygonDrawEnabled;
+        if (mouse.shiftKeyActive || mouse.shiftSelectDrag) {
+            return;
+        }
         if (isSegDataset && polygonDrawEnabled && !samMode) {
             drawNewPolygon(context);
             return;
@@ -18053,10 +18319,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 const strokeColor = getColorFromClass(className);
                 const fillColor = withAlpha(strokeColor, 0.2);
                 const isCurrent = currentBbox && currentBbox.bbox === bbox;
+                const isSelected = !!bbox.uuid && selectedBboxes.has(bbox.uuid);
+                const isNegativeSelected = !!bbox.uuid && negativeBboxes.has(bbox.uuid);
                 const lineWidth = isCurrent ? Math.max(1.5, 1.5 * scale) : 1;
                 const pulseNow = performance.now();
                 const pulseAlpha = 0.35 + 0.25 * Math.sin(pulseNow / 200);
-                const highlightColor = `rgba(255, 213, 79, ${Math.min(0.9, 0.6 + pulseAlpha)})`;
+                const highlightColor = `rgba(34, 197, 94, ${Math.min(0.9, 0.55 + pulseAlpha)})`;
                 const highlightDash = [6 * scale, 4 * scale];
 
                 context.font = context.font.replace(/\d+px/, `${Math.max(8, zoom(fontBaseSize))}px`);
@@ -18082,6 +18350,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     context.closePath();
                     context.fill();
                     context.stroke();
+                    if (isSelected || isNegativeSelected) {
+                        context.save();
+                        context.strokeStyle = isNegativeSelected ? "#ef4444" : "#22c55e";
+                        context.lineWidth = Math.max(2, 2 * scale);
+                        context.setLineDash([4 * scale, 4 * scale]);
+                        context.stroke();
+                        context.restore();
+                    }
                     if (isCurrent) {
                         bbox.points.forEach((pt, idx) => {
                             const x = pt.x;
@@ -18132,6 +18408,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                             drawCornerHandle(context, handlePoint.x, handlePoint.y, strokeColor);
                         }
                     }
+                    if (isSelected || isNegativeSelected) {
+                        context.save();
+                        context.strokeStyle = isNegativeSelected ? "#ef4444" : "#22c55e";
+                        context.lineWidth = Math.max(2, 2 * scale);
+                        context.setLineDash([4 * scale, 4 * scale]);
+                        context.strokeRect(
+                            zoomX(bbox.x) - 2,
+                            zoomY(bbox.y) - 2,
+                            zoom(bbox.width) + 4,
+                            zoom(bbox.height) + 4
+                        );
+                        context.restore();
+                    }
                     if (isCurrent) {
                         context.save();
                         context.strokeStyle = highlightColor;
@@ -18153,6 +18442,32 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 context.restore();
             });
         }
+    };
+
+    const drawSelectionRect = (context) => {
+        if (!mouse.shiftSelectDrag) {
+            return;
+        }
+        const startX = mouse.shiftSelectStartRealX;
+        const startY = mouse.shiftSelectStartRealY;
+        const endX = mouse.shiftSelectEndRealX;
+        const endY = mouse.shiftSelectEndRealY;
+        const left = Math.min(startX, endX);
+        const top = Math.min(startY, endY);
+        const width = Math.abs(endX - startX);
+        const height = Math.abs(endY - startY);
+        if (width < 1 || height < 1) {
+            return;
+        }
+        const isNegative = mouse.shiftSelectKind === "neg";
+        context.save();
+        context.setLineDash([6 * scale, 4 * scale]);
+        context.lineWidth = Math.max(1.5, 1.5 * scale);
+        context.strokeStyle = isNegative ? "#ef4444" : "#22c55e";
+        context.fillStyle = isNegative ? "rgba(239, 68, 68, 0.08)" : "rgba(34, 197, 94, 0.08)";
+        context.strokeRect(zoomX(left), zoomY(top), zoom(width), zoom(height));
+        context.fillRect(zoomX(left), zoomY(top), zoom(width), zoom(height));
+        context.restore();
     };
 
     function getCornerCoordinates(bbox, corner) {
@@ -18292,14 +18607,30 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const oldRealY = mouse.realY;
         mouse.realX = zoomXInv(mouse.x);
         mouse.realY = zoomYInv(mouse.y);
+        mouse.shiftKeyActive = !!event.shiftKey;
     
         if (event.type === "mousedown") {
             mouse.startRealX = mouse.realX;
             mouse.startRealY = mouse.realY;
+            mouse.shiftSelectHit = false;
+            mouse.shiftSelectDrag = false;
             if (event.which === 3) {
                 mouse.buttonR = true;
             } else if (event.which === 1) {
                 mouse.buttonL = true;
+                if (event.shiftKey && currentImage) {
+                    mouse.shiftSelectKind = event.altKey ? "neg" : "pos";
+                    const shiftHit = findBboxAtPoint(mouse.realX, mouse.realY);
+                    if (shiftHit && shiftHit.bbox) {
+                        mouse.shiftSelectHit = true;
+                    } else {
+                        mouse.shiftSelectDrag = true;
+                        mouse.shiftSelectStartRealX = mouse.realX;
+                        mouse.shiftSelectStartRealY = mouse.realY;
+                        mouse.shiftSelectEndRealX = mouse.realX;
+                        mouse.shiftSelectEndRealY = mouse.realY;
+                    }
+                }
                 const segBboxMode = datasetType === "seg" && !polygonDrawEnabled;
                 if (datasetType !== "seg" || segBboxMode) {
                     const insideExisting = currentBbox && isPointInsideBbox(currentBbox.bbox, mouse.realX, mouse.realY);
@@ -18308,6 +18639,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     }
                 }
             }
+        }
+        if (event.type === "mousemove" && mouse.shiftSelectDrag) {
+            mouse.shiftSelectEndRealX = mouse.realX;
+            mouse.shiftSelectEndRealY = mouse.realY;
         }
         const isSegDataset = datasetType === "seg";
         if (isSegDataset) {
@@ -18329,7 +18664,38 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
         }
         if (event.type === "mouseup" || event.type === "mouseout") {
-            if (mouse.buttonL && currentImage !== null && currentClass !== null) {
+            if (mouse.buttonL && currentImage !== null) {
+                if (mouse.shiftSelectHit) {
+                    setBboxMarkedState({ additive: true, negative: mouse.shiftSelectKind === "neg" });
+                    mouse.buttonL = false;
+                    mouse.buttonR = false;
+                    mouse.shiftSelectHit = false;
+                    return;
+                }
+                if (mouse.shiftSelectDrag) {
+                    const left = Math.min(mouse.shiftSelectStartRealX, mouse.shiftSelectEndRealX);
+                    const top = Math.min(mouse.shiftSelectStartRealY, mouse.shiftSelectEndRealY);
+                    const width = Math.abs(mouse.shiftSelectEndRealX - mouse.shiftSelectStartRealX);
+                    const height = Math.abs(mouse.shiftSelectEndRealY - mouse.shiftSelectStartRealY);
+                    if (width > 1 && height > 1) {
+                        selectBboxesInRect(
+                            { x: left, y: top, width, height },
+                            { additive: true, negative: mouse.shiftSelectKind === "neg" }
+                        );
+                    }
+                    mouse.buttonL = false;
+                    mouse.buttonR = false;
+                    mouse.shiftSelectDrag = false;
+                    mouse.shiftSelectHit = false;
+                    return;
+                }
+                if (currentClass === null) {
+                    mouse.buttonL = false;
+                    mouse.buttonR = false;
+                    mouse.shiftSelectHit = false;
+                    mouse.shiftSelectDrag = false;
+                    return;
+                }
                 if (multiPointMode) {
                     mouse.buttonL = false;
                     mouse.buttonR = false;
@@ -18396,6 +18762,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             }
             mouse.buttonR = false;
             mouse.buttonL = false;
+            mouse.shiftSelectHit = false;
+            mouse.shiftSelectDrag = false;
         }
 
         // In seg+SAM mode, allow bbox flows (preview, pan) to run; in plain seg mode we already returned above.
@@ -18657,7 +19025,38 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     };
 
-    const setBboxMarkedState = () => {
+    function findBboxAtPoint(x, y) {
+        if (!currentImage || !bboxes[currentImage.name]) return null;
+        const currentBxs = bboxes[currentImage.name];
+        let found = null;
+        let smallestArea = Number.MAX_SAFE_INTEGER;
+        for (let className in currentBxs) {
+            currentBxs[className].forEach((bx, i) => {
+                if (!bx) return;
+                const isPoly = bx.type === "polygon" || (Array.isArray(bx.points) && bx.points.length >= 3);
+                let inside = false;
+                let area = Number.MAX_SAFE_INTEGER;
+                if (isPoly) {
+                    inside = pointInPolygon(x, y, bx.points);
+                    if (inside) {
+                        const xs = bx.points.map((p) => p.x);
+                        const ys = bx.points.map((p) => p.y);
+                        area = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+                    }
+                } else {
+                    inside = isPointInsideBbox(bx, x, y);
+                    area = Math.abs(bx.width * bx.height);
+                }
+                if (inside && area < smallestArea) {
+                    smallestArea = area;
+                    found = { bbox: bx, className, index: i };
+                }
+            });
+        }
+        return found;
+    }
+
+    const setBboxMarkedState = ({ additive = false, negative = false } = {}) => {
         if (datasetType === "seg" && polygonDrawEnabled) {
             if (currentBbox && currentBbox.bbox) {
                 currentBbox.bbox.marked = true;
@@ -18665,37 +19064,48 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return;
         }
         if (!currentBbox || (!currentBbox.moving && !currentBbox.resizing)) {
+            if (!currentImage || !bboxes[currentImage.name]) {
+                currentBbox = null;
+                if (!additive) {
+                    clearSelectedBboxes();
+                }
+                return;
+            }
             const currentBxs = bboxes[currentImage.name];
-            let wasInside = false;
-            let smallestBbox = Number.MAX_SAFE_INTEGER;
             for (let className in currentBxs) {
-                currentBxs[className].forEach((bx, i) => {
+                currentBxs[className].forEach((bx) => {
                     bx.marked = false;
-                    const endX = bx.x + bx.width;
-                    const endY = bx.y + bx.height;
-                    const size = bx.width * bx.height;
-                    if (
-                        mouse.startRealX >= bx.x && mouse.startRealX <= endX &&
-                        mouse.startRealY >= bx.y && mouse.startRealY <= endY
-                    ) {
-                        wasInside = true;
-                        if (size < smallestBbox) {
-                            smallestBbox = size;
-                            currentBbox = {
-                                bbox: bx,
-                                index: i,
-                                originalX: bx.x,
-                                originalY: bx.y,
-                                originalWidth: bx.width,
-                                originalHeight: bx.height,
-                                moving: false,
-                                resizing: null
-                            };
-                        }
-                    }
                 });
             }
-            if (!wasInside) {
+            const hit = findBboxAtPoint(mouse.startRealX, mouse.startRealY);
+            if (!additive) {
+                clearSelectedBboxes({ keepCurrent: true });
+            }
+            if (hit && hit.bbox) {
+                if (!hit.bbox.uuid) {
+                    hit.bbox.uuid = generateUUID();
+                }
+                const preserveCurrent = negative && currentBbox && currentBbox.bbox && currentBbox.bbox !== hit.bbox;
+                if (!preserveCurrent) {
+                    currentBbox = {
+                        bbox: hit.bbox,
+                        index: hit.index,
+                        originalX: hit.bbox.x,
+                        originalY: hit.bbox.y,
+                        originalWidth: hit.bbox.width,
+                        originalHeight: hit.bbox.height,
+                        moving: false,
+                        resizing: null
+                    };
+                    currentBbox.bbox.marked = true;
+                } else if (currentBbox && currentBbox.bbox) {
+                    currentBbox.bbox.marked = true;
+                }
+                selectBboxRecord(hit.bbox, { additive, negative });
+            } else {
+                if (!additive) {
+                    clearSelectedBboxes();
+                }
                 currentBbox = null;
             }
         }
@@ -18828,6 +19238,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     const moveBbox = () => {
+        if (mouse.shiftKeyActive || mouse.shiftSelectHit || mouse.shiftSelectDrag) {
+            return;
+        }
         if (mouse.buttonL && currentBbox) {
             const bx = currentBbox.bbox;
             const endX = bx.x + bx.width;
@@ -18846,6 +19259,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     };
 
     const resizeBbox = () => {
+        if (mouse.shiftKeyActive || mouse.shiftSelectHit || mouse.shiftSelectDrag) {
+            return;
+        }
         if (mouse.buttonL && currentBbox) {
             const bx = currentBbox.bbox;
             const tlx = bx.x;
@@ -19128,6 +19544,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const previousImageName = currentImage ? currentImage.name : null;
         const cancellation = cancelAllSamJobs({ reason: "image switch", imageName: previousImageName, announce: false });
         cancelPendingMultiPoint({ clearMarkers: true, removePendingBbox: true });
+        clearSelectedBboxes();
         const pendingImageName = image?.meta?.name || image?.name || null;
         if (previousImageName) {
             const preserveImages = pendingImageName ? [pendingImageName] : null;
@@ -19756,6 +20173,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             const plainDeleteHotkey = !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey
                 && (key === 87 || event.key === "w" || event.key === "W");
             if (key === 8 || (key === 46 && event.metaKey === true) || plainDeleteHotkey) {
+                if (selectedBboxes.size) {
+                    const removed = deleteSelectedBboxes();
+                    if (removed > 0) {
+                        event.preventDefault();
+                        return;
+                    }
+                }
                 if (currentBbox !== null) {
                     bboxes[currentImage.name][currentBbox.bbox.class].splice(currentBbox.index, 1);
                     currentBbox = null;

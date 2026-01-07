@@ -185,7 +185,7 @@
     const multiPointQueue = [];
     let multiPointWaitingForPreload = false;
 
-    let samVariant = "sam1";
+    let samVariant = "sam3";
     let autoModeCheckbox = null;
     let autoClassMarginEnabledCheckbox = null;
     let autoClassMarginValueInput = null;
@@ -2142,10 +2142,11 @@ const sam3TrainState = {
             sam3PromptState.models.forEach((m, idx) => {
                 const opt = document.createElement("option");
                 opt.value = m.key || m.path || m.id || `model-${idx}`;
-                const sizeText = Number.isFinite(m.size_bytes) ? ` – ${formatBytes(m.size_bytes)}` : "";
-                opt.textContent = `${m.id || `run ${idx + 1}`} [${m.variant || "sam3"}]${m.promoted ? " (promoted)" : ""}${sizeText}`;
-                sam3PromptElements.select.appendChild(opt);
-            });
+            const sizeText = Number.isFinite(m.size_bytes) ? ` – ${formatBytes(m.size_bytes)}` : "";
+            const activeText = m.active ? " (active)" : "";
+            opt.textContent = `${m.id || `run ${idx + 1}`} [${m.variant || "sam3"}]${m.promoted ? " (promoted)" : ""}${activeText}${sizeText}`;
+            sam3PromptElements.select.appendChild(opt);
+        });
             if (sam3PromptState.models.length) {
                 const first = sam3PromptState.models[0];
                 sam3PromptElements.select.value = first.key || first.path || first.id || sam3PromptElements.select.options[0].value;
@@ -2169,6 +2170,7 @@ const sam3TrainState = {
         }
         const parts = [];
         if (entry.promoted) parts.push("promoted");
+        if (entry.active) parts.push("active");
         if (Number.isFinite(entry.size_bytes)) parts.push(formatBytes(entry.size_bytes));
         if (entry.run_path) parts.push(`run: ${entry.run_path}`);
         sam3PromptElements.summary.textContent = parts.length ? parts.join(" • ") : "";
@@ -15582,7 +15584,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (running) {
                 agentElements.runButton.title = "A recipe mining job is already running.";
             } else if (!hasAnyHead) {
-                agentElements.runButton.title = "No pretrained CLIP heads found. Train CLIP first, then select the head here.";
+                agentElements.runButton.title = "No pretrained heads found. Train a class predictor first, then select the head here.";
             } else {
                 agentElements.runButton.title = "Select a pretrained CLIP head to run recipe mining.";
             }
@@ -16994,10 +16996,10 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 
         if (samVariantSelect) {
-            samVariant = samVariantSelect.value || "sam1";
+            samVariant = samVariantSelect.value || "sam3";
             updateSam3TextButtons();
             samVariantSelect.addEventListener("change", () => {
-                samVariant = samVariantSelect.value || "sam1";
+                samVariant = samVariantSelect.value || "sam3";
                 console.log("SAM variant =>", samVariant);
                 samPreloadLastKey = null;
                 if (samPreloadCurrentImageName) {

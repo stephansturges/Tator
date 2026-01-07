@@ -11942,37 +11942,67 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 },
                 { auto }
             );
-        if (currentImage && result?.image_token) {
-            rememberSamToken(currentImage.name, samVariant, result.image_token);
-        }
-        if (Array.isArray(result?.masks) && Array.isArray(result?.detections)) {
-            result.detections.forEach((det, idx) => {
-                if (det && !det.mask && result.masks[idx]) {
-                    det.mask = result.masks[idx];
+            if (currentImage && result?.image_token) {
+                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            }
+            if (Array.isArray(result?.masks) && Array.isArray(result?.detections)) {
+                result.detections.forEach((det, idx) => {
+                    if (det && !det.mask && result.masks[idx]) {
+                        det.mask = result.masks[idx];
+                    }
+                });
+            }
+            if (auto) {
+                const detections = Array.isArray(result?.detections) ? result.detections : [];
+                const added = applySam3AutoDetections(detections);
+                if (added) {
+                    const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+                    setSam3TextStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
+                } else {
+                    const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
+                        ? "CLIP classifier unavailable; no auto boxes were added."
+                        : "SAM3 auto returned no usable boxes.";
+                    setSam3TextStatus(warning, "warn");
                 }
-            });
-        }
-        if (auto) {
-            const added = applySam3AutoDetections(result?.detections || []);
-            if (added) {
-                const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
-                setSam3TextStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
-            } else {
-                const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
-                    ? "CLIP classifier unavailable; no auto boxes were added."
-                    : "SAM3 auto returned no usable boxes.";
-                setSam3TextStatus(warning, "warn");
+                if (detections.length) {
+                    const counts = new Map();
+                    let known = 0;
+                    let unknown = 0;
+                    detections.forEach((det) => {
+                        const label = String(det?.prediction || "").trim();
+                        if (!label || label === "unknown") {
+                            unknown += 1;
+                            return;
+                        }
+                        known += 1;
+                        counts.set(label, (counts.get(label) || 0) + 1);
+                    });
+                    const top = Array.from(counts.entries())
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 3)
+                        .map(([label, count]) => `${label}(${count})`);
+                    const summary = [
+                        `SAM3 auto-class: ${detections.length} det${detections.length === 1 ? "" : "s"}`,
+                        `${known} classified`,
+                        `${unknown} unknown`,
+                    ];
+                    if (top.length) {
+                        summary.push(`top: ${top.join(", ")}`);
+                    }
+                    enqueueTaskNotice(summary.join(" • "), { durationMs: 5000 });
                 }
             } else {
                 const applied = applySegAwareDetections(result?.detections || [], targetClass, "SAM3");
                 if (applied) {
                     const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
                     setSam3TextStatus(`SAM3 added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, "success");
+                    enqueueTaskNotice(`SAM3 text: added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, { durationMs: 4500 });
                 } else {
                     const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
                         ? "SAM3 found no matches for that prompt."
                         : "SAM3 returned no usable detections.";
                     setSam3TextStatus(warning, "warn");
+                    enqueueTaskNotice("SAM3 text: no detections added.", { durationMs: 3500 });
                 }
             }
         } catch (error) {
@@ -12135,11 +12165,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             if (added) {
                 const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
                 setSam3TextStatus(`Similarity added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
+                enqueueTaskNotice(`SAM3 similarity: added ${added} ${shapeLabel}${added === 1 ? "" : "es"} to ${targetClass}.`, { durationMs: 4500 });
             } else {
                 const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
                     ? "SAM3 found no similar objects."
                     : "SAM3 returned no usable detections.";
                 setSam3TextStatus(warning, "warn");
+                enqueueTaskNotice("SAM3 similarity: no detections added.", { durationMs: 3500 });
             }
         } catch (error) {
             const detail = error?.message || error;

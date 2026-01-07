@@ -8811,6 +8811,7 @@ def _build_clip_head_sweep_grid(
     base_margin: float,
     base_bg_margin: float,
     allow_bg_tune: bool,
+    allow_margin_tune: Optional[bool] = None,
 ) -> Tuple[List[float], List[float], List[float], float]:
     """Return (min_prob candidates, margin candidates, bg_margin candidates, target_precision)."""
     try:
@@ -8844,6 +8845,15 @@ def _build_clip_head_sweep_grid(
         bg_auto_tune = bool(getattr(payload, "clip_head_background_auto_tune", True))
     except Exception:
         bg_auto_tune = True
+    margin_auto_tune = True
+    try:
+        margin_auto_tune = bool(
+            getattr(payload, "clip_head_tune_margin", True)
+            if allow_margin_tune is None
+            else allow_margin_tune
+        )
+    except Exception:
+        margin_auto_tune = True
 
     if not auto_tune:
         return [base_min], [base_mar], [base_bg], target_precision
@@ -8866,6 +8876,8 @@ def _build_clip_head_sweep_grid(
     margins = [0.0, 0.05, 0.1, 0.2]
     margins.append(base_mar)
     margins = sorted({float(max(0.0, min(1.0, m))) for m in margins})
+    if not margin_auto_tune:
+        margins = [base_mar]
     bg_margins = [0.0, 0.02, 0.05, 0.1, 0.2]
     bg_margins.append(base_bg)
     bg_margins = sorted({float(max(0.0, min(1.0, m))) for m in bg_margins})
@@ -12627,12 +12639,17 @@ def _tune_steps_tier1_knobs_image_first(
             margin = float(summary.get("clip_head_margin") or 0.0)
         except Exception:
             margin = 0.0
+        try:
+            bg_margin = float(summary.get("clip_head_background_margin") or 0.0)
+        except Exception:
+            bg_margin = 0.0
         key = _score_head_tuning_candidate(
             matched=matched,
             fps=fps,
             precision=precision_adj,
             min_prob=min_prob,
             margin=margin,
+            bg_margin=bg_margin,
             target_precision=float(target_precision),
         )
         return key, {"candidate": dict(candidate), "summary": summary, "key": key, "budget": int(budget)}
@@ -12917,12 +12934,17 @@ def _tune_steps_tier2_knobs_image_first(
             margin = float(summary.get("clip_head_margin") or 0.0)
         except Exception:
             margin = 0.0
+        try:
+            bg_margin = float(summary.get("clip_head_background_margin") or 0.0)
+        except Exception:
+            bg_margin = 0.0
         key = _score_head_tuning_candidate(
             matched=matched,
             fps=fps,
             precision=precision,
             min_prob=min_prob,
             margin=margin,
+            bg_margin=bg_margin,
             target_precision=float(target_precision),
         )
         return key, {"candidate": dict(candidate), "summary": summary, "key": key, "budget": int(budget)}
@@ -13568,12 +13590,17 @@ def _tune_steps_global_optimizer_image_first(
             margin = float(summary.get("clip_head_margin") or 0.0)
         except Exception:
             margin = 0.0
+        try:
+            bg_margin = float(summary.get("clip_head_background_margin") or 0.0)
+        except Exception:
+            bg_margin = 0.0
         key = _score_head_tuning_candidate(
             matched=matched,
             fps=fps,
             precision=precision,
             min_prob=min_prob,
             margin=margin,
+            bg_margin=bg_margin,
             target_precision=float(target_precision),
         )
         return key, {"summary": summary, "candidate": c, "key": key, "budget": int(budget)}
@@ -17394,6 +17421,13 @@ class AgentMiningRequest(BaseModel):
         description=(
             "When using a pretrained CLIP head, auto-tune per-class min_prob/margin on the sampled images "
             "(recommended). If disabled, uses the fixed min_prob/margin values above."
+        ),
+    )
+    clip_head_tune_margin: bool = Field(
+        True,
+        description=(
+            "When auto-tuning a pretrained CLIP head, also tune the margin. "
+            "Disable this to lock the margin while still tuning min_prob."
         ),
     )
     clip_head_target_precision: float = Field(
@@ -22382,6 +22416,12 @@ def _list_clip_classifiers() -> List[Dict[str, Any]]:
                     entry["embedding_dim"] = meta_obj.get("embedding_dim")
                     entry["n_samples_train"] = meta_obj.get("n_samples_train")
                     entry["n_samples_test"] = meta_obj.get("n_samples_test")
+                    labelmap_hint = meta_obj.get("labelmap_filename") or meta_obj.get("labelmap_path")
+                    if labelmap_hint:
+                        resolved = _resolve_clip_labelmap_path(labelmap_hint, root_hint="labelmaps")
+                        if resolved is not None:
+                            entry["labelmap_guess"] = str(resolved)
+                            entry["labelmap_guess_rel"] = str(resolved.relative_to(labelmaps_root))
             except Exception:
                 pass
 
@@ -22499,6 +22539,10 @@ def _list_clip_labelmaps() -> List[Dict[str, Any]]:
                 continue
             if path.suffix.lower() not in LABELMAP_ALLOWED_EXTS:
                 continue
+            if root_name == "classifiers":
+                name_lower = path.name.lower()
+                if "labelmap" not in name_lower and "labels" not in name_lower:
+                    continue
             if path.name.endswith(".meta.pkl"):
                 continue
             try:
@@ -23913,6 +23957,20 @@ def set_active_model(payload: ActiveModelRequest):
             new_clip_model = clip_model
             new_preprocess = clip_preprocess
         clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
+        if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
+            inferred = _infer_clip_model_from_embedding_dim(embed_dim, active_name=clip_name)
+            if inferred and inferred != clip_name:
+                try:
+                    new_clip_model, new_preprocess = clip.load(inferred, device=device)
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"clip_load_failed:{exc}") from exc
+                clip_name = inferred
+                clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
+                logger.warning(
+                    "CLIP classifier embedding dim %s mismatched requested backbone; falling back to %s.",
+                    embed_dim,
+                    inferred,
+                )
         if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dimension_mismatch:{embed_dim}!={clip_dim}")
         encoder_model_for_active = clip_name

@@ -218,20 +218,22 @@
 	                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
 	                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
 	                                    </div>
-	                                    <div class="sam3-text-batch training-grid" style="margin-top: 10px;">
-	                                        <div>
+	                                    <div class="sam3-text-batch" style="margin-top: 10px;">
+	                                        <div class="sam3-text-batch__count">
 	                                            <label for="sam3BatchCount">Apply to next N images</label>
 	                                            <input type="number" id="sam3BatchCount" min="1" max="999" value="5" />
 	                                        </div>
-	                                        <label class="training-field--inline" for="sam3BatchIncludeCurrent">
-	                                            <input type="checkbox" id="sam3BatchIncludeCurrent" checked />
-	                                            Include current image
-	                                        </label>
-	                                        <label class="training-field--inline" for="sam3BatchAuto">
-	                                            <input type="checkbox" id="sam3BatchAuto" />
-	                                            Use auto-class (CLIP)
-	                                        </label>
-	                                        <div class="training-actions">
+	                                        <div class="sam3-text-batch__options">
+	                                            <label class="sam3-text-batch__option" for="sam3BatchIncludeCurrent">
+	                                                <input type="checkbox" id="sam3BatchIncludeCurrent" checked />
+	                                                Include current image
+	                                            </label>
+	                                            <label class="sam3-text-batch__option" for="sam3BatchAuto">
+	                                                <input type="checkbox" id="sam3BatchAuto" />
+	                                                Use auto-class (CLIP)
+	                                            </label>
+	                                        </div>
+	                                        <div class="sam3-text-batch__actions">
 	                                            <button type="button" id="sam3BatchRunButton" class="training-button secondary">Run batch</button>
 	                                            <button type="button" id="sam3BatchStopButton" class="training-button danger" disabled>Stop batch</button>
 	                                        </div>

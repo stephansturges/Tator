@@ -214,14 +214,15 @@
                                     </div>
 	                                    <label for="sam3ClassSelect">Assign detections to class</label>
 	                                    <select id="sam3ClassSelect"></select>
-	                                    <div class="sam3-text-buttons">
-	                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
-	                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
-	                                    </div>
-	                                    <div class="sam3-text-batch" style="margin-top: 10px;">
-	                                        <div class="sam3-text-batch__count">
-	                                            <label for="sam3BatchCount">Apply to next N images</label>
-	                                            <input type="number" id="sam3BatchCount" min="1" max="999" value="5" />
+                                    <div class="sam3-text-buttons">
+                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
+                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
+                                        <button type="button" id="sam3TextCascadeToggle" class="training-button secondary">Start cascade</button>
+                                    </div>
+                                    <div class="sam3-text-batch" style="margin-top: 10px;">
+                                        <div class="sam3-text-batch__count">
+                                            <label for="sam3BatchCount">Apply to next N images</label>
+                                            <input type="number" id="sam3BatchCount" min="1" max="999" value="5" />
 	                                        </div>
 	                                        <div class="sam3-text-batch__options">
 	                                            <label class="sam3-text-batch__option" for="sam3BatchIncludeCurrent">
@@ -237,11 +238,11 @@
 	                                            <button type="button" id="sam3BatchRunButton" class="training-button secondary">Run batch</button>
 	                                            <button type="button" id="sam3BatchStopButton" class="training-button danger" disabled>Stop batch</button>
 	                                        </div>
-	                                    </div>
+                                    </div>
                                     <p class="training-help" style="margin-top: 6px;">
-                                        Runs the current prompt sequentially across the next N images. Uses the same thresholds and optional auto-class.
+                                        Runs the current prompt sequentially across the next N images. If cascade is enabled, runs every cascade step per image.
                                     </p>
-                                    <div class="sam3-text-cascade">
+                                    <div id="sam3TextCascadePanel" class="sam3-text-cascade" hidden>
                                         <div class="sam3-text-cascade__header">
                                             <strong>Text prompt cascade</strong>
                                             <div class="sam3-text-cascade__actions">
@@ -255,20 +256,6 @@
                                             Chain multiple SAM3 text prompts with their own thresholds and target classes. Steps run in order on the current image.
                                         </p>
                                         <div id="sam3TextCascadeSteps" class="sam3-text-cascade__steps"></div>
-                                        <div class="sam3-text-cascade__batch">
-                                            <div>
-                                                <label for="sam3TextCascadeBatchCount">Apply cascade to next N images</label>
-                                                <input type="number" id="sam3TextCascadeBatchCount" min="1" max="999" value="5" />
-                                            </div>
-                                            <label class="sam3-text-cascade__option" for="sam3TextCascadeBatchIncludeCurrent">
-                                                <input type="checkbox" id="sam3TextCascadeBatchIncludeCurrent" checked />
-                                                Include current image
-                                            </label>
-                                            <div class="sam3-text-cascade__actions">
-                                                <button type="button" id="sam3TextCascadeBatchRun" class="training-button secondary">Run cascade batch</button>
-                                                <button type="button" id="sam3TextCascadeBatchStop" class="training-button danger" disabled>Stop batch</button>
-                                            </div>
-                                        </div>
                                     </div>
                                     <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). New recipe zips contain recipe.json + embedded pretrained CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">Import recipe (zip)</label>
                                     <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />

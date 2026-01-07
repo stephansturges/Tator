@@ -695,6 +695,42 @@ hr {
     gap: 8px;
 }
 
+.sam3-text-batch {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px 12px;
+    align-items: end;
+}
+
+.sam3-text-batch__options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.sam3-text-batch__option {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #334155;
+}
+
+.sam3-text-batch__option input[type="checkbox"] {
+    margin: 0;
+}
+
+.sam3-text-batch__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.sam3-text-batch__actions .training-button {
+    flex: 1 1 140px;
+}
+
 .sam3-text-panel--disabled {
     opacity: 0.6;
 }

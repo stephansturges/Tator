@@ -22528,45 +22528,37 @@ def _find_labelmap_for_classifier(classifier_path: Path) -> Optional[Path]:
 
 def _list_clip_labelmaps() -> List[Dict[str, Any]]:
     labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
-    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
     entries: List[Dict[str, Any]] = []
-    roots = [("labelmaps", labelmaps_root), ("classifiers", classifiers_root)]
-    for root_name, root in roots:
-        if not root.exists():
+    root = labelmaps_root
+    if not root.exists():
+        return entries
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
             continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in LABELMAP_ALLOWED_EXTS:
-                continue
-            if root_name == "classifiers":
-                name_lower = path.name.lower()
-                if "labelmap" not in name_lower and "labels" not in name_lower:
-                    continue
-            if path.name.endswith(".meta.pkl"):
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if path.suffix.lower() == ".pkl" and root_name == "classifiers" and stat.st_size > 5 * 1024 * 1024:
-                continue
-            try:
-                classes = _load_labelmap_file(path)
-            except Exception:
-                classes = []
-            if not classes:
-                continue
-            entries.append(
-                {
-                    "filename": path.name,
-                    "path": str(path.resolve()),
-                    "rel_path": str(path.relative_to(root)),
-                    "root": root_name,
-                    "n_classes": len(classes),
-                    "modified_at": stat.st_mtime,
-                }
-            )
+        if path.suffix.lower() not in LABELMAP_ALLOWED_EXTS:
+            continue
+        if path.name.endswith(".meta.pkl"):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        try:
+            classes = _load_labelmap_file(path)
+        except Exception:
+            classes = []
+        if not classes:
+            continue
+        entries.append(
+            {
+                "filename": path.name,
+                "path": str(path.resolve()),
+                "rel_path": str(path.relative_to(root)),
+                "root": "labelmaps",
+                "n_classes": len(classes),
+                "modified_at": stat.st_mtime,
+            }
+        )
     entries.sort(key=lambda item: (item.get("modified_at") or 0), reverse=True)
     return entries
 

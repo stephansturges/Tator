@@ -2095,6 +2095,7 @@ const sam3TrainState = {
         select: null,
         refresh: null,
         summary: null,
+        activeLabel: null,
         message: null,
         activate: null,
     };
@@ -2108,6 +2109,7 @@ const sam3TrainState = {
         sam3PromptElements.select = document.getElementById("sam3PromptModelSelect");
         sam3PromptElements.refresh = document.getElementById("sam3PromptRefresh");
         sam3PromptElements.summary = document.getElementById("sam3PromptModelSummary");
+        sam3PromptElements.activeLabel = document.getElementById("sam3PromptActiveLabel");
         sam3PromptElements.message = document.getElementById("sam3PromptMessage");
         sam3PromptElements.activate = document.getElementById("sam3PromptActivate");
         if (sam3PromptElements.select) {
@@ -2164,6 +2166,12 @@ const sam3TrainState = {
         if (!sam3PromptElements.summary) return;
         const path = sam3PromptElements.select ? sam3PromptElements.select.value : null;
         const entry = sam3PromptState.models.find((m) => (m.key || m.path || m.id) === path);
+        const activeEntry = sam3PromptState.models.find((m) => m.active);
+        if (sam3PromptElements.activeLabel) {
+            sam3PromptElements.activeLabel.textContent = activeEntry
+                ? `Active model: ${activeEntry.id || "unknown"} [${activeEntry.variant || "sam3"}]`
+                : "Active model: none";
+        }
         if (!entry) {
             sam3PromptElements.summary.textContent = "No model selected.";
             return;

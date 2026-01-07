@@ -672,6 +672,12 @@
         if (!taskQueueState.element) {
             taskQueueState.element = document.getElementById("taskQueue");
         }
+        if (taskQueueState.element && taskQueueState.element.parentElement?.id !== "right") {
+            const host = document.getElementById("right");
+            if (host) {
+                host.appendChild(taskQueueState.element);
+            }
+        }
         return taskQueueState.element;
     }
 
@@ -774,10 +780,11 @@
         if (!container) {
             return null;
         }
+        const lingerMs = Math.max(1500, Number(durationMs) || 3500) * 2;
         const entry = {
             id: ++taskQueueState.counter,
             message: String(message || "").trim() || "Notice",
-            expiresAt: Date.now() + Math.max(1500, Number(durationMs) || 3500),
+            expiresAt: Date.now() + lingerMs,
         };
         taskQueueState.notices.push(entry);
         renderTaskQueue();
@@ -787,7 +794,7 @@
                 taskQueueState.notices.splice(idx, 1);
                 renderTaskQueue();
             }
-        }, Math.max(1500, Number(durationMs) || 3500));
+        }, lingerMs);
         return entry.id;
     }
 
@@ -9552,7 +9559,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const slotStatusMap = new Map();
         latestSlotStatuses.forEach((entry) => {
             if (entry?.image_name) {
-                slotStatusMap.set(entry.image_name, entry);
+                const existing = slotStatusMap.get(entry.image_name) || [];
+                existing.push(entry);
+                slotStatusMap.set(entry.image_name, existing);
             }
         });
         const optionsArray = Array.from(imageList.options);
@@ -9565,8 +9574,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 "sam-slot-loaded",
                 "sam-slot-loading"
             );
-            const name = option.value || option.innerHTML;
-            const slotEntry = slotStatusMap.get(name);
+            const name = getOptionImageName(option);
+            const entries = slotStatusMap.get(name) || [];
+            const slotEntry = entries.find((entry) => entry?.variant === samVariant)
+                || entries.find((entry) => entry?.variant === "sam3")
+                || entries[0];
             const loadingEntry = slotLoadingIndicators.get(name);
             if (slotEntry?.slot) {
                 option.classList.add(`sam-slot-${slotEntry.slot}`);
@@ -12023,14 +12035,14 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSam3TextStatus("Load an image and select a bbox to use as the exemplar.", "warn");
             return;
         }
-        const targetClass = getSam3TargetClass();
-        if (!targetClass) {
-            setSam3TextStatus("Pick a class to assign detections to before running similarity.", "warn");
-            return;
-        }
         const exemplar = currentBbox && currentBbox.bbox ? currentBbox.bbox : null;
         if (!exemplar) {
             setSam3TextStatus("Select or draw a bbox to use as the similarity prompt.", "warn");
+            return;
+        }
+        const targetClass = exemplar.class || null;
+        if (!targetClass || typeof classes[targetClass] === "undefined") {
+            setSam3TextStatus("The selected bbox has no valid class; pick a labeled bbox first.", "warn");
             return;
         }
         const width = Math.abs(exemplar.width);
@@ -12190,13 +12202,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSamStatus("Load an image before running SAM3 similarity.", { variant: "warn", duration: 2500 });
             return;
         }
-        const targetClass = getSam3TargetClass();
-        if (!targetClass) {
-            setSamStatus("Pick a class before running SAM3 similarity.", { variant: "warn", duration: 2500 });
-            return;
-        }
         if (!currentBbox || !currentBbox.bbox) {
             setSamStatus("Select a bbox before running SAM3 similarity.", { variant: "warn", duration: 2500 });
+            return;
+        }
+        const targetClass = currentBbox.bbox.class;
+        if (!targetClass || typeof classes[targetClass] === "undefined") {
+            setSamStatus("Selected bbox has no valid class; pick a labeled bbox first.", { variant: "warn", duration: 2500 });
             return;
         }
         const slotEntry = findSlotStatusForImage(currentImage.name, "sam3");

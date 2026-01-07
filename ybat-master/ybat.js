@@ -1134,7 +1134,6 @@
         maskThresholdInput: null,
         maxResultsInput: null,
         runButton: null,
-        autoButton: null,
         cascadeToggleButton: null,
         cascadePanel: null,
         cascadeSteps: null,
@@ -1144,7 +1143,6 @@
         cascadeClearButton: null,
         batchCountInput: null,
         batchIncludeCurrentToggle: null,
-        batchAutoToggle: null,
         batchRunButton: null,
         batchStopButton: null,
         similarityButton: null,
@@ -1152,7 +1150,6 @@
         similarityThresholdInput: null,
         status: null,
         classSelect: null,
-        baseAutoToggle: null,
         minSizeInput: null,
         maxPointsInput: null,
         epsilonInput: null,
@@ -10297,9 +10294,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.maxPointsInput = document.getElementById("sam3MaxPoints");
         sam3TextElements.epsilonInput = document.getElementById("sam3SimplifyEpsilon");
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
-        sam3TextElements.baseAutoToggle = document.getElementById("sam3BaseAutoClass");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
-        sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
         sam3TextElements.cascadeToggleButton = document.getElementById("sam3TextCascadeToggle");
         sam3TextElements.cascadePanel = document.getElementById("sam3TextCascadePanel");
         sam3TextElements.cascadeSteps = document.getElementById("sam3TextCascadeSteps");
@@ -10309,7 +10304,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.cascadeClearButton = document.getElementById("sam3TextCascadeClear");
         sam3TextElements.batchCountInput = document.getElementById("sam3BatchCount");
         sam3TextElements.batchIncludeCurrentToggle = document.getElementById("sam3BatchIncludeCurrent");
-        sam3TextElements.batchAutoToggle = document.getElementById("sam3BatchAuto");
         sam3TextElements.batchRunButton = document.getElementById("sam3BatchRunButton");
         sam3TextElements.batchStopButton = document.getElementById("sam3BatchStopButton");
         sam3TextElements.similarityButton = document.getElementById("sam3SimilarityButton");
@@ -10337,10 +10331,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3RecipeElements.cascadeFileInput = document.getElementById("sam3CascadeFile");
         sam3RecipeElements.cascadeApplyButton = document.getElementById("sam3CascadeApplyButton");
         if (sam3TextElements.runButton) {
-            sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest({ auto: false }));
-        }
-        if (sam3TextElements.autoButton) {
-            sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
+            sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest());
         }
         if (sam3TextElements.cascadeToggleButton) {
             sam3TextElements.cascadeToggleButton.addEventListener("click", () => toggleSam3TextCascade());
@@ -11724,7 +11715,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             || sam3TextBatchActive
             || sam3TextCascadeActive;
         setButtonDisabled(sam3TextElements.runButton, busy);
-        setButtonDisabled(sam3TextElements.autoButton, busy);
         setButtonDisabled(sam3TextElements.similarityButton, busy);
         setButtonDisabled(sam3TextElements.cascadeToggleButton, busy);
         setButtonDisabled(sam3TextElements.cascadeAddButton, busy);
@@ -11734,14 +11724,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         setButtonDisabled(sam3TextElements.batchRunButton, busy);
         setButtonDisabled(sam3TextElements.batchCountInput, busy);
         setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, busy);
-        setButtonDisabled(sam3TextElements.batchAutoToggle, busy);
         setButtonDisabled(sam3TextElements.batchStopButton, !sam3TextBatchActive);
-        setButtonDisabled(sam3TextElements.baseAutoToggle, busy);
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.textContent = busy ? "Running…" : "Run SAM3";
-        }
-        if (sam3TextElements.autoButton) {
-            sam3TextElements.autoButton.textContent = busy ? "Running…" : "Run SAM3 + Auto Class";
         }
         if (sam3TextElements.similarityButton) {
             sam3TextElements.similarityButton.textContent = busy ? "Running…" : "SAM3 similarity prompt (use selected box(es))";
@@ -12182,7 +12167,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    function buildSam3TextSnapshot({ auto = false } = {}) {
+    function buildSam3TextSnapshot() {
         const prompt = (sam3TextElements.promptInput?.value || "").trim();
         let threshold = parseFloat(sam3TextElements.thresholdInput?.value || "0.5");
         if (Number.isNaN(threshold)) {
@@ -12207,7 +12192,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) {
             simplifyEps = 1.0;
         }
-        const targetClass = auto ? null : getSam3TargetClass();
+        const targetClass = getSam3TargetClass();
         return {
             prompt,
             threshold,
@@ -12215,33 +12200,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             minSize,
             maxResults,
             simplifyEps,
-            auto,
             targetClass,
         };
     }
 
     async function runSam3TextPromptSnapshot(snapshot) {
-        const {
-            prompt,
+        const { prompt, threshold, maskThreshold, minSize, maxResults, simplifyEps, targetClass } = snapshot;
+        const result = await invokeSam3TextPrompt({
+            text_prompt: prompt,
             threshold,
-            maskThreshold,
-            minSize,
-            maxResults,
-            simplifyEps,
-            auto,
-            targetClass,
-        } = snapshot;
-        const result = await invokeSam3TextPrompt(
-            {
-                text_prompt: prompt,
-                threshold,
-                mask_threshold: maskThreshold,
-                min_size: minSize,
-                simplify_epsilon: simplifyEps,
-                max_results: maxResults,
-            },
-            { auto }
-        );
+            mask_threshold: maskThreshold,
+            min_size: minSize,
+            simplify_epsilon: simplifyEps,
+            max_results: maxResults,
+        });
         if (currentImage && result?.image_token) {
             rememberSamToken(currentImage.name, samVariant, result.image_token);
         }
@@ -12251,47 +12223,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     det.mask = result.masks[idx];
                 }
             });
-        }
-        if (auto) {
-            const detections = Array.isArray(result?.detections) ? result.detections : [];
-            const added = applySam3AutoDetections(detections);
-            if (added) {
-                const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
-                setSam3TextStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
-            } else {
-                const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
-                    ? "CLIP classifier unavailable; no auto boxes were added."
-                    : "SAM3 auto returned no usable boxes.";
-                setSam3TextStatus(warning, "warn");
-            }
-            if (detections.length) {
-                const counts = new Map();
-                let known = 0;
-                let unknown = 0;
-                detections.forEach((det) => {
-                    const label = String(det?.prediction || "").trim();
-                    if (!label || label === "unknown") {
-                        unknown += 1;
-                        return;
-                    }
-                    known += 1;
-                    counts.set(label, (counts.get(label) || 0) + 1);
-                });
-                const top = Array.from(counts.entries())
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 3)
-                    .map(([label, count]) => `${label}(${count})`);
-                const summary = [
-                    `SAM3 auto-class: ${detections.length} det${detections.length === 1 ? "" : "s"}`,
-                    `${known} classified`,
-                    `${unknown} unknown`,
-                ];
-                if (top.length) {
-                    summary.push(`top: ${top.join(", ")}`);
-                }
-                enqueueTaskNotice(summary.join(" • "), { durationMs: 5000 });
-            }
-            return { added, detections: detections.length, warnings: result?.warnings || [] };
         }
         const applied = applySegAwareDetections(result?.detections || [], targetClass, "SAM3");
         if (applied) {
@@ -12330,7 +12261,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const steps = getSam3TextCascadeStepElements();
         steps.forEach((step) => {
             const select = step.querySelector(".sam3-text-cascade__class");
-            const autoToggle = step.querySelector(".sam3-text-cascade__auto");
             if (!select) {
                 return;
             }
@@ -12359,7 +12289,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 targetValue = classNames[0];
             }
             select.value = targetValue;
-            select.disabled = !!autoToggle?.checked;
         });
     }
 
@@ -12383,10 +12312,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 <div>
                     <label>Assign class</label>
                     <select class="sam3-text-cascade__class"></select>
-                </div>
-                <div class="sam3-text-cascade__option">
-                    <input type="checkbox" class="sam3-text-cascade__auto" />
-                    Auto-class (CLIP)
                 </div>
                 <div>
                     <label>Score threshold</label>
@@ -12416,7 +12341,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const maxResultsInput = step.querySelector(".sam3-text-cascade__max-results");
         const minSizeInput = step.querySelector(".sam3-text-cascade__min-size");
         const epsilonInput = step.querySelector(".sam3-text-cascade__epsilon");
-        const autoToggle = step.querySelector(".sam3-text-cascade__auto");
         const classSelect = step.querySelector(".sam3-text-cascade__class");
         if (promptInput) promptInput.value = promptDefault;
         if (thresholdInput) thresholdInput.value = Number.isFinite(thresholdDefault) ? thresholdDefault : 0.5;
@@ -12429,11 +12353,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             removeButton.addEventListener("click", () => {
                 step.remove();
                 refreshSam3TextCascadeStepTitles();
-            });
-        }
-        if (autoToggle && classSelect) {
-            autoToggle.addEventListener("change", () => {
-                classSelect.disabled = autoToggle.checked;
             });
         }
         return step;
@@ -12493,8 +12412,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (Number.isNaN(minSize) || minSize < 0) minSize = 0;
         let simplifyEps = parseFloat(step.querySelector(".sam3-text-cascade__epsilon")?.value || "1.0");
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) simplifyEps = 1.0;
-        const auto = !!step.querySelector(".sam3-text-cascade__auto")?.checked;
-        const targetClass = auto ? null : (step.querySelector(".sam3-text-cascade__class")?.value || "");
+        const targetClass = step.querySelector(".sam3-text-cascade__class")?.value || "";
         return {
             prompt,
             threshold,
@@ -12502,7 +12420,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             minSize,
             maxResults,
             simplifyEps,
-            auto,
             targetClass,
         };
     }
@@ -12512,9 +12429,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const snapshots = [];
         let skipped = 0;
         if (includeBase) {
-            const baseAuto = !!sam3TextElements.baseAutoToggle?.checked;
-            const baseSnapshot = buildSam3TextSnapshot({ auto: baseAuto });
-            if (baseSnapshot.prompt && (baseSnapshot.auto || baseSnapshot.targetClass)) {
+            const baseSnapshot = buildSam3TextSnapshot();
+            if (baseSnapshot.prompt && baseSnapshot.targetClass) {
                 snapshots.push(baseSnapshot);
             } else {
                 skipped += 1;
@@ -12522,7 +12438,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         steps.forEach((step) => {
             const snapshot = readSam3TextCascadeStep(step);
-            if (!snapshot.prompt || (!snapshot.auto && !snapshot.targetClass)) {
+            if (!snapshot.prompt || !snapshot.targetClass) {
                 skipped += 1;
                 return;
             }
@@ -12662,10 +12578,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 setSam3TextStatus(`Skipping ${cascadeConfig.skipped} empty step${cascadeConfig.skipped === 1 ? "" : "s"} in cascade.`, "warn");
             }
         }
-        const baseAuto = sam3TextCascadeEnabled
-            ? !!sam3TextElements.baseAutoToggle?.checked
-            : !!sam3TextElements.batchAutoToggle?.checked;
-        const baseSnapshot = sam3TextCascadeEnabled ? null : buildSam3TextSnapshot({ auto: baseAuto });
+        const baseSnapshot = sam3TextCascadeEnabled ? null : buildSam3TextSnapshot();
         if (!sam3TextCascadeEnabled) {
             if (!baseSnapshot.prompt) {
                 setSam3TextStatus("Enter a prompt before running a batch.", "warn");
@@ -12675,7 +12588,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 completeTask(batchTaskId);
                 return;
             }
-            if (!baseAuto && !baseSnapshot.targetClass) {
+            if (!baseSnapshot.targetClass) {
                 setSam3TextStatus("Pick a class before running a batch.", "warn");
                 sam3TextBatchActive = false;
                 updateSam3TextButtons();
@@ -12743,7 +12656,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         setSam3TextStatus("Stopping batch after current image…", "warn");
     }
 
-    async function handleSam3TextRequest({ auto = false } = {}) {
+    async function handleSam3TextRequest() {
         if (sam3TextRequestActive) {
             return;
         }
@@ -12755,20 +12668,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             setSam3TextStatus("Load an image before running SAM3.", "warn");
             return;
         }
-        const snapshot = buildSam3TextSnapshot({ auto });
+        const snapshot = buildSam3TextSnapshot();
         if (!snapshot.prompt) {
             setSam3TextStatus("Enter a prompt describing what to segment.", "warn");
             sam3TextElements.promptInput?.focus();
             return;
         }
-        if (!auto && !snapshot.targetClass) {
+        if (!snapshot.targetClass) {
             setSam3TextStatus("Pick a class to assign boxes to before running SAM3.", "warn");
             return;
         }
         sam3TextRequestActive = true;
         updateSam3TextButtons();
         setSam3TextStatus("Running SAM3…", "info");
-        setSamStatus(`Running SAM3 text prompt${auto ? " (auto class)" : ""}…`, { variant: "info", duration: 0 });
+        setSamStatus("Running SAM3 text prompt…", { variant: "info", duration: 0 });
         try {
             await runSam3TextPromptSnapshot(snapshot);
         } catch (error) {
@@ -13078,7 +12991,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return resp.json();
     }
 
-    async function invokeSam3TextPrompt(requestFields, { auto = false } = {}) {
+    async function invokeSam3TextPrompt(requestFields) {
         if (!currentImage) {
             throw new Error("No active image");
         }
@@ -13090,7 +13003,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             payload.image_name = imageNameForRequest;
         }
         payload.sam_variant = variantForRequest;
-        let resp = await fetch(`${API_ROOT}${auto ? "/sam3/text_prompt_auto" : "/sam3/text_prompt"}`, {
+        let resp = await fetch(`${API_ROOT}/sam3/text_prompt`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...requestFields, ...payload }),
@@ -13101,7 +13014,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 payload.image_name = imageNameForRequest;
             }
             payload.sam_variant = variantForRequest;
-            resp = await fetch(`${API_ROOT}${auto ? "/sam3/text_prompt_auto" : "/sam3/text_prompt"}`, {
+            resp = await fetch(`${API_ROOT}/sam3/text_prompt`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ...requestFields, ...payload }),
@@ -13703,40 +13616,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     function applyQwenBoxes(boxes, className) {
         return applySegAwareDetections(boxes, className, "Qwen");
-    }
-
-    function applySam3AutoDetections(entries, fallbackClass = null) {
-        if (!currentImage || !Array.isArray(entries) || entries.length === 0) {
-            return 0;
-        }
-        let added = 0;
-        entries.forEach((entry) => {
-            if (!entry || !entry.bbox) {
-                return;
-            }
-            let targetClass = null;
-            if (entry.prediction && typeof classes[entry.prediction] !== "undefined") {
-                targetClass = entry.prediction;
-            } else if (fallbackClass) {
-                targetClass = fallbackClass;
-            }
-            if (!targetClass) {
-                return;
-            }
-            const created = addDetectionAnnotation(entry, targetClass);
-            if (!created) {
-                return;
-            }
-            if (typeof entry.score === "number") {
-                created.samScore = entry.score;
-            }
-            added += 1;
-        });
-        if (added > 0) {
-            const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
-            setSamStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, { variant: "success", duration: 4500 });
-        }
-        return added;
     }
 
     function applyApiRootValue(rawValue) {

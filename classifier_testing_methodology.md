@@ -30,6 +30,16 @@ We report:
 Foreground-only metrics exclude any `__bg_*` classes from the CLIP/DINOv3
 negative-class augmentation.
 
+## New Knobs (2025-12-26)
+Additional classifier controls that can be swept:
+- Embedding preprocessing: **center** (mean subtract) and **standardize** (per-dim std).
+- **Effective-number** class weights (beta) as an alternative to plain balanced.
+- MLP architecture knobs: **activation** (ReLU/GELU) + **LayerNorm**.
+- **Hard example mining** for MLPs (extra epochs focusing on misclassified/low-conf).
+- **Temperature scaling** for probability calibration (post-train).
+
+These appear in the benchmark labels as profile tags (e.g., `center_std`, `effective`, `hardmine`, `gelu_ln`, `calib`, `full`).
+
 ## Where Results Live
 We append/update three files:
 - `clip_dinov3_metrics_20241224.json`

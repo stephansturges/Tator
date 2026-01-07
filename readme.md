@@ -461,6 +461,11 @@ Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https
   - `clip_mlp_diff_summary_20241224.txt`
 - Added a reusable benchmark runner (`tools/run_mlp_benchmarks.py`) that can drive the backend API to reuse GPU‑cached embeddings.
 
+## 2025-12-27 – Classifier Quality Knobs + Calibration
+- Added **embedding centering/standardization**, **effective-number class weights**, **MLP activation + LayerNorm**, and **MLP hard mining** controls.
+- Added optional **temperature scaling** for probability calibration (post-train, does not change argmax).
+- Training jobs now log **phase timings** (scan / embed / train / calibration / save) for throughput debugging.
+
 ## 2025-12-20 – DINOv3 Heads + CLIP Model Management
 - Added **DINOv3 encoder support** for classifier heads (image-only alternative to CLIP). DINOv3 heads require `.meta.pkl` so the encoder model is known.
 - Consolidated **CLIP model management**: refresh/download/delete saved heads and labelmaps, upload local `.pkl` heads, and activate models from a single UI panel.

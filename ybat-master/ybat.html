@@ -155,8 +155,8 @@
                             </div>
                             <br />
                             <div id="sam3SimilarityRow" class="training-actions" style="margin-bottom: 12px;">
-                                <button type="button" id="sam3SimilarityButton" class="training-button secondary">
-                                    SAM3 similarity prompt (use selected box)
+                                <button type="button" id="sam3SimilarityButton" class="training-button secondary" title="Shift-click/drag selects positives (green). Shift+Alt selects negatives (red). Runs on the selected boxes for this image.">
+                                    SAM3 similarity prompt (use selected box(es))
                                 </button>
                                 <label for="sam3SimilarityThreshold" class="training-help" style="margin-top: 6px;">Similarity score (higher = stricter)</label>
                                 <input type="range" id="sam3SimilarityThreshold" min="0" max="1" step="0.05" value="0.5" />
@@ -341,6 +341,9 @@
                                 <ul>
                                     <li><strong>X</strong> — press with a bbox selected to run the SAM tweak</li>
                                     <li><strong>X</strong> twice — batch tweak all bboxes in the class currently selected in the list</li>
+                                    <li>Shift + click — add/remove selection (green)</li>
+                                    <li>Shift + drag — selection box (green)</li>
+                                    <li>Shift + Alt + click/drag — select negatives for SAM3 similarity (red)</li>
                                     <li>Mouse wheel — zoom</li>
                                     <li>Shift + wheel — pan</li>
                                     <li>Right-click drag — pan</li>
@@ -351,6 +354,7 @@
                                     <li>Enter — submit multi-point mask</li>
                                     <li>Hold Z — temporarily disable Auto Class and all SAM modes so you can select or delete the active bbox</li>
                                     <li>A — toggle auto class</li>
+                                    <li><strong>1</strong> — SAM3 similarity prompt using selected boxes (pos/neg)</li>
                                     <li>S — toggle SAM</li>
                                     <li>D — toggle SAM point mode</li>
                                     <li>M — toggle SAM multi-point</li>

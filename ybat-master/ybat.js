@@ -1152,6 +1152,7 @@
         similarityThresholdInput: null,
         status: null,
         classSelect: null,
+        baseAutoToggle: null,
         minSizeInput: null,
         maxPointsInput: null,
         epsilonInput: null,
@@ -10094,6 +10095,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.maxPointsInput = document.getElementById("sam3MaxPoints");
         sam3TextElements.epsilonInput = document.getElementById("sam3SimplifyEpsilon");
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
+        sam3TextElements.baseAutoToggle = document.getElementById("sam3BaseAutoClass");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
         sam3TextElements.cascadeToggleButton = document.getElementById("sam3TextCascadeToggle");
@@ -11532,6 +11534,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, busy);
         setButtonDisabled(sam3TextElements.batchAutoToggle, busy);
         setButtonDisabled(sam3TextElements.batchStopButton, !sam3TextBatchActive);
+        setButtonDisabled(sam3TextElements.baseAutoToggle, busy);
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.textContent = busy ? "Running…" : "Run SAM3";
         }
@@ -12307,8 +12310,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         const snapshots = [];
         let skipped = 0;
         if (includeBase) {
-            const baseSnapshot = buildSam3TextSnapshot({ auto: false });
-            if (baseSnapshot.prompt && baseSnapshot.targetClass) {
+            const baseAuto = !!sam3TextElements.baseAutoToggle?.checked;
+            const baseSnapshot = buildSam3TextSnapshot({ auto: baseAuto });
+            if (baseSnapshot.prompt && (baseSnapshot.auto || baseSnapshot.targetClass)) {
                 snapshots.push(baseSnapshot);
             } else {
                 skipped += 1;
@@ -12456,7 +12460,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 setSam3TextStatus(`Skipping ${cascadeConfig.skipped} empty step${cascadeConfig.skipped === 1 ? "" : "s"} in cascade.`, "warn");
             }
         }
-        const baseAuto = !!sam3TextElements.batchAutoToggle?.checked;
+        const baseAuto = sam3TextCascadeEnabled
+            ? !!sam3TextElements.baseAutoToggle?.checked
+            : !!sam3TextElements.batchAutoToggle?.checked;
         const baseSnapshot = sam3TextCascadeEnabled ? null : buildSam3TextSnapshot({ auto: baseAuto });
         if (!sam3TextCascadeEnabled) {
             if (!baseSnapshot.prompt) {

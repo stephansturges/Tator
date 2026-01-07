@@ -9591,6 +9591,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 || entries.find((entry) => entry?.variant === "sam3")
                 || entries[0];
             const loadingEntry = slotLoadingIndicators.get(name);
+            const tokenLoaded = !loadingEntry && (
+                getSamToken(name, slotEntry?.variant || samVariant)
+                || getSamToken(name, "sam3")
+                || getSamToken(name, "sam1")
+            );
             if (slotEntry?.slot) {
                 option.classList.add(`sam-slot-${slotEntry.slot}`);
             }
@@ -9601,7 +9606,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     }
                 });
                 option.classList.add("sam-slot-loading");
-            } else if (slotEntry?.slot) {
+            } else if (slotEntry?.slot || tokenLoaded) {
                 option.classList.add("sam-slot-loaded");
             }
             if (

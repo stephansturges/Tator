@@ -63,14 +63,14 @@
 	    <div class="tab-shell">
 	        <div class="tab-bar" role="tablist">
 	            <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
-            <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train CLIP</button>
+            <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train Class Predictor</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
             <button class="tab-button" data-tab="agent-mining" id="tabAgentMiningButton" type="button">SAM3 Recipe Mining</button>
             <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
-            <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM3 Prompt Model Selection</button>
-            <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">CLIP Class Predictor Settings</button>
+            <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM Model Selection</button>
+            <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">Class Predictor Settings</button>
             <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
             <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">SAM Predictors</button>
             <button class="tab-button" data-tab="settings" id="tabSettingsButton" type="button">Backend Config</button>
@@ -128,8 +128,8 @@
                             <div class="training-field">
                                 <label for="samVariant">SAM Model</label>
                                 <select id="samVariant" name="samVariant">
-                                    <option value="sam1" selected>SAM 1</option>
-                                    <option value="sam3">SAM 3</option>
+                                    <option value="sam1">SAM 1</option>
+                                    <option value="sam3" selected>SAM 3</option>
                                 </select>
                             </div>
                             <div class="training-field training-field--inline">
@@ -216,12 +216,27 @@
                                     <select id="sam3ClassSelect"></select>
                                     <label class="training-field--inline" for="sam3BaseAutoClass">
                                         <input type="checkbox" id="sam3BaseAutoClass" />
-                                        Auto-class base step (CLIP)
+                                        Auto-class base step<span class="help-icon" title="When running a cascade, apply CLIP auto-class to detections from the base step.">?</span>
                                     </label>
                                     <div class="sam3-text-buttons">
                                         <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
                                         <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
                                         <button type="button" id="sam3TextCascadeToggle" class="training-button secondary">Start cascade</button>
+                                    </div>
+                                    <div id="sam3TextCascadePanel" class="sam3-text-cascade" hidden>
+                                        <div class="sam3-text-cascade__header">
+                                            <strong>Text prompt cascade</strong>
+                                            <div class="sam3-text-cascade__actions">
+                                                <button type="button" id="sam3TextCascadeAdd" class="training-button secondary">+ Add step</button>
+                                                <button type="button" id="sam3TextCascadeRun" class="training-button">Run cascade</button>
+                                                <button type="button" id="sam3TextCascadeStop" class="training-button danger" disabled>Stop</button>
+                                                <button type="button" id="sam3TextCascadeClear" class="training-button secondary">Clear</button>
+                                            </div>
+                                        </div>
+                                        <p class="training-help" style="margin-top: 4px;">
+                                            Chain multiple SAM3 text prompts with their own thresholds and target classes. Steps run in order on the current image.
+                                        </p>
+                                        <div id="sam3TextCascadeSteps" class="sam3-text-cascade__steps"></div>
                                     </div>
                                     <div class="sam3-text-batch" style="margin-top: 10px;">
                                         <div class="sam3-text-batch__count">
@@ -246,85 +261,6 @@
                                     <p class="training-help" style="margin-top: 6px;">
                                         Runs the current prompt sequentially across the next N images. If cascade is enabled, runs every cascade step per image.
                                     </p>
-                                    <div id="sam3TextCascadePanel" class="sam3-text-cascade" hidden>
-                                        <div class="sam3-text-cascade__header">
-                                            <strong>Text prompt cascade</strong>
-                                            <div class="sam3-text-cascade__actions">
-                                                <button type="button" id="sam3TextCascadeAdd" class="training-button secondary">+ Add step</button>
-                                                <button type="button" id="sam3TextCascadeRun" class="training-button">Run cascade</button>
-                                                <button type="button" id="sam3TextCascadeStop" class="training-button danger" disabled>Stop</button>
-                                                <button type="button" id="sam3TextCascadeClear" class="training-button secondary">Clear</button>
-                                            </div>
-                                        </div>
-                                        <p class="training-help" style="margin-top: 4px;">
-                                            Chain multiple SAM3 text prompts with their own thresholds and target classes. Steps run in order on the current image.
-                                        </p>
-                                        <div id="sam3TextCascadeSteps" class="sam3-text-cascade__steps"></div>
-                                    </div>
-                                    <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). New recipe zips contain recipe.json + embedded pretrained CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">Import recipe (zip)</label>
-                                    <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
-                                    <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
-
-                                    <div id="sam3RecipeCascade" hidden>
-                                        <div class="training-help" style="margin-top: 8px;">
-                                            <strong>Recipe cascade:</strong> run multiple saved recipes in order. Each step can re-label its outputs and choose whether it participates in cross-class de-dupe.
-                                        </div>
-
-		                                        <div id="sam3CascadeSteps"></div>
-		                                        <button type="button" id="sam3CascadeAddStep" class="training-button secondary" title="Add another recipe to the cascade (you can reorder steps).">+ Add recipe step</button>
-
-		                                        <div class="training-grid" style="margin-top: 10px;">
-		                                            <div>
-		                                                <label for="sam3CascadePerClassIou" title="Removes near-duplicate overlaps within the same output class. IoU means how much two boxes overlap. Lower = more aggressive.">Per-class de-dupe IoU</label>
-		                                                <input type="number" id="sam3CascadePerClassIou" step="0.05" min="0" max="1" value="0.5" title="Overlap threshold (IoU = intersection over union). Lower = more suppression; set to 1 to effectively disable." />
-			                                            </div>
-			                                            <div>
-			                                                <label title="Also remove duplicates across different classes (e.g. car vs truck). Use different dedupe group names (e.g. person vs bike) to avoid removing valid overlaps."><input type="checkbox" id="sam3CascadeCrossDedupeToggle" /> Cross-class de-dupe</label>
-			                                                <select id="sam3CascadeCrossScope" title="Choose whether cross-class de-dupe only happens within the same dedupe group, or across all participating steps.">
-			                                                    <option value="groups" selected>Within dedupe groups</option>
-			                                                    <option value="global">Across all participating steps</option>
-			                                                </select>
-			                                            </div>
-			                                            <div>
-			                                                <label for="sam3CascadeCrossIou" title="How much two detections must overlap (IoU) to be considered the same object across different classes. Lower = more aggressive.">Cross-class IoU</label>
-			                                                <input type="number" id="sam3CascadeCrossIou" step="0.05" min="0" max="1" value="0.5" title="Overlap threshold (IoU = intersection over union) for cross-class de-dupe. Lower = more suppression; set to 1 to effectively disable." />
-			                                            </div>
-			                                            <div>
-			                                                <label for="sam3CascadeConfidence" title="How we pick the 'winner' when two detections overlap.">Confidence (de-dupe)</label>
-			                                                <select id="sam3CascadeConfidence">
-			                                                    <option value="sam_score" selected>SAM score</option>
-			                                                    <option value="clip_head_prob">CLIP head prob</option>
-			                                                    <option value="clip_head_margin">CLIP head margin</option>
-			                                                </select>
-			                                            </div>
-			                                            <div>
-			                                                <label for="sam3CascadeClipHeadSource" title="Only used when Confidence is set to a CLIP head option. Select which saved recipe provides the embedded CLIP head.">CLIP head source recipe</label>
-			                                                <select id="sam3CascadeClipHeadSource"></select>
-			                                            </div>
-			                                        </div>
-
-		                                        <div class="training-grid" style="grid-template-columns: 1fr 1fr; margin-top: 10px;">
-		                                            <div>
-		                                                <label for="sam3CascadePresetSelect" title="Saved cascades on the backend. Use Refresh if you just saved/imported one.">Cascade presets</label>
-		                                                <select id="sam3CascadePresetSelect" title="Saved cascades on the backend. Use Refresh if you just saved/imported one."></select>
-		                                            </div>
-		                                            <div>
-		                                                <label for="sam3CascadePresetName" title="Optional friendly name when saving the current cascade into your preset list.">Save cascade as</label>
-		                                                <input type="text" id="sam3CascadePresetName" placeholder="Optional label" />
-		                                            </div>
-		                                        </div>
-		                                        <div class="training-actions">
-			                                            <button type="button" id="sam3CascadePresetRefresh" class="training-button secondary" title="Reload the list of saved cascades from the backend.">Refresh cascades</button>
-			                                            <button type="button" id="sam3CascadePresetSave" class="training-button secondary" title="Save the current cascade settings as a reusable preset.">Save cascade preset</button>
-			                                            <button type="button" id="sam3CascadePresetLoad" class="training-button secondary" title="Load the selected preset into the editor below.">Load preset</button>
-			                                            <button type="button" id="sam3CascadePresetDelete" class="training-button danger" title="Delete the selected preset from the backend.">Delete preset</button>
-			                                            <button type="button" id="sam3CascadePresetExport" class="training-button secondary" title="Download a portable zip that includes the cascade and all referenced recipes.">Download preset (zip)</button>
-			                                            <label for="sam3CascadeFile" class="training-button secondary" title="Import a portable cascade zip. It bundles cascade.json + all referenced recipe zips.">Import cascade (zip)</label>
-			                                            <input type="file" id="sam3CascadeFile" accept=".zip" class="file-input-hidden" />
-			                                            <button type="button" id="sam3CascadeApplyButton" class="training-button secondary" title="Run every enabled step on the current image and add the final detections.">Apply cascade to image</button>
-			                                        </div>
-                                        <div id="sam3RecipeStatus" class="training-help" aria-live="polite"></div>
-                                    </div>
                                 </section>
                             </section>
                             <br />
@@ -374,7 +310,7 @@
             <div class="tab-panel" id="tabTraining" data-tab-panel="training">
                 <div class="training-wrapper two-col">
                     <section class="training-form-section">
-                        <h2>CLIP Class Predictor Settings</h2>
+                        <h2>Class Predictor Settings</h2>
                         <div class="training-help" style="margin: 8px 0 14px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
                             <div style="font-weight: 600; color: #0f172a;">Backbone guide (recent comparison on qwen_dataset)</div>
                             <div style="margin-top: 6px;">
@@ -2100,8 +2036,8 @@
             <div class="tab-panel" id="tabSam3PromptModels" data-tab-panel="sam3-prompt-models">
                 <div class="training-wrapper single-wide">
                     <section class="training-form-section">
-                        <h2>SAM3 Correction Model Selection</h2>
-                        <p class="training-help">Pick a locally trained SAM3 checkpoint to use for bbox prompting in the labeling page.</p>
+                        <h2>SAM Model Selection</h2>
+                        <p class="training-help">Pick a locally trained SAM checkpoint to use for SAM3 prompting in the labeling page.</p>
                         <div class="training-field">
                             <label for="sam3PromptModelSelect">Available models</label>
                             <div class="sam3-dataset-row">
@@ -2122,7 +2058,7 @@
                     <section class="active-controls">
                         <h2>Switch Models</h2>
                         <div class="active-message" id="activeMessage" role="status"></div>
-                        <p class="active-help">When you activate a trained classifier, the system loads the CLIP backbone saved in its metadata. Use these controls if you need to override the paths manually.</p>
+                        <p class="active-help">When you activate a trained classifier, the system loads the backbone saved in its metadata. Use these controls if you need to override the paths manually.</p>
                         <div class="active-field">
                             <label for="activeClassifierSelect">Saved classifiers</label>
                             <div class="active-picker">

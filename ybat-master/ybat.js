@@ -1040,31 +1040,32 @@
         element: null,
         timerId: null,
     };
-	    const TASK_GROUP_MAP = {
-	        "sam-bbox": "bbox",
-	        "sam-bbox-auto": "bbox",
-	        "sam-point": "bbox",
-	        "sam-point-auto": "bbox",
-	        "sam-multipoint": "bbox",
-	        "sam-multipoint-auto": "bbox",
-	        "sam-batch": "bbox",
-	        "sam-preload": "preload",
-	        "sam-activate": "preload",
-	        sam: "bbox",
-	        "sam-similarity": "sam3",
-	        "clip-auto": "clip",
-	        "recipe-apply": "recipe",
-	        "recipe-cascade": "recipe-cascade",
-	    };
+    const TASK_GROUP_MAP = {
+        "sam-bbox": "bbox",
+        "sam-bbox-auto": "bbox",
+        "sam-point": "bbox",
+        "sam-point-auto": "bbox",
+        "sam-multipoint": "bbox",
+        "sam-multipoint-auto": "bbox",
+        "sam-batch": "bbox",
+        "sam-preload": "preload",
+        "sam-activate": "preload",
+        sam: "bbox",
+        "sam-similarity": "sam3",
+        "sam3-batch": "sam3",
+        "clip-auto": "clip",
+        "recipe-apply": "recipe",
+        "recipe-cascade": "recipe-cascade",
+    };
 
-	    const TASK_GROUP_LABELS = {
-	        preload: "SAM preloads",
-	        bbox: "bbox adjustments",
-	        sam3: "SAM3 similarity",
-	        clip: "CLIP tasks",
-	        recipe: "recipe",
-	        "recipe-cascade": "recipe cascade",
-	    };
+    const TASK_GROUP_LABELS = {
+        preload: "SAM preloads",
+        bbox: "bbox adjustments",
+        sam3: "SAM3 tasks",
+        clip: "CLIP tasks",
+        recipe: "recipe",
+        "recipe-cascade": "recipe cascade",
+    };
 
     const tabElements = {
         labelingButton: null,
@@ -1133,6 +1134,11 @@
         maxResultsInput: null,
         runButton: null,
         autoButton: null,
+        batchCountInput: null,
+        batchIncludeCurrentToggle: null,
+        batchAutoToggle: null,
+        batchRunButton: null,
+        batchStopButton: null,
         similarityButton: null,
         similarityRow: null,
         similarityThresholdInput: null,
@@ -1191,6 +1197,8 @@
     let qwenRequestActive = false;
     let sam3TextRequestActive = false;
     let sam3SimilarityRequestActive = false;
+    let sam3TextBatchActive = false;
+    let sam3TextBatchCancel = false;
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
     const qwenModelState = {
@@ -8835,6 +8843,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!button) {
             return;
         }
+        if ("disabled" in button) {
+            button.disabled = !!disabled;
+        }
         if (disabled) {
             button.classList.add("button-disabled");
             button.setAttribute("aria-disabled", "true");
@@ -10069,6 +10080,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.autoButton = document.getElementById("sam3RunAutoButton");
+        sam3TextElements.batchCountInput = document.getElementById("sam3BatchCount");
+        sam3TextElements.batchIncludeCurrentToggle = document.getElementById("sam3BatchIncludeCurrent");
+        sam3TextElements.batchAutoToggle = document.getElementById("sam3BatchAuto");
+        sam3TextElements.batchRunButton = document.getElementById("sam3BatchRunButton");
+        sam3TextElements.batchStopButton = document.getElementById("sam3BatchStopButton");
         sam3TextElements.similarityButton = document.getElementById("sam3SimilarityButton");
         sam3TextElements.similarityRow = document.getElementById("sam3SimilarityRow");
         sam3TextElements.similarityThresholdInput = document.getElementById("sam3SimilarityThreshold");
@@ -10098,6 +10114,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (sam3TextElements.autoButton) {
             sam3TextElements.autoButton.addEventListener("click", () => handleSam3TextRequest({ auto: true }));
+        }
+        if (sam3TextElements.batchRunButton) {
+            sam3TextElements.batchRunButton.addEventListener("click", () => startSam3TextBatch());
+        }
+        if (sam3TextElements.batchStopButton) {
+            sam3TextElements.batchStopButton.addEventListener("click", () => stopSam3TextBatch());
         }
         if (sam3TextElements.similarityButton) {
             sam3TextElements.similarityButton.addEventListener("click", handleSam3SimilarityPrompt);
@@ -11454,10 +11476,15 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
     function updateSam3TextButtons() {
         refreshSam3SimilarityVisibility();
-        const busy = sam3TextRequestActive || sam3SimilarityRequestActive;
+        const busy = sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextBatchActive;
         setButtonDisabled(sam3TextElements.runButton, busy);
         setButtonDisabled(sam3TextElements.autoButton, busy);
         setButtonDisabled(sam3TextElements.similarityButton, busy);
+        setButtonDisabled(sam3TextElements.batchRunButton, busy);
+        setButtonDisabled(sam3TextElements.batchCountInput, busy);
+        setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, busy);
+        setButtonDisabled(sam3TextElements.batchAutoToggle, busy);
+        setButtonDisabled(sam3TextElements.batchStopButton, !sam3TextBatchActive);
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.textContent = busy ? "Running…" : "Run SAM3";
         }
@@ -11466,6 +11493,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (sam3TextElements.similarityButton) {
             sam3TextElements.similarityButton.textContent = busy ? "Running…" : "SAM3 similarity prompt (use selected box)";
+        }
+        if (sam3TextElements.batchRunButton) {
+            sam3TextElements.batchRunButton.textContent = sam3TextBatchActive ? "Running batch…" : "Run batch";
         }
         if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
             setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
@@ -11896,25 +11926,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
     }
 
-    async function handleSam3TextRequest({ auto = false } = {}) {
-        if (sam3TextRequestActive) {
-            return;
-        }
-        if (!currentImage || !currentImage.name) {
-            setSam3TextStatus("Load an image before running SAM3.", "warn");
-            return;
-        }
+    function buildSam3TextSnapshot({ auto = false } = {}) {
         const prompt = (sam3TextElements.promptInput?.value || "").trim();
-        if (!prompt) {
-            setSam3TextStatus("Enter a prompt describing what to segment.", "warn");
-            sam3TextElements.promptInput?.focus();
-            return;
-        }
-        const targetClass = getSam3TargetClass();
-        if (!auto && !targetClass) {
-            setSam3TextStatus("Pick a class to assign boxes to before running SAM3.", "warn");
-            return;
-        }
         let threshold = parseFloat(sam3TextElements.thresholdInput?.value || "0.5");
         if (Number.isNaN(threshold)) {
             threshold = 0.5;
@@ -11938,85 +11951,248 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) {
             simplifyEps = 1.0;
         }
+        const targetClass = auto ? null : getSam3TargetClass();
+        return {
+            prompt,
+            threshold,
+            maskThreshold,
+            minSize,
+            maxResults,
+            simplifyEps,
+            auto,
+            targetClass,
+        };
+    }
+
+    async function runSam3TextPromptSnapshot(snapshot) {
+        const {
+            prompt,
+            threshold,
+            maskThreshold,
+            minSize,
+            maxResults,
+            simplifyEps,
+            auto,
+            targetClass,
+        } = snapshot;
+        const result = await invokeSam3TextPrompt(
+            {
+                text_prompt: prompt,
+                threshold,
+                mask_threshold: maskThreshold,
+                min_size: minSize,
+                simplify_epsilon: simplifyEps,
+                max_results: maxResults,
+            },
+            { auto }
+        );
+        if (currentImage && result?.image_token) {
+            rememberSamToken(currentImage.name, samVariant, result.image_token);
+        }
+        if (Array.isArray(result?.masks) && Array.isArray(result?.detections)) {
+            result.detections.forEach((det, idx) => {
+                if (det && !det.mask && result.masks[idx]) {
+                    det.mask = result.masks[idx];
+                }
+            });
+        }
+        if (auto) {
+            const detections = Array.isArray(result?.detections) ? result.detections : [];
+            const added = applySam3AutoDetections(detections);
+            if (added) {
+                const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+                setSam3TextStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
+            } else {
+                const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
+                    ? "CLIP classifier unavailable; no auto boxes were added."
+                    : "SAM3 auto returned no usable boxes.";
+                setSam3TextStatus(warning, "warn");
+            }
+            if (detections.length) {
+                const counts = new Map();
+                let known = 0;
+                let unknown = 0;
+                detections.forEach((det) => {
+                    const label = String(det?.prediction || "").trim();
+                    if (!label || label === "unknown") {
+                        unknown += 1;
+                        return;
+                    }
+                    known += 1;
+                    counts.set(label, (counts.get(label) || 0) + 1);
+                });
+                const top = Array.from(counts.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3)
+                    .map(([label, count]) => `${label}(${count})`);
+                const summary = [
+                    `SAM3 auto-class: ${detections.length} det${detections.length === 1 ? "" : "s"}`,
+                    `${known} classified`,
+                    `${unknown} unknown`,
+                ];
+                if (top.length) {
+                    summary.push(`top: ${top.join(", ")}`);
+                }
+                enqueueTaskNotice(summary.join(" • "), { durationMs: 5000 });
+            }
+            return { added, detections: detections.length, warnings: result?.warnings || [] };
+        }
+        const applied = applySegAwareDetections(result?.detections || [], targetClass, "SAM3");
+        if (applied) {
+            const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+            setSam3TextStatus(`SAM3 added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, "success");
+            enqueueTaskNotice(`SAM3 text: added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, { durationMs: 4500 });
+        } else {
+            const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
+                ? "SAM3 found no matches for that prompt."
+                : "SAM3 returned no usable detections.";
+            setSam3TextStatus(warning, "warn");
+            enqueueTaskNotice("SAM3 text: no detections added.", { durationMs: 3500 });
+        }
+        return { added: applied, detections: Array.isArray(result?.detections) ? result.detections.length : 0, warnings: result?.warnings || [] };
+    }
+
+    async function waitForCurrentImageReady(imageName, timeoutMs = 15000) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            if (currentImage && currentImage.name === imageName && currentImage.object) {
+                return true;
+            }
+            await yieldToDom(100);
+        }
+        return false;
+    }
+
+    async function startSam3TextBatch() {
+        if (sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
+            setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSam3TextStatus("Load an image before starting a batch run.", "warn");
+            return;
+        }
+        const imageList = document.getElementById("imageList");
+        if (!imageList || !imageList.options.length) {
+            setSam3TextStatus("Load images before starting a batch run.", "warn");
+            return;
+        }
+        const includeCurrent = !!sam3TextElements.batchIncludeCurrentToggle?.checked;
+        const auto = !!sam3TextElements.batchAutoToggle?.checked;
+        const countRaw = parseInt(sam3TextElements.batchCountInput?.value || "1", 10);
+        const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(999, countRaw)) : 1;
+        const snapshot = buildSam3TextSnapshot({ auto });
+        if (!snapshot.prompt) {
+            setSam3TextStatus("Enter a prompt before running a batch.", "warn");
+            sam3TextElements.promptInput?.focus();
+            return;
+        }
+        if (!auto && !snapshot.targetClass) {
+            setSam3TextStatus("Pick a class before running a batch.", "warn");
+            return;
+        }
+        const startIndex = Math.max(0, imageList.selectedIndex || 0);
+        const names = [];
+        for (let i = 0; i < count; i += 1) {
+            const idx = includeCurrent ? startIndex + i : startIndex + i + 1;
+            if (idx >= imageList.options.length) {
+                break;
+            }
+            const name = getOptionImageName(imageList.options[idx]);
+            if (name) {
+                names.push(name);
+            }
+        }
+        if (!names.length) {
+            setSam3TextStatus("No images found for the batch range.", "warn");
+            return;
+        }
+        const originalName = currentImage.name;
+        const batchTaskId = enqueueTask({ kind: "sam3-batch", imageName: originalName, detail: { count: names.length } });
+        sam3TextBatchActive = true;
+        sam3TextBatchCancel = false;
+        updateSam3TextButtons();
+        let totalAdded = 0;
+        try {
+            for (let idx = 0; idx < names.length; idx += 1) {
+                if (sam3TextBatchCancel) {
+                    break;
+                }
+                const name = names[idx];
+                setSam3TextStatus(`Batch ${idx + 1}/${names.length}: ${name}`, "info");
+                setSamStatus(`SAM3 batch ${idx + 1}/${names.length}: ${name}`, { variant: "info", duration: 0 });
+                const record = images[name];
+                if (!record) {
+                    continue;
+                }
+                await ensureImageRecordReady(record);
+                if (!currentImage || currentImage.name !== name) {
+                    setCurrentImage(record);
+                }
+                const ready = await waitForCurrentImageReady(name);
+                if (!ready) {
+                    setSam3TextStatus(`Batch ${idx + 1}/${names.length}: failed to load ${name}`, "warn");
+                    continue;
+                }
+                try {
+                    const result = await runSam3TextPromptSnapshot(snapshot);
+                    totalAdded += Number(result?.added || 0);
+                } catch (err) {
+                    console.error("SAM3 batch step failed", err);
+                    setSam3TextStatus(`Batch error on ${name}: ${err.message || err}`, "error");
+                }
+            }
+        } finally {
+            sam3TextBatchActive = false;
+            updateSam3TextButtons();
+            completeTask(batchTaskId);
+            if (originalName && images[originalName] && (!currentImage || currentImage.name !== originalName)) {
+                setCurrentImage(images[originalName]);
+            }
+            const doneMessage = sam3TextBatchCancel
+                ? "Batch cancelled."
+                : `Batch complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}.`;
+            setSam3TextStatus(doneMessage, sam3TextBatchCancel ? "warn" : "success");
+            enqueueTaskNotice(doneMessage, { durationMs: 5000 });
+        }
+    }
+
+    function stopSam3TextBatch() {
+        if (!sam3TextBatchActive) {
+            return;
+        }
+        sam3TextBatchCancel = true;
+        setSam3TextStatus("Stopping batch after current image…", "warn");
+    }
+
+    async function handleSam3TextRequest({ auto = false } = {}) {
+        if (sam3TextRequestActive) {
+            return;
+        }
+        if (sam3TextBatchActive) {
+            setSam3TextStatus("Batch is running; wait for it to finish.", "warn");
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSam3TextStatus("Load an image before running SAM3.", "warn");
+            return;
+        }
+        const snapshot = buildSam3TextSnapshot({ auto });
+        if (!snapshot.prompt) {
+            setSam3TextStatus("Enter a prompt describing what to segment.", "warn");
+            sam3TextElements.promptInput?.focus();
+            return;
+        }
+        if (!auto && !snapshot.targetClass) {
+            setSam3TextStatus("Pick a class to assign boxes to before running SAM3.", "warn");
+            return;
+        }
         sam3TextRequestActive = true;
         updateSam3TextButtons();
         setSam3TextStatus("Running SAM3…", "info");
         setSamStatus(`Running SAM3 text prompt${auto ? " (auto class)" : ""}…`, { variant: "info", duration: 0 });
         try {
-            const result = await invokeSam3TextPrompt(
-                {
-                    text_prompt: prompt,
-                    threshold,
-                    mask_threshold: maskThreshold,
-                    min_size: minSize,
-                    simplify_epsilon: simplifyEps,
-                    max_results: maxResults,
-                },
-                { auto }
-            );
-            if (currentImage && result?.image_token) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
-            }
-            if (Array.isArray(result?.masks) && Array.isArray(result?.detections)) {
-                result.detections.forEach((det, idx) => {
-                    if (det && !det.mask && result.masks[idx]) {
-                        det.mask = result.masks[idx];
-                    }
-                });
-            }
-            if (auto) {
-                const detections = Array.isArray(result?.detections) ? result.detections : [];
-                const added = applySam3AutoDetections(detections);
-                if (added) {
-                    const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
-                    setSam3TextStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
-                } else {
-                    const warning = Array.isArray(result?.warnings) && result.warnings.includes("clip_unavailable")
-                        ? "CLIP classifier unavailable; no auto boxes were added."
-                        : "SAM3 auto returned no usable boxes.";
-                    setSam3TextStatus(warning, "warn");
-                }
-                if (detections.length) {
-                    const counts = new Map();
-                    let known = 0;
-                    let unknown = 0;
-                    detections.forEach((det) => {
-                        const label = String(det?.prediction || "").trim();
-                        if (!label || label === "unknown") {
-                            unknown += 1;
-                            return;
-                        }
-                        known += 1;
-                        counts.set(label, (counts.get(label) || 0) + 1);
-                    });
-                    const top = Array.from(counts.entries())
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 3)
-                        .map(([label, count]) => `${label}(${count})`);
-                    const summary = [
-                        `SAM3 auto-class: ${detections.length} det${detections.length === 1 ? "" : "s"}`,
-                        `${known} classified`,
-                        `${unknown} unknown`,
-                    ];
-                    if (top.length) {
-                        summary.push(`top: ${top.join(", ")}`);
-                    }
-                    enqueueTaskNotice(summary.join(" • "), { durationMs: 5000 });
-                }
-            } else {
-                const applied = applySegAwareDetections(result?.detections || [], targetClass, "SAM3");
-                if (applied) {
-                    const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
-                    setSam3TextStatus(`SAM3 added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, "success");
-                    enqueueTaskNotice(`SAM3 text: added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, { durationMs: 4500 });
-                } else {
-                    const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
-                        ? "SAM3 found no matches for that prompt."
-                        : "SAM3 returned no usable detections.";
-                    setSam3TextStatus(warning, "warn");
-                    enqueueTaskNotice("SAM3 text: no detections added.", { durationMs: 3500 });
-                }
-            }
+            await runSam3TextPromptSnapshot(snapshot);
         } catch (error) {
             const detail = error?.message || error;
             setSam3TextStatus(`SAM3 error: ${detail}`, "error");
@@ -12028,7 +12204,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 
     async function handleSam3SimilarityPrompt() {
-        if (sam3SimilarityRequestActive || sam3TextRequestActive) {
+        if (sam3SimilarityRequestActive || sam3TextRequestActive || sam3TextBatchActive) {
+            setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
             return;
         }
         if (!currentImage || !currentImage.name) {

@@ -214,12 +214,34 @@
                                     </div>
 	                                    <label for="sam3ClassSelect">Assign detections to class</label>
 	                                    <select id="sam3ClassSelect"></select>
-		                                    <div class="sam3-text-buttons">
-		                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
-		                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
-		                                        <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). New recipe zips contain recipe.json + embedded pretrained CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">Import recipe (zip)</label>
-		                                        <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
-		                                        <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
+	                                    <div class="sam3-text-buttons">
+	                                        <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
+	                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
+	                                    </div>
+	                                    <div class="sam3-text-batch training-grid" style="margin-top: 10px;">
+	                                        <div>
+	                                            <label for="sam3BatchCount">Apply to next N images</label>
+	                                            <input type="number" id="sam3BatchCount" min="1" max="999" value="5" />
+	                                        </div>
+	                                        <label class="training-field--inline" for="sam3BatchIncludeCurrent">
+	                                            <input type="checkbox" id="sam3BatchIncludeCurrent" checked />
+	                                            Include current image
+	                                        </label>
+	                                        <label class="training-field--inline" for="sam3BatchAuto">
+	                                            <input type="checkbox" id="sam3BatchAuto" />
+	                                            Use auto-class (CLIP)
+	                                        </label>
+	                                        <div class="training-actions">
+	                                            <button type="button" id="sam3BatchRunButton" class="training-button secondary">Run batch</button>
+	                                            <button type="button" id="sam3BatchStopButton" class="training-button danger" disabled>Stop batch</button>
+	                                        </div>
+	                                    </div>
+	                                    <p class="training-help" style="margin-top: 6px;">
+	                                        Runs the current prompt sequentially across the next N images. Uses the same thresholds and optional auto-class.
+	                                    </p>
+	                                    <label for="sam3RecipeFile" class="training-button secondary" title="Import a portable recipe zip (from Agent Mining or another machine). New recipe zips contain recipe.json + embedded pretrained CLIP head artifacts (clip_head/). Legacy zips may also include example crops.">Import recipe (zip)</label>
+	                                    <input type="file" id="sam3RecipeFile" accept=".zip" class="file-input-hidden" />
+	                                    <button type="button" id="sam3RecipePresetRefresh" class="training-button secondary">Refresh recipes</button>
 
 		                                        <div class="training-help" style="margin-top: 8px;">
 		                                            <strong>Recipe cascade:</strong> run multiple saved recipes in order. Each step can re-label its outputs and choose whether it participates in cross-class de-dupe.
@@ -1142,6 +1164,10 @@
         │    - crop each detection and score with the pretrained CLIP head
         │    - auto-tune min prob + (optional) margin to hit your “cleanliness” target
         │
+        ├─ Background suppression (default on)
+        │    - if a __bg_* class scores higher than the target, drop the detection
+        │    - optional margin can make this stricter
+        │
         └─ Save portable recipe zip
              - recipe.json (schema v2, multi-step)
              - clip_head/head.npz + meta.json (embedded head + tuned thresholds)</pre>
@@ -1318,6 +1344,19 @@
 						                                                    <option value="conservative">Keep more prompts</option>
 						                                                    <option value="balanced" selected>Balanced</option>
 						                                                    <option value="aggressive">Keep fewer prompts</option>
+						                                                </select>
+						                                            </div>
+						                                            <div>
+						                                                <label for="agentStepsPromptBgDrop">Prompt background drop<span class="help-icon" title="Use background classes in your CLIP head to skip prompts that mostly hit background.&#10;This can cut a lot of wasted SAM3 runs on noisy prompts.&#10;Requires a head trained with __bg_* classes.">?</span></label>
+						                                                <div class="training-field training-field--inline" style="margin-bottom: 6px;">
+						                                                    <input type="checkbox" id="agentStepsPromptBgDrop" checked />
+						                                                    <span class="training-help">On</span>
+						                                                </div>
+						                                                <label for="agentStepsPromptBgDropMode">Strictness<span class="help-icon" title="Conservative keeps more prompts; Aggressive drops more prompt candidates and is faster.">?</span></label>
+						                                                <select id="agentStepsPromptBgDropMode">
+						                                                    <option value="conservative">Conservative</option>
+						                                                    <option value="balanced" selected>Balanced</option>
+						                                                    <option value="aggressive">Aggressive</option>
 						                                                </select>
 						                                            </div>
 						                                        </div>
@@ -1517,8 +1556,12 @@
 						                                <div class="training-help" id="agentClipHeadMeta"></div>
 						                            </div>
 					                            <div class="training-field training-field--inline">
-					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the sampled images so recipes are clean (few false positives).&#10;These tuned thresholds are baked into the saved recipe ZIP and used whenever the recipe runs.&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
+					                                <label for="agentClipHeadAutoTune">Auto-tune thresholds<span class="help-icon" title="CLIP head mode only (recommended).&#10;Automatically searches per-class CLIP head thresholds on the sampled images so recipes are clean (few false positives).&#10;By default this tunes min prob and margin (see “Auto-tune margin” below).&#10;These tuned thresholds are baked into the saved recipe ZIP and used whenever the recipe runs.&#10;Turn this off only if you want to force fixed thresholds for all classes.">?</span></label>
 					                                <input type="checkbox" id="agentClipHeadAutoTune" checked />
+					                            </div>
+					                            <div class="training-field training-field--inline">
+					                                <label for="agentClipHeadTuneMargin">Auto-tune margin<span class="help-icon" title="When auto-tuning CLIP thresholds, also search a per-class margin (target must beat other classes by this amount).&#10;Disable this to keep a fixed margin while min prob is auto-tuned.">?</span></label>
+					                                <input type="checkbox" id="agentClipHeadTuneMargin" checked />
 					                            </div>
 					                            <div>
 					                                <label for="agentClipHeadTargetPrecision">Recipe cleanliness (precision target)<span class="help-icon" title="CLIP head auto-tune only.&#10;&#10;What “precision” means here:&#10;- Precision = matches / (matches + false positives) on the sampled images.&#10;- A detection is a “match” if it overlaps an unmatched ground-truth box for that class with IoU ≥ the job’s IoU threshold.&#10;- Detections that match no ground-truth box count as false positives.&#10;- Extra detections on the same object are counted as “Duplicates” (shown separately).&#10;&#10;How to tune:&#10;- Move toward “Cleaner” to reduce false positives (but you may miss objects).&#10;- Typical clean recipes: 0.85–0.98. Recall-first runs: 0.70–0.80.&#10;&#10;This sets the per-class CLIP thresholds that get baked into the saved recipe ZIP.">?</span></label>
@@ -1542,12 +1585,57 @@
 					                            </div>
 				                        </div>
 				                        <div class="training-grid">
+				                            <div class="training-field training-field--inline">
+				                                <label for="agentClipHeadBgGuard">Background suppression (negative classes)<span class="help-icon" title="Use the __bg_* classes in your CLIP head to suppress false positives.&#10;If a detection scores higher for background than the target class, we drop it.&#10;Requires a head trained with background classes.">?</span></label>
+				                                <input type="checkbox" id="agentClipHeadBgGuard" checked />
+				                            </div>
+				                            <div>
+				                                <label for="agentClipHeadBgMargin">Background margin<span class="help-icon" title="Optional margin for background suppression.&#10;Require the target class to beat the best background class by at least this margin.&#10;0 = only require target ≥ background.">?</span></label>
+				                                <input type="number" id="agentClipHeadBgMargin" step="0.01" min="0" max="1" value="0.0" />
+				                            </div>
+				                            <div>
+				                                <label for="agentClipHeadBgApply">Apply background suppression<span class="help-icon" title="Choose where to apply background suppression.&#10;Final only = safest for recall.&#10;Seeds only or both can reduce noise earlier but may lower recall.">?</span></label>
+				                                <select id="agentClipHeadBgApply">
+				                                    <option value="final">Final detections only (default)</option>
+				                                    <option value="seed">Seed candidates only</option>
+				                                    <option value="both">Seeds + final</option>
+				                                </select>
+				                            </div>
+				                        </div>
+				                        <div class="training-grid">
+				                            <div>
+				                                <label for="agentClipHeadBgPenalty">Background penalty (optimizer)<span class="help-icon" title="Optional penalty during optimization: recipes that are often classified as background are scored lower.&#10;0 disables the penalty.">?</span></label>
+				                                <input type="number" id="agentClipHeadBgPenalty" step="0.01" min="0" max="2" value="0.0" />
+				                            </div>
+				                            <div class="training-help" style="align-self: center;">
+				                                Uses the __bg_* classes to suppress background-like detections. Default is ON for cleaner recipes.
+				                            </div>
+				                        </div>
+				                        <div class="training-grid">
+				                            <div class="training-field training-field--inline">
+				                                <label for="agentClipHeadBgAutoTune">Auto-tune background margin<span class="help-icon" title="When auto-tuning CLIP thresholds, also search the best background margin per class.&#10;Requires background classes and auto-tune enabled.">?</span></label>
+				                                <input type="checkbox" id="agentClipHeadBgAutoTune" checked />
+				                            </div>
+				                            <div class="training-field training-field--inline">
+				                                <label for="agentStepsHardNegExport">Hard-negative replay export<span class="help-icon" title="Export false positives (background-like crops) during final tuning to reuse as negatives later.&#10;Saved under uploads/clip_negative_replay/.">?</span></label>
+				                                <input type="checkbox" id="agentStepsHardNegExport" checked />
+				                            </div>
+				                            <div>
+				                                <label for="agentStepsHardNegMaxCrops">Max replay crops<span class="help-icon" title="Maximum number of hard-negative crops to save per class.&#10;0 disables export.">?</span></label>
+				                                <input type="number" id="agentStepsHardNegMaxCrops" min="0" max="5000" value="200" />
+				                            </div>
+				                            <div>
+				                                <label for="agentStepsHardNegMinProb">Min CLIP prob<span class="help-icon" title="Minimum target-class probability for a detection to be saved as a hard negative.">?</span></label>
+				                                <input type="number" id="agentStepsHardNegMinProb" step="0.01" min="0" max="1" value="0.1" />
+				                            </div>
+				                        </div>
+				                        <div class="training-grid">
 					                            <div>
 					                                <label for="agentClipHeadMinProb">Manual head min prob<span class="help-icon" title="CLIP head manual mode only (auto-tune OFF).&#10;Minimum probability required for the target class.&#10;Higher = fewer detections, cleaner results; lower = more detections (more false positives).&#10;This value is baked into the saved recipe ZIP.">?</span></label>
 					                                <input type="number" id="agentClipHeadMinProb" step="0.05" min="0" max="1" value="0.5" />
 					                            </div>
 				                            <div>
-				                                <label for="agentClipHeadMargin">Manual head margin<span class="help-icon" title="CLIP head manual mode only (auto-tune OFF).&#10;Require the target class probability to beat the best other class by this margin.&#10;0 disables the margin check.&#10;Higher can reduce confusion between similar classes.&#10;This value is baked into the saved recipe ZIP.">?</span></label>
+				                                <label for="agentClipHeadMargin">Head margin<span class="help-icon" title="Used when auto-tune is OFF or when “Auto-tune margin” is disabled.&#10;Require the target class probability to beat the best other class by this margin.&#10;0 disables the margin check.&#10;Higher can reduce confusion between similar classes.&#10;This value is baked into the saved recipe ZIP.">?</span></label>
 				                                <input type="number" id="agentClipHeadMargin" step="0.05" min="0" max="1" value="0.0" />
 				                            </div>
 				                        </div>

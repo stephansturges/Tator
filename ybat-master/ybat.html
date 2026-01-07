@@ -214,13 +214,8 @@
                                     </div>
                                     <label for="sam3ClassSelect">Assign detections to class</label>
                                     <select id="sam3ClassSelect"></select>
-                                    <label class="training-field--inline" for="sam3BaseAutoClass">
-                                        <input type="checkbox" id="sam3BaseAutoClass" />
-                                        Auto-class base step<span class="help-icon" title="When running a cascade, apply CLIP auto-class to detections from the base step.">?</span>
-                                    </label>
                                     <div class="sam3-text-buttons">
                                         <button type="button" id="sam3RunButton" class="training-button">Run SAM3</button>
-                                        <button type="button" id="sam3RunAutoButton" class="training-button">Run SAM3 + Auto Class</button>
                                         <button type="button" id="sam3TextCascadeToggle" class="training-button secondary">Start cascade</button>
                                     </div>
                                     <div id="sam3TextCascadePanel" class="sam3-text-cascade" hidden>
@@ -247,10 +242,6 @@
 	                                            <label class="sam3-text-batch__option" for="sam3BatchIncludeCurrent">
 	                                                <input type="checkbox" id="sam3BatchIncludeCurrent" checked />
 	                                                Include current image
-	                                            </label>
-	                                            <label class="sam3-text-batch__option" for="sam3BatchAuto">
-	                                                <input type="checkbox" id="sam3BatchAuto" />
-	                                                Use auto-class (CLIP)
 	                                            </label>
 	                                        </div>
 	                                        <div class="sam3-text-batch__actions">

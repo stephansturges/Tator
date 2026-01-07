@@ -1044,6 +1044,7 @@
 	        "sam-preload": "preload",
 	        "sam-activate": "preload",
 	        sam: "bbox",
+	        "sam-similarity": "sam3",
 	        "clip-auto": "clip",
 	        "recipe-apply": "recipe",
 	        "recipe-cascade": "recipe-cascade",
@@ -1052,6 +1053,7 @@
 	    const TASK_GROUP_LABELS = {
 	        preload: "SAM preloads",
 	        bbox: "bbox adjustments",
+	        sam3: "SAM3 similarity",
 	        clip: "CLIP tasks",
 	        recipe: "recipe",
 	        "recipe-cascade": "recipe cascade",
@@ -1541,6 +1543,8 @@ const sam3TrainState = {
 	        stepsEarlyStopMode: null,
 	        stepsPromptPrefilter: null,
 	        stepsPromptPrefilterMode: null,
+	        stepsPromptBgDrop: null,
+	        stepsPromptBgDropMode: null,
 	        stepsGlobalEvalCap1: null,
 	        stepsGlobalEvalCap2: null,
 	        stepsGlobalEvalCap3: null,
@@ -1577,9 +1581,18 @@ const sam3TrainState = {
 	        clipHeadMinProb: null,
 	        clipHeadMargin: null,
 	        clipHeadAutoTune: null,
+	        clipHeadTuneMargin: null,
 	        clipHeadTargetPrecision: null,
         clipHeadTargetPrecisionValue: null,
         clipHeadAllowLowPrecision: null,
+        clipHeadBgGuard: null,
+        clipHeadBgMargin: null,
+        clipHeadBgApply: null,
+        clipHeadBgPenalty: null,
+        clipHeadBgAutoTune: null,
+        stepsHardNegExport: null,
+        stepsHardNegMaxCrops: null,
+        stepsHardNegMinProb: null,
         classesInput: null,
         extraPrompts: null,
         extraPromptsStatus: null,
@@ -3212,6 +3225,20 @@ const sam3TrainState = {
             if (activeElements.labelmapSelect) {
                 const match = activeState.labelmaps.find((lm) => lm.path === entry.labelmap_guess);
                 if (match) activeElements.labelmapSelect.value = match.path;
+            }
+        }
+        if (activeElements.clipSelect) {
+            const encoderType = String(entry.encoder_type || "clip").toLowerCase().trim();
+            if (encoderType !== "clip") {
+                activeElements.clipSelect.value = "";
+                activeElements.clipSelect.disabled = true;
+                activeElements.clipSelect.title = "Disabled for non-CLIP classifiers.";
+            } else {
+                activeElements.clipSelect.disabled = false;
+                activeElements.clipSelect.title = "";
+                if (entry.clip_model) {
+                    activeElements.clipSelect.value = entry.clip_model;
+                }
             }
         }
         syncActiveApplyAvailability();
@@ -8052,13 +8079,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             return;
         }
         try {
+            const encoderType = String(art.encoder_type || "clip").toLowerCase().trim();
             const payload = {
                 classifier_path: art.model_path,
                 labelmap_path: art.labelmap_path,
-                clip_model: art.clip_model || (activeElements.clipSelect ? activeElements.clipSelect.value : null),
+                clip_model: encoderType === "clip" ? (art.clip_model || (activeElements.clipSelect ? activeElements.clipSelect.value : null)) : null,
             };
-            if (activeElements.clipSelect && art.clip_model) {
-                activeElements.clipSelect.value = art.clip_model;
+            if (activeElements.clipSelect) {
+                if (encoderType === "clip" && art.clip_model) {
+                    activeElements.clipSelect.value = art.clip_model;
+                    activeElements.clipSelect.disabled = false;
+                } else if (encoderType !== "clip") {
+                    activeElements.clipSelect.value = "";
+                    activeElements.clipSelect.disabled = true;
+                }
             }
             const resp = await fetch(`${API_ROOT}/clip/active_model`, {
                 method: "POST",
@@ -8082,10 +8116,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (!activeElements.classifierPath || !activeElements.clipSelect) {
             return;
         }
+        const selected = getSelectedActiveClassifier();
+        const encoderType = selected ? String(selected.encoder_type || "clip").toLowerCase().trim() : "clip";
+        let clipModel = activeElements.clipSelect.value || null;
+        if (selected) {
+            if (encoderType !== "clip") {
+                clipModel = null;
+            } else if (selected.clip_model) {
+                clipModel = selected.clip_model;
+            }
+        }
         const payload = {
             classifier_path: activeElements.classifierPath.value.trim() || null,
             labelmap_path: activeElements.labelmapPath ? activeElements.labelmapPath.value.trim() || null : null,
-            clip_model: activeElements.clipSelect.value || null,
+            clip_model: clipModel,
         };
         if (!payload.classifier_path && !payload.clip_model) {
             setActiveMessage("Provide a classifier path or choose a backbone to apply.", "error");
@@ -9536,9 +9580,6 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 option.classList.add("sam-slot-loading");
             } else if (slotEntry?.slot) {
                 option.classList.add("sam-slot-loaded");
-                if (slotEntry.busy) {
-                    option.classList.add("sam-slot-loading");
-                }
             }
             if (
                 !needsSelectionFix &&
@@ -11912,7 +11953,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             });
         }
         if (auto) {
-            const added = applySam3AutoDetections(result?.detections || [], targetClass);
+            const added = applySam3AutoDetections(result?.detections || []);
             if (added) {
                 const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
                 setSam3TextStatus(`SAM3 auto added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
@@ -12037,7 +12078,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         sam3SimilarityRequestActive = true;
         updateSam3TextButtons();
         setSam3TextStatus("Running SAM3 similarity prompt…", "info");
-        setSamStatus("Running SAM3 similarity prompt…", { variant: "info", duration: 0 });
+        const similarityTaskId = enqueueTask({ kind: "sam-similarity", imageName: currentImage.name, detail: targetClass });
+        const statusToken = beginSamActionStatus("Running SAM3 similarity prompt…", { variant: "info" });
         try {
             const result = await invokeSam3VisualPrompt({
                 bbox_left: left,
@@ -12106,7 +12148,42 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         } finally {
             sam3SimilarityRequestActive = false;
             updateSam3TextButtons();
+            completeTask(similarityTaskId);
+            endSamActionStatus(statusToken);
         }
+    }
+
+    async function triggerSam3SimilarityHotkey() {
+        if (!currentImage || !currentImage.name) {
+            setSamStatus("Load an image before running SAM3 similarity.", { variant: "warn", duration: 2500 });
+            return;
+        }
+        const targetClass = getSam3TargetClass();
+        if (!targetClass) {
+            setSamStatus("Pick a class before running SAM3 similarity.", { variant: "warn", duration: 2500 });
+            return;
+        }
+        if (!currentBbox || !currentBbox.bbox) {
+            setSamStatus("Select a bbox before running SAM3 similarity.", { variant: "warn", duration: 2500 });
+            return;
+        }
+        const slotEntry = findSlotStatusForImage(currentImage.name, "sam3");
+        const sam3Loaded = !!(slotEntry && slotEntry.slot);
+        if (!sam3Loaded) {
+            if (samVariantSelect && samVariantSelect.value !== "sam3") {
+                samVariantSelect.value = "sam3";
+                samVariantSelect.dispatchEvent(new Event("change"));
+            } else {
+                samVariant = "sam3";
+            }
+            if (!samPreloadEnabled) {
+                updateSamPreloadState(true);
+            }
+            prepareSamForCurrentImage({ messagePrefix: "Loading SAM3 predictor", immediate: true }).catch((err) => {
+                console.debug("SAM3 preload for similarity failed", err);
+            });
+        }
+        handleSam3SimilarityPrompt();
     }
 
     async function invokeQwenInfer(requestFields) {
@@ -12781,8 +12858,8 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             let targetClass = null;
             if (entry.prediction && typeof classes[entry.prediction] !== "undefined") {
                 targetClass = entry.prediction;
-            } else {
-                targetClass = fallbackClass || getQwenTargetClass();
+            } else if (fallbackClass) {
+                targetClass = fallbackClass;
             }
             if (!targetClass) {
                 return;
@@ -13607,11 +13684,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            body.innerHTML = `<div class="training-help">GT eval: ${evalGt}</div>`;
 
 		            const configBits = [];
-		            if (recipe.clip_head) {
-		                const head = recipe.clip_head || {};
-		                const headClasses = Array.isArray(head.classes) ? head.classes : [];
-		                const nClasses = headClasses.length ? headClasses.length : null;
-		                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
+            if (recipe.clip_head) {
+                const head = recipe.clip_head || {};
+                const headClasses = Array.isArray(head.classes) ? head.classes : [];
+                const nClasses = headClasses.length ? headClasses.length : null;
+                const minProb = Number.isFinite(head.min_prob) ? head.min_prob : null;
 		                const margin = Number.isFinite(head.margin) ? head.margin : null;
 		                const autoTuned = !!head.auto_tuned;
 		                const targetPrecision = Number.isFinite(head.target_precision) ? head.target_precision : null;
@@ -13625,12 +13702,43 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                if (headIdx !== null) parts.push(`head idx ${headIdx}`);
 		                if (minProb !== null) parts.push(`p≥${minProb}`);
 		                if (margin !== null && margin > 0) parts.push(`Δ≥${margin}`);
-		                if (autoTuned && targetPrecision !== null) {
-		                    const suffix = meetsTarget === false ? " (missed)" : meetsTarget === true ? " (met)" : "";
-		                    parts.push(`tune prec≥${targetPrecision}${suffix}`);
-		                }
-		                configBits.push(parts.join(" "));
-		            }
+                if (autoTuned && targetPrecision !== null) {
+                    const suffix = meetsTarget === false ? " (missed)" : meetsTarget === true ? " (met)" : "";
+                    parts.push(`tune prec≥${targetPrecision}${suffix}`);
+                }
+                configBits.push(parts.join(" "));
+            }
+            const bgGuard =
+                typeof params.clip_head_background_guard === "boolean"
+                    ? params.clip_head_background_guard
+                    : typeof summary.clip_head_background_guard === "boolean"
+                      ? summary.clip_head_background_guard
+                      : false;
+            const bgMargin =
+                Number.isFinite(params.clip_head_background_margin)
+                    ? params.clip_head_background_margin
+                    : Number.isFinite(summary.clip_head_background_margin)
+                      ? summary.clip_head_background_margin
+                      : null;
+            const bgApply =
+                typeof params.clip_head_background_apply === "string" && params.clip_head_background_apply
+                    ? params.clip_head_background_apply
+                    : typeof summary.clip_head_background_apply === "string" && summary.clip_head_background_apply
+                      ? summary.clip_head_background_apply
+                      : null;
+            const bgPenalty =
+                Number.isFinite(params.clip_head_background_penalty)
+                    ? params.clip_head_background_penalty
+                    : Number.isFinite(summary.clip_head_background_penalty)
+                      ? summary.clip_head_background_penalty
+                      : null;
+            if (bgGuard) {
+                const bgBits = ["bg guard"];
+                if (bgMargin !== null && Number(bgMargin) > 0) bgBits.push(`Δbg≥${Number(bgMargin)}`);
+                if (bgApply) bgBits.push(`apply ${bgApply}`);
+                if (bgPenalty !== null && Number(bgPenalty) > 0) bgBits.push(`penalty ${Number(bgPenalty)}`);
+                configBits.push(bgBits.join(" "));
+            }
             if (typeof params.seed_threshold === "number") configBits.push(`base text thr ${params.seed_threshold}`);
             if (typeof params.expand_threshold === "number") configBits.push(`base visual thr ${params.expand_threshold}`);
             if (typeof params.max_visual_seeds === "number") configBits.push(`base candidates ${params.max_visual_seeds}`);
@@ -13657,17 +13765,34 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                body.appendChild(meta);
 		            }
 
-		            const prefilterSummary = summary.prompt_prefilter && typeof summary.prompt_prefilter === "object" ? summary.prompt_prefilter : null;
-		            const earlyStopSummary = summary.early_stop && typeof summary.early_stop === "object" ? summary.early_stop : null;
-		            if (prefilterSummary || earlyStopSummary) {
-		                const block = document.createElement("div");
-		                block.className = "training-subsection";
-		                const title = document.createElement("div");
-		                title.className = "training-subsection__title";
-		                title.textContent = "Run summary";
-		                block.appendChild(title);
+            const prefilterSummary = summary.prompt_prefilter && typeof summary.prompt_prefilter === "object" ? summary.prompt_prefilter : null;
+            const promptBgDropSummary =
+                summary.prompt_bg_drop && typeof summary.prompt_bg_drop === "object" ? summary.prompt_bg_drop : null;
+            const earlyStopSummary = summary.early_stop && typeof summary.early_stop === "object" ? summary.early_stop : null;
+            const bgSeedRate = Number.isFinite(summary.bg_veto_rate_seed) ? Number(summary.bg_veto_rate_seed) : null;
+            const bgFinalRate = Number.isFinite(summary.bg_veto_rate_final) ? Number(summary.bg_veto_rate_final) : null;
+            const bgSeedCount = Number.isFinite(summary.bg_veto_seed) ? Number(summary.bg_veto_seed) : null;
+            const bgFinalCount = Number.isFinite(summary.bg_veto_final) ? Number(summary.bg_veto_final) : null;
+            const hardNegSummary =
+                summary.hard_negative_export && typeof summary.hard_negative_export === "object"
+                    ? summary.hard_negative_export
+                    : null;
+            const bgGuardEnabled =
+                typeof summary.clip_head_background_guard === "boolean"
+                    ? summary.clip_head_background_guard
+                    : typeof params.clip_head_background_guard === "boolean"
+                      ? params.clip_head_background_guard
+                      : false;
+            const bgSummary = bgGuardEnabled && (bgSeedRate !== null || bgFinalRate !== null || bgSeedCount !== null || bgFinalCount !== null);
+            if (prefilterSummary || promptBgDropSummary || earlyStopSummary || bgSummary || hardNegSummary) {
+                const block = document.createElement("div");
+                block.className = "training-subsection";
+                const title = document.createElement("div");
+                title.className = "training-subsection__title";
+                title.textContent = "Run summary";
+                block.appendChild(title);
 
-		                if (prefilterSummary) {
+                if (prefilterSummary) {
 		                    const enabled = !!prefilterSummary.enabled;
 		                    const mode = prefilterSummary.mode || "balanced";
 		                    const total = Number.isFinite(prefilterSummary.total) ? prefilterSummary.total : null;
@@ -13691,11 +13816,11 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                    block.appendChild(line);
 		                }
 
-		                if (earlyStopSummary) {
-		                    const enabled = !!earlyStopSummary.enabled;
-		                    const mode = earlyStopSummary.mode || "balanced";
-		                    const maxSteps = Number.isFinite(earlyStopSummary.max_steps) ? earlyStopSummary.max_steps : null;
-		                    const selectedSteps =
+                if (earlyStopSummary) {
+                    const enabled = !!earlyStopSummary.enabled;
+                    const mode = earlyStopSummary.mode || "balanced";
+                    const maxSteps = Number.isFinite(earlyStopSummary.max_steps) ? earlyStopSummary.max_steps : null;
+                    const selectedSteps =
 		                        Number.isFinite(earlyStopSummary.selected_steps_final)
 		                            ? earlyStopSummary.selected_steps_final
 		                            : Number.isFinite(earlyStopSummary.selected_steps)
@@ -13714,12 +13839,75 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		                    }
 		                    const line = document.createElement("div");
 		                    line.className = "training-help";
-		                    line.textContent = bits.join(" • ");
-		                    block.appendChild(line);
-		                }
+                    line.textContent = bits.join(" • ");
+                    block.appendChild(line);
+                }
 
-		                body.appendChild(block);
-		            }
+                if (promptBgDropSummary) {
+                    const enabled = !!promptBgDropSummary.enabled;
+                    const mode = promptBgDropSummary.mode || "balanced";
+                    const total = Number.isFinite(promptBgDropSummary.total) ? promptBgDropSummary.total : null;
+                    const dropped = Number.isFinite(promptBgDropSummary.dropped) ? promptBgDropSummary.dropped : null;
+                    const bits = [];
+                    bits.push("Prompt bg drop");
+                    if (enabled) {
+                        if (dropped !== null && total !== null) bits.push(`dropped ${dropped}/${total}`);
+                        bits.push(mode);
+                    } else {
+                        const reason = promptBgDropSummary.disabled_reason;
+                        if (reason === "no_background_classes") {
+                            bits.push("disabled (no background classes)");
+                        } else {
+                            bits.push("off");
+                        }
+                    }
+                    const line = document.createElement("div");
+                    line.className = "training-help";
+                    line.textContent = bits.join(" • ");
+                    block.appendChild(line);
+                }
+
+                if (bgSummary) {
+                    const bits = [];
+                    bits.push("Background guard");
+                    if (bgSeedRate !== null || bgSeedCount !== null) {
+                        const rate = bgSeedRate !== null ? `${(bgSeedRate * 100).toFixed(1)}%` : "—";
+                        const count = bgSeedCount !== null ? bgSeedCount : "—";
+                        bits.push(`seed veto ${count} (${rate})`);
+                    }
+                    if (bgFinalRate !== null || bgFinalCount !== null) {
+                        const rate = bgFinalRate !== null ? `${(bgFinalRate * 100).toFixed(1)}%` : "—";
+                        const count = bgFinalCount !== null ? bgFinalCount : "—";
+                        bits.push(`final veto ${count} (${rate})`);
+                    }
+                    const line = document.createElement("div");
+                    line.className = "training-help";
+                    line.textContent = bits.join(" • ");
+                    block.appendChild(line);
+                }
+
+                if (hardNegSummary) {
+                    const enabled = typeof hardNegSummary.enabled === "boolean" ? hardNegSummary.enabled : false;
+                    const count = Number.isFinite(hardNegSummary.count) ? hardNegSummary.count : null;
+                    const maxCrops = Number.isFinite(hardNegSummary.max_crops) ? hardNegSummary.max_crops : null;
+                    const root = hardNegSummary.root || hardNegSummary.path || null;
+                    const bits = [];
+                    bits.push("Hard-neg replay");
+                    if (enabled) {
+                        if (count !== null) bits.push(`${count} crops`);
+                        if (maxCrops !== null) bits.push(`cap ${maxCrops}`);
+                        if (root) bits.push("saved");
+                    } else {
+                        bits.push("off");
+                    }
+                    const line = document.createElement("div");
+                    line.className = "training-help";
+                    line.textContent = bits.join(" • ");
+                    block.appendChild(line);
+                }
+
+                body.appendChild(block);
+            }
 
 	            if (isStepRecipeV2) {
 	                const headMinProb =
@@ -13977,6 +14165,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                         }
                         return String(total);
                     };
+                    const bgGuardOn =
+                        typeof summary.clip_head_background_guard === "boolean"
+                            ? summary.clip_head_background_guard
+                            : typeof params.clip_head_background_guard === "boolean"
+                              ? params.clip_head_background_guard
+                              : false;
+                    const showBg = bgGuardOn;
+                    const formatBg = (vetoRaw, checkedRaw) => {
+                        const veto = Number.isFinite(vetoRaw) ? Number(vetoRaw) : 0;
+                        const checked = Number.isFinite(checkedRaw) ? Number(checkedRaw) : 0;
+                        const rate = checked > 0 ? ((veto / checked) * 100).toFixed(1) : "0.0";
+                        if (totalImages && totalImages > 0) {
+                            return `${(veto / totalImages).toFixed(2)} avg (${veto}/${checked}, ${rate}%)`;
+                        }
+                        return `${veto}/${checked} (${rate}%)`;
+                    };
 
                     const table = document.createElement("table");
                     table.className = "training-table";
@@ -13990,6 +14194,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                                 <th>Expand candidates</th>
                                 <th>Expanded dets</th>
                                 <th>Final dets</th>
+                                ${showBg ? "<th>BG veto (seed)</th><th>BG veto (final)</th>" : ""}
                             </tr>
                         </thead>
                     `;
@@ -14006,6 +14211,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                             <td>${escapeHtml(formatCount(step.expand_candidates))}</td>
                             <td>${escapeHtml(formatCount(step.expanded_total))}</td>
                             <td>${escapeHtml(formatCount(step.final_total))}</td>
+                            ${
+                                showBg
+                                    ? `<td>${escapeHtml(formatBg(step.seed_bg_veto, step.seed_bg_checked))}</td>
+                                       <td>${escapeHtml(formatBg(step.final_bg_veto, step.final_bg_checked))}</td>`
+                                    : ""
+                            }
                         `;
                         tbody.appendChild(row);
                     });
@@ -14358,6 +14569,24 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         return !encoderType || encoderType === "clip";
     }
 
+    function getAgentClipHeadBackgroundInfo() {
+        const entry = getAgentSelectedClipHeadEntry();
+        if (!entry) return { count: 0, known: false };
+        if (Number.isFinite(entry.background_class_count)) {
+            return { count: Math.max(0, Math.floor(entry.background_class_count)), known: true };
+        }
+        if (Array.isArray(entry.classes)) {
+            const count = entry.classes.filter((name) => String(name || "").trim().startsWith("__bg_")).length;
+            return { count, known: true };
+        }
+        return { count: 0, known: false };
+    }
+
+    function hasAgentClipHeadBackgroundClasses() {
+        const info = getAgentClipHeadBackgroundInfo();
+        return !!(info && info.known && info.count > 0);
+    }
+
     function updateAgentClipHeadMeta() {
         if (!agentElements.clipHeadMeta) return;
         const entry = getAgentSelectedClipHeadEntry();
@@ -14377,19 +14606,59 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (encoderType !== "clip") {
             bits.push("CLIP prompt prefilter is unavailable for image-only heads.");
         }
+        const bgInfo = getAgentClipHeadBackgroundInfo();
+        if (bgInfo.known) {
+            bits.push(bgInfo.count > 0 ? `Background classes: ${bgInfo.count}` : "No background classes");
+        }
         agentElements.clipHeadMeta.textContent = bits.join(" ");
     }
 
     function syncAgentClipHeadControls() {
         const hasHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
         const autoTune = !!(agentElements.clipHeadAutoTune && agentElements.clipHeadAutoTune.checked);
+        const tuneMargin = !!(agentElements.clipHeadTuneMargin && agentElements.clipHeadTuneMargin.checked);
         const prefilterAllowed = isAgentPromptPrefilterAllowed();
+        const hasBgClasses = hasAgentClipHeadBackgroundClasses();
 
         if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.disabled = !hasHead;
+        if (agentElements.clipHeadTuneMargin) {
+            const enabled = hasHead && autoTune;
+            agentElements.clipHeadTuneMargin.disabled = !enabled;
+            if (!enabled && !autoTune) agentElements.clipHeadTuneMargin.checked = false;
+        }
         if (agentElements.clipHeadTargetPrecision) agentElements.clipHeadTargetPrecision.disabled = !hasHead || !autoTune;
         if (agentElements.clipHeadAllowLowPrecision) agentElements.clipHeadAllowLowPrecision.disabled = !hasHead || !autoTune;
         if (agentElements.clipHeadMinProb) agentElements.clipHeadMinProb.disabled = !hasHead || autoTune;
-        if (agentElements.clipHeadMargin) agentElements.clipHeadMargin.disabled = !hasHead || autoTune;
+        if (agentElements.clipHeadMargin) {
+            const enabled = hasHead && (!autoTune || !tuneMargin);
+            agentElements.clipHeadMargin.disabled = !enabled;
+        }
+
+        if (agentElements.clipHeadBgGuard) {
+            const enabled = hasHead && hasBgClasses;
+            agentElements.clipHeadBgGuard.disabled = !enabled;
+            if (!enabled) agentElements.clipHeadBgGuard.checked = false;
+            agentElements.clipHeadBgGuard.title = enabled
+                ? ""
+                : "Disabled because the selected head has no __bg_* background classes.";
+        }
+        if (agentElements.clipHeadBgMargin) {
+            const enabled = hasHead && hasBgClasses;
+            agentElements.clipHeadBgMargin.disabled = !enabled;
+        }
+        if (agentElements.clipHeadBgApply) {
+            const enabled = hasHead && hasBgClasses;
+            agentElements.clipHeadBgApply.disabled = !enabled;
+        }
+        if (agentElements.clipHeadBgPenalty) {
+            const enabled = hasHead && hasBgClasses;
+            agentElements.clipHeadBgPenalty.disabled = !enabled;
+        }
+        if (agentElements.clipHeadBgAutoTune) {
+            const enabled = hasHead && hasBgClasses && autoTune;
+            agentElements.clipHeadBgAutoTune.disabled = !enabled;
+            if (!enabled && !autoTune) agentElements.clipHeadBgAutoTune.checked = false;
+        }
 
         if (agentElements.stepsPromptPrefilter) {
             agentElements.stepsPromptPrefilter.disabled = !hasHead || !prefilterAllowed;
@@ -14408,6 +14677,41 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                 agentElements.stepsPromptPrefilter.checked
             );
             agentElements.stepsPromptPrefilterMode.disabled = !enabled;
+        }
+
+        if (agentElements.stepsPromptBgDrop) {
+            const enabled = hasHead && hasBgClasses;
+            agentElements.stepsPromptBgDrop.disabled = !enabled;
+            if (!enabled) agentElements.stepsPromptBgDrop.checked = false;
+            agentElements.stepsPromptBgDrop.title = enabled
+                ? ""
+                : "Disabled because the selected head has no __bg_* background classes.";
+        }
+        if (agentElements.stepsPromptBgDropMode) {
+            const enabled =
+                agentElements.stepsPromptBgDrop &&
+                !agentElements.stepsPromptBgDrop.disabled &&
+                agentElements.stepsPromptBgDrop.checked;
+            agentElements.stepsPromptBgDropMode.disabled = !enabled;
+        }
+
+        if (agentElements.stepsHardNegExport) {
+            agentElements.stepsHardNegExport.disabled = !hasHead;
+            if (!hasHead) agentElements.stepsHardNegExport.checked = false;
+        }
+        if (agentElements.stepsHardNegMaxCrops) {
+            const enabled =
+                agentElements.stepsHardNegExport &&
+                !agentElements.stepsHardNegExport.disabled &&
+                agentElements.stepsHardNegExport.checked;
+            agentElements.stepsHardNegMaxCrops.disabled = !enabled;
+        }
+        if (agentElements.stepsHardNegMinProb) {
+            const enabled =
+                agentElements.stepsHardNegExport &&
+                !agentElements.stepsHardNegExport.disabled &&
+                agentElements.stepsHardNegExport.checked;
+            agentElements.stepsHardNegMinProb.disabled = !enabled;
         }
 
         syncAgentStepsOptimizationControls();
@@ -14606,25 +14910,42 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            agentElements.stepsPromptPrefilter &&
 	            agentElements.stepsPromptPrefilter.checked
 	        );
-	        const prefilterMode =
-	            agentElements.stepsPromptPrefilterMode && agentElements.stepsPromptPrefilterMode.value
-	                ? agentElements.stepsPromptPrefilterMode.value
-	                : "balanced";
-	        const earlyStopFactor = earlyStopEnabled
-	            ? earlyStopMode === "conservative"
-	                ? 0.9
-	                : earlyStopMode === "aggressive"
-	                  ? 0.65
-	                  : 0.8
-	            : 1.0;
-	        const prefilterFactor = prefilterEnabled
-	            ? prefilterMode === "conservative"
-	                ? 0.85
-	                : prefilterMode === "aggressive"
-	                  ? 0.55
-	                  : 0.7
-	            : 1.0;
-	        const speedFactor = earlyStopFactor * prefilterFactor;
+        const prefilterMode =
+            agentElements.stepsPromptPrefilterMode && agentElements.stepsPromptPrefilterMode.value
+                ? agentElements.stepsPromptPrefilterMode.value
+                : "balanced";
+        const bgDropAllowed = hasHead && hasAgentClipHeadBackgroundClasses();
+        const bgDropEnabled = !!(
+            bgDropAllowed &&
+            agentElements.stepsPromptBgDrop &&
+            agentElements.stepsPromptBgDrop.checked
+        );
+        const bgDropMode =
+            agentElements.stepsPromptBgDropMode && agentElements.stepsPromptBgDropMode.value
+                ? agentElements.stepsPromptBgDropMode.value
+                : "balanced";
+        const earlyStopFactor = earlyStopEnabled
+            ? earlyStopMode === "conservative"
+                ? 0.9
+                : earlyStopMode === "aggressive"
+                  ? 0.65
+                  : 0.8
+            : 1.0;
+        const prefilterFactor = prefilterEnabled
+            ? prefilterMode === "conservative"
+                ? 0.85
+                : prefilterMode === "aggressive"
+                  ? 0.55
+                  : 0.7
+            : 1.0;
+        const bgDropFactor = bgDropEnabled
+            ? bgDropMode === "conservative"
+                ? 0.92
+                : bgDropMode === "aggressive"
+                  ? 0.7
+                  : 0.82
+            : 1.0;
+        const speedFactor = earlyStopFactor * prefilterFactor * bgDropFactor;
 
 		        const classIds = parseAgentClassIdList(agentElements.classesInput ? agentElements.classesInput.value : "");
 		        const classCount =
@@ -14706,17 +15027,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 
 			        const lines = [];
         lines.push(`Sample images: ${sampleImages} • steps: ${steps} • candidates/step: ${seeds}`);
-	        if (earlyStopEnabled || prefilterEnabled || !prefilterAllowed) {
-	            const speedBits = [];
-	            if (earlyStopEnabled) speedBits.push(`early-stop ${earlyStopMode}`);
-	            if (prefilterEnabled) {
-	                speedBits.push(`CLIP prefilter ${prefilterMode}`);
-	            } else if (!prefilterAllowed) {
-	                speedBits.push("CLIP prefilter disabled (non-CLIP head)");
-	            }
-	            speedBits.push(`est. ${(speedFactor * 100).toFixed(0)}% base work`);
-	            lines.push(`Speed helpers: ${speedBits.join(" • ")}`);
-	        }
+        if (earlyStopEnabled || prefilterEnabled || !prefilterAllowed || bgDropEnabled || (hasHead && !bgDropAllowed)) {
+            const speedBits = [];
+            if (earlyStopEnabled) speedBits.push(`early-stop ${earlyStopMode}`);
+            if (prefilterEnabled) {
+                speedBits.push(`CLIP prefilter ${prefilterMode}`);
+            } else if (!prefilterAllowed) {
+                speedBits.push("CLIP prefilter disabled (non-CLIP head)");
+            }
+            if (bgDropEnabled) {
+                speedBits.push(`bg drop ${bgDropMode}`);
+            } else if (hasHead && !bgDropAllowed) {
+                speedBits.push("bg drop disabled (no background classes)");
+            }
+            speedBits.push(`est. ${(speedFactor * 100).toFixed(0)}% base work`);
+            lines.push(`Speed helpers: ${speedBits.join(" • ")}`);
+        }
 				        const globalLine = globalRequested
 				            ? globalEnabled
 				                ? globalEstimate.invalidBudgets
@@ -15014,15 +15340,36 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        const clipHeadPathRaw = agentElements.clipHeadSelect?.value || "";
 	        const clipHeadClassifierPath = clipHeadPathRaw ? clipHeadPathRaw : null;
 	        const clipHeadAutoTune = !!(agentElements.clipHeadAutoTune && agentElements.clipHeadAutoTune.checked);
+        const clipHeadTuneMargin = agentElements.clipHeadTuneMargin
+            ? !!agentElements.clipHeadTuneMargin.checked
+            : true;
 	        const clipHeadTargetPrecisionRaw = readNumberInput(agentElements.clipHeadTargetPrecision, { integer: false });
         const clipHeadTargetPrecision = Number.isFinite(clipHeadTargetPrecisionRaw)
             ? Math.max(0, Math.min(1, clipHeadTargetPrecisionRaw))
             : 0.75;
-	        const clipHeadMinProbRaw = readNumberInput(agentElements.clipHeadMinProb, { integer: false });
-	        const clipHeadMinProb = Number.isFinite(clipHeadMinProbRaw) ? Math.max(0, Math.min(1, clipHeadMinProbRaw)) : 0.5;
-	        const clipHeadMarginRaw = readNumberInput(agentElements.clipHeadMargin, { integer: false });
-	        const clipHeadMargin = Number.isFinite(clipHeadMarginRaw) ? Math.max(0, Math.min(1, clipHeadMarginRaw)) : 0.0;
-	        const hasClipHead = !!clipHeadClassifierPath;
+        const clipHeadMinProbRaw = readNumberInput(agentElements.clipHeadMinProb, { integer: false });
+        const clipHeadMinProb = Number.isFinite(clipHeadMinProbRaw) ? Math.max(0, Math.min(1, clipHeadMinProbRaw)) : 0.5;
+        const clipHeadMarginRaw = readNumberInput(agentElements.clipHeadMargin, { integer: false });
+        const clipHeadMargin = Number.isFinite(clipHeadMarginRaw) ? Math.max(0, Math.min(1, clipHeadMarginRaw)) : 0.0;
+        const clipHeadBgGuard = !!(agentElements.clipHeadBgGuard && agentElements.clipHeadBgGuard.checked);
+        const clipHeadBgMarginRaw = readNumberInput(agentElements.clipHeadBgMargin, { integer: false });
+        const clipHeadBgMargin = Number.isFinite(clipHeadBgMarginRaw) ? Math.max(0, Math.min(1, clipHeadBgMarginRaw)) : 0.0;
+        let clipHeadBgApply =
+            agentElements.clipHeadBgApply && agentElements.clipHeadBgApply.value
+                ? String(agentElements.clipHeadBgApply.value)
+                : "final";
+        if (!["seed", "final", "both"].includes(clipHeadBgApply)) {
+            clipHeadBgApply = "final";
+        }
+        const clipHeadBgPenaltyRaw = readNumberInput(agentElements.clipHeadBgPenalty, { integer: false });
+        const clipHeadBgPenalty = Number.isFinite(clipHeadBgPenaltyRaw) ? Math.max(0, clipHeadBgPenaltyRaw) : 0.0;
+        const clipHeadBgAutoTune = !!(
+            clipHeadAutoTune &&
+            hasAgentClipHeadBackgroundClasses() &&
+            agentElements.clipHeadBgAutoTune &&
+            agentElements.clipHeadBgAutoTune.checked
+        );
+        const hasClipHead = !!clipHeadClassifierPath;
 	        if (!hasClipHead) {
 	            setAgentStatus("Select a pretrained CLIP head (required). Train one in the CLIP tab first.", "warn");
 	            return null;
@@ -15057,8 +15404,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            ? Math.max(0, Math.min(100, stepsRefineMaxItersRaw))
 	            : 6;
 	        const stepsRefineTopKRaw = readNumberInput(agentElements.stepsRefineTopK, { integer: true });
-	        const stepsRefineTopK = Number.isFinite(stepsRefineTopKRaw) ? Math.max(1, Math.min(50, stepsRefineTopKRaw)) : 6;
-	        const stepsEnableRefine = !!(stepsRefinePromptSubset && searchMode === "steps" && !stepsOptimizeGlobal);
+        const stepsRefineTopK = Number.isFinite(stepsRefineTopKRaw) ? Math.max(1, Math.min(50, stepsRefineTopKRaw)) : 6;
+        const stepsEnableRefine = !!(stepsRefinePromptSubset && searchMode === "steps" && !stepsOptimizeGlobal);
+
+        const stepsHardNegExport = !!(
+            hasClipHead &&
+            agentElements.stepsHardNegExport &&
+            agentElements.stepsHardNegExport.checked
+        );
+        const stepsHardNegMaxCropsRaw = readNumberInput(agentElements.stepsHardNegMaxCrops, { integer: true });
+        const stepsHardNegMaxCrops = Number.isFinite(stepsHardNegMaxCropsRaw)
+            ? Math.max(0, Math.min(5000, stepsHardNegMaxCropsRaw))
+            : 200;
+        const stepsHardNegMinProbRaw = readNumberInput(agentElements.stepsHardNegMinProb, { integer: false });
+        const stepsHardNegMinProb = Number.isFinite(stepsHardNegMinProbRaw)
+            ? Math.max(0, Math.min(1, stepsHardNegMinProbRaw))
+            : 0.1;
 
 	        const stepsSeedEvalFloorRaw = readNumberInput(agentElements.stepsSeedEvalFloor, { integer: false });
 	        const stepsSeedEvalFloor = Number.isFinite(stepsSeedEvalFloorRaw)
@@ -15086,9 +15447,23 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            agentElements.stepsPromptPrefilterMode && agentElements.stepsPromptPrefilterMode.value
 	                ? agentElements.stepsPromptPrefilterMode.value
 	                : "balanced";
-	        if (!["conservative", "balanced", "aggressive"].includes(stepsPromptPrefilterMode)) {
-	            stepsPromptPrefilterMode = "balanced";
-	        }
+        if (!["conservative", "balanced", "aggressive"].includes(stepsPromptPrefilterMode)) {
+            stepsPromptPrefilterMode = "balanced";
+        }
+
+        const bgDropAllowed = hasAgentClipHeadBackgroundClasses();
+        const stepsPromptBgDrop = !!(
+            bgDropAllowed &&
+            agentElements.stepsPromptBgDrop &&
+            agentElements.stepsPromptBgDrop.checked
+        );
+        let stepsPromptBgDropMode =
+            agentElements.stepsPromptBgDropMode && agentElements.stepsPromptBgDropMode.value
+                ? agentElements.stepsPromptBgDropMode.value
+                : "balanced";
+        if (!["conservative", "balanced", "aggressive"].includes(stepsPromptBgDropMode)) {
+            stepsPromptBgDropMode = "balanced";
+        }
 
 	        const classesRaw = agentElements.classesInput?.value || "";
 		        const classes =
@@ -15135,11 +15510,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 			            steps_optimize_global_enable_ordering: stepsGlobalEnableOrdering,
 			            steps_seed_eval_floor: stepsSeedEvalFloor,
 			            steps_seed_eval_max_results: stepsSeedEvalMaxResults,
-			            steps_early_stop: stepsEarlyStop,
-			            steps_early_stop_mode: stepsEarlyStopMode,
-			            steps_prompt_prefilter: stepsPromptPrefilter,
-			            steps_prompt_prefilter_mode: stepsPromptPrefilterMode,
-			            steps_optimize_tier1: stepsOptimizeTier1,
+                    steps_early_stop: stepsEarlyStop,
+                    steps_early_stop_mode: stepsEarlyStopMode,
+                    steps_prompt_prefilter: stepsPromptPrefilter,
+                    steps_prompt_prefilter_mode: stepsPromptPrefilterMode,
+                    steps_prompt_bg_drop: stepsPromptBgDrop,
+                    steps_prompt_bg_drop_mode: stepsPromptBgDropMode,
+                    steps_optimize_tier1: stepsOptimizeTier1,
 		            steps_optimize_tier1_eval_cap: stepsTier1EvalCap,
 		            steps_optimize_tier1_max_trials: stepsTier1MaxTrials,
 		            steps_optimize_tier2: stepsOptimizeTier2,
@@ -15159,11 +15536,20 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
 	            prompt_max_new_tokens: promptMaxTokens,
 		            extra_prompts_by_class: extraPromptsByClass,
-		            clip_head_classifier_path: clipHeadClassifierPath,
-		            clip_head_min_prob: clipHeadMinProb,
-		            clip_head_margin: clipHeadMargin,
-		            clip_head_auto_tune: clipHeadAutoTune,
-		            clip_head_target_precision: clipHeadTargetPrecision,
+            clip_head_classifier_path: clipHeadClassifierPath,
+            clip_head_min_prob: clipHeadMinProb,
+            clip_head_margin: clipHeadMargin,
+            clip_head_auto_tune: clipHeadAutoTune,
+            clip_head_tune_margin: clipHeadTuneMargin,
+            clip_head_target_precision: clipHeadTargetPrecision,
+            clip_head_background_guard: clipHeadBgGuard,
+            clip_head_background_margin: clipHeadBgMargin,
+            clip_head_background_apply: clipHeadBgApply,
+            clip_head_background_penalty: clipHeadBgPenalty,
+            clip_head_background_auto_tune: clipHeadBgAutoTune,
+            steps_hard_negative_export: stepsHardNegExport,
+            steps_hard_negative_max_crops: stepsHardNegMaxCrops,
+            steps_hard_negative_min_prob: stepsHardNegMinProb,
 
 	            seed_threshold: seedThreshold,
 	            expand_threshold: expandThreshold,
@@ -15403,11 +15789,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        agentElements.stepsBudgetBadge = document.getElementById("agentStepsBudgetBadge");
 	        agentElements.stepsBudgetText = document.getElementById("agentStepsBudgetText");
 	        agentElements.stepsBudgetFill = document.getElementById("agentStepsBudgetFill");
-	        agentElements.stepsEarlyStop = document.getElementById("agentStepsEarlyStop");
-	        agentElements.stepsEarlyStopMode = document.getElementById("agentStepsEarlyStopMode");
-	        agentElements.stepsPromptPrefilter = document.getElementById("agentStepsPromptPrefilter");
-	        agentElements.stepsPromptPrefilterMode = document.getElementById("agentStepsPromptPrefilterMode");
-	        agentElements.stepsGlobalEvalCap1 = document.getElementById("agentStepsGlobalEvalCap1");
+        agentElements.stepsEarlyStop = document.getElementById("agentStepsEarlyStop");
+        agentElements.stepsEarlyStopMode = document.getElementById("agentStepsEarlyStopMode");
+        agentElements.stepsPromptPrefilter = document.getElementById("agentStepsPromptPrefilter");
+        agentElements.stepsPromptPrefilterMode = document.getElementById("agentStepsPromptPrefilterMode");
+        agentElements.stepsPromptBgDrop = document.getElementById("agentStepsPromptBgDrop");
+        agentElements.stepsPromptBgDropMode = document.getElementById("agentStepsPromptBgDropMode");
+        agentElements.stepsGlobalEvalCap1 = document.getElementById("agentStepsGlobalEvalCap1");
 	        agentElements.stepsGlobalEvalCap2 = document.getElementById("agentStepsGlobalEvalCap2");
 	        agentElements.stepsGlobalEvalCap3 = document.getElementById("agentStepsGlobalEvalCap3");
 	        agentElements.stepsGlobalMaxTrials = document.getElementById("agentStepsGlobalMaxTrials");
@@ -15440,12 +15828,21 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.clipHeadSelect = document.getElementById("agentClipHeadSelect");
         agentElements.clipHeadRefresh = document.getElementById("agentClipHeadRefresh");
         agentElements.clipHeadMeta = document.getElementById("agentClipHeadMeta");
-	        agentElements.clipHeadAutoTune = document.getElementById("agentClipHeadAutoTune");
-	        agentElements.clipHeadTargetPrecision = document.getElementById("agentClipHeadTargetPrecision");
+        agentElements.clipHeadAutoTune = document.getElementById("agentClipHeadAutoTune");
+        agentElements.clipHeadTuneMargin = document.getElementById("agentClipHeadTuneMargin");
+        agentElements.clipHeadTargetPrecision = document.getElementById("agentClipHeadTargetPrecision");
         agentElements.clipHeadTargetPrecisionValue = document.getElementById("agentClipHeadTargetPrecisionValue");
         agentElements.clipHeadAllowLowPrecision = document.getElementById("agentClipHeadAllowLowPrecision");
-	        agentElements.clipHeadMinProb = document.getElementById("agentClipHeadMinProb");
-	        agentElements.clipHeadMargin = document.getElementById("agentClipHeadMargin");
+        agentElements.clipHeadMinProb = document.getElementById("agentClipHeadMinProb");
+        agentElements.clipHeadMargin = document.getElementById("agentClipHeadMargin");
+        agentElements.clipHeadBgGuard = document.getElementById("agentClipHeadBgGuard");
+        agentElements.clipHeadBgMargin = document.getElementById("agentClipHeadBgMargin");
+        agentElements.clipHeadBgApply = document.getElementById("agentClipHeadBgApply");
+        agentElements.clipHeadBgPenalty = document.getElementById("agentClipHeadBgPenalty");
+        agentElements.clipHeadBgAutoTune = document.getElementById("agentClipHeadBgAutoTune");
+        agentElements.stepsHardNegExport = document.getElementById("agentStepsHardNegExport");
+        agentElements.stepsHardNegMaxCrops = document.getElementById("agentStepsHardNegMaxCrops");
+        agentElements.stepsHardNegMinProb = document.getElementById("agentStepsHardNegMinProb");
 	        agentElements.classesInput = document.getElementById("agentClasses");
 		        agentElements.extraPrompts = document.getElementById("agentExtraPrompts");
 		        agentElements.extraPromptsStatus = document.getElementById("agentExtraPromptsParseStatus");
@@ -15470,11 +15867,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 	        agentElements.progressText = document.getElementById("agentProgressText");
 	        if (agentElements.logs) agentElements.logs.innerHTML = "";
 	        if (agentElements.progressFill) agentElements.progressFill.style.width = "0%";
-	        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
+        if (agentElements.clipHeadSelect) agentElements.clipHeadSelect.addEventListener("change", syncAgentClipHeadControls);
         if (agentElements.clipHeadRefresh) {
             agentElements.clipHeadRefresh.addEventListener("click", () => loadAgentClipClassifiers().catch((err) => console.warn("Agent CLIP classifier refresh failed", err)));
         }
-	        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
+        if (agentElements.clipHeadAutoTune) agentElements.clipHeadAutoTune.addEventListener("change", syncAgentClipHeadControls);
+        if (agentElements.clipHeadTuneMargin) agentElements.clipHeadTuneMargin.addEventListener("change", syncAgentClipHeadControls);
+        if (agentElements.clipHeadBgAutoTune) agentElements.clipHeadBgAutoTune.addEventListener("change", syncAgentClipHeadControls);
 		        if (agentElements.stepsGlobalPreset) {
 		            agentElements.stepsGlobalPreset.addEventListener("change", () => {
 		                applyAgentStepsGlobalPreset(agentElements.stepsGlobalPreset.value);
@@ -15505,11 +15904,19 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 		        });
 	        if (agentElements.stepsMaxSteps) agentElements.stepsMaxSteps.addEventListener("input", updateBudget);
 	        if (agentElements.stepsMaxSeedsPerStep) agentElements.stepsMaxSeedsPerStep.addEventListener("input", updateBudget);
-	        if (agentElements.stepsEarlyStop) agentElements.stepsEarlyStop.addEventListener("change", updateBudget);
-	        if (agentElements.stepsEarlyStopMode) agentElements.stepsEarlyStopMode.addEventListener("change", updateBudget);
-	        if (agentElements.stepsPromptPrefilter) agentElements.stepsPromptPrefilter.addEventListener("change", updateBudget);
-	        if (agentElements.stepsPromptPrefilterMode) agentElements.stepsPromptPrefilterMode.addEventListener("change", updateBudget);
-	        if (agentElements.evalImageCount) agentElements.evalImageCount.addEventListener("input", updateBudget);
+        if (agentElements.stepsEarlyStop) agentElements.stepsEarlyStop.addEventListener("change", updateBudget);
+        if (agentElements.stepsEarlyStopMode) agentElements.stepsEarlyStopMode.addEventListener("change", updateBudget);
+        if (agentElements.stepsPromptPrefilter) agentElements.stepsPromptPrefilter.addEventListener("change", updateBudget);
+        if (agentElements.stepsPromptPrefilterMode) agentElements.stepsPromptPrefilterMode.addEventListener("change", updateBudget);
+        if (agentElements.stepsPromptBgDrop) {
+            agentElements.stepsPromptBgDrop.addEventListener("change", () => {
+                syncAgentClipHeadControls();
+                updateBudget();
+            });
+        }
+        if (agentElements.stepsPromptBgDropMode) agentElements.stepsPromptBgDropMode.addEventListener("change", updateBudget);
+        if (agentElements.stepsHardNegExport) agentElements.stepsHardNegExport.addEventListener("change", syncAgentClipHeadControls);
+        if (agentElements.evalImageCount) agentElements.evalImageCount.addEventListener("input", updateBudget);
 		        if (agentElements.classesInput) agentElements.classesInput.addEventListener("input", updateBudget);
 		        if (agentElements.stepsTier1Optimize) agentElements.stepsTier1Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
 		        if (agentElements.stepsTier2Optimize) agentElements.stepsTier2Optimize.addEventListener("change", syncAgentStepsOptimizationControls);
@@ -18817,6 +19224,12 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
                     updateMultiPointState(false);
                 }
                 event.preventDefault();
+            }
+            // '1' => SAM3 similarity (requires SAM3 predictor loaded for current image)
+            if (!event.repeat && (key === 49 || event.key === "1") && !modeSnapshot) {
+                triggerSam3SimilarityHotkey();
+                event.preventDefault();
+                return;
             }
             // 'f' => add positive point
             if (!event.repeat && key === 70 && multiPointMode && !modeSnapshot) {

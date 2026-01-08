@@ -1375,6 +1375,8 @@
         progressFill: null,
         statusText: null,
         message: null,
+        metricCanvas: null,
+        chartStatus: null,
         log: null,
         history: null,
     };
@@ -7413,6 +7415,141 @@ function drawQwenLossChart(points) {
     ctx.restore();
 }
 
+function pickYoloMetricKey(metrics) {
+    const options = [
+        { key: "metrics/mAP50-95(B)", label: "mAP50-95 (box)" },
+        { key: "metrics/mAP50-95(M)", label: "mAP50-95 (mask)" },
+        { key: "metrics/mAP50(B)", label: "mAP50 (box)" },
+        { key: "metrics/mAP50(M)", label: "mAP50 (mask)" },
+        { key: "metrics/precision(B)", label: "Precision (box)" },
+        { key: "metrics/precision(M)", label: "Precision (mask)" },
+        { key: "metrics/recall(B)", label: "Recall (box)" },
+        { key: "metrics/recall(M)", label: "Recall (mask)" },
+    ];
+    for (const option of options) {
+        if (metrics.some((entry) => Number.isFinite(entry?.[option.key]))) {
+            return option;
+        }
+    }
+    return { key: null, label: "Metric" };
+}
+
+function drawYoloMetricChart(points, label) {
+    const canvas = yoloTrainElements.metricCanvas;
+    if (!canvas) {
+        return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+        return;
+    }
+    const width = Math.max(canvas.clientWidth || 400, 320);
+    const height = Math.max(canvas.clientHeight || 200, 160);
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+    }
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+    if (!points.length) {
+        ctx.restore();
+        return;
+    }
+    const values = points.map((point) => point.y).filter((val) => Number.isFinite(val));
+    const minY = values.length ? Math.min(...values) : 0;
+    const maxY = values.length ? Math.max(...values) : 1;
+    const bounded = minY >= 0 && maxY <= 1.0;
+    const axisMinY = bounded ? 0 : minY;
+    const axisMaxY = bounded ? 1 : maxY;
+    const topPadding = 14;
+    const bottomPadding = 14;
+    const rightPadding = 14;
+    const leftPadding = 44;
+    const chartWidth = Math.max(1, width - leftPadding - rightPadding);
+    const chartHeight = Math.max(1, height - topPadding - bottomPadding);
+    const minX = points[0].x;
+    const maxX = points[points.length - 1].x;
+    const xRange = maxX - minX || 1;
+    const yRange = axisMaxY - axisMinY || 1;
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 1;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "12px sans-serif";
+    const ticks = 5;
+    for (let i = 0; i <= ticks; i += 1) {
+        const tick = axisMinY + (i / ticks) * yRange;
+        const norm = (tick - axisMinY) / yRange;
+        const y = topPadding + (1 - norm) * chartHeight;
+        ctx.beginPath();
+        ctx.moveTo(leftPadding, y);
+        ctx.lineTo(width - rightPadding, y);
+        ctx.stroke();
+        ctx.fillText(tick.toFixed(2), leftPadding - 6, y);
+    }
+    ctx.strokeStyle = "#94a3b8";
+    ctx.beginPath();
+    ctx.moveTo(leftPadding, topPadding);
+    ctx.lineTo(leftPadding, topPadding + chartHeight);
+    ctx.stroke();
+    ctx.strokeStyle = "#16a34a";
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    points.forEach((point, index) => {
+        const normX = (point.x - minX) / xRange;
+        const normY = (point.y - axisMinY) / yRange;
+        const xPos = leftPadding + normX * chartWidth;
+        const yPos = topPadding + (1 - normY) * chartHeight;
+        if (index === 0) {
+            ctx.moveTo(xPos, yPos);
+        } else {
+            ctx.lineTo(xPos, yPos);
+        }
+    });
+    ctx.stroke();
+    ctx.restore();
+}
+
+function updateYoloMetricChart(metrics) {
+    if (!yoloTrainElements.metricCanvas || !yoloTrainElements.chartStatus) {
+        return;
+    }
+    if (!Array.isArray(metrics) || !metrics.length) {
+        yoloTrainElements.chartStatus.textContent = "Metrics appear after training completes.";
+        const ctx = yoloTrainElements.metricCanvas.getContext("2d");
+        if (ctx) {
+            ctx.clearRect(0, 0, yoloTrainElements.metricCanvas.width, yoloTrainElements.metricCanvas.height);
+        }
+        return;
+    }
+    const choice = pickYoloMetricKey(metrics);
+    if (!choice.key) {
+        yoloTrainElements.chartStatus.textContent = "No mAP/precision metrics found.";
+        return;
+    }
+    const series = metrics
+        .map((entry, idx) => {
+            const y = entry[choice.key];
+            if (!Number.isFinite(y)) {
+                return null;
+            }
+            const x = Number.isFinite(entry.epoch) ? entry.epoch : idx + 1;
+            return { x, y };
+        })
+        .filter(Boolean);
+    if (!series.length) {
+        yoloTrainElements.chartStatus.textContent = "No numeric metrics available yet.";
+        return;
+    }
+    drawYoloMetricChart(series, choice.label);
+    yoloTrainElements.chartStatus.textContent = `${choice.label} over ${series.length} epoch${series.length === 1 ? "" : "s"}.`;
+}
+
 function resetQwenLossCanvas() {
     const canvas = qwenTrainElements.lossCanvas;
     if (!canvas) {
@@ -7732,6 +7869,7 @@ function initQwenTrainingTab() {
             const cancellable = job.status === "running" || job.status === "queued";
             yoloTrainElements.cancelButton.disabled = !cancellable;
         }
+        updateYoloMetricChart(job.metrics);
     }
 
     async function handleStartYoloTraining() {
@@ -7837,6 +7975,8 @@ function initQwenTrainingTab() {
         yoloTrainElements.progressFill = document.getElementById("yoloTrainProgressFill");
         yoloTrainElements.statusText = document.getElementById("yoloTrainStatusText");
         yoloTrainElements.message = document.getElementById("yoloTrainMessage");
+        yoloTrainElements.metricCanvas = document.getElementById("yoloTrainMetricCanvas");
+        yoloTrainElements.chartStatus = document.getElementById("yoloTrainChartStatus");
         yoloTrainElements.log = document.getElementById("yoloTrainLog");
         yoloTrainElements.history = document.getElementById("yoloTrainHistory");
         if (yoloTrainElements.startButton) {

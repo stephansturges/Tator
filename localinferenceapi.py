@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip
+import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv
 from array import array
 from copy import deepcopy
 from pathlib import Path
@@ -3475,6 +3475,7 @@ YOLO_KEEP_FILES = {
     "results.csv",
     "args.yaml",
     "metrics.json",
+    "metrics_series.json",
     "labelmap.txt",
     YOLO_RUN_META_NAME,
 }
@@ -4724,6 +4725,43 @@ def _yolo_build_aug_args(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if key in payload:
             aug_args[dest] = payload[key]
     return {k: v for k, v in aug_args.items() if v is not None}
+
+
+def _yolo_parse_results_csv(results_path: Path) -> List[Dict[str, Any]]:
+    if not results_path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    try:
+        with results_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for idx, raw in enumerate(reader):
+                if not raw:
+                    continue
+                parsed: Dict[str, Any] = {}
+                for key, value in raw.items():
+                    if key is None or value is None:
+                        continue
+                    name = str(key).strip()
+                    if not name:
+                        continue
+                    text = str(value).strip()
+                    if text == "":
+                        continue
+                    try:
+                        num = float(text)
+                    except ValueError:
+                        continue
+                    if name == "epoch":
+                        parsed["epoch"] = int(num) if float(num).is_integer() else num
+                    else:
+                        parsed[name] = num
+                if "epoch" not in parsed:
+                    parsed["epoch"] = idx + 1
+                if parsed:
+                    rows.append(parsed)
+    except Exception:  # noqa: BLE001
+        return []
+    return rows
 
 
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
@@ -22632,6 +22670,16 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 shutil.copy2(results_csv, run_dir / "results.csv")
             if args_yaml.exists():
                 shutil.copy2(args_yaml, run_dir / "args.yaml")
+            metrics_series: List[Dict[str, Any]] = []
+            series_path = run_dir / "metrics_series.json"
+            if (run_dir / "results.csv").exists():
+                metrics_series = _yolo_parse_results_csv(run_dir / "results.csv")
+                if metrics_series:
+                    try:
+                        series_path.write_text(json.dumps(metrics_series, indent=2, sort_keys=True))
+                        job.metrics = metrics_series
+                    except Exception:
+                        pass
             metrics_payload = {}
             try:
                 metrics_payload = results.metrics if results else {}
@@ -22644,6 +22692,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 "run_dir": str(run_dir),
                 "best_path": str(run_dir / "best.pt") if (run_dir / "best.pt").exists() else None,
                 "metrics_path": str(run_dir / "metrics.json") if (run_dir / "metrics.json").exists() else None,
+                "metrics_series_path": str(series_path) if series_path.exists() else None,
             }
             _yolo_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
         except Exception as exc:  # noqa: BLE001

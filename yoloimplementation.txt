@@ -52,7 +52,7 @@ Status key: [ ] pending  [x] done
 9) Progress + graph
    - Persist progress snapshots (epoch, loss, mAP)
    - UI status + small graph/sparkline
-   Status: [ ]
+   Status: [x]
 
 10) Model management + README
    - List/download/delete best.pt + metrics

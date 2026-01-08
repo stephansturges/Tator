@@ -115,6 +115,7 @@ Tator/
 ## Prerequisites
 - Python 3.10 or newer (3.11+ recommended).
 - Optional GPU with CUDA for faster CLIP/SAM inference.
+- Ultralytics YOLOv8 (AGPL‑3.0) for the Train YOLO tab. Review the license terms before use: https://github.com/ultralytics/ultralytics/blob/main/LICENSE and https://www.ultralytics.com/license
 - Model weights: `sam_vit_h_4b8939.pth` (SAM1). Optional SAM3 checkpoints/configs are supported; see `sam3integration.txt` for sample commands and Hugging Face IDs.
 
 ## Quick Start
@@ -127,7 +128,7 @@ Tator/
    ```bash
    pip install -r requirements.txt
    ```
-   Torch wheels are hardware-specific; replace `torch`/`torchvision` with the build matching your CUDA/cuDNN stack if needed.
+   Torch wheels are hardware-specific; replace `torch`/`torchvision` with the build matching your CUDA/cuDNN stack if needed. This installs Ultralytics YOLOv8 for the Train YOLO tab; review the license terms linked above before using it.
 3. **Install dev tooling (optional)**
    ```bash
    pip install -r requirements-dev.txt
@@ -208,6 +209,7 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
    - Training mode (from scratch or fine-tune),
    - Augmentations as needed.
 3. **Accept Ultralytics terms** (required to start training).
+   - YOLOv8 is provided by Ultralytics under AGPL‑3.0; review the license: https://github.com/ultralytics/ultralytics/blob/main/LICENSE and https://www.ultralytics.com/license
 4. **Start training** and monitor progress + metrics in the right panel.
 5. **Download or delete runs** from the “Saved YOLO Runs” section. We keep only `best.pt` + metrics (`results.csv`, `metrics.json`) to avoid bloating disk.
 

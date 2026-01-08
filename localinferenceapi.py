@@ -3495,6 +3495,7 @@ SAM3_BPE_PATH = SAM3_VENDOR_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
 SAM3_MAX_LOG_LINES = 500
 SAM3_MAX_METRIC_POINTS = 2000
 SAM3_STORAGE_SCOPES = {"all", "checkpoints", "logs", "tensorboard", "dumps"}
+YOLO_MAX_LOG_LINES = 300
 
 
 @dataclass
@@ -3925,6 +3926,18 @@ def _yolo_job_update(
     if result is not None:
         job.result = result
     job.updated_at = time.time()
+
+
+def _yolo_job_log(job: YoloTrainingJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > YOLO_MAX_LOG_LINES:
+        job.logs[:] = job.logs[-YOLO_MAX_LOG_LINES:]
+    job.updated_at = time.time()
+    try:
+        logger.info("[yolo-train %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
 
 
 def _seg_job_log(job: SegmentationBuildJob, message: str) -> None:
@@ -4595,6 +4608,78 @@ def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
         "cache_key": cache_key,
         "source": source,
     }
+
+
+def _yolo_resolve_split_paths(dataset_root: Path, layout: Optional[str]) -> Tuple[str, str]:
+    if layout == "split":
+        train_images = dataset_root / "train" / "images"
+        val_images = dataset_root / "val" / "images"
+        train_rel = str(train_images.relative_to(dataset_root))
+        if val_images.exists():
+            val_rel = str(val_images.relative_to(dataset_root))
+        else:
+            val_rel = train_rel
+        return train_rel, val_rel
+    images = dataset_root / "images"
+    train_rel = str(images.relative_to(dataset_root))
+    val_images = dataset_root / "val" / "images"
+    if val_images.exists():
+        val_rel = str(val_images.relative_to(dataset_root))
+    else:
+        val_rel = train_rel
+    return train_rel, val_rel
+
+
+def _yolo_load_labelmap(labelmap_path: Path) -> List[str]:
+    try:
+        return [line.strip() for line in labelmap_path.read_text().splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def _yolo_write_data_yaml(run_dir: Path, dataset_root: Path, layout: Optional[str], labelmap_path: Optional[str]) -> Path:
+    train_rel, val_rel = _yolo_resolve_split_paths(dataset_root, layout)
+    names = []
+    if labelmap_path:
+        names = _yolo_load_labelmap(Path(labelmap_path))
+    data = {
+        "path": str(dataset_root),
+        "train": train_rel,
+        "val": val_rel,
+        "names": names,
+    }
+    data_path = run_dir / "data.yaml"
+    data_path.write_text(yaml.safe_dump(data, sort_keys=False))
+    if labelmap_path:
+        try:
+            shutil.copy2(labelmap_path, run_dir / "labelmap.txt")
+        except Exception:
+            pass
+    return data_path
+
+
+def _yolo_device_arg(devices: Optional[List[int]]) -> Optional[str]:
+    if not devices:
+        return None
+    cleaned = [str(int(d)) for d in devices if isinstance(d, (int, str)) and str(d).strip().isdigit()]
+    return ",".join(cleaned) if cleaned else None
+
+
+def _yolo_resolve_model_source(
+    variant: Optional[str],
+    task: str,
+    from_scratch: bool,
+    base_weights: Optional[str],
+) -> Tuple[str, str]:
+    model_id = (variant or "yolov8n").strip()
+    if base_weights:
+        return "custom", base_weights
+    if from_scratch:
+        suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
+        return "cfg", f"{model_id}{suffix}.yaml"
+    if task == "segment" and "seg" not in model_id:
+        model_id = f"{model_id}-seg"
+    return "weights", f"{model_id}.pt"
 
 
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
@@ -22444,6 +22529,90 @@ def _start_sam3_training_worker(
     thread.start()
 
 
+def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
+    def worker() -> None:
+        run_dir = _yolo_run_dir(job.job_id, create=True)
+        config = dict(job.config or {})
+        dataset_info = config.get("dataset") or {}
+        task = str(dataset_info.get("task") or config.get("task") or "detect").lower()
+        if job.cancel_event.is_set():
+            _yolo_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        if not dataset_info.get("yolo_ready"):
+            _yolo_job_update(job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        try:
+            from ultralytics import YOLO  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            _yolo_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        _yolo_job_update(job, status="running", message="Starting YOLOv8 training", progress=0.0)
+        _yolo_job_log(job, "Preparing dataset + data.yaml")
+        dataset_root = Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or "")
+        data_yaml = _yolo_write_data_yaml(run_dir, dataset_root, dataset_info.get("yolo_layout"), dataset_info.get("yolo_labelmap_path"))
+        from_scratch = bool(config.get("from_scratch"))
+        base_weights = config.get("base_weights")
+        variant = config.get("variant")
+        _, model_source = _yolo_resolve_model_source(variant, task, from_scratch, base_weights)
+        _yolo_job_log(job, f"Model source: {model_source}")
+        device_arg = _yolo_device_arg(config.get("devices"))
+        train_kwargs = {
+            "data": str(data_yaml),
+            "task": task,
+            "epochs": config.get("epochs"),
+            "imgsz": config.get("img_size"),
+            "batch": config.get("batch"),
+            "workers": config.get("workers"),
+            "seed": config.get("seed"),
+            "device": device_arg,
+            "project": str(run_dir),
+            "name": "train",
+            "exist_ok": True,
+        }
+        train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
+        try:
+            model = YOLO(model_source)
+            _yolo_job_log(job, "Training started")
+            results = model.train(**train_kwargs)
+            train_dir = run_dir / "train"
+            best_path = train_dir / "weights" / "best.pt"
+            if best_path.exists():
+                shutil.copy2(best_path, run_dir / "best.pt")
+            results_csv = train_dir / "results.csv"
+            args_yaml = train_dir / "args.yaml"
+            if results_csv.exists():
+                shutil.copy2(results_csv, run_dir / "results.csv")
+            if args_yaml.exists():
+                shutil.copy2(args_yaml, run_dir / "args.yaml")
+            metrics_payload = {}
+            try:
+                metrics_payload = results.metrics if results else {}
+            except Exception:
+                metrics_payload = {}
+            if metrics_payload:
+                (run_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2, sort_keys=True))
+            _yolo_prune_run_dir(run_dir)
+            result_payload = {
+                "run_dir": str(run_dir),
+                "best_path": str(run_dir / "best.pt") if (run_dir / "best.pt").exists() else None,
+                "metrics_path": str(run_dir / "metrics.json") if (run_dir / "metrics.json").exists() else None,
+            }
+            _yolo_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
+        except Exception as exc:  # noqa: BLE001
+            _yolo_job_update(job, status="failed", message="Training failed", error=str(exc))
+        finally:
+            _yolo_write_run_meta(
+                run_dir,
+                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config, "result": job.result},
+            )
+
+    thread = threading.Thread(target=worker, name=f"yolo-train-{job.job_id}", daemon=True)
+    thread.start()
+
+
 def _get_sam3_job(job_id: str) -> Sam3TrainingJob:
     with SAM3_TRAINING_JOBS_LOCK:
         job = SAM3_TRAINING_JOBS.get(job_id)
@@ -24132,6 +24301,7 @@ def create_yolo_training_job(payload: YoloTrainRequest):
     job = YoloTrainingJob(job_id=job_id, config=config, message=message, status=status)
     with YOLO_TRAINING_JOBS_LOCK:
         YOLO_TRAINING_JOBS[job_id] = job
+        _yolo_job_log(job, job.message)
     _yolo_write_run_meta(
         run_dir,
         {
@@ -24141,6 +24311,8 @@ def create_yolo_training_job(payload: YoloTrainRequest):
             "config": job.config,
         },
     )
+    if job.status != "blocked":
+        _start_yolo_training_worker(job)
     return {"job_id": job_id}
 
 

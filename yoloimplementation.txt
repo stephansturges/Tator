@@ -23,7 +23,7 @@ Status key: [ ] pending  [x] done
    - Ultralytics YOLO().train for detect/segment
    - from-scratch vs fine-tune support
    - Save only best.pt + metrics/artifacts + labelmap
-   Status: [ ]
+   Status: [x]
 
 5) Variant catalog (YOLOv8 only)
    - Supported variants: yolov8n/s/m/l/x (+ p2 variants if present)

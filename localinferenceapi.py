@@ -3439,6 +3439,19 @@ SAM3_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_ROOT = SAM3_JOB_ROOT / "datasets"
 SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
+YOLO_JOB_ROOT = Path(os.environ.get("YOLO_TRAINING_ROOT", "./uploads/yolo_runs"))
+YOLO_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+YOLO_MODEL_ROOT = Path(os.environ.get("YOLO_MODEL_ROOT", "./uploads/yolo_models"))
+YOLO_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+YOLO_RUN_META_NAME = "run.json"
+YOLO_KEEP_FILES = {
+    "best.pt",
+    "results.csv",
+    "args.yaml",
+    "metrics.json",
+    "labelmap.txt",
+    YOLO_RUN_META_NAME,
+}
 DATASET_REGISTRY_ROOT = Path(os.environ.get("DATASET_ROOT", "./uploads/datasets"))
 DATASET_REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_META_NAME = "dataset.json"
@@ -4335,6 +4348,75 @@ def _delete_run_scope(run_dir: Path, scope: str) -> Tuple[List[str], int]:
             continue
         deleted.append(str(target))
     return deleted, freed
+
+
+def _sanitize_yolo_run_id(raw: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", (raw or "").strip()).strip("-_.")
+    if cleaned:
+        return cleaned
+    return uuid.uuid4().hex[:12]
+
+
+def _yolo_run_dir(run_id: str, *, create: bool = False) -> Path:
+    safe_id = _sanitize_yolo_run_id(run_id)
+    candidate = (YOLO_JOB_ROOT / safe_id).resolve()
+    if not str(candidate).startswith(str(YOLO_JOB_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_run_id")
+    if create:
+        candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+def _yolo_load_run_meta(run_dir: Path) -> Dict[str, Any]:
+    meta_path = run_dir / YOLO_RUN_META_NAME
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
+def _yolo_write_run_meta(run_dir: Path, meta: Dict[str, Any]) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = dict(meta or {})
+    now = time.time()
+    payload.setdefault("created_at", now)
+    payload["updated_at"] = now
+    (run_dir / YOLO_RUN_META_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _yolo_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) -> Dict[str, Any]:
+    kept: List[str] = []
+    deleted: List[str] = []
+    freed = 0
+    if not run_dir.exists():
+        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    keep = set(keep_files or YOLO_KEEP_FILES)
+    weights_dir = run_dir / "weights"
+    if weights_dir.exists():
+        best_path = weights_dir / "best.pt"
+        target_best = run_dir / "best.pt"
+        if best_path.exists() and not target_best.exists():
+            try:
+                shutil.copy2(best_path, target_best)
+            except Exception:
+                pass
+    for child in list(run_dir.iterdir()):
+        if child.name in keep:
+            kept.append(child.name)
+            continue
+        try:
+            if child.is_dir():
+                freed += _dir_size_bytes(child)
+                shutil.rmtree(child)
+            else:
+                freed += child.stat().st_size
+                child.unlink()
+            deleted.append(child.name)
+        except Exception:
+            continue
+    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
 
 
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:

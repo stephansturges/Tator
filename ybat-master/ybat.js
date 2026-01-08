@@ -266,6 +266,7 @@
     const TAB_TRAINING = "training";
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
+    const TAB_YOLO_TRAIN = "yolo-train";
     const TAB_AGENT_MINING = "agent-mining";
     const TAB_PROMPT_HELPER = "prompt-helper";
     const TAB_DATASETS = "datasets";
@@ -1073,6 +1074,7 @@
         trainingButton: null,
         qwenTrainButton: null,
         sam3TrainButton: null,
+        yoloTrainButton: null,
         agentMiningButton: null,
         promptHelperButton: null,
         sam3PromptModelsButton: null,
@@ -1085,6 +1087,7 @@
         trainingPanel: null,
         qwenTrainPanel: null,
         sam3TrainPanel: null,
+        yoloTrainPanel: null,
         agentMiningPanel: null,
         promptHelperPanel: null,
         sam3PromptModelsPanel: null,
@@ -1339,6 +1342,43 @@
         cachePurge: null,
     };
 
+    const yoloTrainElements = {
+        datasetSelect: null,
+        datasetRefresh: null,
+        datasetSummary: null,
+        runNameInput: null,
+        taskSelect: null,
+        variantSelect: null,
+        fromScratchToggle: null,
+        baseWeightsInput: null,
+        epochsInput: null,
+        imgSizeInput: null,
+        batchInput: null,
+        workersInput: null,
+        devicesInput: null,
+        seedInput: null,
+        augFlipLR: null,
+        augFlipUD: null,
+        augHsvH: null,
+        augHsvS: null,
+        augHsvV: null,
+        augMosaic: null,
+        augMixup: null,
+        augCopyPaste: null,
+        augScale: null,
+        augTranslate: null,
+        augDegrees: null,
+        acceptTos: null,
+        startButton: null,
+        cancelButton: null,
+        refreshButton: null,
+        progressFill: null,
+        statusText: null,
+        message: null,
+        log: null,
+        history: null,
+    };
+
     const activeElements = {
         message: null,
         info: null,
@@ -1395,7 +1435,19 @@ const qwenTrainState = {
     lastJobSnapshot: null,
 };
 
+    const yoloTrainState = {
+        activeJobId: null,
+        pollHandle: null,
+        lastJobSnapshot: null,
+        variants: [],
+    };
+
     const qwenDatasetState = {
+        items: [],
+        selectedId: null,
+    };
+
+    const yoloDatasetState = {
         items: [],
         selectedId: null,
     };
@@ -2377,6 +2429,210 @@ const sam3TrainState = {
 	            return [];
 	        }
 	    }
+
+    function getSelectedYoloDataset() {
+        const id = yoloDatasetState.selectedId;
+        if (!id) {
+            return null;
+        }
+        return yoloDatasetState.items.find((entry) => entry.id === id) || null;
+    }
+
+    function updateYoloDatasetSummary() {
+        const summaryEl = yoloTrainElements.datasetSummary;
+        if (!summaryEl) {
+            return;
+        }
+        const entry = getSelectedYoloDataset();
+        if (entry) {
+            const formatLabel = entry.format ? `format: ${entry.format}` : "format: unknown";
+            const yoloStatus = entry.yolo_ready ? "YOLO ready" : "needs YOLO conversion";
+            summaryEl.textContent = `Dataset "${entry.label || entry.id}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}) • ${formatLabel} • ${yoloStatus}`;
+            return;
+        }
+        summaryEl.textContent = "No dataset selected. Create and manage datasets in the Dataset Management tab, then refresh.";
+    }
+
+    function populateYoloDatasetSelect() {
+        const select = yoloTrainElements.datasetSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!yoloDatasetState.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No datasets available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            yoloDatasetState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.id;
+                const status = entry.yolo_ready ? "YOLO ready" : "needs YOLO";
+                option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images, ${status})`;
+                select.appendChild(option);
+            });
+            if (!yoloDatasetState.selectedId || !yoloDatasetState.items.some((entry) => entry.id === yoloDatasetState.selectedId)) {
+                yoloDatasetState.selectedId = yoloDatasetState.items[0].id;
+            }
+            select.disabled = false;
+            select.value = yoloDatasetState.selectedId;
+        }
+        updateYoloDatasetSummary();
+    }
+
+    async function loadYoloDatasetList(force = false) {
+        if (!force && yoloDatasetState.items.length) {
+            populateYoloDatasetSelect();
+            return yoloDatasetState.items;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            yoloDatasetState.items = Array.isArray(data) ? data : [];
+            populateYoloDatasetSelect();
+            return yoloDatasetState.items;
+        } catch (error) {
+            if (yoloTrainElements.datasetSummary) {
+                yoloTrainElements.datasetSummary.textContent = `Unable to load datasets: ${error.message || error}`;
+            }
+            return [];
+        }
+    }
+
+    function setYoloTrainMessage(text, variant = null) {
+        if (!yoloTrainElements.message) {
+            return;
+        }
+        yoloTrainElements.message.textContent = text || "";
+        yoloTrainElements.message.classList.remove("error", "warn", "success");
+        if (variant) {
+            yoloTrainElements.message.classList.add(variant);
+        }
+    }
+
+    function parseYoloNumber(value, { integer = false } = {}) {
+        if (value === null || value === undefined || value === "") {
+            return null;
+        }
+        const parsed = integer ? parseInt(value, 10) : parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function parseYoloDevices(raw) {
+        if (!raw) {
+            return null;
+        }
+        const tokens = String(raw)
+            .split(/[,\\s]+/)
+            .map((part) => part.trim())
+            .filter(Boolean);
+        const devices = tokens
+            .map((token) => parseInt(token, 10))
+            .filter((val) => Number.isFinite(val));
+        return devices.length ? devices : null;
+    }
+
+    function buildYoloAugmentations() {
+        const mapping = {
+            flip_lr: yoloTrainElements.augFlipLR,
+            flip_ud: yoloTrainElements.augFlipUD,
+            hsv_h: yoloTrainElements.augHsvH,
+            hsv_s: yoloTrainElements.augHsvS,
+            hsv_v: yoloTrainElements.augHsvV,
+            mosaic: yoloTrainElements.augMosaic,
+            mixup: yoloTrainElements.augMixup,
+            copy_paste: yoloTrainElements.augCopyPaste,
+            scale: yoloTrainElements.augScale,
+            translate: yoloTrainElements.augTranslate,
+            degrees: yoloTrainElements.augDegrees,
+        };
+        const payload = {};
+        Object.entries(mapping).forEach(([key, input]) => {
+            if (!input) {
+                return;
+            }
+            const value = parseYoloNumber(input.value);
+            if (value === null) {
+                return;
+            }
+            payload[key] = value;
+        });
+        return Object.keys(payload).length ? payload : null;
+    }
+
+    function populateYoloVariantSelect(list) {
+        const select = yoloTrainElements.variantSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!Array.isArray(list) || !list.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No variants available";
+            select.appendChild(option);
+            select.disabled = true;
+            yoloTrainState.variants = [];
+            return;
+        }
+        list.forEach((entry) => {
+            const option = document.createElement("option");
+            option.value = entry.id || "";
+            option.textContent = entry.label || entry.id || "YOLO variant";
+            select.appendChild(option);
+        });
+        yoloTrainState.variants = list;
+        select.disabled = false;
+        if (!select.value || !list.some((item) => item.id === select.value)) {
+            select.value = list[0].id || "";
+        }
+    }
+
+    async function loadYoloVariants() {
+        const task = yoloTrainElements.taskSelect?.value || "detect";
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/variants?task=${encodeURIComponent(task)}`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            populateYoloVariantSelect(Array.isArray(data) ? data : []);
+        } catch (error) {
+            console.error("Failed to load YOLO variants", error);
+            populateYoloVariantSelect([]);
+        }
+    }
+
+    function buildYoloTrainingPayload() {
+        const datasetId = yoloDatasetState.selectedId;
+        if (!datasetId) {
+            return { error: "Select a dataset first." };
+        }
+        const fromScratch = !!yoloTrainElements.fromScratchToggle?.checked;
+        const baseWeightsRaw = yoloTrainElements.baseWeightsInput?.value?.trim() || "";
+        const payload = {
+            dataset_id: datasetId,
+            run_name: yoloTrainElements.runNameInput?.value?.trim() || null,
+            task: yoloTrainElements.taskSelect?.value || "detect",
+            variant: yoloTrainElements.variantSelect?.value || null,
+            from_scratch: fromScratch,
+            base_weights: fromScratch ? null : baseWeightsRaw || null,
+            epochs: parseYoloNumber(yoloTrainElements.epochsInput?.value, { integer: true }),
+            img_size: parseYoloNumber(yoloTrainElements.imgSizeInput?.value, { integer: true }),
+            batch: parseYoloNumber(yoloTrainElements.batchInput?.value, { integer: true }),
+            workers: parseYoloNumber(yoloTrainElements.workersInput?.value, { integer: true }),
+            devices: parseYoloDevices(yoloTrainElements.devicesInput?.value),
+            seed: parseYoloNumber(yoloTrainElements.seedInput?.value, { integer: true }),
+            augmentations: buildYoloAugmentations(),
+            accept_tos: !!yoloTrainElements.acceptTos?.checked,
+        };
+        return payload;
+    }
 
     async function handleQwenDatasetDelete() {
         const entry = getSelectedQwenDataset();
@@ -7267,7 +7523,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     }
 }
 
-	    function initQwenTrainingTab() {
+function initQwenTrainingTab() {
 	        if (qwenTrainElements.runNameInput) {
 	            return;
 	        }
@@ -7365,6 +7621,272 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         loadQwenDatasetList().catch((error) => console.error("Failed to load cached datasets", error));
         setQwenDatasetModeState();
+    }
+
+    function renderYoloTrainingHistoryItem(container, job) {
+        if (!container) {
+            return;
+        }
+        const item = document.createElement("div");
+        item.className = "training-history-item";
+        const label = job?.config?.run_name || job?.config?.dataset?.label || job.job_id;
+        const status = job.status || "unknown";
+        const created = job.created_at ? new Date(job.created_at * 1000).toLocaleString() : "";
+        const left = document.createElement("div");
+        left.innerHTML = `<strong>${escapeHtml(label)}</strong><div class="training-help">${escapeHtml(status)} • ${escapeHtml(created)}</div>`;
+        const right = document.createElement("div");
+        const viewBtn = document.createElement("button");
+        viewBtn.type = "button";
+        viewBtn.className = "training-button";
+        viewBtn.textContent = "View";
+        viewBtn.addEventListener("click", () => {
+            yoloTrainState.activeJobId = job.job_id;
+            pollYoloTrainingJob(job.job_id, { force: true }).catch((error) => console.error("Poll YOLO job failed", error));
+        });
+        right.appendChild(viewBtn);
+        item.append(left, right);
+        container.appendChild(item);
+    }
+
+    async function refreshYoloTrainingHistory() {
+        if (!yoloTrainElements.history) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/train/jobs`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const jobs = await resp.json();
+            yoloTrainElements.history.innerHTML = "";
+            if (!Array.isArray(jobs) || !jobs.length) {
+                const empty = document.createElement("div");
+                empty.className = "training-history-item";
+                empty.textContent = "No YOLO jobs yet.";
+                yoloTrainElements.history.appendChild(empty);
+                return;
+            }
+            jobs.forEach((job) => renderYoloTrainingHistoryItem(yoloTrainElements.history, job));
+        } catch (error) {
+            console.error("Failed to load YOLO job history", error);
+            yoloTrainElements.history.textContent = `Unable to load history: ${error.message || error}`;
+        }
+    }
+
+    function scheduleYoloJobPoll(jobId, delayMs = 5000) {
+        if (yoloTrainState.pollHandle) {
+            clearTimeout(yoloTrainState.pollHandle);
+        }
+        yoloTrainState.pollHandle = window.setTimeout(() => {
+            pollYoloTrainingJob(jobId, { force: true }).catch((error) => console.error("YOLO poll failed", error));
+        }, delayMs);
+    }
+
+    async function pollYoloTrainingJob(jobId, { force = false } = {}) {
+        if (!jobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/train/jobs/${jobId}`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const job = await resp.json();
+            yoloTrainState.activeJobId = job.job_id;
+            updateYoloTrainingUI(job);
+            const terminalStates = new Set(["succeeded", "failed", "cancelled", "blocked"]);
+            if (!terminalStates.has(job.status)) {
+                scheduleYoloJobPoll(job.job_id);
+            } else if (yoloTrainState.pollHandle) {
+                clearTimeout(yoloTrainState.pollHandle);
+                yoloTrainState.pollHandle = null;
+            }
+        } catch (error) {
+            console.error("pollYoloTrainingJob error", error);
+            setYoloTrainMessage(error.message || "Unable to load job", "error");
+        }
+    }
+
+    function updateYoloTrainingUI(job) {
+        if (!job) {
+            return;
+        }
+        yoloTrainState.lastJobSnapshot = job;
+        const pct = Math.round((job.progress || 0) * 100);
+        if (yoloTrainElements.progressFill) {
+            yoloTrainElements.progressFill.style.width = `${pct}%`;
+        }
+        if (yoloTrainElements.statusText) {
+            const message = job.message ? ` • ${job.message}` : "";
+            yoloTrainElements.statusText.textContent = `${job.status?.toUpperCase() || ""}${message}`;
+        }
+        if (yoloTrainElements.log) {
+            const logs = Array.isArray(job.logs) ? job.logs : [];
+            yoloTrainElements.log.textContent = logs
+                .map((entry) => `[${formatTimestamp(entry.timestamp)}] ${entry.message}`)
+                .join("\n");
+        }
+        if (yoloTrainElements.cancelButton) {
+            const cancellable = job.status === "running" || job.status === "queued";
+            yoloTrainElements.cancelButton.disabled = !cancellable;
+        }
+    }
+
+    async function handleStartYoloTraining() {
+        if (yoloTrainElements.startButton) {
+            yoloTrainElements.startButton.disabled = true;
+        }
+        try {
+            if (!yoloTrainElements.acceptTos?.checked) {
+                setYoloTrainMessage("Please accept the Ultralytics terms to start training.", "warn");
+                return;
+            }
+            const entry = getSelectedYoloDataset();
+            if (!entry) {
+                setYoloTrainMessage("Select a dataset first.", "error");
+                return;
+            }
+            if (!entry.yolo_ready) {
+                setYoloTrainMessage("Selected dataset needs YOLO conversion. Use Dataset Management to build YOLO labels.", "error");
+                return;
+            }
+            const payload = buildYoloTrainingPayload();
+            if (payload.error) {
+                setYoloTrainMessage(payload.error, "error");
+                return;
+            }
+            setYoloTrainMessage("Starting training job…");
+            const resp = await fetch(`${API_ROOT}/yolo/train/jobs`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            yoloTrainState.activeJobId = data.job_id;
+            setYoloTrainMessage("Job started", "success");
+            if (yoloTrainElements.cancelButton) {
+                yoloTrainElements.cancelButton.disabled = false;
+            }
+            await pollYoloTrainingJob(data.job_id, { force: true });
+            await refreshYoloTrainingHistory();
+        } catch (error) {
+            console.error("YOLO training submit failed", error);
+            setYoloTrainMessage(error.message || "Failed to start training", "error");
+        } finally {
+            if (yoloTrainElements.startButton) {
+                yoloTrainElements.startButton.disabled = false;
+            }
+        }
+    }
+
+    async function cancelYoloTrainingJobRequest() {
+        if (!yoloTrainState.activeJobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/train/jobs/${yoloTrainState.activeJobId}/cancel`, { method: "POST" });
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            setYoloTrainMessage("Cancellation requested", "warn");
+        } catch (error) {
+            console.error("Cancel YOLO job failed", error);
+            setYoloTrainMessage(error.message || "Failed to cancel job", "error");
+        }
+    }
+
+    function initYoloTrainingTab() {
+        if (yoloTrainElements.datasetSelect) {
+            return;
+        }
+        yoloTrainElements.datasetSelect = document.getElementById("yoloDatasetSelect");
+        yoloTrainElements.datasetRefresh = document.getElementById("yoloDatasetRefresh");
+        yoloTrainElements.datasetSummary = document.getElementById("yoloDatasetSummary");
+        yoloTrainElements.runNameInput = document.getElementById("yoloRunName");
+        yoloTrainElements.taskSelect = document.getElementById("yoloTask");
+        yoloTrainElements.variantSelect = document.getElementById("yoloVariant");
+        yoloTrainElements.fromScratchToggle = document.getElementById("yoloFromScratch");
+        yoloTrainElements.baseWeightsInput = document.getElementById("yoloBaseWeights");
+        yoloTrainElements.epochsInput = document.getElementById("yoloEpochs");
+        yoloTrainElements.imgSizeInput = document.getElementById("yoloImgSize");
+        yoloTrainElements.batchInput = document.getElementById("yoloBatch");
+        yoloTrainElements.workersInput = document.getElementById("yoloWorkers");
+        yoloTrainElements.devicesInput = document.getElementById("yoloDevices");
+        yoloTrainElements.seedInput = document.getElementById("yoloSeed");
+        yoloTrainElements.augFlipLR = document.getElementById("yoloAugFlipLR");
+        yoloTrainElements.augFlipUD = document.getElementById("yoloAugFlipUD");
+        yoloTrainElements.augHsvH = document.getElementById("yoloAugHsvH");
+        yoloTrainElements.augHsvS = document.getElementById("yoloAugHsvS");
+        yoloTrainElements.augHsvV = document.getElementById("yoloAugHsvV");
+        yoloTrainElements.augMosaic = document.getElementById("yoloAugMosaic");
+        yoloTrainElements.augMixup = document.getElementById("yoloAugMixup");
+        yoloTrainElements.augCopyPaste = document.getElementById("yoloAugCopyPaste");
+        yoloTrainElements.augScale = document.getElementById("yoloAugScale");
+        yoloTrainElements.augTranslate = document.getElementById("yoloAugTranslate");
+        yoloTrainElements.augDegrees = document.getElementById("yoloAugDegrees");
+        yoloTrainElements.acceptTos = document.getElementById("yoloAcceptTos");
+        yoloTrainElements.startButton = document.getElementById("yoloTrainStartBtn");
+        yoloTrainElements.cancelButton = document.getElementById("yoloTrainCancelBtn");
+        yoloTrainElements.refreshButton = document.getElementById("yoloTrainRefreshBtn");
+        yoloTrainElements.progressFill = document.getElementById("yoloTrainProgressFill");
+        yoloTrainElements.statusText = document.getElementById("yoloTrainStatusText");
+        yoloTrainElements.message = document.getElementById("yoloTrainMessage");
+        yoloTrainElements.log = document.getElementById("yoloTrainLog");
+        yoloTrainElements.history = document.getElementById("yoloTrainHistory");
+        if (yoloTrainElements.startButton) {
+            yoloTrainElements.startButton.addEventListener("click", () => {
+                handleStartYoloTraining().catch((error) => console.error("YOLO training start failed", error));
+            });
+        }
+        if (yoloTrainElements.cancelButton) {
+            yoloTrainElements.cancelButton.addEventListener("click", () => {
+                cancelYoloTrainingJobRequest().catch((error) => console.error("YOLO cancel failed", error));
+            });
+            yoloTrainElements.cancelButton.disabled = true;
+        }
+        if (yoloTrainElements.refreshButton) {
+            yoloTrainElements.refreshButton.addEventListener("click", () => {
+                if (yoloTrainState.activeJobId) {
+                    pollYoloTrainingJob(yoloTrainState.activeJobId, { force: true }).catch((error) => console.error("YOLO refresh failed", error));
+                } else {
+                    refreshYoloTrainingHistory();
+                }
+            });
+        }
+        if (yoloTrainElements.datasetSelect) {
+            yoloTrainElements.datasetSelect.addEventListener("change", () => {
+                yoloDatasetState.selectedId = yoloTrainElements.datasetSelect.value || null;
+                updateYoloDatasetSummary();
+            });
+        }
+        if (yoloTrainElements.datasetRefresh) {
+            yoloTrainElements.datasetRefresh.addEventListener("click", () => {
+                loadYoloDatasetList(true).catch((error) => console.error("Failed to refresh YOLO datasets", error));
+            });
+        }
+        if (yoloTrainElements.taskSelect) {
+            yoloTrainElements.taskSelect.addEventListener("change", () => {
+                loadYoloVariants().catch((error) => console.error("Failed to refresh YOLO variants", error));
+            });
+        }
+        if (yoloTrainElements.fromScratchToggle && yoloTrainElements.baseWeightsInput) {
+            const syncBaseWeights = () => {
+                const disabled = !!yoloTrainElements.fromScratchToggle.checked;
+                yoloTrainElements.baseWeightsInput.disabled = disabled;
+                if (disabled) {
+                    yoloTrainElements.baseWeightsInput.value = "";
+                }
+            };
+            yoloTrainElements.fromScratchToggle.addEventListener("change", syncBaseWeights);
+            syncBaseWeights();
+        }
+        loadYoloDatasetList().catch((error) => console.error("Failed to load YOLO datasets", error));
+        loadYoloVariants().catch((error) => console.error("Failed to load YOLO variants", error));
+        updateYoloDatasetSummary();
     }
 
 
@@ -8193,6 +8715,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
+        tabElements.yoloTrainButton = document.getElementById("tabYoloTrainButton");
         tabElements.agentMiningButton = document.getElementById("tabAgentMiningButton");
         tabElements.promptHelperButton = document.getElementById("tabPromptHelperButton");
         tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
@@ -8205,6 +8728,7 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
+        tabElements.yoloTrainPanel = document.getElementById("tabYoloTrain");
         tabElements.agentMiningPanel = document.getElementById("tabAgentMining");
         tabElements.promptHelperPanel = document.getElementById("tabPromptHelper");
         tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
@@ -8224,6 +8748,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.addEventListener("click", () => setActiveTab(TAB_SAM3_TRAIN));
+        }
+        if (tabElements.yoloTrainButton) {
+            tabElements.yoloTrainButton.addEventListener("click", () => setActiveTab(TAB_YOLO_TRAIN));
         }
         if (tabElements.agentMiningButton) {
             tabElements.agentMiningButton.addEventListener("click", () => setActiveTab(TAB_AGENT_MINING));
@@ -8267,6 +8794,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         if (tabElements.sam3TrainButton) {
             tabElements.sam3TrainButton.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
         }
+        if (tabElements.yoloTrainButton) {
+            tabElements.yoloTrainButton.classList.toggle("active", tabName === TAB_YOLO_TRAIN);
+        }
         if (tabElements.agentMiningButton) {
             tabElements.agentMiningButton.classList.toggle("active", tabName === TAB_AGENT_MINING);
         }
@@ -8302,6 +8832,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabElements.sam3TrainPanel) {
             tabElements.sam3TrainPanel.classList.toggle("active", tabName === TAB_SAM3_TRAIN);
+        }
+        if (tabElements.yoloTrainPanel) {
+            tabElements.yoloTrainPanel.classList.toggle("active", tabName === TAB_YOLO_TRAIN);
         }
         if (tabElements.agentMiningPanel) {
             tabElements.agentMiningPanel.classList.toggle("active", tabName === TAB_AGENT_MINING);
@@ -8344,6 +8877,13 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
         }
         if (tabName === TAB_SAM3_TRAIN && previous !== TAB_SAM3_TRAIN) {
             initSam3TrainUi().catch((err) => console.error("SAM3 UI init failed", err));
+        }
+        if (tabName === TAB_YOLO_TRAIN && previous !== TAB_YOLO_TRAIN) {
+            initYoloTrainingTab();
+            refreshYoloTrainingHistory();
+            if (yoloTrainState.activeJobId) {
+                pollYoloTrainingJob(yoloTrainState.activeJobId, { force: true }).catch((error) => console.error("YOLO job poll failed", error));
+            }
         }
         if (tabName === TAB_AGENT_MINING && previous !== TAB_AGENT_MINING) {
             initAgentMiningUi();

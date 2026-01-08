@@ -42,7 +42,7 @@ Status key: [ ] pending  [x] done
    - from-scratch vs fine-tune
    - Augmentation panel
    - Start/Cancel/Refresh + logs
-   Status: [ ]
+   Status: [x]
 
 8) T&Cs gating
    - UI checkbox: “I have read and accept Ultralytics T&Cs”

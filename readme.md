@@ -44,6 +44,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
 - **Qwen 2.5 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. The active model (selected on the Qwen Models tab) always supplies the system prompt and defaults so inference matches training.
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
+- **YOLOv8 training** – launch detect/segment runs from the UI, track progress, and keep only `best.pt` + metrics for easy sharing.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
 ## Repository Layout
@@ -82,6 +83,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 │  - clip_embeddings/   cached CLIP features used by training + mining       │
 │  - agent_mining/      jobs/, cache/, recipes/, cascades/                   │
 │  - qwen_runs/         datasets/, checkpoints/, metadata.json               │
+│  - yolo_runs/         best.pt, metrics.json, results.csv, run.json         │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -108,6 +110,7 @@ Tator/
   - `sam3_steps`: run each step (seed → diverse seed selection → SAM3 visual expand → final CLIP filter + IoU de-dupe)
   - `sam3_greedy`: prompt bank → (optional) crop-bank CLIP filter → SAM3 expand → (optional) CLIP head gate → IoU de-dupe
 - **Apply a recipe cascade**: UI → `/agent_mining/apply_image_chain` → run multiple recipes → per-class de-dupe → optional cross-class de-dupe (by group or global) with optional CLIP-head-based confidence → detections returned to UI.
+- **YOLOv8 training**: Train YOLO tab → `/yolo/train/jobs` (start/poll/cancel) → runs saved under `uploads/yolo_runs/` with `best.pt` + metrics → download/delete via `/yolo/runs`.
 
 ## Prerequisites
 - Python 3.10 or newer (3.11+ recommended).
@@ -196,6 +199,17 @@ SAM3 support is optional but recommended if you plan to use the text-prompt work
    Generate a read token from your Hugging Face settings, paste it when prompted, and verify with `hf auth whoami`. This allows Transformers to download the gated checkpoints automatically.
 4. **(Optional) Pin checkpoints manually** – if you want deterministic paths, call `huggingface_hub.hf_hub_download` (examples in `sam3integration.txt`) and set `SAM3_CHECKPOINT_PATH` / `SAM3_MODEL_ID` to the downloaded files.
 5. **Run the API** — once authenticated, start the backend as usual. Selecting “SAM 3” in the UI enables both the point/bbox flows and the new text prompt panel.
+
+### YOLOv8 Training (Detect + Segment)
+1. **Prepare a dataset** in the **Dataset Management** tab (YOLO or COCO). Ensure the dataset shows the YOLO badge.
+2. **Open the Train YOLO tab** and choose:
+   - Task (detect vs segment),
+   - Variant (YOLOv8n–x, plus P2 variants),
+   - Training mode (from scratch or fine-tune),
+   - Augmentations as needed.
+3. **Accept Ultralytics terms** (required to start training).
+4. **Start training** and monitor progress + metrics in the right panel.
+5. **Download or delete runs** from the “Saved YOLO Runs” section. We keep only `best.pt` + metrics (`results.csv`, `metrics.json`) to avoid bloating disk.
 
 ### Segmentation Builder (bbox → polygons)
 The **Segmentation Builder** tab clones an existing **bbox** dataset into a YOLO‑seg (polygon) dataset using SAM1 or SAM3. Originals stay untouched; output is named `<source>_seg` by default and tagged with `type: seg` so SAM3 training can auto-enable mask losses.

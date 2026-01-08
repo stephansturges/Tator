@@ -1379,6 +1379,11 @@
         chartStatus: null,
         log: null,
         history: null,
+        runSelect: null,
+        runRefresh: null,
+        runDownload: null,
+        runDelete: null,
+        runSummary: null,
     };
 
     const activeElements = {
@@ -1452,6 +1457,11 @@ const YOLO_TOS_STORAGE_KEY = "yoloTrainingTosAccepted";
     };
 
     const yoloDatasetState = {
+        items: [],
+        selectedId: null,
+    };
+
+    const yoloRunState = {
         items: [],
         selectedId: null,
     };
@@ -2505,6 +2515,140 @@ const sam3TrainState = {
                 yoloTrainElements.datasetSummary.textContent = `Unable to load datasets: ${error.message || error}`;
             }
             return [];
+        }
+    }
+
+    function getSelectedYoloRun() {
+        const id = yoloRunState.selectedId;
+        if (!id) {
+            return null;
+        }
+        return yoloRunState.items.find((entry) => entry.run_id === id) || null;
+    }
+
+    function updateYoloRunSummary() {
+        if (!yoloTrainElements.runSummary) {
+            return;
+        }
+        const entry = getSelectedYoloRun();
+        if (!entry) {
+            yoloTrainElements.runSummary.textContent = "No runs yet.";
+            return;
+        }
+        const datasetLabel = entry.dataset_label ? `dataset: ${entry.dataset_label}` : "dataset: unknown";
+        const created = entry.created_at ? new Date(entry.created_at * 1000).toLocaleString() : "unknown";
+        const artifacts = entry.artifacts || {};
+        const bits = [];
+        if (artifacts.best_pt) bits.push("best.pt");
+        if (artifacts.metrics_json) bits.push("metrics.json");
+        if (artifacts.metrics_series) bits.push("metrics_series.json");
+        if (artifacts.results_csv) bits.push("results.csv");
+        if (artifacts.args_yaml) bits.push("args.yaml");
+        if (artifacts.labelmap) bits.push("labelmap.txt");
+        const artifactText = bits.length ? bits.join(", ") : "no artifacts";
+        yoloTrainElements.runSummary.textContent = `${datasetLabel} • created ${created} • ${artifactText}`;
+    }
+
+    function populateYoloRunSelect() {
+        const select = yoloTrainElements.runSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!yoloRunState.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No runs available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            yoloRunState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.run_id || "";
+                const label = entry.run_name || entry.run_id;
+                const status = entry.status ? ` • ${entry.status}` : "";
+                option.textContent = `${label}${status}`;
+                select.appendChild(option);
+            });
+            if (!yoloRunState.selectedId || !yoloRunState.items.some((entry) => entry.run_id === yoloRunState.selectedId)) {
+                yoloRunState.selectedId = yoloRunState.items[0].run_id;
+            }
+            select.disabled = false;
+            select.value = yoloRunState.selectedId;
+        }
+        updateYoloRunSummary();
+    }
+
+    async function loadYoloRunList(force = false) {
+        if (!force && yoloRunState.items.length) {
+            populateYoloRunSelect();
+            return yoloRunState.items;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/runs`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            yoloRunState.items = Array.isArray(data) ? data : [];
+            populateYoloRunSelect();
+            return yoloRunState.items;
+        } catch (error) {
+            if (yoloTrainElements.runSummary) {
+                yoloTrainElements.runSummary.textContent = `Unable to load runs: ${error.message || error}`;
+            }
+            return [];
+        }
+    }
+
+    async function downloadYoloRun() {
+        const entry = getSelectedYoloRun();
+        if (!entry) {
+            setYoloTrainMessage("Select a run to download.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/runs/${encodeURIComponent(entry.run_id)}/download`);
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${entry.run_name || entry.run_id}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error("YOLO run download failed", error);
+            setYoloTrainMessage(error.message || "Failed to download run", "error");
+        }
+    }
+
+    async function deleteYoloRun() {
+        const entry = getSelectedYoloRun();
+        if (!entry) {
+            setYoloTrainMessage("Select a run to delete.", "warn");
+            return;
+        }
+        if (!window.confirm(`Delete YOLO run "${entry.run_name || entry.run_id}"? This cannot be undone.`)) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/runs/${encodeURIComponent(entry.run_id)}`, { method: "DELETE" });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            setYoloTrainMessage("Run deleted.", "success");
+            yoloRunState.selectedId = null;
+            await loadYoloRunList(true);
+        } catch (error) {
+            console.error("YOLO run delete failed", error);
+            setYoloTrainMessage(error.message || "Failed to delete run", "error");
         }
     }
 
@@ -7850,6 +7994,7 @@ function initQwenTrainingTab() {
         if (!job) {
             return;
         }
+        const previousStatus = yoloTrainState.lastJobSnapshot?.status;
         yoloTrainState.lastJobSnapshot = job;
         const pct = Math.round((job.progress || 0) * 100);
         if (yoloTrainElements.progressFill) {
@@ -7870,6 +8015,12 @@ function initQwenTrainingTab() {
             yoloTrainElements.cancelButton.disabled = !cancellable;
         }
         updateYoloMetricChart(job.metrics);
+        if (job.status && job.status !== previousStatus) {
+            const terminalStates = new Set(["succeeded", "failed", "cancelled", "blocked"]);
+            if (terminalStates.has(job.status)) {
+                loadYoloRunList(true).catch((error) => console.error("Failed to refresh YOLO runs", error));
+            }
+        }
     }
 
     async function handleStartYoloTraining() {
@@ -7979,6 +8130,11 @@ function initQwenTrainingTab() {
         yoloTrainElements.chartStatus = document.getElementById("yoloTrainChartStatus");
         yoloTrainElements.log = document.getElementById("yoloTrainLog");
         yoloTrainElements.history = document.getElementById("yoloTrainHistory");
+        yoloTrainElements.runSelect = document.getElementById("yoloRunSelect");
+        yoloTrainElements.runRefresh = document.getElementById("yoloRunsRefresh");
+        yoloTrainElements.runDownload = document.getElementById("yoloRunDownload");
+        yoloTrainElements.runDelete = document.getElementById("yoloRunDelete");
+        yoloTrainElements.runSummary = document.getElementById("yoloRunSummary");
         if (yoloTrainElements.startButton) {
             yoloTrainElements.startButton.addEventListener("click", () => {
                 handleStartYoloTraining().catch((error) => console.error("YOLO training start failed", error));
@@ -7997,6 +8153,27 @@ function initQwenTrainingTab() {
                 } else {
                     refreshYoloTrainingHistory();
                 }
+            });
+        }
+        if (yoloTrainElements.runSelect) {
+            yoloTrainElements.runSelect.addEventListener("change", () => {
+                yoloRunState.selectedId = yoloTrainElements.runSelect.value || null;
+                updateYoloRunSummary();
+            });
+        }
+        if (yoloTrainElements.runRefresh) {
+            yoloTrainElements.runRefresh.addEventListener("click", () => {
+                loadYoloRunList(true).catch((error) => console.error("Failed to refresh YOLO runs", error));
+            });
+        }
+        if (yoloTrainElements.runDownload) {
+            yoloTrainElements.runDownload.addEventListener("click", () => {
+                downloadYoloRun().catch((error) => console.error("Failed to download YOLO run", error));
+            });
+        }
+        if (yoloTrainElements.runDelete) {
+            yoloTrainElements.runDelete.addEventListener("click", () => {
+                deleteYoloRun().catch((error) => console.error("Failed to delete YOLO run", error));
             });
         }
         if (yoloTrainElements.datasetSelect) {
@@ -8037,6 +8214,7 @@ function initQwenTrainingTab() {
         }
         loadYoloDatasetList().catch((error) => console.error("Failed to load YOLO datasets", error));
         loadYoloVariants().catch((error) => console.error("Failed to load YOLO variants", error));
+        loadYoloRunList().catch((error) => console.error("Failed to load YOLO runs", error));
         updateYoloDatasetSummary();
     }
 

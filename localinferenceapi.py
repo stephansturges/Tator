@@ -4532,6 +4532,51 @@ def _yolo_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) ->
     return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
 
 
+def _collect_yolo_artifacts(run_dir: Path) -> Dict[str, bool]:
+    return {
+        "best_pt": (run_dir / "best.pt").exists(),
+        "metrics_json": (run_dir / "metrics.json").exists(),
+        "metrics_series": (run_dir / "metrics_series.json").exists(),
+        "results_csv": (run_dir / "results.csv").exists(),
+        "args_yaml": (run_dir / "args.yaml").exists(),
+        "labelmap": (run_dir / "labelmap.txt").exists(),
+        "run_meta": (run_dir / YOLO_RUN_META_NAME).exists(),
+    }
+
+
+def _list_yolo_runs() -> List[Dict[str, Any]]:
+    runs: List[Dict[str, Any]] = []
+    for entry in YOLO_JOB_ROOT.iterdir():
+        if not entry.is_dir():
+            continue
+        meta = _yolo_load_run_meta(entry)
+        run_id = meta.get("job_id") or entry.name
+        config = meta.get("config") or {}
+        dataset = config.get("dataset") or {}
+        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+        created_at = meta.get("created_at")
+        if not created_at:
+            try:
+                created_at = entry.stat().st_mtime
+            except Exception:
+                created_at = None
+        runs.append(
+            {
+                "run_id": run_id,
+                "run_name": run_name,
+                "status": meta.get("status"),
+                "message": meta.get("message"),
+                "created_at": created_at,
+                "updated_at": meta.get("updated_at"),
+                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+                "dataset_label": dataset.get("label"),
+                "artifacts": _collect_yolo_artifacts(entry),
+            }
+        )
+    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return runs
+
+
 def _detect_yolo_layout(dataset_root: Path) -> Dict[str, Any]:
     labelmap_path = dataset_root / "labelmap.txt"
     train_images = dataset_root / "train" / "images"
@@ -24456,6 +24501,42 @@ def list_yolo_variants(task: Optional[str] = Query(None)):
         task_norm = task.strip().lower()
         return [v for v in YOLO_VARIANTS if v.get("task") == task_norm]
     return YOLO_VARIANTS
+
+
+@app.get("/yolo/runs")
+def list_yolo_runs():
+    return _list_yolo_runs()
+
+
+@app.get("/yolo/runs/{run_id}/download")
+def download_yolo_run(run_id: str):
+    run_dir = _yolo_run_dir(run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    meta = _yolo_load_run_meta(run_dir)
+    run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or run_id
+    safe_name = _sanitize_yolo_run_id(run_name)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename in sorted(YOLO_KEEP_FILES):
+            path = run_dir / filename
+            if path.exists():
+                zf.write(path, arcname=filename)
+    buffer.seek(0)
+    headers = {"Content-Disposition": f'attachment; filename="{safe_name}.zip"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+@app.delete("/yolo/runs/{run_id}")
+def delete_yolo_run(run_id: str):
+    run_dir = _yolo_run_dir(run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    try:
+        shutil.rmtree(run_dir)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    return {"status": "deleted", "run_id": run_id}
 
 
 @app.get("/sam3/train/cache_size")

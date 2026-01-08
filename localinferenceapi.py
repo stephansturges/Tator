@@ -24332,6 +24332,8 @@ def cancel_sam3_training_job(job_id: str):
 
 @app.post("/yolo/train/jobs")
 def create_yolo_training_job(payload: YoloTrainRequest):
+    if not payload.accept_tos:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_tos_required")
     job_id = uuid.uuid4().hex
     run_dir = _yolo_run_dir(job_id, create=True)
     dataset_info = _resolve_yolo_training_dataset(payload)

@@ -57,4 +57,4 @@ Status key: [ ] pending  [x] done
 10) Model management + README
    - List/download/delete best.pt + metrics
    - Docs: usage, artifacts, dataset reuse, T&Cs
-   Status: [ ]
+   Status: [x]

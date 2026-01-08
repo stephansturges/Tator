@@ -1218,6 +1218,22 @@
                             <h3>Recent YOLO Jobs</h3>
                             <div id="yoloTrainHistory"></div>
                         </div>
+                        <div class="training-history">
+                            <div class="storage-header">
+                                <h3>Saved YOLO Runs</h3>
+                                <button type="button" class="training-button" id="yoloRunsRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help">Each run stores <code>best.pt</code> + metrics only. Download a zip to move it elsewhere.</div>
+                            <div class="training-field">
+                                <label for="yoloRunSelect">Saved runs</label>
+                                <select id="yoloRunSelect"></select>
+                            </div>
+                            <div class="training-actions">
+                                <button type="button" class="training-button" id="yoloRunDownload">Download zip</button>
+                                <button type="button" class="training-button training-button-danger" id="yoloRunDelete">Delete run</button>
+                            </div>
+                            <div class="training-help" id="yoloRunSummary">No runs yet.</div>
+                        </div>
                     </section>
                 </div>
             </div>

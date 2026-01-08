@@ -33,7 +33,7 @@ Status key: [ ] pending  [x] done
 6) Augmentation controls
    - Simple, safe aug schema (flips, hsv, mosaic, mixup, crop, scale, rotate)
    - Map UI -> API -> Ultralytics args
-   Status: [ ]
+   Status: [x]
 
 7) UI tab: Train YOLO
    - Dataset selector (current + saved)

@@ -4699,6 +4699,33 @@ def _yolo_resolve_model_source(
     return "weights", f"{model_id}.pt"
 
 
+def _yolo_build_aug_args(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not aug:
+        return {}
+    payload = dict(aug)
+    mapping = {
+        "flip_lr": "fliplr",
+        "flip_ud": "flipud",
+        "hsv_h": "hsv_h",
+        "hsv_s": "hsv_s",
+        "hsv_v": "hsv_v",
+        "mosaic": "mosaic",
+        "mixup": "mixup",
+        "copy_paste": "copy_paste",
+        "scale": "scale",
+        "translate": "translate",
+        "degrees": "degrees",
+        "shear": "shear",
+        "perspective": "perspective",
+        "erasing": "erasing",
+    }
+    aug_args: Dict[str, Any] = {}
+    for key, dest in mapping.items():
+        if key in payload:
+            aug_args[dest] = payload[key]
+    return {k: v for k, v in aug_args.items() if v is not None}
+
+
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
     """Remove optimizer/scheduler state from a torch checkpoint to shrink size."""
     before = ckpt_path.stat().st_size if ckpt_path.exists() else 0
@@ -22589,6 +22616,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             "name": "train",
             "exist_ok": True,
         }
+        train_kwargs.update(_yolo_build_aug_args(config.get("augmentations")))
         train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
         try:
             model = YOLO(model_source)

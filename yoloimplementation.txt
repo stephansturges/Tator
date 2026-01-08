@@ -17,7 +17,7 @@ Status key: [ ] pending  [x] done
    - Resolve dataset from Dataset Manager (current or selected)
    - Convert to YOLO once if needed, cache by dataset_id + task
    - Avoid duplicate dataset copies per run
-   Status: [ ]
+   Status: [x]
 
 4) Training execution (YOLOv8 detect/segment)
    - Ultralytics YOLO().train for detect/segment

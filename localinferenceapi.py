@@ -3467,6 +3467,8 @@ YOLO_JOB_ROOT = Path(os.environ.get("YOLO_TRAINING_ROOT", "./uploads/yolo_runs")
 YOLO_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 YOLO_MODEL_ROOT = Path(os.environ.get("YOLO_MODEL_ROOT", "./uploads/yolo_models"))
 YOLO_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+YOLO_DATASET_CACHE_ROOT = YOLO_JOB_ROOT / "datasets"
+YOLO_DATASET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 YOLO_RUN_META_NAME = "run.json"
 YOLO_KEEP_FILES = {
     "best.pt",
@@ -4497,6 +4499,102 @@ def _yolo_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) ->
         except Exception:
             continue
     return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+
+
+def _detect_yolo_layout(dataset_root: Path) -> Dict[str, Any]:
+    labelmap_path = dataset_root / "labelmap.txt"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    root_images = dataset_root / "images"
+    root_labels = dataset_root / "labels"
+    yolo_images_dir: Optional[str] = None
+    yolo_labels_dir: Optional[str] = None
+    yolo_layout: Optional[str] = None
+    if labelmap_path.exists():
+        if train_images.exists() and train_labels.exists():
+            yolo_images_dir = str(train_images)
+            yolo_labels_dir = str(train_labels)
+            yolo_layout = "split"
+        elif root_images.exists() and root_labels.exists():
+            yolo_images_dir = str(root_images)
+            yolo_labels_dir = str(root_labels)
+            yolo_layout = "flat"
+    yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
+    return {
+        "yolo_ready": yolo_ready,
+        "yolo_images_dir": yolo_images_dir,
+        "yolo_labels_dir": yolo_labels_dir,
+        "yolo_labelmap_path": str(labelmap_path) if labelmap_path.exists() else None,
+        "yolo_layout": yolo_layout,
+    }
+
+
+def _resolve_dataset_entry(dataset_id: str) -> Optional[Dict[str, Any]]:
+    cleaned = (dataset_id or "").strip()
+    if not cleaned:
+        return None
+    for entry in _list_all_datasets():
+        if cleaned in (entry.get("id"), entry.get("signature")):
+            return entry
+    return None
+
+
+def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
+    task = (payload.task or "detect").lower().strip()
+    dataset_id = (payload.dataset_id or "").strip()
+    dataset_root: Optional[Path] = None
+    entry: Optional[Dict[str, Any]] = None
+    if dataset_id:
+        entry = _resolve_dataset_entry(dataset_id)
+        if entry and entry.get("dataset_root"):
+            dataset_root = Path(entry["dataset_root"]).resolve()
+        else:
+            dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    elif payload.dataset_root:
+        dataset_root = Path(payload.dataset_root).expanduser().resolve()
+    if not dataset_root or not dataset_root.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
+    dataset_signature = None
+    if entry and entry.get("signature"):
+        dataset_signature = str(entry.get("signature"))
+    if not dataset_signature:
+        dataset_signature = _compute_dir_signature(dataset_root)
+    safe_name = _sanitize_yolo_run_id(entry.get("id") if entry else dataset_root.name)
+    cache_key = _stable_hash([safe_name, dataset_signature, task])[:12]
+    cache_root = (YOLO_DATASET_CACHE_ROOT / f"{safe_name}_{cache_key}").resolve()
+    cache_layout = _detect_yolo_layout(cache_root) if cache_root.exists() else None
+    layout = _detect_yolo_layout(dataset_root)
+    if cache_layout and cache_layout.get("yolo_ready"):
+        prepared_root = cache_root
+        yolo_ready = True
+        yolo_images_dir = cache_layout.get("yolo_images_dir")
+        yolo_labels_dir = cache_layout.get("yolo_labels_dir")
+        yolo_labelmap_path = cache_layout.get("yolo_labelmap_path")
+        yolo_layout = cache_layout.get("yolo_layout")
+        source = "cache"
+    else:
+        prepared_root = dataset_root
+        yolo_ready = bool(layout.get("yolo_ready"))
+        yolo_images_dir = layout.get("yolo_images_dir")
+        yolo_labels_dir = layout.get("yolo_labels_dir")
+        yolo_labelmap_path = layout.get("yolo_labelmap_path")
+        yolo_layout = layout.get("yolo_layout")
+        source = "registry" if entry else "custom"
+    return {
+        "dataset_id": entry.get("id") if entry else dataset_root.name,
+        "dataset_root": str(dataset_root),
+        "prepared_root": str(prepared_root),
+        "signature": dataset_signature,
+        "task": task,
+        "yolo_ready": yolo_ready,
+        "yolo_images_dir": yolo_images_dir,
+        "yolo_labels_dir": yolo_labels_dir,
+        "yolo_labelmap_path": yolo_labelmap_path,
+        "yolo_layout": yolo_layout,
+        "cache_root": str(cache_root),
+        "cache_key": cache_key,
+        "source": source,
+    }
 
 
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
@@ -24022,9 +24120,16 @@ def cancel_sam3_training_job(job_id: str):
 def create_yolo_training_job(payload: YoloTrainRequest):
     job_id = uuid.uuid4().hex
     run_dir = _yolo_run_dir(job_id, create=True)
+    dataset_info = _resolve_yolo_training_dataset(payload)
     config = payload.dict(exclude_none=True)
     config["paths"] = {"run_dir": str(run_dir)}
-    job = YoloTrainingJob(job_id=job_id, config=config, message="Queued (training not started)")
+    config["dataset"] = dataset_info
+    message = "Queued (training not started)"
+    status = "queued"
+    if not dataset_info.get("yolo_ready"):
+        status = "blocked"
+        message = "Dataset is not YOLO-ready; conversion required."
+    job = YoloTrainingJob(job_id=job_id, config=config, message=message, status=status)
     with YOLO_TRAINING_JOBS_LOCK:
         YOLO_TRAINING_JOBS[job_id] = job
     _yolo_write_run_meta(

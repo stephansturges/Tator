@@ -3366,6 +3366,10 @@ class YoloTrainRequest(BaseModel):
         return values
 
 
+class YoloActiveRequest(BaseModel):
+    run_id: str
+
+
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None
     label: Optional[str] = None
@@ -3467,6 +3471,7 @@ YOLO_JOB_ROOT = Path(os.environ.get("YOLO_TRAINING_ROOT", "./uploads/yolo_runs")
 YOLO_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 YOLO_MODEL_ROOT = Path(os.environ.get("YOLO_MODEL_ROOT", "./uploads/yolo_models"))
 YOLO_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+YOLO_ACTIVE_PATH = YOLO_MODEL_ROOT / "active.json"
 YOLO_DATASET_CACHE_ROOT = YOLO_JOB_ROOT / "datasets"
 YOLO_DATASET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 YOLO_RUN_META_NAME = "run.json"
@@ -4546,6 +4551,8 @@ def _collect_yolo_artifacts(run_dir: Path) -> Dict[str, bool]:
 
 def _list_yolo_runs() -> List[Dict[str, Any]]:
     runs: List[Dict[str, Any]] = []
+    active = _load_yolo_active()
+    active_id = active.get("run_id") if isinstance(active, dict) else None
     for entry in YOLO_JOB_ROOT.iterdir():
         if not entry.is_dir():
             continue
@@ -4576,10 +4583,30 @@ def _list_yolo_runs() -> List[Dict[str, Any]]:
                 "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
                 "dataset_label": dataset.get("label"),
                 "artifacts": _collect_yolo_artifacts(entry),
+                "is_active": bool(active_id and run_id == active_id),
             }
         )
     runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
     return runs
+
+
+def _load_yolo_active() -> Dict[str, Any]:
+    if not YOLO_ACTIVE_PATH.exists():
+        return {}
+    try:
+        return json.loads(YOLO_ACTIVE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _save_yolo_active(payload: Dict[str, Any]) -> Dict[str, Any]:
+    YOLO_ACTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(payload or {})
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    YOLO_ACTIVE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return data
 
 
 def _detect_yolo_layout(dataset_root: Path) -> Dict[str, Any]:
@@ -24511,6 +24538,33 @@ def list_yolo_variants(task: Optional[str] = Query(None)):
 @app.get("/yolo/runs")
 def list_yolo_runs():
     return _list_yolo_runs()
+
+
+@app.get("/yolo/active")
+def get_yolo_active():
+    return _load_yolo_active()
+
+
+@app.post("/yolo/active")
+def set_yolo_active(payload: YoloActiveRequest):
+    run_dir = _yolo_run_dir(payload.run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    best_path = run_dir / "best.pt"
+    if not best_path.exists():
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="yolo_best_missing")
+    meta = _yolo_load_run_meta(run_dir)
+    config = meta.get("config") or {}
+    dataset = config.get("dataset") or {}
+    active_payload = {
+        "run_id": payload.run_id,
+        "run_name": config.get("run_name") or dataset.get("label") or payload.run_id,
+        "best_path": str(best_path),
+        "labelmap_path": str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None,
+        "task": config.get("task"),
+        "variant": config.get("variant"),
+    }
+    return _save_yolo_active(active_payload)
 
 
 @app.get("/yolo/runs/{run_id}/download")

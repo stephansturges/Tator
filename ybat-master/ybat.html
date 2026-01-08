@@ -66,6 +66,7 @@
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train Class Predictor</button>
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
+            <button class="tab-button" data-tab="yolo-train" id="tabYoloTrainButton" type="button">Train YOLO</button>
             <button class="tab-button" data-tab="agent-mining" id="tabAgentMiningButton" type="button">SAM3 Recipe Mining</button>
             <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
@@ -1074,7 +1075,148 @@
                     </section>
                 </div>
             </div>
-	            <div class="tab-panel" id="tabAgentMining" data-tab-panel="agent-mining">
+            <div class="tab-panel" id="tabYoloTrain" data-tab-panel="yolo-train">
+                <div class="training-wrapper two-col">
+                    <section class="training-form-section">
+                        <h2>Train YOLOv8</h2>
+                        <p class="training-help">Train YOLOv8 on any dataset managed in the Dataset Management tab. We keep only <code>best.pt</code> + metrics to avoid disk bloat.</p>
+                        <div class="training-field">
+                            <label>Dataset</label>
+                            <div class="sam3-dataset-row">
+                                <select id="yoloDatasetSelect"></select>
+                                <button type="button" class="training-button" id="yoloDatasetRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help" id="yoloDatasetSummary">Select a dataset, then start training.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="yoloRunName">Run name (optional)</label>
+                            <input type="text" id="yoloRunName" placeholder="qwen_yolov8s_2025-01-10" />
+                            <div class="training-help">Used in run storage + history. Leave blank to auto-name runs.</div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="yoloTask">Task</label>
+                                <select id="yoloTask">
+                                    <option value="detect" selected>Detect (bbox)</option>
+                                    <option value="segment">Segment (mask)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="yoloVariant">Model variant</label>
+                                <select id="yoloVariant"></select>
+                            </div>
+                            <div class="checkbox-row">
+                                <label><input type="checkbox" id="yoloFromScratch" /> Train from scratch (no pretrained weights)</label>
+                            </div>
+                            <div>
+                                <label for="yoloBaseWeights">Base weights (optional)</label>
+                                <input type="text" id="yoloBaseWeights" placeholder="yolov8n.pt or /path/to/weights" />
+                            </div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="yoloEpochs">Epochs</label>
+                                <input type="number" id="yoloEpochs" min="1" value="50" />
+                            </div>
+                            <div>
+                                <label for="yoloImgSize">Image size</label>
+                                <input type="number" id="yoloImgSize" min="256" step="32" value="640" />
+                            </div>
+                            <div>
+                                <label for="yoloBatch">Batch</label>
+                                <input type="number" id="yoloBatch" min="1" value="16" />
+                            </div>
+                            <div>
+                                <label for="yoloWorkers">Workers</label>
+                                <input type="number" id="yoloWorkers" min="0" value="4" />
+                            </div>
+                            <div>
+                                <label for="yoloDevices">Devices (comma-separated)</label>
+                                <input type="text" id="yoloDevices" placeholder="0,1" />
+                            </div>
+                            <div>
+                                <label for="yoloSeed">Seed</label>
+                                <input type="number" id="yoloSeed" value="42" />
+                            </div>
+                        </div>
+                        <div class="training-subsection__title">Augmentations</div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="yoloAugFlipLR">Flip LR</label>
+                                <input type="number" id="yoloAugFlipLR" min="0" max="1" step="0.05" value="0.5" />
+                            </div>
+                            <div>
+                                <label for="yoloAugFlipUD">Flip UD</label>
+                                <input type="number" id="yoloAugFlipUD" min="0" max="1" step="0.05" value="0.0" />
+                            </div>
+                            <div>
+                                <label for="yoloAugHsvH">HSV H</label>
+                                <input type="number" id="yoloAugHsvH" min="0" max="0.5" step="0.01" value="0.015" />
+                            </div>
+                            <div>
+                                <label for="yoloAugHsvS">HSV S</label>
+                                <input type="number" id="yoloAugHsvS" min="0" max="1" step="0.01" value="0.7" />
+                            </div>
+                            <div>
+                                <label for="yoloAugHsvV">HSV V</label>
+                                <input type="number" id="yoloAugHsvV" min="0" max="1" step="0.01" value="0.4" />
+                            </div>
+                            <div>
+                                <label for="yoloAugMosaic">Mosaic</label>
+                                <input type="number" id="yoloAugMosaic" min="0" max="1" step="0.05" value="1.0" />
+                            </div>
+                            <div>
+                                <label for="yoloAugMixup">Mixup</label>
+                                <input type="number" id="yoloAugMixup" min="0" max="1" step="0.05" value="0.0" />
+                            </div>
+                            <div>
+                                <label for="yoloAugCopyPaste">Copy-paste</label>
+                                <input type="number" id="yoloAugCopyPaste" min="0" max="1" step="0.05" value="0.0" />
+                            </div>
+                            <div>
+                                <label for="yoloAugScale">Scale</label>
+                                <input type="number" id="yoloAugScale" min="0" max="1" step="0.05" value="0.5" />
+                            </div>
+                            <div>
+                                <label for="yoloAugTranslate">Translate</label>
+                                <input type="number" id="yoloAugTranslate" min="0" max="1" step="0.05" value="0.1" />
+                            </div>
+                            <div>
+                                <label for="yoloAugDegrees">Degrees</label>
+                                <input type="number" id="yoloAugDegrees" min="0" max="45" step="1" value="0" />
+                            </div>
+                        </div>
+                        <div class="checkbox-row">
+                            <label><input type="checkbox" id="yoloAcceptTos" /> I have read and accept the Ultralytics YOLO license/terms.</label>
+                            <div class="training-help">Required to start training.</div>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="yoloTrainStartBtn">Start YOLO Training</button>
+                            <button type="button" class="training-button training-button-danger" id="yoloTrainCancelBtn" disabled>Cancel Job</button>
+                        </div>
+                        <div class="training-message" id="yoloTrainMessage" role="status"></div>
+                    </section>
+                    <section class="training-status-section">
+                        <h2>YOLO Training Status</h2>
+                        <div class="training-progress" id="yoloTrainProgressBar">
+                            <div class="training-progress-fill" id="yoloTrainProgressFill"></div>
+                        </div>
+                        <div class="training-status-text" id="yoloTrainStatusText">Idle</div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="yoloTrainRefreshBtn">Refresh status</button>
+                        </div>
+                        <div class="training-logs">
+                            <h3>Logs</h3>
+                            <pre id="yoloTrainLog"></pre>
+                        </div>
+                        <div class="training-history">
+                            <h3>Recent YOLO Jobs</h3>
+                            <div id="yoloTrainHistory"></div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabAgentMining" data-tab-panel="agent-mining">
 	                <div class="training-wrapper two-col">
 		                    <section class="training-form-section">
 		                        <h2>SAM3 Recipe Mining</h2>

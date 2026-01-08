@@ -4549,6 +4549,11 @@ def _list_yolo_runs() -> List[Dict[str, Any]]:
     for entry in YOLO_JOB_ROOT.iterdir():
         if not entry.is_dir():
             continue
+        if entry == YOLO_DATASET_CACHE_ROOT:
+            continue
+        meta_path = entry / YOLO_RUN_META_NAME
+        if not meta_path.exists():
+            continue
         meta = _yolo_load_run_meta(entry)
         run_id = meta.get("job_id") or entry.name
         config = meta.get("config") or {}

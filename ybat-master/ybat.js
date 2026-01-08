@@ -1435,6 +1435,8 @@ const qwenTrainState = {
     lastJobSnapshot: null,
 };
 
+const YOLO_TOS_STORAGE_KEY = "yoloTrainingTosAccepted";
+
     const yoloTrainState = {
         activeJobId: null,
         pollHandle: null,
@@ -7883,6 +7885,15 @@ function initQwenTrainingTab() {
             };
             yoloTrainElements.fromScratchToggle.addEventListener("change", syncBaseWeights);
             syncBaseWeights();
+        }
+        if (yoloTrainElements.acceptTos) {
+            const stored = window.localStorage.getItem(YOLO_TOS_STORAGE_KEY);
+            if (stored === "true") {
+                yoloTrainElements.acceptTos.checked = true;
+            }
+            yoloTrainElements.acceptTos.addEventListener("change", () => {
+                window.localStorage.setItem(YOLO_TOS_STORAGE_KEY, yoloTrainElements.acceptTos.checked ? "true" : "false");
+            });
         }
         loadYoloDatasetList().catch((error) => console.error("Failed to load YOLO datasets", error));
         loadYoloVariants().catch((error) => console.error("Failed to load YOLO variants", error));

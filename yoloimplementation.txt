@@ -47,7 +47,7 @@ Status key: [ ] pending  [x] done
 8) T&Cs gating
    - UI checkbox: “I have read and accept Ultralytics T&Cs”
    - Persist in localStorage; block API without acceptance
-   Status: [ ]
+   Status: [x]
 
 9) Progress + graph
    - Persist progress snapshots (epoch, loss, mAP)

@@ -3342,6 +3342,30 @@ class Sam3TrainRequest(BaseModel):
     split_seed: Optional[int] = None
 
 
+class YoloTrainRequest(BaseModel):
+    dataset_id: Optional[str] = None
+    dataset_root: Optional[str] = None
+    run_name: Optional[str] = None
+    task: Literal["detect", "segment"] = "detect"
+    variant: Optional[str] = None
+    from_scratch: Optional[bool] = None
+    base_weights: Optional[str] = None
+    epochs: Optional[int] = None
+    img_size: Optional[int] = None
+    batch: Optional[int] = None
+    workers: Optional[int] = None
+    devices: Optional[List[int]] = None
+    seed: Optional[int] = None
+    augmentations: Optional[Dict[str, Any]] = None
+    accept_tos: Optional[bool] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_dataset_fields(cls, values):  # noqa: N805
+        if not (values.get("dataset_id") or values.get("dataset_root")):
+            raise ValueError("dataset_id_or_root_required")
+        return values
+
+
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None
     label: Optional[str] = None
@@ -3506,6 +3530,22 @@ class Sam3TrainingJob:
 
 
 @dataclass
+class YoloTrainingJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    config: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
 class SegmentationBuildJob:
     job_id: str
     status: str = "queued"
@@ -3555,6 +3595,8 @@ QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
 SAM3_TRAINING_JOBS_LOCK = threading.Lock()
+YOLO_TRAINING_JOBS: Dict[str, YoloTrainingJob] = {}
+YOLO_TRAINING_JOBS_LOCK = threading.Lock()
 SEGMENTATION_BUILD_JOBS: Dict[str, SegmentationBuildJob] = {}
 SEGMENTATION_BUILD_JOBS_LOCK = threading.Lock()
 PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
@@ -3843,6 +3885,44 @@ def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
+
+
+def _serialize_yolo_job(job: YoloTrainingJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "config": job.config,
+        "logs": job.logs,
+        "metrics": job.metrics,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _yolo_job_update(
+    job: YoloTrainingJob,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
+    if status is not None:
+        job.status = status
+    if message is not None:
+        job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
 
 
 def _seg_job_log(job: SegmentationBuildJob, message: str) -> None:
@@ -22274,6 +22354,14 @@ def _get_sam3_job(job_id: str) -> Sam3TrainingJob:
         return job
 
 
+def _get_yolo_job(job_id: str) -> YoloTrainingJob:
+    with YOLO_TRAINING_JOBS_LOCK:
+        job = YOLO_TRAINING_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_job_not_found")
+        return job
+
+
 async def _save_upload_file(
     upload: UploadFile,
     root: Path,
@@ -23927,6 +24015,65 @@ def cancel_sam3_training_job(job_id: str):
                 pass
         next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
         _sam3_job_update(job, status=next_status, message="Cancellation requested ...")
+    return {"status": job.status}
+
+
+@app.post("/yolo/train/jobs")
+def create_yolo_training_job(payload: YoloTrainRequest):
+    job_id = uuid.uuid4().hex
+    run_dir = _yolo_run_dir(job_id, create=True)
+    config = payload.dict(exclude_none=True)
+    config["paths"] = {"run_dir": str(run_dir)}
+    job = YoloTrainingJob(job_id=job_id, config=config, message="Queued (training not started)")
+    with YOLO_TRAINING_JOBS_LOCK:
+        YOLO_TRAINING_JOBS[job_id] = job
+    _yolo_write_run_meta(
+        run_dir,
+        {
+            "job_id": job_id,
+            "status": job.status,
+            "message": job.message,
+            "config": job.config,
+        },
+    )
+    return {"job_id": job_id}
+
+
+@app.get("/yolo/train/jobs")
+def list_yolo_training_jobs():
+    _prune_job_registry(YOLO_TRAINING_JOBS, YOLO_TRAINING_JOBS_LOCK)
+    with YOLO_TRAINING_JOBS_LOCK:
+        jobs = sorted(YOLO_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+        return [_serialize_yolo_job(job) for job in jobs]
+
+
+@app.get("/yolo/train/jobs/{job_id}")
+def get_yolo_training_job(job_id: str):
+    job = _get_yolo_job(job_id)
+    return _serialize_yolo_job(job)
+
+
+@app.post("/yolo/train/jobs/{job_id}/cancel")
+def cancel_yolo_training_job(job_id: str):
+    job = _get_yolo_job(job_id)
+    with YOLO_TRAINING_JOBS_LOCK:
+        if job.status in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        if job.cancel_event.is_set():
+            return {"status": job.status}
+        job.cancel_event.set()
+        next_status = job.status if job.status not in {"running", "queued"} else "cancelled"
+        _yolo_job_update(job, status=next_status, message="Cancellation requested ...")
+        run_dir = _yolo_run_dir(job.job_id, create=False)
+        _yolo_write_run_meta(
+            run_dir,
+            {
+                "job_id": job.job_id,
+                "status": job.status,
+                "message": job.message,
+                "config": job.config,
+            },
+        )
     return {"status": job.status}
 
 

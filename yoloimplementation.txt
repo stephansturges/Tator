@@ -1,0 +1,60 @@
+YOLOv8 Integration Plan (10 steps)
+
+Status key: [ ] pending  [x] done
+
+1) Backend scaffolding + safe model registry
+   - Add YOLO run/model roots under uploads/
+   - Add run metadata helpers + prune to keep best.pt + metrics only
+   - Commit: "yolo: add run storage helpers" (ed4aa63)
+   Status: [x]
+
+2) Training API skeleton
+   - Endpoints: POST /yolo/train/jobs, GET /yolo/train/jobs, GET /yolo/train/jobs/{id}, POST /yolo/train/jobs/{id}/cancel
+   - Create run records + stub responses (non-breaking)
+   Status: [x]
+
+3) Dataset integration + reuse rules
+   - Resolve dataset from Dataset Manager (current or selected)
+   - Convert to YOLO once if needed, cache by dataset_id + task
+   - Avoid duplicate dataset copies per run
+   Status: [ ]
+
+4) Training execution (YOLOv8 detect/segment)
+   - Ultralytics YOLO().train for detect/segment
+   - from-scratch vs fine-tune support
+   - Save only best.pt + metrics/artifacts + labelmap
+   Status: [ ]
+
+5) Variant catalog (YOLOv8 only)
+   - Supported variants: yolov8n/s/m/l/x (+ p2 variants if present)
+   - Endpoint: GET /yolo/variants
+   Status: [ ]
+
+6) Augmentation controls
+   - Simple, safe aug schema (flips, hsv, mosaic, mixup, crop, scale, rotate)
+   - Map UI -> API -> Ultralytics args
+   Status: [ ]
+
+7) UI tab: Train YOLO
+   - Dataset selector (current + saved)
+   - Task detect/segment
+   - Model variant dropdown (from /yolo/variants)
+   - from-scratch vs fine-tune
+   - Augmentation panel
+   - Start/Cancel/Refresh + logs
+   Status: [ ]
+
+8) T&Cs gating
+   - UI checkbox: “I have read and accept Ultralytics T&Cs”
+   - Persist in localStorage; block API without acceptance
+   Status: [ ]
+
+9) Progress + graph
+   - Persist progress snapshots (epoch, loss, mAP)
+   - UI status + small graph/sparkline
+   Status: [ ]
+
+10) Model management + README
+   - List/download/delete best.pt + metrics
+   - Docs: usage, artifacts, dataset reuse, T&Cs
+   Status: [ ]

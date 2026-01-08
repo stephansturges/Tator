@@ -28,7 +28,7 @@ Status key: [ ] pending  [x] done
 5) Variant catalog (YOLOv8 only)
    - Supported variants: yolov8n/s/m/l/x (+ p2 variants if present)
    - Endpoint: GET /yolo/variants
-   Status: [ ]
+   Status: [x]
 
 6) Augmentation controls
    - Simple, safe aug schema (flips, hsv, mosaic, mixup, crop, scale, rotate)

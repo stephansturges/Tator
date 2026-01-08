@@ -3478,6 +3478,23 @@ YOLO_KEEP_FILES = {
     "labelmap.txt",
     YOLO_RUN_META_NAME,
 }
+YOLO_VARIANTS = [
+    {"id": "yolov8n", "label": "YOLOv8 Nano", "task": "detect"},
+    {"id": "yolov8s", "label": "YOLOv8 Small", "task": "detect"},
+    {"id": "yolov8m", "label": "YOLOv8 Medium", "task": "detect"},
+    {"id": "yolov8l", "label": "YOLOv8 Large", "task": "detect"},
+    {"id": "yolov8x", "label": "YOLOv8 XLarge", "task": "detect"},
+    {"id": "yolov8n-seg", "label": "YOLOv8 Nano (seg)", "task": "segment"},
+    {"id": "yolov8s-seg", "label": "YOLOv8 Small (seg)", "task": "segment"},
+    {"id": "yolov8m-seg", "label": "YOLOv8 Medium (seg)", "task": "segment"},
+    {"id": "yolov8l-seg", "label": "YOLOv8 Large (seg)", "task": "segment"},
+    {"id": "yolov8x-seg", "label": "YOLOv8 XLarge (seg)", "task": "segment"},
+    {"id": "yolov8n-p2", "label": "YOLOv8 Nano (P2)", "task": "detect"},
+    {"id": "yolov8s-p2", "label": "YOLOv8 Small (P2)", "task": "detect"},
+    {"id": "yolov8m-p2", "label": "YOLOv8 Medium (P2)", "task": "detect"},
+    {"id": "yolov8l-p2", "label": "YOLOv8 Large (P2)", "task": "detect"},
+    {"id": "yolov8x-p2", "label": "YOLOv8 XLarge (P2)", "task": "detect"},
+]
 DATASET_REGISTRY_ROOT = Path(os.environ.get("DATASET_ROOT", "./uploads/datasets"))
 DATASET_REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_META_NAME = "dataset.json"
@@ -24352,6 +24369,14 @@ def cancel_yolo_training_job(job_id: str):
             },
         )
     return {"status": job.status}
+
+
+@app.get("/yolo/variants")
+def list_yolo_variants(task: Optional[str] = Query(None)):
+    if task:
+        task_norm = task.strip().lower()
+        return [v for v in YOLO_VARIANTS if v.get("task") == task_norm]
+    return YOLO_VARIANTS
 
 
 @app.get("/sam3/train/cache_size")

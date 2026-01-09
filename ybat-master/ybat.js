@@ -190,6 +190,9 @@
     let autoClassMarginEnabledCheckbox = null;
     let autoClassMarginValueInput = null;
     let autoClassMarginWarnCheckbox = null;
+    let yoloRegionConfInput = null;
+    let yoloRegionIouInput = null;
+    let yoloRegionMaxDetInput = null;
     let samModeCheckbox = null;
     let pointModeCheckbox = null;
     let multiPointModeCheckbox = null;
@@ -1348,7 +1351,10 @@
         datasetSummary: null,
         runNameInput: null,
         taskSelect: null,
-        variantSelect: null,
+        headTypeSelect: null,
+        scaleSelect: null,
+        variantResolved: null,
+        variantHelp: null,
         fromScratchToggle: null,
         baseWeightsInput: null,
         epochsInput: null,
@@ -1450,6 +1456,8 @@ const YOLO_TOS_STORAGE_KEY = "yoloTrainingTosAccepted";
         pollHandle: null,
         lastJobSnapshot: null,
         variants: [],
+        lastHeadType: "standard",
+        autoScratchForced: false,
     };
 
     const qwenDatasetState = {
@@ -2745,46 +2753,72 @@ const sam3TrainState = {
         return Object.keys(payload).length ? payload : null;
     }
 
-    function populateYoloVariantSelect(list) {
-        const select = yoloTrainElements.variantSelect;
-        if (!select) {
-            return;
+    function resolveYoloVariantId() {
+        const task = yoloTrainElements.taskSelect?.value || "detect";
+        const scale = (yoloTrainElements.scaleSelect?.value || "n").trim().toLowerCase();
+        const headType = yoloTrainElements.headTypeSelect?.value || "standard";
+        let model = `yolov8${scale}`;
+        if (task === "segment") {
+            return `${model}-seg`;
         }
-        select.innerHTML = "";
-        if (!Array.isArray(list) || !list.length) {
-            const option = document.createElement("option");
-            option.value = "";
-            option.textContent = "No variants available";
-            select.appendChild(option);
-            select.disabled = true;
-            yoloTrainState.variants = [];
-            return;
+        if (headType === "p2") {
+            return `${model}-p2`;
         }
-        list.forEach((entry) => {
-            const option = document.createElement("option");
-            option.value = entry.id || "";
-            option.textContent = entry.label || entry.id || "YOLO variant";
-            select.appendChild(option);
-        });
-        yoloTrainState.variants = list;
-        select.disabled = false;
-        if (!select.value || !list.some((item) => item.id === select.value)) {
-            select.value = list[0].id || "";
-        }
+        return model;
     }
 
-    async function loadYoloVariants() {
+    function updateYoloVariantSummary() {
         const task = yoloTrainElements.taskSelect?.value || "detect";
-        try {
-            const resp = await fetch(`${API_ROOT}/yolo/variants?task=${encodeURIComponent(task)}`);
-            if (!resp.ok) {
-                throw new Error(`HTTP ${resp.status}`);
+        const headTypeSelect = yoloTrainElements.headTypeSelect;
+        const baseWeightsInput = yoloTrainElements.baseWeightsInput;
+        const fromScratchToggle = yoloTrainElements.fromScratchToggle;
+        if (headTypeSelect) {
+            if (task === "segment") {
+                yoloTrainState.lastHeadType = headTypeSelect.value || yoloTrainState.lastHeadType;
+                headTypeSelect.value = "standard";
+                headTypeSelect.disabled = true;
+            } else {
+                headTypeSelect.disabled = false;
+                if (headTypeSelect.value !== yoloTrainState.lastHeadType) {
+                    headTypeSelect.value = yoloTrainState.lastHeadType || "standard";
+                }
             }
-            const data = await resp.json();
-            populateYoloVariantSelect(Array.isArray(data) ? data : []);
-        } catch (error) {
-            console.error("Failed to load YOLO variants", error);
-            populateYoloVariantSelect([]);
+        }
+        const variant = resolveYoloVariantId();
+        if (yoloTrainElements.variantResolved) {
+            yoloTrainElements.variantResolved.value = variant;
+        }
+        if (yoloTrainElements.variantHelp) {
+            const headType = headTypeSelect?.value || "standard";
+            if (task === "segment") {
+                yoloTrainElements.variantHelp.textContent = "Segmentation uses the YOLOv8 -seg weights for the selected scale.";
+            } else if (headType === "p2") {
+                yoloTrainElements.variantHelp.textContent = "P2 uses a custom head for small objects and no official pretrained weights. Supply base weights or it will train from scratch.";
+            } else {
+                yoloTrainElements.variantHelp.textContent = "Standard YOLOv8 weights are available for common scales (n/s/m/l/x).";
+            }
+        }
+        if (baseWeightsInput && fromScratchToggle) {
+            const headType = headTypeSelect?.value || "standard";
+            const hasBaseWeights = !!baseWeightsInput.value.trim();
+            if (headType === "p2" && !hasBaseWeights) {
+                if (!fromScratchToggle.checked) {
+                    fromScratchToggle.checked = true;
+                }
+                fromScratchToggle.disabled = true;
+                yoloTrainState.autoScratchForced = true;
+            } else {
+                if (yoloTrainState.autoScratchForced && fromScratchToggle.checked && hasBaseWeights) {
+                    fromScratchToggle.checked = false;
+                }
+                fromScratchToggle.disabled = false;
+                yoloTrainState.autoScratchForced = false;
+            }
+            const disableBaseWeights = fromScratchToggle.checked && headType !== "p2";
+            baseWeightsInput.disabled = disableBaseWeights;
+            if (disableBaseWeights) {
+                baseWeightsInput.value = "";
+            }
         }
     }
 
@@ -2799,7 +2833,7 @@ const sam3TrainState = {
             dataset_id: datasetId,
             run_name: yoloTrainElements.runNameInput?.value?.trim() || null,
             task: yoloTrainElements.taskSelect?.value || "detect",
-            variant: yoloTrainElements.variantSelect?.value || null,
+            variant: resolveYoloVariantId(),
             from_scratch: fromScratch,
             base_weights: fromScratch ? null : baseWeightsRaw || null,
             epochs: parseYoloNumber(yoloTrainElements.epochsInput?.value, { integer: true }),
@@ -8131,7 +8165,10 @@ function initQwenTrainingTab() {
         yoloTrainElements.datasetSummary = document.getElementById("yoloDatasetSummary");
         yoloTrainElements.runNameInput = document.getElementById("yoloRunName");
         yoloTrainElements.taskSelect = document.getElementById("yoloTask");
-        yoloTrainElements.variantSelect = document.getElementById("yoloVariant");
+        yoloTrainElements.headTypeSelect = document.getElementById("yoloHeadType");
+        yoloTrainElements.scaleSelect = document.getElementById("yoloScale");
+        yoloTrainElements.variantResolved = document.getElementById("yoloResolvedVariant");
+        yoloTrainElements.variantHelp = document.getElementById("yoloVariantHelp");
         yoloTrainElements.fromScratchToggle = document.getElementById("yoloFromScratch");
         yoloTrainElements.baseWeightsInput = document.getElementById("yoloBaseWeights");
         yoloTrainElements.epochsInput = document.getElementById("yoloEpochs");
@@ -8227,19 +8264,29 @@ function initQwenTrainingTab() {
         }
         if (yoloTrainElements.taskSelect) {
             yoloTrainElements.taskSelect.addEventListener("change", () => {
-                loadYoloVariants().catch((error) => console.error("Failed to refresh YOLO variants", error));
+                updateYoloVariantSummary();
             });
         }
-        if (yoloTrainElements.fromScratchToggle && yoloTrainElements.baseWeightsInput) {
-            const syncBaseWeights = () => {
-                const disabled = !!yoloTrainElements.fromScratchToggle.checked;
-                yoloTrainElements.baseWeightsInput.disabled = disabled;
-                if (disabled) {
-                    yoloTrainElements.baseWeightsInput.value = "";
-                }
-            };
-            yoloTrainElements.fromScratchToggle.addEventListener("change", syncBaseWeights);
-            syncBaseWeights();
+        if (yoloTrainElements.headTypeSelect) {
+            yoloTrainElements.headTypeSelect.addEventListener("change", () => {
+                yoloTrainState.lastHeadType = yoloTrainElements.headTypeSelect.value || yoloTrainState.lastHeadType;
+                updateYoloVariantSummary();
+            });
+        }
+        if (yoloTrainElements.scaleSelect) {
+            yoloTrainElements.scaleSelect.addEventListener("change", () => {
+                updateYoloVariantSummary();
+            });
+        }
+        if (yoloTrainElements.fromScratchToggle) {
+            yoloTrainElements.fromScratchToggle.addEventListener("change", () => {
+                updateYoloVariantSummary();
+            });
+        }
+        if (yoloTrainElements.baseWeightsInput) {
+            yoloTrainElements.baseWeightsInput.addEventListener("input", () => {
+                updateYoloVariantSummary();
+            });
         }
         if (yoloTrainElements.acceptTos) {
             const stored = window.localStorage.getItem(YOLO_TOS_STORAGE_KEY);
@@ -8251,9 +8298,9 @@ function initQwenTrainingTab() {
             });
         }
         loadYoloDatasetList().catch((error) => console.error("Failed to load YOLO datasets", error));
-        loadYoloVariants().catch((error) => console.error("Failed to load YOLO variants", error));
         loadYoloRunList().catch((error) => console.error("Failed to load YOLO runs", error));
         updateYoloDatasetSummary();
+        updateYoloVariantSummary();
     }
 
 
@@ -17694,17 +17741,20 @@ function initQwenTrainingTab() {
 	            });
 	    }
 
-	    document.addEventListener("DOMContentLoaded", () => {
-	        initHelpTooltips();
+    document.addEventListener("DOMContentLoaded", () => {
+        initHelpTooltips();
         autoModeCheckbox = document.getElementById("autoMode");
         autoClassMarginEnabledCheckbox = document.getElementById("autoClassMarginEnabled");
         autoClassMarginValueInput = document.getElementById("autoClassMarginValue");
         autoClassMarginWarnCheckbox = document.getElementById("autoClassMarginWarn");
         samModeCheckbox = document.getElementById("samMode");
-	        pointModeCheckbox = document.getElementById("pointMode");
-	        multiPointModeCheckbox = document.getElementById("multiPointMode");
+        pointModeCheckbox = document.getElementById("pointMode");
+        multiPointModeCheckbox = document.getElementById("multiPointMode");
         samVariantSelect = document.getElementById("samVariant");
         samPreloadCheckbox = document.getElementById("samPreload");
+        yoloRegionConfInput = document.getElementById("yoloRegionConf");
+        yoloRegionIouInput = document.getElementById("yoloRegionIou");
+        yoloRegionMaxDetInput = document.getElementById("yoloRegionMaxDet");
         polygonSimplifyInput = document.getElementById("polygonSimplifyEpsilon");
         polygonSimplifyField = document.getElementById("polygonSimplifyField");
         imagesSelectButton = document.getElementById("imagesSelect");
@@ -17837,6 +17887,248 @@ function initQwenTrainingTab() {
         const dataUrl = offCan.toDataURL("image/jpeg");
         return dataUrl.split(",")[1];
     }
+
+    async function extractBase64Region(region) {
+        const left = Math.max(0, Math.min(currentImage.width, region.x));
+        const top = Math.max(0, Math.min(currentImage.height, region.y));
+        const width = Math.max(1, Math.min(currentImage.width - left, region.width));
+        const height = Math.max(1, Math.min(currentImage.height - top, region.height));
+        const offCan = document.createElement("canvas");
+        offCan.width = Math.round(width);
+        offCan.height = Math.round(height);
+        const ctx = offCan.getContext("2d");
+        ctx.drawImage(
+            currentImage.object,
+            left,
+            top,
+            width,
+            height,
+            0,
+            0,
+            offCan.width,
+            offCan.height
+        );
+        const dataUrl = offCan.toDataURL("image/jpeg");
+        return {
+            base64: dataUrl.split(",")[1],
+            region: { x: left, y: top, width, height },
+        };
+    }
+
+    const getYoloRegionConfig = () => {
+        const conf = parseFloat(yoloRegionConfInput?.value);
+        const iou = parseFloat(yoloRegionIouInput?.value);
+        const maxDet = parseInt(yoloRegionMaxDetInput?.value, 10);
+        return {
+            conf: Number.isFinite(conf) ? conf : 0.25,
+            iou: Number.isFinite(iou) ? iou : 0.45,
+            max_det: Number.isFinite(maxDet) ? Math.max(1, maxDet) : 100,
+        };
+    };
+
+    const getClassNameById = (classId) => {
+        for (const [name, idx] of Object.entries(classes)) {
+            if (idx === classId) {
+                return name;
+            }
+        }
+        return null;
+    };
+
+    const getExpectedLabelmap = () => {
+        if (Array.isArray(loadedClassList) && loadedClassList.length) {
+            return [...loadedClassList];
+        }
+        return Object.entries(classes)
+            .sort((a, b) => a[1] - b[1])
+            .map(([name]) => name);
+    };
+
+    const summarizeYoloWarnings = (warnings) => {
+        const messages = [];
+        warnings.forEach((code) => {
+            switch (code) {
+                case "labelmap_mismatch":
+                    messages.push("YOLO region: labelmap mismatch (labels may be wrong).");
+                    break;
+                case "labelmap_missing":
+                    messages.push("YOLO region: labelmap missing on active model.");
+                    break;
+                case "conf_clamped":
+                    messages.push("YOLO region: conf clamped to [0,1].");
+                    break;
+                case "iou_clamped":
+                    messages.push("YOLO region: IoU clamped to [0,1].");
+                    break;
+                case "max_det_clamped":
+                    messages.push("YOLO region: max dets clamped.");
+                    break;
+                case "region_crop_mismatch":
+                    messages.push("YOLO region: crop size mismatch; results may be offset.");
+                    break;
+                case "full_size_missing":
+                    messages.push("YOLO region: full image size missing; results may be offset.");
+                    break;
+                default:
+                    messages.push(`YOLO region warning: ${code}`);
+                    break;
+            }
+        });
+        return messages;
+    };
+
+    const runYoloRegionDetect = async (region) => {
+        if (!currentImage) {
+            setSamStatus("Load an image before running YOLO region detect.", { variant: "warn", duration: 3000 });
+            enqueueTaskNotice("YOLO region: load an image first.");
+            return;
+        }
+        if (!Object.keys(classes).length) {
+            setSamStatus("Load classes before running YOLO region detect.", { variant: "warn", duration: 3000 });
+            enqueueTaskNotice("YOLO region: load classes first.");
+            return;
+        }
+        if (datasetType === "seg") {
+            setSamStatus("YOLO region detect is only available in bbox mode.", { variant: "warn", duration: 3500 });
+            enqueueTaskNotice("YOLO region: bbox mode only.");
+            return;
+        }
+        if (!region || region.width <= 1 || region.height <= 1) {
+            setSamStatus("Draw a larger region to run YOLO detect.", { variant: "warn", duration: 2500 });
+            enqueueTaskNotice("YOLO region: draw a larger region.");
+            return;
+        }
+        const { base64, region: croppedRegion } = await extractBase64Region(region);
+        const { conf, iou, max_det } = getYoloRegionConfig();
+        const expectedLabelmap = getExpectedLabelmap();
+        const statusToken = beginSamActionStatus("Running YOLO region detect…", { variant: "info" });
+        try {
+            const payload = {
+                image_base64: base64,
+                region: [croppedRegion.x, croppedRegion.y, croppedRegion.width, croppedRegion.height],
+                conf,
+                iou,
+                max_det,
+                center_only: true,
+                image_is_cropped: true,
+                full_width: currentImage.width,
+                full_height: currentImage.height,
+                expected_labelmap: expectedLabelmap,
+            };
+            const resp = await fetch(`${API_ROOT}/yolo/predict_region`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                const detail = err.detail || `YOLO region detect failed (${resp.status})`;
+                throw new Error(detail);
+            }
+            const data = await resp.json();
+            const detections = Array.isArray(data?.detections) ? data.detections : [];
+            const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+            let added = 0;
+            const perClassCounts = {};
+            detections.forEach((det) => {
+                const classId = typeof det.class_id === "number" ? det.class_id : -1;
+                let className = det.class_name && typeof classes[det.class_name] !== "undefined"
+                    ? det.class_name
+                    : null;
+                if (!className && classId >= 0) {
+                    className = getClassNameById(classId);
+                }
+                if (!className) {
+                    return;
+                }
+                const [x, y, width, height] = det.bbox || [];
+                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+                    return;
+                }
+                const bbox = {
+                    type: "bbox",
+                    x,
+                    y,
+                    width,
+                    height,
+                    marked: true,
+                    class: className,
+                    uuid: generateUUID(),
+                };
+                stampBboxCreation(bbox);
+                if (!bboxes[currentImage.name]) {
+                    bboxes[currentImage.name] = {};
+                }
+                if (!bboxes[currentImage.name][className]) {
+                    bboxes[currentImage.name][className] = [];
+                }
+                bboxes[currentImage.name][className].push(bbox);
+                currentBbox = {
+                    bbox,
+                    index: bboxes[currentImage.name][className].length - 1,
+                    originalX: bbox.x,
+                    originalY: bbox.y,
+                    originalWidth: bbox.width,
+                    originalHeight: bbox.height,
+                    moving: false,
+                    resizing: null,
+                };
+                added += 1;
+                perClassCounts[className] = (perClassCounts[className] || 0) + 1;
+            });
+            if (added > 0) {
+                updateBboxAfterTransform();
+                const classSummary = Object.entries(perClassCounts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 5)
+                    .map(([name, count]) => `${name} ${count}`)
+                    .join(", ");
+                const extraClasses = Object.keys(perClassCounts).length - 5;
+                const suffix = extraClasses > 0 ? ` +${extraClasses} more` : "";
+                enqueueTaskNotice(`YOLO region: added ${added} box${added === 1 ? "" : "es"} (${classSummary}${suffix}).`, { durationMs: 5000 });
+            } else {
+                enqueueTaskNotice("YOLO region: no detections.", { durationMs: 3500 });
+            }
+            if (warnings.length) {
+                summarizeYoloWarnings(warnings).forEach((message) => {
+                    enqueueTaskNotice(message, { durationMs: 5000 });
+                });
+            }
+        } catch (err) {
+            const message = String(err?.message || err || "");
+            if (message.includes("yolo_active_missing")) {
+                enqueueTaskNotice("YOLO region: no active model selected.");
+                setSamStatus("Select an active YOLO model before running region detect.", { variant: "warn", duration: 5000 });
+            } else if (message.includes("yolo_task_unknown")) {
+                enqueueTaskNotice("YOLO region: model task unknown.");
+                setSamStatus("Active YOLO model task could not be determined.", { variant: "error", duration: 5000 });
+            } else if (message.startsWith("yolo_unavailable")) {
+                enqueueTaskNotice("YOLO region: backend not ready.");
+                setSamStatus("YOLO backend unavailable (Ultralytics missing).", { variant: "error", duration: 6000 });
+            } else {
+                enqueueTaskNotice("YOLO region: failed.");
+                setSamStatus(`YOLO region detect error: ${message}`, { variant: "error", duration: 5000 });
+            }
+        } finally {
+            endSamActionStatus(statusToken);
+        }
+    };
+
+    const shortcutToastState = {
+        lastShown: {},
+        cooldownMs: 1200,
+    };
+
+    const showShortcutToast = (key, message, { durationMs = 2500, cooldownMs = null } = {}) => {
+        const now = Date.now();
+        const last = shortcutToastState.lastShown[key] || 0;
+        const windowMs = Number.isFinite(cooldownMs) ? cooldownMs : shortcutToastState.cooldownMs;
+        if (now - last < windowMs) {
+            return;
+        }
+        shortcutToastState.lastShown[key] = now;
+        enqueueTaskNotice(message, { durationMs });
+    };
 
     async function buildSamImagePayload({ forceBase64 = false, variantOverride = null, preferredToken = null } = {}) {
         const token = preferredToken ?? getCurrentSamToken(variantOverride);
@@ -18939,7 +19231,13 @@ function initQwenTrainingTab() {
         shiftSelectStartRealX: 0,
         shiftSelectStartRealY: 0,
         shiftSelectEndRealX: 0,
-        shiftSelectEndRealY: 0
+        shiftSelectEndRealY: 0,
+        yoloKeyActive: false,
+        yoloDragActive: false,
+        yoloDragStartRealX: 0,
+        yoloDragStartRealY: 0,
+        yoloDragEndRealX: 0,
+        yoloDragEndRealY: 0
     };
 
     document.addEventListener("contextmenu", function (e) {
@@ -18998,6 +19296,7 @@ function initQwenTrainingTab() {
                 drawNewBbox(context);
                 drawExistingBboxes(context);
                 drawSelectionRect(context);
+                drawYoloSelectionRect(context);
                 drawMultiPointMarkers(context);
                 drawCross(context);
             } else {
@@ -19036,7 +19335,7 @@ function initQwenTrainingTab() {
     const drawNewBbox = (context) => {
         const isSegDataset = datasetType === "seg";
         const segBboxMode = isSegDataset && !polygonDrawEnabled;
-        if (mouse.shiftKeyActive || mouse.shiftSelectDrag) {
+        if (mouse.shiftKeyActive || mouse.shiftSelectDrag || mouse.yoloKeyActive || mouse.yoloDragActive) {
             return;
         }
         if (isSegDataset && polygonDrawEnabled && !samMode) {
@@ -19266,6 +19565,31 @@ function initQwenTrainingTab() {
         context.restore();
     };
 
+    const drawYoloSelectionRect = (context) => {
+        if (!mouse.yoloDragActive) {
+            return;
+        }
+        const startX = mouse.yoloDragStartRealX;
+        const startY = mouse.yoloDragStartRealY;
+        const endX = mouse.yoloDragEndRealX;
+        const endY = mouse.yoloDragEndRealY;
+        const left = Math.min(startX, endX);
+        const top = Math.min(startY, endY);
+        const width = Math.abs(endX - startX);
+        const height = Math.abs(endY - startY);
+        if (width < 1 || height < 1) {
+            return;
+        }
+        context.save();
+        context.setLineDash([6 * scale, 4 * scale]);
+        context.lineWidth = Math.max(1.5, 1.5 * scale);
+        context.strokeStyle = "#3b82f6";
+        context.fillStyle = "rgba(59, 130, 246, 0.10)";
+        context.strokeRect(zoomX(left), zoomY(top), zoom(width), zoom(height));
+        context.fillRect(zoomX(left), zoomY(top), zoom(width), zoom(height));
+        context.restore();
+    };
+
     function getCornerCoordinates(bbox, corner) {
         const x1 = bbox.x;
         const y1 = bbox.y;
@@ -19369,6 +19693,23 @@ function initQwenTrainingTab() {
         canvas.element.addEventListener("mousedown", trackPointer);
         canvas.element.addEventListener("mouseup", trackPointer);
         canvas.element.addEventListener("mouseout", trackPointer);
+        document.addEventListener("mouseup", () => {
+            if (!mouse.yoloDragActive || !currentImage) {
+                return;
+            }
+            const left = Math.min(mouse.yoloDragStartRealX, mouse.yoloDragEndRealX);
+            const top = Math.min(mouse.yoloDragStartRealY, mouse.yoloDragEndRealY);
+            const width = Math.abs(mouse.yoloDragEndRealX - mouse.yoloDragStartRealX);
+            const height = Math.abs(mouse.yoloDragEndRealY - mouse.yoloDragStartRealY);
+            mouse.buttonL = false;
+            mouse.buttonR = false;
+            mouse.yoloDragActive = false;
+            runYoloRegionDetect({ x: left, y: top, width, height });
+        });
+        window.addEventListener("blur", () => {
+            mouse.yoloKeyActive = false;
+            mouse.yoloDragActive = false;
+        });
     };
 
     const trackWheel = (event) => {
@@ -19414,6 +19755,14 @@ function initQwenTrainingTab() {
                 mouse.buttonR = true;
             } else if (event.which === 1) {
                 mouse.buttonL = true;
+                if (mouse.yoloKeyActive && currentImage) {
+                    mouse.yoloDragActive = true;
+                    mouse.yoloDragStartRealX = mouse.realX;
+                    mouse.yoloDragStartRealY = mouse.realY;
+                    mouse.yoloDragEndRealX = mouse.realX;
+                    mouse.yoloDragEndRealY = mouse.realY;
+                    return;
+                }
                 if (event.shiftKey && currentImage) {
                     mouse.shiftSelectKind = event.altKey ? "neg" : "pos";
                     const shiftHit = findBboxAtPoint(mouse.realX, mouse.realY);
@@ -19440,6 +19789,11 @@ function initQwenTrainingTab() {
             mouse.shiftSelectEndRealX = mouse.realX;
             mouse.shiftSelectEndRealY = mouse.realY;
         }
+        if (event.type === "mousemove" && mouse.yoloDragActive) {
+            mouse.yoloDragEndRealX = mouse.realX;
+            mouse.yoloDragEndRealY = mouse.realY;
+            return;
+        }
         const isSegDataset = datasetType === "seg";
         if (isSegDataset) {
             const handled = await handlePolygonPointer(event, oldRealX, oldRealY);
@@ -19461,6 +19815,17 @@ function initQwenTrainingTab() {
         }
         if (event.type === "mouseup" || event.type === "mouseout") {
             if (mouse.buttonL && currentImage !== null) {
+                if (mouse.yoloDragActive) {
+                    const left = Math.min(mouse.yoloDragStartRealX, mouse.yoloDragEndRealX);
+                    const top = Math.min(mouse.yoloDragStartRealY, mouse.yoloDragEndRealY);
+                    const width = Math.abs(mouse.yoloDragEndRealX - mouse.yoloDragStartRealX);
+                    const height = Math.abs(mouse.yoloDragEndRealY - mouse.yoloDragStartRealY);
+                    mouse.buttonL = false;
+                    mouse.buttonR = false;
+                    mouse.yoloDragActive = false;
+                    await runYoloRegionDetect({ x: left, y: top, width, height });
+                    return;
+                }
                 if (mouse.shiftSelectHit) {
                     setBboxMarkedState({ additive: true, negative: mouse.shiftSelectKind === "neg" });
                     mouse.buttonL = false;
@@ -20937,10 +21302,15 @@ function initQwenTrainingTab() {
                 if (datasetType !== "seg") {
                     setDatasetType("seg");
                     setPolygonDrawEnabled(true);
+                    showShortcutToast("polygon_toggle", "Polygon draw: ON (seg mode).");
                     event.preventDefault();
                     return;
                 }
                 setPolygonDrawEnabled(!polygonDrawEnabled);
+                showShortcutToast(
+                    "polygon_toggle",
+                    `Polygon draw: ${polygonDrawEnabled ? "ON" : "OFF"}.`
+                );
                 event.preventDefault();
                 return;
             }
@@ -20955,7 +21325,15 @@ function initQwenTrainingTab() {
                     };
                     updateSamModeState(false, { preservePoints: true });
                     updateAutoModeState(false);
+                    showShortcutToast("hold_z", "Hold Z: SAM/Auto paused.");
                 }
+                event.preventDefault();
+                return;
+            }
+
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 82 || event.key === "r" || event.key === "R")) {
+                mouse.yoloKeyActive = true;
+                showShortcutToast("yolo_region", "YOLO region mode: drag a box to scan (zoom in for more detail).", { durationMs: 4000, cooldownMs: 2000 });
                 event.preventDefault();
                 return;
             }
@@ -20963,6 +21341,7 @@ function initQwenTrainingTab() {
             if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 88 || event.key === "x" || event.key === "X")) {
                 event.preventDefault();
                 handleXHotkeyPress();
+                showShortcutToast("magic_tweak", "Magic tweak requested.");
                 return;
             }
 
@@ -20972,6 +21351,7 @@ function initQwenTrainingTab() {
                 if (selectedBboxes.size) {
                     const removed = deleteSelectedBboxes();
                     if (removed > 0) {
+                        showShortcutToast("delete_bbox", `Deleted ${removed} selection${removed === 1 ? "" : "s"}.`);
                         event.preventDefault();
                         return;
                     }
@@ -20980,6 +21360,7 @@ function initQwenTrainingTab() {
                     bboxes[currentImage.name][currentBbox.bbox.class].splice(currentBbox.index, 1);
                     currentBbox = null;
                     document.body.style.cursor = "default";
+                    showShortcutToast("delete_bbox", "Deleted 1 bbox.");
                 }
                 event.preventDefault();
             }
@@ -21005,17 +21386,20 @@ function initQwenTrainingTab() {
                     }
                 }
                 if (removed) {
+                    showShortcutToast("delete_latest", "Deleted latest bbox.");
                     event.preventDefault();
                 }
             }
             // 'a' => toggle auto class
             if (key === 65 && !modeSnapshot) {
                 updateAutoModeState(!autoMode);
+                showShortcutToast("auto_toggle", `Auto-class: ${autoMode ? "ON" : "OFF"}.`);
                 event.preventDefault();
             }
             // 's' => toggle SAM
             if (key === 83 && !modeSnapshot) {
                 updateSamModeState(!samMode);
+                showShortcutToast("sam_toggle", `SAM mode: ${samMode ? "ON" : "OFF"}.`);
                 event.preventDefault();
             }
             // 'd' => toggle SAM point mode
@@ -21028,6 +21412,7 @@ function initQwenTrainingTab() {
                 } else {
                     updatePointModeState(false);
                 }
+                showShortcutToast("sam_point_toggle", `SAM point: ${pointMode ? "ON" : "OFF"}.`);
                 event.preventDefault();
             }
             // 'm' => toggle SAM multi-point mode
@@ -21040,27 +21425,32 @@ function initQwenTrainingTab() {
                 } else {
                     updateMultiPointState(false);
                 }
+                showShortcutToast("sam_multi_toggle", `SAM multi-point: ${multiPointMode ? "ON" : "OFF"}.`);
                 event.preventDefault();
             }
             // '1' => SAM3 similarity (requires SAM3 predictor loaded for current image)
             if (!event.repeat && (key === 49 || event.key === "1") && !modeSnapshot) {
                 triggerSam3SimilarityHotkey();
+                showShortcutToast("sam3_similarity", "SAM3 similarity requested.");
                 event.preventDefault();
                 return;
             }
             // 'f' => add positive point
             if (!event.repeat && key === 70 && multiPointMode && !modeSnapshot) {
                 addMultiPointAnnotation(1);
+                showShortcutToast("multi_point_pos", "Multi-point: +positive.", { cooldownMs: 600 });
                 event.preventDefault();
             }
             // 'g' => add negative point
             if (!event.repeat && key === 71 && multiPointMode && !modeSnapshot) {
                 addMultiPointAnnotation(0);
+                showShortcutToast("multi_point_neg", "Multi-point: +negative.", { cooldownMs: 600 });
                 event.preventDefault();
             }
             // Enter => submit multi-point selection
             if (!event.repeat && key === 13 && multiPointMode && !modeSnapshot) {
                 submitMultiPointSelection();
+                showShortcutToast("multi_point_submit", "Multi-point submitted.");
                 event.preventDefault();
                 return;
             }
@@ -21133,10 +21523,13 @@ function initQwenTrainingTab() {
         });
 
         document.addEventListener("keyup", (event) => {
+            const key = event.keyCode || event.charCode;
+            if (key === 82 || event.key === "r" || event.key === "R") {
+                mouse.yoloKeyActive = false;
+            }
             if (activeTab !== TAB_LABELING) {
                 return;
             }
-            const key = event.keyCode || event.charCode;
             if (modeSnapshot && (key === 90 || event.key === "z" || event.key === "Z")) {
                 const snapshot = modeSnapshot;
                 modeSnapshot = null;
@@ -21144,6 +21537,7 @@ function initQwenTrainingTab() {
                 updateAutoModeState(snapshot.auto);
                 updatePointModeState(snapshot.point);
                 updateMultiPointState(snapshot.multi);
+                showShortcutToast("hold_z", "Z released: modes restored.", { cooldownMs: 800 });
                 event.preventDefault();
             }
         });

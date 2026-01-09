@@ -3370,6 +3370,39 @@ class YoloActiveRequest(BaseModel):
     run_id: str
 
 
+class YoloRegionRequest(BaseModel):
+    image_base64: str
+    region: List[float]
+    conf: Optional[float] = 0.25
+    iou: Optional[float] = 0.45
+    max_det: Optional[int] = 300
+    center_only: Optional[bool] = True
+    image_is_cropped: Optional[bool] = False
+    full_width: Optional[int] = None
+    full_height: Optional[int] = None
+    expected_labelmap: Optional[List[str]] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_region(cls, values):  # noqa: N805
+        region = values.get("region")
+        if not isinstance(region, list) or len(region) < 4:
+            raise ValueError("region_required")
+        return values
+
+
+class YoloRegionDetection(BaseModel):
+    bbox: List[float]
+    class_id: int
+    class_name: Optional[str] = None
+    score: Optional[float] = None
+
+
+class YoloRegionResponse(BaseModel):
+    detections: List[YoloRegionDetection]
+    labelmap: Optional[List[str]] = None
+    warnings: Optional[List[str]] = None
+
+
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None
     label: Optional[str] = None
@@ -3479,11 +3512,18 @@ YOLO_KEEP_FILES = {
     "best.pt",
     "results.csv",
     "args.yaml",
+    "data.yaml",
     "metrics.json",
     "metrics_series.json",
     "labelmap.txt",
     YOLO_RUN_META_NAME,
 }
+
+YOLO_INFER_LOCK = threading.RLock()
+yolo_infer_model: Any = None
+yolo_infer_path: Optional[str] = None
+yolo_infer_labelmap: List[str] = []
+yolo_infer_task: Optional[str] = None
 YOLO_VARIANTS = [
     {"id": "yolov8n", "label": "YOLOv8 Nano", "task": "detect"},
     {"id": "yolov8s", "label": "YOLOv8 Small", "task": "detect"},
@@ -4511,6 +4551,9 @@ def _yolo_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) ->
     if not run_dir.exists():
         return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
     keep = set(keep_files or YOLO_KEEP_FILES)
+    for child in run_dir.iterdir():
+        if child.is_file() and child.suffix == ".yaml":
+            keep.add(child.name)
     weights_dir = run_dir / "weights"
     if weights_dir.exists():
         best_path = weights_dir / "best.pt"
@@ -4760,6 +4803,13 @@ def _yolo_device_arg(devices: Optional[List[int]]) -> Optional[str]:
     return ",".join(cleaned) if cleaned else None
 
 
+def _yolo_p2_scale(model_id: str) -> Optional[str]:
+    match = re.match(r"^yolov8([nsmlx])-p2$", model_id)
+    if match:
+        return match.group(1)
+    return None
+
+
 def _yolo_resolve_model_source(
     variant: Optional[str],
     task: str,
@@ -4767,6 +4817,8 @@ def _yolo_resolve_model_source(
     base_weights: Optional[str],
 ) -> Tuple[str, str]:
     model_id = (variant or "yolov8n").strip()
+    if _yolo_p2_scale(model_id):
+        return "cfg", "yolov8-p2.yaml"
     if base_weights:
         return "custom", base_weights
     if from_scratch:
@@ -4775,6 +4827,33 @@ def _yolo_resolve_model_source(
     if task == "segment" and "seg" not in model_id:
         model_id = f"{model_id}-seg"
     return "weights", f"{model_id}.pt"
+
+
+def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
+    global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
+    active = _load_yolo_active()
+    if not isinstance(active, dict):
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="yolo_active_missing")
+    best_path = active.get("best_path")
+    if not best_path:
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="yolo_active_missing")
+    labelmap_path = active.get("labelmap_path")
+    task = active.get("task")
+    with YOLO_INFER_LOCK:
+        if yolo_infer_model is not None and yolo_infer_path == best_path:
+            return yolo_infer_model, yolo_infer_labelmap, yolo_infer_task
+        try:
+            from ultralytics import YOLO  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"yolo_unavailable:{exc}") from exc
+        model = YOLO(best_path)
+        labelmap = _yolo_load_labelmap(Path(labelmap_path)) if labelmap_path else []
+        resolved_task = task or getattr(model, "task", None)
+        yolo_infer_model = model
+        yolo_infer_path = best_path
+        yolo_infer_labelmap = labelmap
+        yolo_infer_task = resolved_task
+        return model, labelmap, resolved_task
 
 
 def _yolo_build_aug_args(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -22714,9 +22793,12 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
         data_yaml = _yolo_write_data_yaml(run_dir, dataset_root, dataset_info.get("yolo_layout"), dataset_info.get("yolo_labelmap_path"))
         from_scratch = bool(config.get("from_scratch"))
         base_weights = config.get("base_weights")
-        variant = config.get("variant")
+        variant = config.get("variant") or ""
+        if task == "segment" and _yolo_p2_scale(variant):
+            _yolo_job_update(job, status="failed", message="P2 head is only supported for detection.", error="yolo_p2_segment")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
         _, model_source = _yolo_resolve_model_source(variant, task, from_scratch, base_weights)
-        _yolo_job_log(job, f"Model source: {model_source}")
         device_arg = _yolo_device_arg(config.get("devices"))
         train_kwargs = {
             "data": str(data_yaml),
@@ -22731,6 +22813,26 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             "name": "train",
             "exist_ok": True,
         }
+        p2_scale = _yolo_p2_scale(variant)
+        if p2_scale and model_source.endswith("yolov8-p2.yaml"):
+            try:
+                import ultralytics  # type: ignore
+            except Exception as exc:  # noqa: BLE001
+                _yolo_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
+                _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+                return
+            base_cfg = Path(ultralytics.__file__).resolve().parent / "cfg" / "models" / "v8" / "yolov8-p2.yaml"
+            cfg_payload = yaml.safe_load(base_cfg.read_text())
+            cfg_payload["scale"] = p2_scale
+            p2_cfg = run_dir / f"yolov8{p2_scale}-p2.yaml"
+            p2_cfg.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
+            model_source = str(p2_cfg)
+            if base_weights:
+                train_kwargs["pretrained"] = base_weights
+            else:
+                train_kwargs["pretrained"] = False
+            _yolo_job_log(job, f"P2 variant: scale={p2_scale} (config={p2_cfg.name}, pretrained={train_kwargs.get('pretrained')})")
+        _yolo_job_log(job, f"Model source: {model_source}")
         train_kwargs.update(_yolo_build_aug_args(config.get("augmentations")))
         train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
         try:
@@ -24565,6 +24667,88 @@ def set_yolo_active(payload: YoloActiveRequest):
         "variant": config.get("variant"),
     }
     return _save_yolo_active(active_payload)
+
+
+@app.post("/yolo/predict_region", response_model=YoloRegionResponse)
+def yolo_predict_region(payload: YoloRegionRequest):
+    model, labelmap, task = _ensure_yolo_inference_runtime()
+    task_name = str(task).lower() if task else None
+    if not task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
+    if "segment" in task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_region_detect_requires_bbox")
+    pil_img, _ = _decode_image_base64(payload.image_base64)
+    img_w, img_h = pil_img.size
+    full_w = int(payload.full_width) if payload.full_width else img_w
+    full_h = int(payload.full_height) if payload.full_height else img_h
+    x, y, w, h = [float(v) for v in payload.region[:4]]
+    left = max(0.0, min(full_w, x))
+    top = max(0.0, min(full_h, y))
+    right = max(left + 1.0, min(full_w, x + w))
+    bottom = max(top + 1.0, min(full_h, y + h))
+    warnings: List[str] = []
+    if payload.image_is_cropped:
+        if payload.full_width is None or payload.full_height is None:
+            warnings.append("full_size_missing")
+        if int(right - left) != img_w or int(bottom - top) != img_h:
+            warnings.append("region_crop_mismatch")
+        right = min(full_w, left + img_w)
+        bottom = min(full_h, top + img_h)
+        crop = pil_img
+    else:
+        crop = pil_img.crop((left, top, right, bottom))
+    conf = float(payload.conf) if payload.conf is not None else 0.25
+    iou = float(payload.iou) if payload.iou is not None else 0.45
+    max_det = int(payload.max_det) if payload.max_det is not None else 300
+    if conf < 0 or conf > 1:
+        conf = min(1.0, max(0.0, conf))
+        warnings.append("conf_clamped")
+    if iou < 0 or iou > 1:
+        iou = min(1.0, max(0.0, iou))
+        warnings.append("iou_clamped")
+    if max_det < 1:
+        max_det = 1
+        warnings.append("max_det_clamped")
+    if max_det > 5000:
+        max_det = 5000
+        warnings.append("max_det_clamped")
+    expected = payload.expected_labelmap or []
+    if expected and not labelmap:
+        warnings.append("labelmap_missing")
+    elif expected and labelmap and expected != labelmap:
+        warnings.append("labelmap_mismatch")
+    results = model.predict(crop, conf=conf, iou=iou, max_det=max_det, verbose=False)
+    detections: List[YoloRegionDetection] = []
+    if results:
+        det_boxes = results[0].boxes
+        if det_boxes is not None and det_boxes.xyxy is not None:
+            xyxy = det_boxes.xyxy.cpu().numpy()
+            confs = det_boxes.conf.cpu().numpy() if det_boxes.conf is not None else None
+            classes = det_boxes.cls.cpu().numpy() if det_boxes.cls is not None else None
+            for idx, box in enumerate(xyxy):
+                x1, y1, x2, y2 = [float(v) for v in box[:4]]
+                cx = (x1 + x2) / 2 + left
+                cy = (y1 + y2) / 2 + top
+                if payload.center_only and not (left <= cx <= right and top <= cy <= bottom):
+                    continue
+                abs_x = max(0.0, min(full_w, x1 + left))
+                abs_y = max(0.0, min(full_h, y1 + top))
+                abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+                abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+                class_id = int(classes[idx]) if classes is not None else -1
+                class_name = None
+                if class_id >= 0 and class_id < len(labelmap):
+                    class_name = labelmap[class_id]
+                score = float(confs[idx]) if confs is not None else None
+                detections.append(
+                    YoloRegionDetection(
+                        bbox=[abs_x, abs_y, abs_w, abs_h],
+                        class_id=class_id,
+                        class_name=class_name,
+                        score=score,
+                    )
+                )
+    return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
 @app.get("/yolo/runs/{run_id}/download")

@@ -145,6 +145,19 @@
                                 <label for="multiPointMode">Multi-Point Mode</label>
                                 <input type="checkbox" id="multiPointMode" name="multiPointMode" />
                             </div>
+                            <div class="training-field">
+                                <label for="yoloRegionConf">YOLO region conf<span class="help-icon" title="Hold R and drag to run YOLO only on the selected region. Zooming in gives the model more detail. Lower = more detections, higher = stricter.">?</span></label>
+                                <input type="number" id="yoloRegionConf" value="0.25" min="0" max="1" step="0.01" />
+                                <div class="training-help">Runs YOLO on the crop at full model resolution. Detections are kept if their center lands inside the region.</div>
+                            </div>
+                            <div class="training-field">
+                                <label for="yoloRegionIou">YOLO region IoU<span class="help-icon" title="Non-max suppression threshold for YOLO. Higher keeps more overlapping boxes.">?</span></label>
+                                <input type="number" id="yoloRegionIou" value="0.45" min="0" max="1" step="0.01" />
+                            </div>
+                            <div class="training-field">
+                                <label for="yoloRegionMaxDet">YOLO max dets<span class="help-icon" title="Max boxes returned for the selected region.">?</span></label>
+                                <input type="number" id="yoloRegionMaxDet" value="100" min="1" step="1" />
+                            </div>
                             <div class="training-field" id="polygonSimplifyField">
                                 <label for="polygonSimplifyEpsilon">Polygon detail</label>
                                 <input type="range" id="polygonSimplifyEpsilon" name="polygonSimplifyEpsilon" min="0" max="40" step="0.5" value="20" />
@@ -272,6 +285,7 @@
                                     <li>Shift + click — add/remove selection (green)</li>
                                     <li>Shift + drag — selection box (green)</li>
                                     <li>Shift + Alt + click/drag — select negatives for SAM3 similarity (red)</li>
+                                    <li>Hold R + drag — YOLO region detect (keeps detections whose center is inside; zoom in for more detail)</li>
                                     <li>Mouse wheel — zoom</li>
                                     <li>Shift + wheel — pan</li>
                                     <li>Right-click drag — pan</li>
@@ -1102,8 +1116,28 @@
                                 </select>
                             </div>
                             <div>
-                                <label for="yoloVariant">Model variant</label>
-                                <select id="yoloVariant"></select>
+                                <label for="yoloHeadType">Head type</label>
+                                <select id="yoloHeadType" title="P2 adds a higher-resolution head for small objects. No official P2 pretrained weights are provided by Ultralytics.">
+                                    <option value="standard" selected>Standard (P3-P5)</option>
+                                    <option value="p2">P2 (small-object head)</option>
+                                </select>
+                                <div class="training-help">P2 variants use a custom P2 head and start from scratch unless you supply base weights.</div>
+                            </div>
+                            <div>
+                                <label for="yoloScale">Model scale</label>
+                                <select id="yoloScale" title="Scale controls width/depth. Larger = more accuracy, more VRAM.">
+                                    <option value="n" selected>Nano (fastest)</option>
+                                    <option value="s">Small</option>
+                                    <option value="m">Medium</option>
+                                    <option value="l">Large</option>
+                                    <option value="x">XLarge</option>
+                                </select>
+                                <div class="training-help">Scale is baked into the model config (n/s/m/l/x). Larger scales train slower and need more VRAM.</div>
+                            </div>
+                            <div>
+                                <label for="yoloResolvedVariant">Resolved model id</label>
+                                <input type="text" id="yoloResolvedVariant" readonly />
+                                <div class="training-help" id="yoloVariantHelp">Standard uses official YOLOv8 pretrained weights when available.</div>
                             </div>
                             <div class="checkbox-row">
                                 <label><input type="checkbox" id="yoloFromScratch" /> Train from scratch (no pretrained weights)</label>
@@ -1111,6 +1145,7 @@
                             <div>
                                 <label for="yoloBaseWeights">Base weights (optional)</label>
                                 <input type="text" id="yoloBaseWeights" placeholder="yolov8n.pt or /path/to/weights" />
+                                <div class="training-help">For P2 heads there are no official pretrained weights, so leave blank to start from scratch or point to your own weights.</div>
                             </div>
                         </div>
                         <div class="training-grid">

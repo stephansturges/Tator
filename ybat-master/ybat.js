@@ -190,6 +190,7 @@
     let autoClassMarginEnabledCheckbox = null;
     let autoClassMarginValueInput = null;
     let autoClassMarginWarnCheckbox = null;
+    let regionDetectorSelect = null;
     let yoloRegionConfInput = null;
     let yoloRegionIouInput = null;
     let yoloRegionMaxDetInput = null;
@@ -18531,6 +18532,7 @@ function initQwenTrainingTab() {
         multiPointModeCheckbox = document.getElementById("multiPointMode");
         samVariantSelect = document.getElementById("samVariant");
         samPreloadCheckbox = document.getElementById("samPreload");
+        regionDetectorSelect = document.getElementById("regionDetector");
         yoloRegionConfInput = document.getElementById("yoloRegionConf");
         yoloRegionIouInput = document.getElementById("yoloRegionIou");
         yoloRegionMaxDetInput = document.getElementById("yoloRegionMaxDet");
@@ -18617,6 +18619,15 @@ function initQwenTrainingTab() {
             });
         }
 
+        if (regionDetectorSelect && yoloRegionIouInput) {
+            const syncRegionDetector = () => {
+                const mode = (regionDetectorSelect.value || "yolo").toLowerCase();
+                yoloRegionIouInput.disabled = mode !== "yolo";
+            };
+            regionDetectorSelect.addEventListener("change", syncRegionDetector);
+            syncRegionDetector();
+        }
+
 
         if (samVariantSelect) {
             samVariant = samVariantSelect.value || "sam3";
@@ -18694,11 +18705,16 @@ function initQwenTrainingTab() {
         };
     }
 
-    const getYoloRegionConfig = () => {
+    const getRegionDetectorMode = () => {
+        return (regionDetectorSelect?.value || "yolo").toLowerCase();
+    };
+
+    const getRegionDetectConfig = () => {
         const conf = parseFloat(yoloRegionConfInput?.value);
         const iou = parseFloat(yoloRegionIouInput?.value);
         const maxDet = parseInt(yoloRegionMaxDetInput?.value, 10);
         return {
+            mode: getRegionDetectorMode(),
             conf: Number.isFinite(conf) ? conf : 0.25,
             iou: Number.isFinite(iou) ? iou : 0.45,
             max_det: Number.isFinite(maxDet) ? Math.max(1, maxDet) : 100,
@@ -18723,62 +18739,127 @@ function initQwenTrainingTab() {
             .map(([name]) => name);
     };
 
-    const summarizeYoloWarnings = (warnings) => {
+    const summarizeRegionWarnings = (warnings, labelPrefix) => {
+        const prefix = labelPrefix || "Region";
         const messages = [];
         warnings.forEach((code) => {
             switch (code) {
                 case "labelmap_mismatch":
-                    messages.push("YOLO region: labelmap mismatch (labels may be wrong).");
+                    messages.push(`${prefix}: labelmap mismatch (labels may be wrong).`);
                     break;
                 case "labelmap_missing":
-                    messages.push("YOLO region: labelmap missing on active model.");
+                    messages.push(`${prefix}: labelmap missing on active model.`);
                     break;
                 case "conf_clamped":
-                    messages.push("YOLO region: conf clamped to [0,1].");
+                    messages.push(`${prefix}: conf clamped to [0,1].`);
                     break;
                 case "iou_clamped":
-                    messages.push("YOLO region: IoU clamped to [0,1].");
+                    messages.push(`${prefix}: IoU clamped to [0,1].`);
                     break;
                 case "max_det_clamped":
-                    messages.push("YOLO region: max dets clamped.");
+                    messages.push(`${prefix}: max dets clamped.`);
                     break;
                 case "region_crop_mismatch":
-                    messages.push("YOLO region: crop size mismatch; results may be offset.");
+                    messages.push(`${prefix}: crop size mismatch; results may be offset.`);
                     break;
                 case "full_size_missing":
-                    messages.push("YOLO region: full image size missing; results may be offset.");
+                    messages.push(`${prefix}: full image size missing; results may be offset.`);
                     break;
                 default:
-                    messages.push(`YOLO region warning: ${code}`);
+                    messages.push(`${prefix} warning: ${code}`);
                     break;
             }
         });
         return messages;
     };
 
+    const applyRegionDetections = (detections, labelPrefix) => {
+        let added = 0;
+        const perClassCounts = {};
+        detections.forEach((det) => {
+            const classId = typeof det.class_id === "number" ? det.class_id : -1;
+            let className = det.class_name && typeof classes[det.class_name] !== "undefined"
+                ? det.class_name
+                : null;
+            if (!className && classId >= 0) {
+                className = getClassNameById(classId);
+            }
+            if (!className) {
+                return;
+            }
+            const [x, y, width, height] = det.bbox || [];
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+                return;
+            }
+            const bbox = {
+                type: "bbox",
+                x,
+                y,
+                width,
+                height,
+                marked: true,
+                class: className,
+                uuid: generateUUID(),
+            };
+            stampBboxCreation(bbox);
+            if (!bboxes[currentImage.name]) {
+                bboxes[currentImage.name] = {};
+            }
+            if (!bboxes[currentImage.name][className]) {
+                bboxes[currentImage.name][className] = [];
+            }
+            bboxes[currentImage.name][className].push(bbox);
+            currentBbox = {
+                bbox,
+                index: bboxes[currentImage.name][className].length - 1,
+                originalX: bbox.x,
+                originalY: bbox.y,
+                originalWidth: bbox.width,
+                originalHeight: bbox.height,
+                moving: false,
+                resizing: null,
+            };
+            added += 1;
+            perClassCounts[className] = (perClassCounts[className] || 0) + 1;
+        });
+        if (added > 0) {
+            updateBboxAfterTransform();
+            const classSummary = Object.entries(perClassCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([name, count]) => `${name} ${count}`)
+                .join(", ");
+            const extraClasses = Object.keys(perClassCounts).length - 5;
+            const suffix = extraClasses > 0 ? ` +${extraClasses} more` : "";
+            enqueueTaskNotice(`${labelPrefix}: added ${added} box${added === 1 ? "" : "es"} (${classSummary}${suffix}).`, { durationMs: 5000 });
+        } else {
+            enqueueTaskNotice(`${labelPrefix}: no detections.`, { durationMs: 3500 });
+        }
+    };
+
     const runYoloRegionDetect = async (region) => {
         if (!currentImage) {
-            setSamStatus("Load an image before running YOLO region detect.", { variant: "warn", duration: 3000 });
+            setSamStatus("Load an image before running region detect.", { variant: "warn", duration: 3000 });
             enqueueTaskNotice("YOLO region: load an image first.");
             return;
         }
         if (!Object.keys(classes).length) {
-            setSamStatus("Load classes before running YOLO region detect.", { variant: "warn", duration: 3000 });
+            setSamStatus("Load classes before running region detect.", { variant: "warn", duration: 3000 });
             enqueueTaskNotice("YOLO region: load classes first.");
             return;
         }
         if (datasetType === "seg") {
-            setSamStatus("YOLO region detect is only available in bbox mode.", { variant: "warn", duration: 3500 });
+            setSamStatus("Region detect is only available in bbox mode.", { variant: "warn", duration: 3500 });
             enqueueTaskNotice("YOLO region: bbox mode only.");
             return;
         }
         if (!region || region.width <= 1 || region.height <= 1) {
-            setSamStatus("Draw a larger region to run YOLO detect.", { variant: "warn", duration: 2500 });
+            setSamStatus("Draw a larger region to run region detect.", { variant: "warn", duration: 2500 });
             enqueueTaskNotice("YOLO region: draw a larger region.");
             return;
         }
         const { base64, region: croppedRegion } = await extractBase64Region(region);
-        const { conf, iou, max_det } = getYoloRegionConfig();
+        const { conf, iou, max_det } = getRegionDetectConfig();
         const expectedLabelmap = getExpectedLabelmap();
         const statusToken = beginSamActionStatus("Running YOLO region detect…", { variant: "info" });
         try {
@@ -18807,69 +18888,9 @@ function initQwenTrainingTab() {
             const data = await resp.json();
             const detections = Array.isArray(data?.detections) ? data.detections : [];
             const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
-            let added = 0;
-            const perClassCounts = {};
-            detections.forEach((det) => {
-                const classId = typeof det.class_id === "number" ? det.class_id : -1;
-                let className = det.class_name && typeof classes[det.class_name] !== "undefined"
-                    ? det.class_name
-                    : null;
-                if (!className && classId >= 0) {
-                    className = getClassNameById(classId);
-                }
-                if (!className) {
-                    return;
-                }
-                const [x, y, width, height] = det.bbox || [];
-                if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
-                    return;
-                }
-                const bbox = {
-                    type: "bbox",
-                    x,
-                    y,
-                    width,
-                    height,
-                    marked: true,
-                    class: className,
-                    uuid: generateUUID(),
-                };
-                stampBboxCreation(bbox);
-                if (!bboxes[currentImage.name]) {
-                    bboxes[currentImage.name] = {};
-                }
-                if (!bboxes[currentImage.name][className]) {
-                    bboxes[currentImage.name][className] = [];
-                }
-                bboxes[currentImage.name][className].push(bbox);
-                currentBbox = {
-                    bbox,
-                    index: bboxes[currentImage.name][className].length - 1,
-                    originalX: bbox.x,
-                    originalY: bbox.y,
-                    originalWidth: bbox.width,
-                    originalHeight: bbox.height,
-                    moving: false,
-                    resizing: null,
-                };
-                added += 1;
-                perClassCounts[className] = (perClassCounts[className] || 0) + 1;
-            });
-            if (added > 0) {
-                updateBboxAfterTransform();
-                const classSummary = Object.entries(perClassCounts)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 5)
-                    .map(([name, count]) => `${name} ${count}`)
-                    .join(", ");
-                const extraClasses = Object.keys(perClassCounts).length - 5;
-                const suffix = extraClasses > 0 ? ` +${extraClasses} more` : "";
-                enqueueTaskNotice(`YOLO region: added ${added} box${added === 1 ? "" : "es"} (${classSummary}${suffix}).`, { durationMs: 5000 });
-            } else {
-                enqueueTaskNotice("YOLO region: no detections.", { durationMs: 3500 });
-            }
+            applyRegionDetections(detections, "YOLO region");
             if (warnings.length) {
-                summarizeYoloWarnings(warnings).forEach((message) => {
+                summarizeRegionWarnings(warnings, "YOLO region").forEach((message) => {
                     enqueueTaskNotice(message, { durationMs: 5000 });
                 });
             }
@@ -18890,6 +18911,94 @@ function initQwenTrainingTab() {
             }
         } finally {
             endSamActionStatus(statusToken);
+        }
+    };
+
+    const runRfDetrRegionDetect = async (region) => {
+        if (!currentImage) {
+            setSamStatus("Load an image before running region detect.", { variant: "warn", duration: 3000 });
+            enqueueTaskNotice("RF-DETR region: load an image first.");
+            return;
+        }
+        if (!Object.keys(classes).length) {
+            setSamStatus("Load classes before running region detect.", { variant: "warn", duration: 3000 });
+            enqueueTaskNotice("RF-DETR region: load classes first.");
+            return;
+        }
+        if (datasetType === "seg") {
+            setSamStatus("Region detect is only available in bbox mode.", { variant: "warn", duration: 3500 });
+            enqueueTaskNotice("RF-DETR region: bbox mode only.");
+            return;
+        }
+        if (!region || region.width <= 1 || region.height <= 1) {
+            setSamStatus("Draw a larger region to run region detect.", { variant: "warn", duration: 2500 });
+            enqueueTaskNotice("RF-DETR region: draw a larger region.");
+            return;
+        }
+        const { base64, region: croppedRegion } = await extractBase64Region(region);
+        const { conf, max_det } = getRegionDetectConfig();
+        const expectedLabelmap = getExpectedLabelmap();
+        const statusToken = beginSamActionStatus("Running RF-DETR region detect…", { variant: "info" });
+        try {
+            const payload = {
+                image_base64: base64,
+                region: [croppedRegion.x, croppedRegion.y, croppedRegion.width, croppedRegion.height],
+                conf,
+                max_det,
+                center_only: true,
+                image_is_cropped: true,
+                full_width: currentImage.width,
+                full_height: currentImage.height,
+                expected_labelmap: expectedLabelmap,
+            };
+            const resp = await fetch(`${API_ROOT}/rfdetr/predict_region`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                const detail = err.detail || `RF-DETR region detect failed (${resp.status})`;
+                throw new Error(detail);
+            }
+            const data = await resp.json();
+            const detections = Array.isArray(data?.detections) ? data.detections : [];
+            const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+            applyRegionDetections(detections, "RF-DETR region");
+            if (warnings.length) {
+                summarizeRegionWarnings(warnings, "RF-DETR region").forEach((message) => {
+                    enqueueTaskNotice(message, { durationMs: 5000 });
+                });
+            }
+        } catch (err) {
+            const message = String(err?.message || err || "");
+            if (message.includes("rfdetr_active_missing")) {
+                enqueueTaskNotice("RF-DETR region: no active model selected.");
+                setSamStatus("Select an active RF-DETR model before running region detect.", { variant: "warn", duration: 5000 });
+            } else if (message.includes("rfdetr_task_unknown")) {
+                enqueueTaskNotice("RF-DETR region: model task unknown.");
+                setSamStatus("Active RF-DETR model task could not be determined.", { variant: "error", duration: 5000 });
+            } else if (message.startsWith("rfdetr_unavailable")) {
+                enqueueTaskNotice("RF-DETR region: backend not ready.");
+                setSamStatus("RF-DETR backend unavailable.", { variant: "error", duration: 6000 });
+            } else if (message.includes("rfdetr_region_detect_requires_bbox")) {
+                enqueueTaskNotice("RF-DETR region: bbox-only model required.");
+                setSamStatus("RF-DETR segmentation models are not supported for bbox region detect.", { variant: "warn", duration: 5000 });
+            } else {
+                enqueueTaskNotice("RF-DETR region: failed.");
+                setSamStatus(`RF-DETR region detect error: ${message}`, { variant: "error", duration: 5000 });
+            }
+        } finally {
+            endSamActionStatus(statusToken);
+        }
+    };
+
+    const runRegionDetect = async (region) => {
+        const mode = getRegionDetectorMode();
+        if (mode === "rfdetr") {
+            await runRfDetrRegionDetect(region);
+        } else {
+            await runYoloRegionDetect(region);
         }
     };
 
@@ -20483,7 +20592,7 @@ function initQwenTrainingTab() {
             mouse.buttonL = false;
             mouse.buttonR = false;
             mouse.yoloDragActive = false;
-            runYoloRegionDetect({ x: left, y: top, width, height });
+            runRegionDetect({ x: left, y: top, width, height });
         });
         window.addEventListener("blur", () => {
             mouse.yoloKeyActive = false;
@@ -20602,7 +20711,7 @@ function initQwenTrainingTab() {
                     mouse.buttonL = false;
                     mouse.buttonR = false;
                     mouse.yoloDragActive = false;
-                    await runYoloRegionDetect({ x: left, y: top, width, height });
+                    await runRegionDetect({ x: left, y: top, width, height });
                     return;
                 }
                 if (mouse.shiftSelectHit) {
@@ -22112,7 +22221,12 @@ function initQwenTrainingTab() {
 
             if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 82 || event.key === "r" || event.key === "R")) {
                 mouse.yoloKeyActive = true;
-                showShortcutToast("yolo_region", "YOLO region mode: drag a box to scan (zoom in for more detail).", { durationMs: 4000, cooldownMs: 2000 });
+                const regionModeLabel = getRegionDetectorMode() === "rfdetr" ? "RF-DETR" : "YOLO";
+                showShortcutToast(
+                    "yolo_region",
+                    `${regionModeLabel} region mode: drag a box to scan (zoom in for more detail).`,
+                    { durationMs: 4000, cooldownMs: 2000 }
+                );
                 event.preventDefault();
                 return;
             }

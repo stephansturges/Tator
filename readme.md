@@ -45,6 +45,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **Qwen 2.5 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. The active model (selected on the Qwen Models tab) always supplies the system prompt and defaults so inference matches training.
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **YOLOv8 training** – launch detect/segment runs from the UI, track progress, and keep only `best.pt` + metrics for easy sharing.
+- **RF-DETR training** – launch detect/segment runs from the UI, track progress, and keep best checkpoints + metrics for easy sharing.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
 ## Repository Layout
@@ -72,7 +73,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 ┌───────────────────────────────────────────────────────────────────────────┐
 │ FastAPI backend (app/ + localinferenceapi.py)                              │
 │  - Model runtime: CLIP, SAM1/2/3, (optional) Qwen                          │
-│  - Training jobs: CLIP, Qwen, SAM3                                         │
+│  - Training jobs: CLIP, Qwen, SAM3, YOLOv8, RF-DETR                         │
 │  - Agent Mining: jobs/results + apply single recipe + apply recipe cascade │
 │  - Portability: recipe/cascade ZIP export + import                         │
 └───────────────────────────────┬───────────────────────────────────────────┘
@@ -84,6 +85,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 │  - agent_mining/      jobs/, cache/, recipes/, cascades/                   │
 │  - qwen_runs/         datasets/, checkpoints/, metadata.json               │
 │  - yolo_runs/         best.pt, metrics.json, results.csv, run.json         │
+│  - rfdetr_runs/       checkpoints, metrics, results.json, run.json         │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -111,11 +113,13 @@ Tator/
   - `sam3_greedy`: prompt bank → (optional) crop-bank CLIP filter → SAM3 expand → (optional) CLIP head gate → IoU de-dupe
 - **Apply a recipe cascade**: UI → `/agent_mining/apply_image_chain` → run multiple recipes → per-class de-dupe → optional cross-class de-dupe (by group or global) with optional CLIP-head-based confidence → detections returned to UI.
 - **YOLOv8 training**: Train YOLO tab → `/yolo/train/jobs` (start/poll/cancel) → runs saved under `uploads/yolo_runs/` with `best.pt` + metrics → download/delete via `/yolo/runs`.
+- **RF-DETR training**: Train RF-DETR tab → `/rfdetr/train/jobs` (start/poll/cancel) → runs saved under `uploads/rfdetr_runs/` with best checkpoints + metrics → download/delete via `/rfdetr/runs`.
 
 ## Prerequisites
 - Python 3.10 or newer (3.11+ recommended).
 - Optional GPU with CUDA for faster CLIP/SAM inference.
 - Ultralytics YOLOv8 (AGPL‑3.0) for the Train YOLO tab. Review the license terms before use: https://github.com/ultralytics/ultralytics/blob/main/LICENSE and https://www.ultralytics.com/license
+- RF-DETR (Apache‑2.0) for the Train RF-DETR tab. Review the license terms before use: https://github.com/roboflow/rf-detr/blob/main/LICENSE
 - Model weights: `sam_vit_h_4b8939.pth` (SAM1). Optional SAM3 checkpoints/configs are supported; see `sam3integration.txt` for sample commands and Hugging Face IDs.
 
 ## Quick Start
@@ -128,7 +132,7 @@ Tator/
    ```bash
    pip install -r requirements.txt
    ```
-   Torch wheels are hardware-specific; replace `torch`/`torchvision` with the build matching your CUDA/cuDNN stack if needed. This installs Ultralytics YOLOv8 for the Train YOLO tab; review the license terms linked above before using it.
+   Torch wheels are hardware-specific; replace `torch`/`torchvision` with the build matching your CUDA/cuDNN stack if needed. This installs Ultralytics YOLOv8 + RF-DETR for the Train YOLO/RF-DETR tabs; review the license terms linked above before using them.
 3. **Install dev tooling (optional)**
    ```bash
    pip install -r requirements-dev.txt

@@ -1320,6 +1320,7 @@
                             </div>
                             <div class="checkbox-row">
                                 <label><input type="checkbox" id="rfdetrFromScratch" /> Train from scratch (no pretrained weights)</label>
+                                <div class="training-help">Starts with random weights. Use only for large datasets or extreme domain shifts (slower + lower early accuracy).</div>
                             </div>
                             <div>
                                 <label for="rfdetrPretrainWeights">Pretrained weights (optional)</label>
@@ -1357,6 +1358,7 @@
                             <div>
                                 <label for="rfdetrDevices">Devices (comma-separated)</label>
                                 <input type="text" id="rfdetrDevices" placeholder="0,1" />
+                                <div class="training-help">Leave blank to use all GPUs. Use "0" to pin to one GPU. Multi-GPU uses distributed training.</div>
                             </div>
                             <div>
                                 <label for="rfdetrSeed">Seed</label>

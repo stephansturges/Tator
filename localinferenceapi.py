@@ -3434,6 +3434,38 @@ class YoloRegionResponse(BaseModel):
     warnings: Optional[List[str]] = None
 
 
+class RfDetrRegionRequest(BaseModel):
+    image_base64: str
+    region: List[float]
+    conf: Optional[float] = 0.25
+    max_det: Optional[int] = 300
+    center_only: Optional[bool] = True
+    image_is_cropped: Optional[bool] = False
+    full_width: Optional[int] = None
+    full_height: Optional[int] = None
+    expected_labelmap: Optional[List[str]] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_region(cls, values):  # noqa: N805
+        region = values.get("region")
+        if not isinstance(region, list) or len(region) < 4:
+            raise ValueError("region_required")
+        return values
+
+
+class RfDetrRegionDetection(BaseModel):
+    bbox: List[float]
+    class_id: int
+    class_name: Optional[str] = None
+    score: Optional[float] = None
+
+
+class RfDetrRegionResponse(BaseModel):
+    detections: List[RfDetrRegionDetection]
+    labelmap: Optional[List[str]] = None
+    warnings: Optional[List[str]] = None
+
+
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None
     label: Optional[str] = None
@@ -3573,6 +3605,12 @@ yolo_infer_model: Any = None
 yolo_infer_path: Optional[str] = None
 yolo_infer_labelmap: List[str] = []
 yolo_infer_task: Optional[str] = None
+RFDETR_INFER_LOCK = threading.RLock()
+rfdetr_infer_model: Any = None
+rfdetr_infer_path: Optional[str] = None
+rfdetr_infer_labelmap: List[str] = []
+rfdetr_infer_task: Optional[str] = None
+rfdetr_infer_variant: Optional[str] = None
 YOLO_VARIANTS = [
     {"id": "yolov8n", "label": "YOLOv8 Nano", "task": "detect"},
     {"id": "yolov8s", "label": "YOLOv8 Small", "task": "detect"},
@@ -5246,6 +5284,65 @@ def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
         yolo_infer_labelmap = labelmap
         yolo_infer_task = resolved_task
         return model, labelmap, resolved_task
+
+
+def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
+    global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
+    active = _load_rfdetr_active()
+    if not isinstance(active, dict):
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="rfdetr_active_missing")
+    best_path = active.get("best_path")
+    if not best_path:
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="rfdetr_active_missing")
+    labelmap_path = active.get("labelmap_path")
+    task = active.get("task") or "detect"
+    variant = active.get("variant")
+    with RFDETR_INFER_LOCK:
+        if rfdetr_infer_model is not None and rfdetr_infer_path == best_path:
+            return rfdetr_infer_model, rfdetr_infer_labelmap, rfdetr_infer_task
+        try:
+            from rfdetr import (
+                RFDETRBase,
+                RFDETRLarge,
+                RFDETRNano,
+                RFDETRSmall,
+                RFDETRMedium,
+                RFDETRSegPreview,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"rfdetr_unavailable:{exc}") from exc
+        variant_info = _rfdetr_variant_info(task, variant)
+        variant_id = variant_info.get("id")
+        model_cls_map = {
+            "rfdetr-nano": RFDETRNano,
+            "rfdetr-small": RFDETRSmall,
+            "rfdetr-medium": RFDETRMedium,
+            "rfdetr-base": RFDETRBase,
+            "rfdetr-large": RFDETRLarge,
+            "rfdetr-seg-preview": RFDETRSegPreview,
+        }
+        model_cls = model_cls_map.get(variant_id)
+        if not model_cls:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_variant_unknown")
+        model_kwargs: Dict[str, Any] = {
+            "pretrain_weights": best_path,
+            "device": "cuda" if torch.cuda.is_available() else "cpu",
+        }
+        if variant_id == "rfdetr-seg-preview" or task == "segment":
+            model_kwargs["segmentation_head"] = True
+        model = model_cls(**model_kwargs)
+        labelmap = _yolo_load_labelmap(Path(labelmap_path)) if labelmap_path else []
+        if labelmap:
+            try:
+                model.model.class_names = labelmap
+            except Exception:
+                pass
+        rfdetr_infer_model = model
+        rfdetr_infer_path = best_path
+        rfdetr_infer_labelmap = labelmap
+        rfdetr_infer_task = task
+        rfdetr_infer_variant = variant_id
+        return model, labelmap, task
 
 
 def _yolo_build_aug_args(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -25436,6 +25533,90 @@ def yolo_predict_region(payload: YoloRegionRequest):
                     )
                 )
     return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
+
+
+@app.post("/rfdetr/predict_region", response_model=RfDetrRegionResponse)
+def rfdetr_predict_region(payload: RfDetrRegionRequest):
+    model, labelmap, task = _ensure_rfdetr_inference_runtime()
+    task_name = str(task).lower() if task else None
+    if not task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
+    if "segment" in task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_region_detect_requires_bbox")
+    pil_img, _ = _decode_image_base64(payload.image_base64)
+    img_w, img_h = pil_img.size
+    full_w = int(payload.full_width) if payload.full_width else img_w
+    full_h = int(payload.full_height) if payload.full_height else img_h
+    x, y, w, h = [float(v) for v in payload.region[:4]]
+    left = max(0.0, min(full_w, x))
+    top = max(0.0, min(full_h, y))
+    right = max(left + 1.0, min(full_w, x + w))
+    bottom = max(top + 1.0, min(full_h, y + h))
+    warnings: List[str] = []
+    if payload.image_is_cropped:
+        if payload.full_width is None or payload.full_height is None:
+            warnings.append("full_size_missing")
+        if int(right - left) != img_w or int(bottom - top) != img_h:
+            warnings.append("region_crop_mismatch")
+        right = min(full_w, left + img_w)
+        bottom = min(full_h, top + img_h)
+        crop = pil_img
+    else:
+        crop = pil_img.crop((left, top, right, bottom))
+    conf = float(payload.conf) if payload.conf is not None else 0.25
+    max_det = int(payload.max_det) if payload.max_det is not None else 300
+    if conf < 0 or conf > 1:
+        conf = min(1.0, max(0.0, conf))
+        warnings.append("conf_clamped")
+    if max_det < 1:
+        max_det = 1
+        warnings.append("max_det_clamped")
+    if max_det > 5000:
+        max_det = 5000
+        warnings.append("max_det_clamped")
+    expected = payload.expected_labelmap or []
+    if expected and not labelmap:
+        warnings.append("labelmap_missing")
+    elif expected and labelmap and expected != labelmap:
+        warnings.append("labelmap_mismatch")
+    detections: List[RfDetrRegionDetection] = []
+    try:
+        results = model.predict(crop, threshold=conf)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
+    if results is not None:
+        xyxy = getattr(results, "xyxy", None)
+        scores = getattr(results, "confidence", None)
+        class_ids = getattr(results, "class_id", None)
+        if xyxy is not None and len(xyxy):
+            for idx, box in enumerate(xyxy):
+                x1, y1, x2, y2 = [float(v) for v in box[:4]]
+                cx = (x1 + x2) / 2 + left
+                cy = (y1 + y2) / 2 + top
+                if payload.center_only and not (left <= cx <= right and top <= cy <= bottom):
+                    continue
+                abs_x = max(0.0, min(full_w, x1 + left))
+                abs_y = max(0.0, min(full_h, y1 + top))
+                abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+                abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+                class_id = int(class_ids[idx]) if class_ids is not None else -1
+                if labelmap and class_id >= len(labelmap) and 0 <= class_id - 1 < len(labelmap):
+                    class_id -= 1
+                class_name = None
+                if class_id >= 0 and class_id < len(labelmap):
+                    class_name = labelmap[class_id]
+                score = float(scores[idx]) if scores is not None else None
+                detections.append(
+                    RfDetrRegionDetection(
+                        bbox=[abs_x, abs_y, abs_w, abs_h],
+                        class_id=class_id,
+                        class_name=class_name,
+                        score=score,
+                    )
+                )
+                if len(detections) >= max_det:
+                    break
+    return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
 @app.get("/yolo/runs/{run_id}/download")

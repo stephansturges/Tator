@@ -147,16 +147,24 @@
                                 <input type="checkbox" id="multiPointMode" name="multiPointMode" />
                             </div>
                             <div class="training-field">
-                                <label for="yoloRegionConf">YOLO region conf<span class="help-icon" title="Hold R and drag to run YOLO only on the selected region. Zooming in gives the model more detail. Lower = more detections, higher = stricter.">?</span></label>
-                                <input type="number" id="yoloRegionConf" value="0.25" min="0" max="1" step="0.01" />
-                                <div class="training-help">Runs YOLO on the crop at full model resolution. Detections are kept if their center lands inside the region.</div>
+                                <label for="regionDetector">Region detector</label>
+                                <select id="regionDetector">
+                                    <option value="yolo" selected>YOLOv8</option>
+                                    <option value="rfdetr">RF-DETR</option>
+                                </select>
+                                <div class="training-help">Used when you hold R and drag a region on the canvas.</div>
                             </div>
                             <div class="training-field">
-                                <label for="yoloRegionIou">YOLO region IoU<span class="help-icon" title="Non-max suppression threshold for YOLO. Higher keeps more overlapping boxes.">?</span></label>
+                                <label for="yoloRegionConf">Region conf<span class="help-icon" title="Hold R and drag to run the selected detector only on the region. Zooming in gives the model more detail. Lower = more detections, higher = stricter.">?</span></label>
+                                <input type="number" id="yoloRegionConf" value="0.25" min="0" max="1" step="0.01" />
+                                <div class="training-help">Runs the selected detector on the crop at full model resolution. Detections are kept if their center lands inside the region.</div>
+                            </div>
+                            <div class="training-field">
+                                <label for="yoloRegionIou">Region IoU<span class="help-icon" title="Non-max suppression threshold (YOLO only). Higher keeps more overlapping boxes.">?</span></label>
                                 <input type="number" id="yoloRegionIou" value="0.45" min="0" max="1" step="0.01" />
                             </div>
                             <div class="training-field">
-                                <label for="yoloRegionMaxDet">YOLO max dets<span class="help-icon" title="Max boxes returned for the selected region.">?</span></label>
+                                <label for="yoloRegionMaxDet">Region max dets<span class="help-icon" title="Max boxes returned for the selected region.">?</span></label>
                                 <input type="number" id="yoloRegionMaxDet" value="100" min="1" step="1" />
                             </div>
                             <div class="training-field" id="polygonSimplifyField">
@@ -286,7 +294,7 @@
                                     <li>Shift + click — add/remove selection (green)</li>
                                     <li>Shift + drag — selection box (green)</li>
                                     <li>Shift + Alt + click/drag — select negatives for SAM3 similarity (red)</li>
-                                    <li>Hold R + drag — YOLO region detect (keeps detections whose center is inside; zoom in for more detail)</li>
+                                    <li>Hold R + drag — Region detect (YOLO/RF-DETR; keeps detections whose center is inside; zoom in for more detail)</li>
                                     <li>Mouse wheel — zoom</li>
                                     <li>Shift + wheel — pan</li>
                                     <li>Right-click drag — pan</li>

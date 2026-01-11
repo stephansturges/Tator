@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv
+import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket
 from array import array
 from copy import deepcopy
 from pathlib import Path
@@ -239,6 +239,98 @@ def _reset_qwen_runtime() -> None:
             pass
 
 
+def _unload_sam3_text_runtime() -> None:
+    """Release SAM3 text prompt model to free device memory."""
+    global sam3_text_model, sam3_text_processor, sam3_text_device
+    with sam3_text_lock:
+        try:
+            del sam3_text_model
+        except Exception:
+            pass
+        try:
+            del sam3_text_processor
+        except Exception:
+            pass
+        sam3_text_model = None
+        sam3_text_processor = None
+        sam3_text_device = None
+
+
+def _unload_dinov3_backbone() -> None:
+    """Release DINOv3 encoder + per-device caches."""
+    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized
+    with dinov3_lock:
+        try:
+            del dinov3_model
+        except Exception:
+            pass
+        try:
+            del dinov3_processor
+        except Exception:
+            pass
+        dinov3_model = None
+        dinov3_processor = None
+        dinov3_model_name = None
+        dinov3_initialized = False
+    try:
+        with _agent_dinov3_backbones_lock:
+            _agent_dinov3_backbones.clear()
+            _agent_dinov3_locks.clear()
+    except Exception:
+        pass
+
+
+def _unload_detector_inference() -> None:
+    """Release detector inference models (YOLO/RF-DETR) to free GPU memory."""
+    global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
+    global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
+    try:
+        del yolo_infer_model
+    except Exception:
+        pass
+    yolo_infer_model = None
+    yolo_infer_path = None
+    yolo_infer_labelmap = []
+    yolo_infer_task = None
+    try:
+        del rfdetr_infer_model
+    except Exception:
+        pass
+    rfdetr_infer_model = None
+    rfdetr_infer_path = None
+    rfdetr_infer_labelmap = []
+    rfdetr_infer_task = None
+    rfdetr_infer_variant = None
+
+
+def _prepare_for_training() -> None:
+    """Free heavy inference runtimes before starting a training job."""
+    try:
+        predictor_manager.unload_all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to unload SAM predictors before training: %s", exc)
+    _unload_sam3_text_runtime()
+    _unload_qwen_runtime()
+    _unload_prompt_llm_runtime()
+    _suspend_clip_backbone()
+    _unload_dinov3_backbone()
+    _unload_detector_inference()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _finalize_training_environment() -> None:
+    _resume_clip_backbone()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 sam3_text_model = None
 sam3_text_processor = None
 sam3_text_device: Optional[torch.device] = None
@@ -263,26 +355,11 @@ def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict
 
 
 def _prepare_for_qwen_training() -> None:
-    try:
-        predictor_manager.unload_all()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to unload SAM predictors before training: %s", exc)
-    _reset_qwen_runtime()
-    _suspend_clip_backbone()
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception:  # noqa: BLE001
-            pass
+    _prepare_for_training()
 
 
 def _finalize_qwen_training_environment() -> None:
-    _resume_clip_backbone()
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception:  # noqa: BLE001
-            pass
+    _finalize_training_environment()
 
 
 def _bytes_to_mb(value: int) -> float:
@@ -3592,6 +3669,7 @@ RFDETR_KEEP_FILES = {
     "checkpoint_best_regular.pth",
     "checkpoint_best_ema.pth",
     "checkpoint_best_total.pth",
+    "checkpoint_best_optimized.pt",
     "results.json",
     "metrics_series.json",
     "metrics_plot.png",
@@ -4826,6 +4904,7 @@ def _collect_rfdetr_artifacts(run_dir: Path) -> Dict[str, bool]:
         "best_regular": (run_dir / "checkpoint_best_regular.pth").exists(),
         "best_ema": (run_dir / "checkpoint_best_ema.pth").exists(),
         "best_total": (run_dir / "checkpoint_best_total.pth").exists(),
+        "best_optimized": (run_dir / "checkpoint_best_optimized.pt").exists(),
         "results_json": (run_dir / "results.json").exists(),
         "metrics_series": (run_dir / "metrics_series.json").exists(),
         "log_txt": (run_dir / "log.txt").exists(),
@@ -22100,6 +22179,75 @@ def _rfdetr_prepare_dataset(dataset_root: Path, run_dir: Path, coco_train: str, 
     return dataset_dir
 
 
+def _normalize_device_list(devices: Optional[List[Any]]) -> List[int]:
+    if not devices:
+        return []
+    cleaned: List[int] = []
+    for value in devices:
+        try:
+            cleaned.append(int(value))
+        except Exception:
+            continue
+    return [value for value in cleaned if value >= 0]
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return int(sock.getsockname()[1])
+
+
+def _rfdetr_ddp_worker(
+    rank: int,
+    world_size: int,
+    variant_id: str,
+    model_kwargs: Dict[str, Any],
+    train_kwargs: Dict[str, Any],
+    dist_url: str,
+) -> None:
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(rank)
+    if dist_url.startswith("tcp://"):
+        try:
+            host_port = dist_url.replace("tcp://", "")
+            host, port = host_port.split(":", 1)
+            os.environ["MASTER_ADDR"] = host
+            os.environ["MASTER_PORT"] = port
+        except Exception:
+            pass
+    try:
+        from rfdetr import (
+            RFDETRBase,
+            RFDETRLarge,
+            RFDETRNano,
+            RFDETRSmall,
+            RFDETRMedium,
+            RFDETRSegPreview,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"rfdetr_import_failed:{exc}") from exc
+    model_cls_map = {
+        "rfdetr-nano": RFDETRNano,
+        "rfdetr-small": RFDETRSmall,
+        "rfdetr-medium": RFDETRMedium,
+        "rfdetr-base": RFDETRBase,
+        "rfdetr-large": RFDETRLarge,
+        "rfdetr-seg-preview": RFDETRSegPreview,
+    }
+    model_cls = model_cls_map.get(variant_id)
+    if not model_cls:
+        raise RuntimeError("rfdetr_variant_unknown")
+    model_kwargs = dict(model_kwargs)
+    model_kwargs["device"] = "cuda" if torch.cuda.is_available() else model_kwargs.get("device", "cpu")
+    train_kwargs = dict(train_kwargs)
+    train_kwargs["device"] = "cuda" if torch.cuda.is_available() else train_kwargs.get("device", "cpu")
+    train_kwargs["world_size"] = world_size
+    train_kwargs["dist_url"] = dist_url
+    rf_detr = model_cls(**model_kwargs)
+    rf_detr.train(**train_kwargs)
+
+
 def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     dataset_root = dataset_root.resolve()
     train_images = dataset_root / "train" / "images"
@@ -23169,6 +23317,7 @@ def _start_sam3_training_worker(
         except Exception:
             steps_per_epoch = None
         try:
+            _prepare_for_training()
             _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
             script_path = SAM3_PACKAGE_ROOT / "train" / "train.py"
@@ -23359,6 +23508,7 @@ def _start_sam3_training_worker(
                     proc.terminate()
                 except Exception:
                     pass
+            _finalize_training_environment()
 
     thread = threading.Thread(target=worker, name=f"sam3-train-{job.job_id}", daemon=True)
     thread.start()
@@ -23379,6 +23529,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         try:
+            _prepare_for_training()
             from ultralytics import YOLO  # type: ignore
         except Exception as exc:  # noqa: BLE001
             _yolo_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
@@ -23474,6 +23625,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
         except Exception as exc:  # noqa: BLE001
             _yolo_job_update(job, status="failed", message="Training failed", error=str(exc))
         finally:
+            _finalize_training_environment()
             _yolo_write_run_meta(
                 run_dir,
                 {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config, "result": job.result},
@@ -23493,6 +23645,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             _rfdetr_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         try:
+            _prepare_for_training()
             from rfdetr import (
                 RFDETRBase,
                 RFDETRLarge,
@@ -23565,30 +23718,52 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             if task == "segment":
                 train_kwargs["segmentation_head"] = True
             train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
-            rf_detr = model_cls(**model_kwargs)
-
-            def on_fit_epoch_end(stats: Dict[str, Any]) -> None:
-                metric = _rfdetr_sanitize_metric(stats)
-                if metric:
-                    _rfdetr_job_append_metric(job, metric)
-                epoch = metric.get("epoch") if metric else None
-                if epoch is not None:
-                    try:
-                        epoch_idx = int(epoch)
-                        progress = max(0.0, min(0.99, epoch_idx / total_epochs))
-                        _rfdetr_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
-                    except Exception:
-                        pass
-                if job.cancel_event.is_set():
-                    try:
-                        rf_detr.model.request_early_stop()
-                    except Exception:
-                        pass
-
-            rf_detr.callbacks["on_fit_epoch_end"].append(on_fit_epoch_end)
+            device_ids = _normalize_device_list(config.get("devices"))
+            if not device_ids and torch.cuda.is_available():
+                device_ids = list(range(torch.cuda.device_count()))
+            cuda_visible = ",".join(str(d) for d in device_ids) if device_ids else None
+            prev_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            if cuda_visible:
+                os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible
+            train_kwargs["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+            use_distributed = torch.cuda.is_available() and len(device_ids) > 1
             _rfdetr_job_log(job, f"Model variant: {variant_id}")
-            _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
-            rf_detr.train(**train_kwargs)
+            if use_distributed:
+                dist_url = f"tcp://127.0.0.1:{_find_free_port()}"
+                world_size = len(device_ids)
+                _rfdetr_job_log(job, f"Multi-GPU enabled: devices={cuda_visible} world_size={world_size}")
+                _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
+                import torch.multiprocessing as mp
+                mp.spawn(
+                    _rfdetr_ddp_worker,
+                    args=(world_size, variant_id, model_kwargs, train_kwargs, dist_url),
+                    nprocs=world_size,
+                    join=True,
+                )
+            else:
+                rf_detr = model_cls(**model_kwargs)
+
+                def on_fit_epoch_end(stats: Dict[str, Any]) -> None:
+                    metric = _rfdetr_sanitize_metric(stats)
+                    if metric:
+                        _rfdetr_job_append_metric(job, metric)
+                    epoch = metric.get("epoch") if metric else None
+                    if epoch is not None:
+                        try:
+                            epoch_idx = int(epoch)
+                            progress = max(0.0, min(0.99, epoch_idx / total_epochs))
+                            _rfdetr_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+                        except Exception:
+                            pass
+                    if job.cancel_event.is_set():
+                        try:
+                            rf_detr.model.request_early_stop()
+                        except Exception:
+                            pass
+
+                rf_detr.callbacks["on_fit_epoch_end"].append(on_fit_epoch_end)
+                _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
+                rf_detr.train(**train_kwargs)
             if job.cancel_event.is_set():
                 _rfdetr_job_update(job, status="cancelled", message="Training cancelled", progress=job.progress)
             else:
@@ -23604,9 +23779,23 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 except Exception:
                     pass
             best_path = _rfdetr_best_checkpoint(run_dir)
+            optimized_path = None
+            if best_path:
+                try:
+                    export_kwargs = dict(model_kwargs)
+                    export_kwargs["pretrain_weights"] = best_path
+                    export_kwargs["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+                    export_model = model_cls(**export_kwargs)
+                    export_model.optimize_for_inference()
+                    optimized_path = run_dir / "checkpoint_best_optimized.pt"
+                    torch.jit.save(export_model.model.inference_model, str(optimized_path))
+                    _rfdetr_job_log(job, f"Optimized export saved: {optimized_path.name}")
+                except Exception as exc:  # noqa: BLE001
+                    _rfdetr_job_log(job, f"Optimized export failed: {exc}")
             result_payload = {
                 "run_dir": str(run_dir),
                 "best_path": best_path,
+                "optimized_path": str(optimized_path) if optimized_path else None,
                 "results_path": str(run_dir / "results.json") if (run_dir / "results.json").exists() else None,
                 "metrics_series_path": str(run_dir / "metrics_series.json") if (run_dir / "metrics_series.json").exists() else None,
                 "log_path": str(run_dir / "log.txt") if (run_dir / "log.txt").exists() else None,
@@ -23616,6 +23805,12 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
         except Exception as exc:  # noqa: BLE001
             _rfdetr_job_update(job, status="failed", message="Training failed", error=str(exc))
         finally:
+            if "prev_cuda_visible" in locals():
+                if prev_cuda_visible is None:
+                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                else:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda_visible
+            _finalize_training_environment()
             _rfdetr_write_run_meta(
                 run_dir,
                 {
@@ -24431,6 +24626,7 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
 
     def worker() -> None:
         try:
+            _prepare_for_training()
             with TRAINING_JOBS_LOCK:
                 if cancel_event.is_set():
                     _job_update(job, status="cancelled", progress=job.progress, message="Training cancelled before start.")
@@ -24515,6 +24711,7 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 _job_update(job, status="failed", message="Training crashed.", error=str(exc))
             logger.exception("[clip-train %s] Training crashed", job.job_id[:8])
         finally:
+            _finalize_training_environment()
             _cleanup_job(job)
 
     threading.Thread(target=worker, name=f"clip-train-{job.job_id[:8]}", daemon=True).start()

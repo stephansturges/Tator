@@ -5089,6 +5089,10 @@ def _resolve_rfdetr_training_dataset(payload: RfDetrTrainRequest) -> Dict[str, A
         coco_ready = bool(coco_train and coco_val)
     if not coco_ready:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_ready")
+    if coco_train:
+        _ensure_coco_supercategory(Path(coco_train))
+    if coco_val:
+        _ensure_coco_supercategory(Path(coco_val))
     dataset_label = entry.get("label") if entry else meta.get("label") or dataset_root.name
     return {
         "dataset_id": entry.get("id") if entry else dataset_root.name,
@@ -21992,6 +21996,110 @@ def _ensure_coco_info_fields(path: Path, dataset_id: str, categories: List[Dict[
     return str(path)
 
 
+def _ensure_coco_supercategory(path: Path, default: str = "object") -> bool:
+    """Ensure every COCO category has a supercategory (RF-DETR expects it)."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    categories = data.get("categories")
+    if not isinstance(categories, list):
+        return False
+    modified = False
+    for category in categories:
+        if not isinstance(category, dict):
+            continue
+        if "supercategory" not in category:
+            category["supercategory"] = default
+            modified = True
+    if modified:
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+        except Exception:
+            return False
+    return modified
+
+
+def _rfdetr_remap_coco_ids(src_path: Path, dest_path: Path) -> None:
+    """Create a 0-based COCO category id mapping for RF-DETR."""
+    data = json.loads(src_path.read_text())
+    categories = data.get("categories", [])
+    annotations = data.get("annotations", [])
+    if not isinstance(categories, list) or not isinstance(annotations, list):
+        raise RuntimeError("rfdetr_coco_invalid")
+    ordered = [c for c in categories if isinstance(c, dict) and "id" in c and "name" in c]
+    ordered.sort(key=lambda c: int(c.get("id", 0)))
+    mapping = {int(cat["id"]): idx for idx, cat in enumerate(ordered)}
+    new_categories = []
+    for idx, cat in enumerate(ordered):
+        new_categories.append(
+            {
+                "id": idx,
+                "name": str(cat.get("name")),
+                "supercategory": cat.get("supercategory") or "object",
+            }
+        )
+    new_annotations = []
+    for ann in annotations:
+        if not isinstance(ann, dict):
+            continue
+        try:
+            cat_id = int(ann.get("category_id"))
+        except Exception:
+            continue
+        if cat_id not in mapping:
+            continue
+        ann = dict(ann)
+        ann["category_id"] = mapping[cat_id]
+        new_annotations.append(ann)
+    data["categories"] = new_categories
+    data["annotations"] = new_annotations
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_text(json.dumps(data))
+
+
+def _rfdetr_prepare_dataset(dataset_root: Path, run_dir: Path, coco_train: str, coco_val: str) -> Path:
+    """Prepare a RF-DETR-compatible dataset layout with 0-based category ids."""
+    dataset_dir = run_dir / "dataset"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    train_src = dataset_root / "train"
+    valid_src = dataset_root / "valid"
+    val_src = dataset_root / "val"
+    test_src = dataset_root / "test"
+
+    if not train_src.exists():
+        train_src = dataset_root
+    if not valid_src.exists():
+        valid_src = val_src if val_src.exists() else train_src
+    if not test_src.exists():
+        test_src = valid_src if valid_src.exists() else train_src
+
+    def _link_split(name: str, source: Path) -> None:
+        dest = dataset_dir / name
+        if dest.exists() or dest.is_symlink():
+            return
+        try:
+            dest.symlink_to(source, target_is_directory=True)
+        except Exception:
+            shutil.copytree(source, dest)
+
+    _link_split("train", train_src)
+    _link_split("valid", valid_src)
+    _link_split("test", test_src)
+
+    train_dest = dataset_dir / "train" / "_annotations.coco.json"
+    val_dest = dataset_dir / "valid" / "_annotations.coco.json"
+    test_dest = dataset_dir / "test" / "_annotations.coco.json"
+    _rfdetr_remap_coco_ids(Path(coco_train), train_dest)
+    _rfdetr_remap_coco_ids(Path(coco_val), val_dest)
+    _rfdetr_remap_coco_ids(Path(coco_val), test_dest)
+    return dataset_dir
+
+
 def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     dataset_root = dataset_root.resolve()
     train_images = dataset_root / "train" / "images"
@@ -22015,7 +22123,7 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
     label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
-    categories = [{"id": cid, "name": name} for name, cid in label_to_id.items()]
+    categories = [{"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()]
     signature = _compute_dir_signature(dataset_root)
     existing_meta = _load_sam3_dataset_metadata(dataset_root)
     # Preserve previously recorded metadata and infer dataset type (bbox vs seg) so downstream
@@ -22339,7 +22447,7 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
     label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
-    categories = [{"id": cid, "name": name} for name, cid in label_to_id.items()]
+    categories = [{"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()]
     existing_meta = _load_sam3_dataset_metadata(dataset_root)
     if (
         existing_meta
@@ -23415,6 +23523,9 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 raise RuntimeError("rfdetr_variant_unknown")
             dataset_root = Path(dataset_info.get("dataset_root") or "")
             coco_train = dataset_info.get("coco_train_json")
+            coco_val = dataset_info.get("coco_val_json") or coco_train
+            if not coco_train or not coco_val:
+                raise RuntimeError("rfdetr_coco_missing")
             labelmap = _rfdetr_load_labelmap(dataset_root, coco_train)
             if labelmap:
                 (run_dir / "labelmap.txt").write_text("\n".join(labelmap) + "\n")
@@ -23433,9 +23544,11 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 model_kwargs["segmentation_head"] = True
             _rfdetr_job_update(job, status="running", message=f"Starting RF-DETR training ({variant_label})", progress=0.0)
             _rfdetr_job_log(job, "Preparing dataset + COCO annotations")
+            prepared_root = _rfdetr_prepare_dataset(dataset_root, run_dir, coco_train, coco_val)
+            _rfdetr_job_log(job, f"RF-DETR dataset prepared at {prepared_root}")
             total_epochs = max(1, int(config.get("epochs") or 100))
             train_kwargs: Dict[str, Any] = {
-                "dataset_dir": str(dataset_root),
+                "dataset_dir": str(prepared_root),
                 "dataset_file": "roboflow",
                 "output_dir": str(run_dir),
                 "epochs": total_epochs,

@@ -270,6 +270,7 @@
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
     const TAB_YOLO_TRAIN = "yolo-train";
+    const TAB_RFDETR_TRAIN = "rfdetr-train";
     const TAB_AGENT_MINING = "agent-mining";
     const TAB_PROMPT_HELPER = "prompt-helper";
     const TAB_DATASETS = "datasets";
@@ -1078,6 +1079,7 @@
         qwenTrainButton: null,
         sam3TrainButton: null,
         yoloTrainButton: null,
+        rfdetrTrainButton: null,
         agentMiningButton: null,
         promptHelperButton: null,
         sam3PromptModelsButton: null,
@@ -1091,6 +1093,7 @@
         qwenTrainPanel: null,
         sam3TrainPanel: null,
         yoloTrainPanel: null,
+        rfdetrTrainPanel: null,
         agentMiningPanel: null,
         promptHelperPanel: null,
         sam3PromptModelsPanel: null,
@@ -1393,6 +1396,45 @@
         runSummary: null,
     };
 
+    const rfdetrTrainElements = {
+        datasetSelect: null,
+        datasetRefresh: null,
+        datasetSummary: null,
+        runNameInput: null,
+        taskSelect: null,
+        variantSelect: null,
+        variantHelp: null,
+        resolutionInput: null,
+        fromScratchToggle: null,
+        pretrainInput: null,
+        useEmaToggle: null,
+        earlyStopToggle: null,
+        earlyStopPatienceInput: null,
+        epochsInput: null,
+        batchInput: null,
+        gradAccumInput: null,
+        workersInput: null,
+        devicesInput: null,
+        seedInput: null,
+        acceptTos: null,
+        startButton: null,
+        cancelButton: null,
+        refreshButton: null,
+        progressFill: null,
+        statusText: null,
+        message: null,
+        metricCanvas: null,
+        chartStatus: null,
+        log: null,
+        history: null,
+        runSelect: null,
+        runRefresh: null,
+        runActivate: null,
+        runDownload: null,
+        runDelete: null,
+        runSummary: null,
+    };
+
     const activeElements = {
         message: null,
         info: null,
@@ -1450,6 +1492,7 @@ const qwenTrainState = {
 };
 
 const YOLO_TOS_STORAGE_KEY = "yoloTrainingTosAccepted";
+const RFDETR_TOS_STORAGE_KEY = "rfdetrTrainingTosAccepted";
 
     const yoloTrainState = {
         activeJobId: null,
@@ -1458,6 +1501,13 @@ const YOLO_TOS_STORAGE_KEY = "yoloTrainingTosAccepted";
         variants: [],
         lastHeadType: "standard",
         autoScratchForced: false,
+    };
+
+    const rfdetrTrainState = {
+        activeJobId: null,
+        pollHandle: null,
+        lastJobSnapshot: null,
+        variants: [],
     };
 
     const qwenDatasetState = {
@@ -1470,7 +1520,18 @@ const YOLO_TOS_STORAGE_KEY = "yoloTrainingTosAccepted";
         selectedId: null,
     };
 
+    const rfdetrDatasetState = {
+        items: [],
+        selectedId: null,
+    };
+
     const yoloRunState = {
+        items: [],
+        selectedId: null,
+        activeId: null,
+    };
+
+    const rfdetrRunState = {
         items: [],
         selectedId: null,
         activeId: null,
@@ -2528,6 +2589,80 @@ const sam3TrainState = {
         }
     }
 
+    function getSelectedRfDetrDataset() {
+        const id = rfdetrDatasetState.selectedId;
+        if (!id) {
+            return null;
+        }
+        return rfdetrDatasetState.items.find((entry) => entry.id === id) || null;
+    }
+
+    function updateRfDetrDatasetSummary() {
+        const summaryEl = rfdetrTrainElements.datasetSummary;
+        if (!summaryEl) {
+            return;
+        }
+        const entry = getSelectedRfDetrDataset();
+        if (entry) {
+            const formatLabel = entry.format ? `format: ${entry.format}` : "format: unknown";
+            const cocoStatus = entry.coco_ready ? "COCO ready" : "COCO will be generated";
+            summaryEl.textContent = `Dataset "${entry.label || entry.id}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}) • ${formatLabel} • ${cocoStatus}`;
+            return;
+        }
+        summaryEl.textContent = "No dataset selected. Create and manage datasets in the Dataset Management tab, then refresh.";
+    }
+
+    function populateRfDetrDatasetSelect() {
+        const select = rfdetrTrainElements.datasetSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!rfdetrDatasetState.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No datasets available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            rfdetrDatasetState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.id;
+                const status = entry.coco_ready ? "COCO ready" : "needs COCO";
+                option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images, ${status})`;
+                select.appendChild(option);
+            });
+            if (!rfdetrDatasetState.selectedId || !rfdetrDatasetState.items.some((entry) => entry.id === rfdetrDatasetState.selectedId)) {
+                rfdetrDatasetState.selectedId = rfdetrDatasetState.items[0].id;
+            }
+            select.disabled = false;
+            select.value = rfdetrDatasetState.selectedId;
+        }
+        updateRfDetrDatasetSummary();
+    }
+
+    async function loadRfDetrDatasetList(force = false) {
+        if (!force && rfdetrDatasetState.items.length) {
+            populateRfDetrDatasetSelect();
+            return rfdetrDatasetState.items;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            rfdetrDatasetState.items = Array.isArray(data) ? data : [];
+            populateRfDetrDatasetSelect();
+            return rfdetrDatasetState.items;
+        } catch (error) {
+            if (rfdetrTrainElements.datasetSummary) {
+                rfdetrTrainElements.datasetSummary.textContent = `Unable to load datasets: ${error.message || error}`;
+            }
+            return [];
+        }
+    }
+
     function getSelectedYoloRun() {
         const id = yoloRunState.selectedId;
         if (!id) {
@@ -2593,6 +2728,96 @@ const sam3TrainState = {
             select.value = yoloRunState.selectedId;
         }
         updateYoloRunSummary();
+    }
+
+    function getSelectedRfDetrRun() {
+        const id = rfdetrRunState.selectedId;
+        if (!id) {
+            return null;
+        }
+        return rfdetrRunState.items.find((entry) => entry.run_id === id) || null;
+    }
+
+    function updateRfDetrRunSummary() {
+        if (!rfdetrTrainElements.runSummary) {
+            return;
+        }
+        const entry = getSelectedRfDetrRun();
+        if (!entry) {
+            rfdetrTrainElements.runSummary.textContent = "No runs yet.";
+            return;
+        }
+        const datasetLabel = entry.dataset_label ? `dataset: ${entry.dataset_label}` : "dataset: unknown";
+        const created = entry.created_at ? new Date(entry.created_at * 1000).toLocaleString() : "unknown";
+        const activeTag = entry.is_active ? " • active" : "";
+        const artifacts = entry.artifacts || {};
+        const bits = [];
+        if (artifacts.best_total) bits.push("checkpoint_best_total.pth");
+        if (artifacts.best_ema) bits.push("checkpoint_best_ema.pth");
+        if (artifacts.best_regular) bits.push("checkpoint_best_regular.pth");
+        if (artifacts.results_json) bits.push("results.json");
+        if (artifacts.metrics_series) bits.push("metrics_series.json");
+        if (artifacts.log_txt) bits.push("log.txt");
+        if (artifacts.labelmap) bits.push("labelmap.txt");
+        const artifactText = bits.length ? bits.join(", ") : "no artifacts";
+        rfdetrTrainElements.runSummary.textContent = `${datasetLabel} • created ${created}${activeTag} • ${artifactText}`;
+    }
+
+    function populateRfDetrRunSelect() {
+        const select = rfdetrTrainElements.runSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!rfdetrRunState.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No runs available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            rfdetrRunState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.run_id || "";
+                const label = entry.run_name || entry.run_id;
+                const activeTag = entry.is_active ? " (active)" : "";
+                const status = entry.status ? ` • ${entry.status}` : "";
+                option.textContent = `${label}${activeTag}${status}`;
+                select.appendChild(option);
+            });
+            const activeRun = rfdetrRunState.items.find((entry) => entry.is_active);
+            if (activeRun) {
+                rfdetrRunState.selectedId = activeRun.run_id;
+                rfdetrRunState.activeId = activeRun.run_id;
+            } else if (!rfdetrRunState.selectedId || !rfdetrRunState.items.some((entry) => entry.run_id === rfdetrRunState.selectedId)) {
+                rfdetrRunState.selectedId = rfdetrRunState.items[0].run_id;
+            }
+            select.disabled = false;
+            select.value = rfdetrRunState.selectedId;
+        }
+        updateRfDetrRunSummary();
+    }
+
+    async function loadRfDetrRunList(force = false) {
+        if (!force && rfdetrRunState.items.length) {
+            populateRfDetrRunSelect();
+            return rfdetrRunState.items;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/runs`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            rfdetrRunState.items = Array.isArray(data) ? data : [];
+            populateRfDetrRunSelect();
+            return rfdetrRunState.items;
+        } catch (error) {
+            if (rfdetrTrainElements.runSummary) {
+                rfdetrTrainElements.runSummary.textContent = `Unable to load runs: ${error.message || error}`;
+            }
+            return [];
+        }
     }
 
     async function loadYoloRunList(force = false) {
@@ -2692,6 +2917,81 @@ const sam3TrainState = {
         }
     }
 
+    async function downloadRfDetrRun() {
+        const entry = getSelectedRfDetrRun();
+        if (!entry) {
+            setRfDetrTrainMessage("Select a run to download.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/runs/${encodeURIComponent(entry.run_id)}/download`);
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${entry.run_name || entry.run_id}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error("RF-DETR run download failed", error);
+            setRfDetrTrainMessage(error.message || "Failed to download run", "error");
+        }
+    }
+
+    async function setActiveRfDetrRun() {
+        const entry = getSelectedRfDetrRun();
+        if (!entry) {
+            setRfDetrTrainMessage("Select a run to activate.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/active`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ run_id: entry.run_id }),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            setRfDetrTrainMessage("Active RF-DETR run updated.", "success");
+            await loadRfDetrRunList(true);
+        } catch (error) {
+            console.error("RF-DETR run activate failed", error);
+            setRfDetrTrainMessage(error.message || "Failed to activate run", "error");
+        }
+    }
+
+    async function deleteRfDetrRun() {
+        const entry = getSelectedRfDetrRun();
+        if (!entry) {
+            setRfDetrTrainMessage("Select a run to delete.", "warn");
+            return;
+        }
+        if (!window.confirm(`Delete RF-DETR run "${entry.run_name || entry.run_id}"? This cannot be undone.`)) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/runs/${encodeURIComponent(entry.run_id)}`, { method: "DELETE" });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            setRfDetrTrainMessage("Run deleted.", "success");
+            rfdetrRunState.selectedId = null;
+            await loadRfDetrRunList(true);
+        } catch (error) {
+            console.error("RF-DETR run delete failed", error);
+            setRfDetrTrainMessage(error.message || "Failed to delete run", "error");
+        }
+    }
+
     function setYoloTrainMessage(text, variant = null) {
         if (!yoloTrainElements.message) {
             return;
@@ -2700,6 +3000,17 @@ const sam3TrainState = {
         yoloTrainElements.message.classList.remove("error", "warn", "success");
         if (variant) {
             yoloTrainElements.message.classList.add(variant);
+        }
+    }
+
+    function setRfDetrTrainMessage(text, variant = null) {
+        if (!rfdetrTrainElements.message) {
+            return;
+        }
+        rfdetrTrainElements.message.textContent = text || "";
+        rfdetrTrainElements.message.classList.remove("error", "warn", "success");
+        if (variant) {
+            rfdetrTrainElements.message.classList.add(variant);
         }
     }
 
@@ -2844,6 +3155,91 @@ const sam3TrainState = {
             seed: parseYoloNumber(yoloTrainElements.seedInput?.value, { integer: true }),
             augmentations: buildYoloAugmentations(),
             accept_tos: !!yoloTrainElements.acceptTos?.checked,
+        };
+        return payload;
+    }
+
+    function populateRfDetrVariantSelect() {
+        const select = rfdetrTrainElements.variantSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        const task = rfdetrTrainElements.taskSelect?.value || "detect";
+        const variants = rfdetrTrainState.variants.filter((entry) => entry.task === task);
+        if (!variants.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No variants available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            variants.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.id;
+                option.textContent = entry.label || entry.id;
+                select.appendChild(option);
+            });
+            if (!select.value || !variants.some((entry) => entry.id === select.value)) {
+                select.value = variants[0].id;
+            }
+            select.disabled = false;
+        }
+        if (rfdetrTrainElements.variantHelp) {
+            rfdetrTrainElements.variantHelp.textContent = task === "segment"
+                ? "Segmentation uses the RF-DETR seg-preview variant."
+                : "Choose a model size. Larger variants are slower and need more VRAM.";
+        }
+    }
+
+    async function loadRfDetrVariants(force = false) {
+        if (!force && rfdetrTrainState.variants.length) {
+            populateRfDetrVariantSelect();
+            return rfdetrTrainState.variants;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/variants`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            rfdetrTrainState.variants = Array.isArray(data) ? data : [];
+            populateRfDetrVariantSelect();
+            return rfdetrTrainState.variants;
+        } catch (error) {
+            console.error("Failed to load RF-DETR variants", error);
+            if (rfdetrTrainElements.variantHelp) {
+                rfdetrTrainElements.variantHelp.textContent = `Unable to load variants: ${error.message || error}`;
+            }
+            return [];
+        }
+    }
+
+    function buildRfDetrTrainingPayload() {
+        const datasetId = rfdetrDatasetState.selectedId;
+        if (!datasetId) {
+            return { error: "Select a dataset first." };
+        }
+        const fromScratch = !!rfdetrTrainElements.fromScratchToggle?.checked;
+        const pretrainRaw = rfdetrTrainElements.pretrainInput?.value?.trim() || "";
+        const payload = {
+            dataset_id: datasetId,
+            run_name: rfdetrTrainElements.runNameInput?.value?.trim() || null,
+            task: rfdetrTrainElements.taskSelect?.value || "detect",
+            variant: rfdetrTrainElements.variantSelect?.value || null,
+            epochs: parseYoloNumber(rfdetrTrainElements.epochsInput?.value, { integer: true }),
+            batch: parseYoloNumber(rfdetrTrainElements.batchInput?.value, { integer: true }),
+            grad_accum: parseYoloNumber(rfdetrTrainElements.gradAccumInput?.value, { integer: true }),
+            workers: parseYoloNumber(rfdetrTrainElements.workersInput?.value, { integer: true }),
+            devices: parseYoloDevices(rfdetrTrainElements.devicesInput?.value),
+            seed: parseYoloNumber(rfdetrTrainElements.seedInput?.value, { integer: true }),
+            resolution: parseYoloNumber(rfdetrTrainElements.resolutionInput?.value, { integer: true }),
+            from_scratch: fromScratch,
+            pretrain_weights: fromScratch ? null : pretrainRaw || null,
+            use_ema: !!rfdetrTrainElements.useEmaToggle?.checked,
+            early_stopping: !!rfdetrTrainElements.earlyStopToggle?.checked,
+            early_stopping_patience: parseYoloNumber(rfdetrTrainElements.earlyStopPatienceInput?.value, { integer: true }),
+            accept_tos: !!rfdetrTrainElements.acceptTos?.checked,
         };
         return payload;
     }
@@ -7644,8 +8040,7 @@ function pickYoloMetricKey(metrics) {
     return { key: null, label: "Metric" };
 }
 
-function drawYoloMetricChart(points, label) {
-    const canvas = yoloTrainElements.metricCanvas;
+function drawMetricChartCanvas(canvas, points, lineColor = "#16a34a") {
     if (!canvas) {
         return;
     }
@@ -7705,7 +8100,7 @@ function drawYoloMetricChart(points, label) {
     ctx.moveTo(leftPadding, topPadding);
     ctx.lineTo(leftPadding, topPadding + chartHeight);
     ctx.stroke();
-    ctx.strokeStyle = "#16a34a";
+    ctx.strokeStyle = lineColor;
     ctx.lineWidth = 2;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -7723,6 +8118,10 @@ function drawYoloMetricChart(points, label) {
     });
     ctx.stroke();
     ctx.restore();
+}
+
+function drawYoloMetricChart(points) {
+    drawMetricChartCanvas(yoloTrainElements.metricCanvas, points, "#16a34a");
 }
 
 function updateYoloMetricChart(metrics) {
@@ -7756,8 +8155,50 @@ function updateYoloMetricChart(metrics) {
         yoloTrainElements.chartStatus.textContent = "No numeric metrics available yet.";
         return;
     }
-    drawYoloMetricChart(series, choice.label);
+    drawYoloMetricChart(series);
     yoloTrainElements.chartStatus.textContent = `${choice.label} over ${series.length} epoch${series.length === 1 ? "" : "s"}.`;
+}
+
+function updateRfDetrMetricChart(metrics) {
+    if (!rfdetrTrainElements.metricCanvas || !rfdetrTrainElements.chartStatus) {
+        return;
+    }
+    if (!Array.isArray(metrics) || !metrics.length) {
+        rfdetrTrainElements.chartStatus.textContent = "Metrics appear after training completes.";
+        const ctx = rfdetrTrainElements.metricCanvas.getContext("2d");
+        if (ctx) {
+            ctx.clearRect(0, 0, rfdetrTrainElements.metricCanvas.width, rfdetrTrainElements.metricCanvas.height);
+        }
+        return;
+    }
+    let seriesLabel = null;
+    const series = metrics
+        .map((entry, idx) => {
+            if (!entry) return null;
+            const epoch = Number.isFinite(entry.epoch) ? entry.epoch : idx + 1;
+            const emaArr = Array.isArray(entry.ema_test_coco_eval_bbox) ? entry.ema_test_coco_eval_bbox : null;
+            const baseArr = Array.isArray(entry.test_coco_eval_bbox) ? entry.test_coco_eval_bbox : null;
+            if (emaArr && Number.isFinite(emaArr[0])) {
+                seriesLabel = "AP50-95 (EMA)";
+                return { x: epoch, y: Number(emaArr[0]) };
+            }
+            if (baseArr && Number.isFinite(baseArr[0])) {
+                seriesLabel = "AP50-95";
+                return { x: epoch, y: Number(baseArr[0]) };
+            }
+            if (Number.isFinite(entry.train_loss)) {
+                if (!seriesLabel) seriesLabel = "Train loss";
+                return { x: epoch, y: Number(entry.train_loss) };
+            }
+            return null;
+        })
+        .filter(Boolean);
+    if (!series.length) {
+        rfdetrTrainElements.chartStatus.textContent = "No numeric metrics available yet.";
+        return;
+    }
+    drawMetricChartCanvas(rfdetrTrainElements.metricCanvas, series, "#2563eb");
+    rfdetrTrainElements.chartStatus.textContent = `${seriesLabel || "Metric"} over ${series.length} epoch${series.length === 1 ? "" : "s"}.`;
 }
 
 function resetQwenLossCanvas() {
@@ -8301,6 +8742,326 @@ function initQwenTrainingTab() {
         loadYoloRunList().catch((error) => console.error("Failed to load YOLO runs", error));
         updateYoloDatasetSummary();
         updateYoloVariantSummary();
+    }
+
+    function renderRfDetrTrainingHistoryItem(container, job) {
+        if (!container) {
+            return;
+        }
+        const item = document.createElement("div");
+        item.className = "training-history-item";
+        const label = job?.config?.run_name || job?.config?.dataset?.label || job.job_id;
+        const status = job.status || "unknown";
+        const created = job.created_at ? new Date(job.created_at * 1000).toLocaleString() : "";
+        const left = document.createElement("div");
+        left.innerHTML = `<strong>${escapeHtml(label)}</strong><div class="training-help">${escapeHtml(status)} • ${escapeHtml(created)}</div>`;
+        const right = document.createElement("div");
+        const viewBtn = document.createElement("button");
+        viewBtn.type = "button";
+        viewBtn.className = "training-button";
+        viewBtn.textContent = "View";
+        viewBtn.addEventListener("click", () => {
+            rfdetrTrainState.activeJobId = job.job_id;
+            pollRfDetrTrainingJob(job.job_id, { force: true }).catch((error) => console.error("Poll RF-DETR job failed", error));
+        });
+        right.appendChild(viewBtn);
+        item.append(left, right);
+        container.appendChild(item);
+    }
+
+    async function refreshRfDetrTrainingHistory() {
+        if (!rfdetrTrainElements.history) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const jobs = await resp.json();
+            rfdetrTrainElements.history.innerHTML = "";
+            if (!Array.isArray(jobs) || !jobs.length) {
+                const empty = document.createElement("div");
+                empty.className = "training-history-item";
+                empty.textContent = "No RF-DETR jobs yet.";
+                rfdetrTrainElements.history.appendChild(empty);
+                return;
+            }
+            jobs.forEach((job) => renderRfDetrTrainingHistoryItem(rfdetrTrainElements.history, job));
+        } catch (error) {
+            console.error("Failed to load RF-DETR job history", error);
+            rfdetrTrainElements.history.textContent = `Unable to load history: ${error.message || error}`;
+        }
+    }
+
+    function scheduleRfDetrJobPoll(jobId, delayMs = 5000) {
+        if (rfdetrTrainState.pollHandle) {
+            clearTimeout(rfdetrTrainState.pollHandle);
+        }
+        rfdetrTrainState.pollHandle = window.setTimeout(() => {
+            pollRfDetrTrainingJob(jobId, { force: true }).catch((error) => console.error("RF-DETR poll failed", error));
+        }, delayMs);
+    }
+
+    async function pollRfDetrTrainingJob(jobId, { force = false } = {}) {
+        if (!jobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs/${jobId}`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const job = await resp.json();
+            rfdetrTrainState.activeJobId = job.job_id;
+            updateRfDetrTrainingUI(job);
+            const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
+            if (!terminalStates.has(job.status)) {
+                scheduleRfDetrJobPoll(job.job_id);
+            } else if (rfdetrTrainState.pollHandle) {
+                clearTimeout(rfdetrTrainState.pollHandle);
+                rfdetrTrainState.pollHandle = null;
+            }
+        } catch (error) {
+            console.error("pollRfDetrTrainingJob error", error);
+            setRfDetrTrainMessage(error.message || "Unable to load job", "error");
+        }
+    }
+
+    function updateRfDetrTrainingUI(job) {
+        if (!job) {
+            return;
+        }
+        const previousStatus = rfdetrTrainState.lastJobSnapshot?.status;
+        rfdetrTrainState.lastJobSnapshot = job;
+        const pct = Math.round((job.progress || 0) * 100);
+        if (rfdetrTrainElements.progressFill) {
+            rfdetrTrainElements.progressFill.style.width = `${pct}%`;
+        }
+        if (rfdetrTrainElements.statusText) {
+            const message = job.message ? ` • ${job.message}` : "";
+            rfdetrTrainElements.statusText.textContent = `${job.status?.toUpperCase() || ""}${message}`;
+        }
+        if (rfdetrTrainElements.log) {
+            const logs = Array.isArray(job.logs) ? job.logs : [];
+            rfdetrTrainElements.log.textContent = logs
+                .map((entry) => `[${formatTimestamp(entry.timestamp)}] ${entry.message}`)
+                .join("\n");
+        }
+        if (rfdetrTrainElements.cancelButton) {
+            const cancellable = job.status === "running" || job.status === "queued";
+            rfdetrTrainElements.cancelButton.disabled = !cancellable;
+        }
+        updateRfDetrMetricChart(job.metrics);
+        if (job.status && job.status !== previousStatus) {
+            const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
+            if (terminalStates.has(job.status)) {
+                loadRfDetrRunList(true).catch((error) => console.error("Failed to refresh RF-DETR runs", error));
+            }
+        }
+    }
+
+    async function handleStartRfDetrTraining() {
+        if (rfdetrTrainElements.startButton) {
+            rfdetrTrainElements.startButton.disabled = true;
+        }
+        try {
+            if (!rfdetrTrainElements.acceptTos?.checked) {
+                setRfDetrTrainMessage("Please accept the RF-DETR terms to start training.", "warn");
+                return;
+            }
+            const entry = getSelectedRfDetrDataset();
+            if (!entry) {
+                setRfDetrTrainMessage("Select a dataset first.", "error");
+                return;
+            }
+            if (rfdetrTrainElements.taskSelect?.value === "segment" && (entry.type || "bbox") !== "seg") {
+                setRfDetrTrainMessage("Segmentation requires polygon datasets. Convert to YOLO-seg first.", "error");
+                return;
+            }
+            const payload = buildRfDetrTrainingPayload();
+            if (payload.error) {
+                setRfDetrTrainMessage(payload.error, "error");
+                return;
+            }
+            setRfDetrTrainMessage("Starting training job…");
+            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            rfdetrTrainState.activeJobId = data.job_id;
+            setRfDetrTrainMessage("Job started", "success");
+            if (rfdetrTrainElements.cancelButton) {
+                rfdetrTrainElements.cancelButton.disabled = false;
+            }
+            await pollRfDetrTrainingJob(data.job_id, { force: true });
+            await refreshRfDetrTrainingHistory();
+        } catch (error) {
+            console.error("RF-DETR training submit failed", error);
+            setRfDetrTrainMessage(error.message || "Failed to start training", "error");
+        } finally {
+            if (rfdetrTrainElements.startButton) {
+                rfdetrTrainElements.startButton.disabled = false;
+            }
+        }
+    }
+
+    async function cancelRfDetrTrainingJobRequest() {
+        if (!rfdetrTrainState.activeJobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs/${rfdetrTrainState.activeJobId}/cancel`, { method: "POST" });
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            setRfDetrTrainMessage("Cancellation requested", "warn");
+        } catch (error) {
+            console.error("Cancel RF-DETR job failed", error);
+            setRfDetrTrainMessage(error.message || "Failed to cancel job", "error");
+        }
+    }
+
+    function initRfDetrTrainingTab() {
+        if (rfdetrTrainElements.datasetSelect) {
+            return;
+        }
+        rfdetrTrainElements.datasetSelect = document.getElementById("rfdetrDatasetSelect");
+        rfdetrTrainElements.datasetRefresh = document.getElementById("rfdetrDatasetRefresh");
+        rfdetrTrainElements.datasetSummary = document.getElementById("rfdetrDatasetSummary");
+        rfdetrTrainElements.runNameInput = document.getElementById("rfdetrRunName");
+        rfdetrTrainElements.taskSelect = document.getElementById("rfdetrTask");
+        rfdetrTrainElements.variantSelect = document.getElementById("rfdetrVariant");
+        rfdetrTrainElements.variantHelp = document.getElementById("rfdetrVariantHelp");
+        rfdetrTrainElements.resolutionInput = document.getElementById("rfdetrResolution");
+        rfdetrTrainElements.fromScratchToggle = document.getElementById("rfdetrFromScratch");
+        rfdetrTrainElements.pretrainInput = document.getElementById("rfdetrPretrainWeights");
+        rfdetrTrainElements.useEmaToggle = document.getElementById("rfdetrUseEma");
+        rfdetrTrainElements.earlyStopToggle = document.getElementById("rfdetrEarlyStop");
+        rfdetrTrainElements.earlyStopPatienceInput = document.getElementById("rfdetrEarlyStopPatience");
+        rfdetrTrainElements.epochsInput = document.getElementById("rfdetrEpochs");
+        rfdetrTrainElements.batchInput = document.getElementById("rfdetrBatch");
+        rfdetrTrainElements.gradAccumInput = document.getElementById("rfdetrGradAccum");
+        rfdetrTrainElements.workersInput = document.getElementById("rfdetrWorkers");
+        rfdetrTrainElements.devicesInput = document.getElementById("rfdetrDevices");
+        rfdetrTrainElements.seedInput = document.getElementById("rfdetrSeed");
+        rfdetrTrainElements.acceptTos = document.getElementById("rfdetrAcceptTos");
+        rfdetrTrainElements.startButton = document.getElementById("rfdetrTrainStartBtn");
+        rfdetrTrainElements.cancelButton = document.getElementById("rfdetrTrainCancelBtn");
+        rfdetrTrainElements.refreshButton = document.getElementById("rfdetrTrainRefreshBtn");
+        rfdetrTrainElements.progressFill = document.getElementById("rfdetrTrainProgressFill");
+        rfdetrTrainElements.statusText = document.getElementById("rfdetrTrainStatusText");
+        rfdetrTrainElements.message = document.getElementById("rfdetrTrainMessage");
+        rfdetrTrainElements.metricCanvas = document.getElementById("rfdetrTrainMetricCanvas");
+        rfdetrTrainElements.chartStatus = document.getElementById("rfdetrTrainChartStatus");
+        rfdetrTrainElements.log = document.getElementById("rfdetrTrainLog");
+        rfdetrTrainElements.history = document.getElementById("rfdetrTrainHistory");
+        rfdetrTrainElements.runSelect = document.getElementById("rfdetrRunSelect");
+        rfdetrTrainElements.runRefresh = document.getElementById("rfdetrRunsRefresh");
+        rfdetrTrainElements.runActivate = document.getElementById("rfdetrRunActivate");
+        rfdetrTrainElements.runDownload = document.getElementById("rfdetrRunDownload");
+        rfdetrTrainElements.runDelete = document.getElementById("rfdetrRunDelete");
+        rfdetrTrainElements.runSummary = document.getElementById("rfdetrRunSummary");
+        if (rfdetrTrainElements.startButton) {
+            rfdetrTrainElements.startButton.addEventListener("click", () => {
+                handleStartRfDetrTraining().catch((error) => console.error("RF-DETR training start failed", error));
+            });
+        }
+        if (rfdetrTrainElements.cancelButton) {
+            rfdetrTrainElements.cancelButton.addEventListener("click", () => {
+                cancelRfDetrTrainingJobRequest().catch((error) => console.error("RF-DETR cancel failed", error));
+            });
+            rfdetrTrainElements.cancelButton.disabled = true;
+        }
+        if (rfdetrTrainElements.refreshButton) {
+            rfdetrTrainElements.refreshButton.addEventListener("click", () => {
+                if (rfdetrTrainState.activeJobId) {
+                    pollRfDetrTrainingJob(rfdetrTrainState.activeJobId, { force: true }).catch((error) => console.error("RF-DETR refresh failed", error));
+                } else {
+                    refreshRfDetrTrainingHistory();
+                }
+            });
+        }
+        if (rfdetrTrainElements.runSelect) {
+            rfdetrTrainElements.runSelect.addEventListener("change", () => {
+                rfdetrRunState.selectedId = rfdetrTrainElements.runSelect.value || null;
+                updateRfDetrRunSummary();
+            });
+        }
+        if (rfdetrTrainElements.runRefresh) {
+            rfdetrTrainElements.runRefresh.addEventListener("click", () => {
+                loadRfDetrRunList(true).catch((error) => console.error("Failed to refresh RF-DETR runs", error));
+            });
+        }
+        if (rfdetrTrainElements.runActivate) {
+            rfdetrTrainElements.runActivate.addEventListener("click", () => {
+                setActiveRfDetrRun().catch((error) => console.error("Failed to activate RF-DETR run", error));
+            });
+        }
+        if (rfdetrTrainElements.runDownload) {
+            rfdetrTrainElements.runDownload.addEventListener("click", () => {
+                downloadRfDetrRun().catch((error) => console.error("Failed to download RF-DETR run", error));
+            });
+        }
+        if (rfdetrTrainElements.runDelete) {
+            rfdetrTrainElements.runDelete.addEventListener("click", () => {
+                deleteRfDetrRun().catch((error) => console.error("Failed to delete RF-DETR run", error));
+            });
+        }
+        if (rfdetrTrainElements.datasetSelect) {
+            rfdetrTrainElements.datasetSelect.addEventListener("change", () => {
+                rfdetrDatasetState.selectedId = rfdetrTrainElements.datasetSelect.value || null;
+                updateRfDetrDatasetSummary();
+            });
+        }
+        if (rfdetrTrainElements.datasetRefresh) {
+            rfdetrTrainElements.datasetRefresh.addEventListener("click", () => {
+                loadRfDetrDatasetList(true).catch((error) => console.error("Failed to refresh RF-DETR datasets", error));
+            });
+        }
+        if (rfdetrTrainElements.taskSelect) {
+            rfdetrTrainElements.taskSelect.addEventListener("change", () => {
+                populateRfDetrVariantSelect();
+            });
+        }
+        if (rfdetrTrainElements.fromScratchToggle && rfdetrTrainElements.pretrainInput) {
+            const syncPretrain = () => {
+                const disabled = !!rfdetrTrainElements.fromScratchToggle.checked;
+                rfdetrTrainElements.pretrainInput.disabled = disabled;
+                if (disabled) {
+                    rfdetrTrainElements.pretrainInput.value = "";
+                }
+            };
+            rfdetrTrainElements.fromScratchToggle.addEventListener("change", syncPretrain);
+            syncPretrain();
+        }
+        if (rfdetrTrainElements.acceptTos) {
+            const stored = window.localStorage.getItem(RFDETR_TOS_STORAGE_KEY);
+            if (stored === "true") {
+                rfdetrTrainElements.acceptTos.checked = true;
+            }
+            rfdetrTrainElements.acceptTos.addEventListener("change", () => {
+                window.localStorage.setItem(RFDETR_TOS_STORAGE_KEY, rfdetrTrainElements.acceptTos.checked ? "true" : "false");
+            });
+        }
+        if (rfdetrTrainElements.earlyStopToggle && rfdetrTrainElements.earlyStopPatienceInput) {
+            const syncEarlyStop = () => {
+                const enabled = !!rfdetrTrainElements.earlyStopToggle.checked;
+                rfdetrTrainElements.earlyStopPatienceInput.disabled = !enabled;
+            };
+            rfdetrTrainElements.earlyStopToggle.addEventListener("change", syncEarlyStop);
+            syncEarlyStop();
+        }
+        loadRfDetrVariants().catch((error) => console.error("Failed to load RF-DETR variants", error));
+        loadRfDetrDatasetList().catch((error) => console.error("Failed to load RF-DETR datasets", error));
+        loadRfDetrRunList().catch((error) => console.error("Failed to load RF-DETR runs", error));
+        updateRfDetrDatasetSummary();
     }
 
 
@@ -9130,6 +9891,7 @@ function initQwenTrainingTab() {
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
         tabElements.yoloTrainButton = document.getElementById("tabYoloTrainButton");
+        tabElements.rfdetrTrainButton = document.getElementById("tabRfDetrTrainButton");
         tabElements.agentMiningButton = document.getElementById("tabAgentMiningButton");
         tabElements.promptHelperButton = document.getElementById("tabPromptHelperButton");
         tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
@@ -9143,6 +9905,7 @@ function initQwenTrainingTab() {
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
         tabElements.yoloTrainPanel = document.getElementById("tabYoloTrain");
+        tabElements.rfdetrTrainPanel = document.getElementById("tabRfDetrTrain");
         tabElements.agentMiningPanel = document.getElementById("tabAgentMining");
         tabElements.promptHelperPanel = document.getElementById("tabPromptHelper");
         tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
@@ -9165,6 +9928,9 @@ function initQwenTrainingTab() {
         }
         if (tabElements.yoloTrainButton) {
             tabElements.yoloTrainButton.addEventListener("click", () => setActiveTab(TAB_YOLO_TRAIN));
+        }
+        if (tabElements.rfdetrTrainButton) {
+            tabElements.rfdetrTrainButton.addEventListener("click", () => setActiveTab(TAB_RFDETR_TRAIN));
         }
         if (tabElements.agentMiningButton) {
             tabElements.agentMiningButton.addEventListener("click", () => setActiveTab(TAB_AGENT_MINING));
@@ -9211,6 +9977,9 @@ function initQwenTrainingTab() {
         if (tabElements.yoloTrainButton) {
             tabElements.yoloTrainButton.classList.toggle("active", tabName === TAB_YOLO_TRAIN);
         }
+        if (tabElements.rfdetrTrainButton) {
+            tabElements.rfdetrTrainButton.classList.toggle("active", tabName === TAB_RFDETR_TRAIN);
+        }
         if (tabElements.agentMiningButton) {
             tabElements.agentMiningButton.classList.toggle("active", tabName === TAB_AGENT_MINING);
         }
@@ -9249,6 +10018,9 @@ function initQwenTrainingTab() {
         }
         if (tabElements.yoloTrainPanel) {
             tabElements.yoloTrainPanel.classList.toggle("active", tabName === TAB_YOLO_TRAIN);
+        }
+        if (tabElements.rfdetrTrainPanel) {
+            tabElements.rfdetrTrainPanel.classList.toggle("active", tabName === TAB_RFDETR_TRAIN);
         }
         if (tabElements.agentMiningPanel) {
             tabElements.agentMiningPanel.classList.toggle("active", tabName === TAB_AGENT_MINING);
@@ -9297,6 +10069,13 @@ function initQwenTrainingTab() {
             refreshYoloTrainingHistory();
             if (yoloTrainState.activeJobId) {
                 pollYoloTrainingJob(yoloTrainState.activeJobId, { force: true }).catch((error) => console.error("YOLO job poll failed", error));
+            }
+        }
+        if (tabName === TAB_RFDETR_TRAIN && previous !== TAB_RFDETR_TRAIN) {
+            initRfDetrTrainingTab();
+            refreshRfDetrTrainingHistory();
+            if (rfdetrTrainState.activeJobId) {
+                pollRfDetrTrainingJob(rfdetrTrainState.activeJobId, { force: true }).catch((error) => console.error("RF-DETR job poll failed", error));
             }
         }
         if (tabName === TAB_AGENT_MINING && previous !== TAB_AGENT_MINING) {

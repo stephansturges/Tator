@@ -67,6 +67,7 @@
             <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
             <button class="tab-button" data-tab="yolo-train" id="tabYoloTrainButton" type="button">Train YOLO</button>
+            <button class="tab-button" data-tab="rfdetr-train" id="tabRfDetrTrainButton" type="button">Train RF-DETR</button>
             <button class="tab-button" data-tab="agent-mining" id="tabAgentMiningButton" type="button">SAM3 Recipe Mining</button>
             <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
@@ -1269,6 +1270,139 @@
                                 <button type="button" class="training-button training-button-danger" id="yoloRunDelete">Delete run</button>
                             </div>
                             <div class="training-help" id="yoloRunSummary">No runs yet.</div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabRfDetrTrain" data-tab-panel="rfdetr-train">
+                <div class="training-wrapper two-col">
+                    <section class="training-form-section">
+                        <h2>Train RF-DETR</h2>
+                        <p class="training-help">Train RF-DETR on datasets from the Dataset Management tab. We keep only best checkpoints + metrics.</p>
+                        <div class="training-field">
+                            <label>Dataset</label>
+                            <div class="sam3-dataset-row">
+                                <select id="rfdetrDatasetSelect"></select>
+                                <button type="button" class="training-button" id="rfdetrDatasetRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help" id="rfdetrDatasetSummary">Select a dataset, then start training.</div>
+                        </div>
+                        <div class="training-field">
+                            <label for="rfdetrRunName">Run name (optional)</label>
+                            <input type="text" id="rfdetrRunName" placeholder="qwen_rfdetr_medium_2025-01-10" />
+                            <div class="training-help">Used in run storage + history. Leave blank to auto-name runs.</div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="rfdetrTask">Task</label>
+                                <select id="rfdetrTask">
+                                    <option value="detect" selected>Detect (bbox)</option>
+                                    <option value="segment">Segment (mask)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="rfdetrVariant">Model variant</label>
+                                <select id="rfdetrVariant"></select>
+                                <div class="training-help" id="rfdetrVariantHelp">Variants are loaded from the backend.</div>
+                            </div>
+                            <div>
+                                <label for="rfdetrResolution">Resolution (optional)</label>
+                                <input type="number" id="rfdetrResolution" min="256" step="32" placeholder="auto" />
+                                <div class="training-help">Overrides the default resolution for the selected variant.</div>
+                            </div>
+                            <div class="checkbox-row">
+                                <label><input type="checkbox" id="rfdetrFromScratch" /> Train from scratch (no pretrained weights)</label>
+                            </div>
+                            <div>
+                                <label for="rfdetrPretrainWeights">Pretrained weights (optional)</label>
+                                <input type="text" id="rfdetrPretrainWeights" placeholder="rf-detr-medium.pth or /path/to/weights" />
+                                <div class="training-help">Leave blank to use the default weights for the variant.</div>
+                            </div>
+                            <div class="checkbox-row">
+                                <label><input type="checkbox" id="rfdetrUseEma" checked /> Use EMA weights</label>
+                            </div>
+                            <div class="checkbox-row">
+                                <label><input type="checkbox" id="rfdetrEarlyStop" /> Enable early stopping</label>
+                            </div>
+                            <div>
+                                <label for="rfdetrEarlyStopPatience">Early-stop patience</label>
+                                <input type="number" id="rfdetrEarlyStopPatience" min="1" value="10" />
+                            </div>
+                        </div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="rfdetrEpochs">Epochs</label>
+                                <input type="number" id="rfdetrEpochs" min="1" value="100" />
+                            </div>
+                            <div>
+                                <label for="rfdetrBatch">Batch</label>
+                                <input type="number" id="rfdetrBatch" min="1" value="4" />
+                            </div>
+                            <div>
+                                <label for="rfdetrGradAccum">Grad accumulation</label>
+                                <input type="number" id="rfdetrGradAccum" min="1" value="4" />
+                            </div>
+                            <div>
+                                <label for="rfdetrWorkers">Workers</label>
+                                <input type="number" id="rfdetrWorkers" min="0" value="2" />
+                            </div>
+                            <div>
+                                <label for="rfdetrDevices">Devices (comma-separated)</label>
+                                <input type="text" id="rfdetrDevices" placeholder="0,1" />
+                            </div>
+                            <div>
+                                <label for="rfdetrSeed">Seed</label>
+                                <input type="number" id="rfdetrSeed" value="42" />
+                            </div>
+                        </div>
+                        <div class="checkbox-row">
+                            <label><input type="checkbox" id="rfdetrAcceptTos" /> I have read and accept the RF-DETR license/terms.</label>
+                            <div class="training-help">Required to start training.</div>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="rfdetrTrainStartBtn">Start RF-DETR Training</button>
+                            <button type="button" class="training-button training-button-danger" id="rfdetrTrainCancelBtn" disabled>Cancel Job</button>
+                        </div>
+                        <div class="training-message" id="rfdetrTrainMessage" role="status"></div>
+                    </section>
+                    <section class="training-status-section">
+                        <h2>RF-DETR Training Status</h2>
+                        <div class="training-progress" id="rfdetrTrainProgressBar">
+                            <div class="training-progress-fill" id="rfdetrTrainProgressFill"></div>
+                        </div>
+                        <div class="training-status-text" id="rfdetrTrainStatusText">Idle</div>
+                        <div class="training-chart">
+                            <h3>Validation Metric</h3>
+                            <canvas id="rfdetrTrainMetricCanvas" height="160"></canvas>
+                            <div class="training-help" id="rfdetrTrainChartStatus">Metrics appear after training completes.</div>
+                        </div>
+                        <div class="training-actions">
+                            <button type="button" class="training-button" id="rfdetrTrainRefreshBtn">Refresh status</button>
+                        </div>
+                        <div class="training-logs">
+                            <h3>Logs</h3>
+                            <pre id="rfdetrTrainLog"></pre>
+                        </div>
+                        <div class="training-history">
+                            <h3>Recent RF-DETR Jobs</h3>
+                            <div id="rfdetrTrainHistory"></div>
+                        </div>
+                        <div class="training-history">
+                            <div class="storage-header">
+                                <h3>Saved RF-DETR Runs</h3>
+                                <button type="button" class="training-button" id="rfdetrRunsRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help">Each run stores best checkpoints + metrics only. Download a zip to move it elsewhere.</div>
+                            <div class="training-field">
+                                <label for="rfdetrRunSelect">Saved runs</label>
+                                <select id="rfdetrRunSelect"></select>
+                            </div>
+                            <div class="training-actions">
+                                <button type="button" class="training-button" id="rfdetrRunActivate">Set active</button>
+                                <button type="button" class="training-button" id="rfdetrRunDownload">Download zip</button>
+                                <button type="button" class="training-button training-button-danger" id="rfdetrRunDelete">Delete run</button>
+                            </div>
+                            <div class="training-help" id="rfdetrRunSummary">No runs yet.</div>
                         </div>
                     </section>
                 </div>

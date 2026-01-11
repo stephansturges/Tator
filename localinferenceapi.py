@@ -3366,7 +3366,38 @@ class YoloTrainRequest(BaseModel):
         return values
 
 
+class RfDetrTrainRequest(BaseModel):
+    dataset_id: Optional[str] = None
+    dataset_root: Optional[str] = None
+    run_name: Optional[str] = None
+    task: Literal["detect", "segment"] = "detect"
+    variant: Optional[str] = None
+    epochs: Optional[int] = None
+    batch: Optional[int] = None
+    grad_accum: Optional[int] = None
+    workers: Optional[int] = None
+    devices: Optional[List[int]] = None
+    seed: Optional[int] = None
+    resolution: Optional[int] = None
+    from_scratch: Optional[bool] = None
+    pretrain_weights: Optional[str] = None
+    use_ema: Optional[bool] = None
+    early_stopping: Optional[bool] = None
+    early_stopping_patience: Optional[int] = None
+    accept_tos: Optional[bool] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_dataset_fields(cls, values):  # noqa: N805
+        if not (values.get("dataset_id") or values.get("dataset_root")):
+            raise ValueError("dataset_id_or_root_required")
+        return values
+
+
 class YoloActiveRequest(BaseModel):
+    run_id: str
+
+
+class RfDetrActiveRequest(BaseModel):
     run_id: str
 
 
@@ -3519,6 +3550,24 @@ YOLO_KEEP_FILES = {
     YOLO_RUN_META_NAME,
 }
 
+RFDETR_JOB_ROOT = Path(os.environ.get("RFDETR_TRAINING_ROOT", "./uploads/rfdetr_runs"))
+RFDETR_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+RFDETR_MODEL_ROOT = Path(os.environ.get("RFDETR_MODEL_ROOT", "./uploads/rfdetr_models"))
+RFDETR_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+RFDETR_ACTIVE_PATH = RFDETR_MODEL_ROOT / "active.json"
+RFDETR_RUN_META_NAME = "run.json"
+RFDETR_KEEP_FILES = {
+    "checkpoint_best_regular.pth",
+    "checkpoint_best_ema.pth",
+    "checkpoint_best_total.pth",
+    "results.json",
+    "metrics_series.json",
+    "metrics_plot.png",
+    "log.txt",
+    "labelmap.txt",
+    RFDETR_RUN_META_NAME,
+}
+
 YOLO_INFER_LOCK = threading.RLock()
 yolo_infer_model: Any = None
 yolo_infer_path: Optional[str] = None
@@ -3540,6 +3589,14 @@ YOLO_VARIANTS = [
     {"id": "yolov8m-p2", "label": "YOLOv8 Medium (P2)", "task": "detect"},
     {"id": "yolov8l-p2", "label": "YOLOv8 Large (P2)", "task": "detect"},
     {"id": "yolov8x-p2", "label": "YOLOv8 XLarge (P2)", "task": "detect"},
+]
+RFDETR_VARIANTS = [
+    {"id": "rfdetr-nano", "label": "RF-DETR Nano", "task": "detect"},
+    {"id": "rfdetr-small", "label": "RF-DETR Small", "task": "detect"},
+    {"id": "rfdetr-medium", "label": "RF-DETR Medium", "task": "detect"},
+    {"id": "rfdetr-base", "label": "RF-DETR Base", "task": "detect"},
+    {"id": "rfdetr-large", "label": "RF-DETR Large", "task": "detect"},
+    {"id": "rfdetr-seg-preview", "label": "RF-DETR Seg Preview", "task": "segment"},
 ]
 DATASET_REGISTRY_ROOT = Path(os.environ.get("DATASET_ROOT", "./uploads/datasets"))
 DATASET_REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
@@ -3612,6 +3669,22 @@ class YoloTrainingJob:
 
 
 @dataclass
+class RfDetrTrainingJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    config: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
 class SegmentationBuildJob:
     job_id: str
     status: str = "queued"
@@ -3663,6 +3736,8 @@ SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
 SAM3_TRAINING_JOBS_LOCK = threading.Lock()
 YOLO_TRAINING_JOBS: Dict[str, YoloTrainingJob] = {}
 YOLO_TRAINING_JOBS_LOCK = threading.Lock()
+RFDETR_TRAINING_JOBS: Dict[str, RfDetrTrainingJob] = {}
+RFDETR_TRAINING_JOBS_LOCK = threading.Lock()
 SEGMENTATION_BUILD_JOBS: Dict[str, SegmentationBuildJob] = {}
 SEGMENTATION_BUILD_JOBS_LOCK = threading.Lock()
 PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
@@ -4001,6 +4076,65 @@ def _yolo_job_log(job: YoloTrainingJob, message: str) -> None:
         logger.info("[yolo-train %s] %s", job.job_id[:8], message)
     except Exception:
         pass
+
+
+def _serialize_rfdetr_job(job: RfDetrTrainingJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "config": job.config,
+        "logs": job.logs,
+        "metrics": job.metrics,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _rfdetr_job_update(
+    job: RfDetrTrainingJob,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
+    if status is not None:
+        job.status = status
+    if message is not None:
+        job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
+
+
+def _rfdetr_job_log(job: RfDetrTrainingJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > MAX_JOB_LOGS:
+        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+    job.updated_at = time.time()
+    try:
+        logger.info("[rfdetr-train %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _rfdetr_job_append_metric(job: RfDetrTrainingJob, metric: Dict[str, Any]) -> None:
+    if not metric:
+        return
+    job.metrics.append(metric)
+    if len(job.metrics) > 2000:
+        job.metrics[:] = job.metrics[-2000:]
+    job.updated_at = time.time()
 
 
 def _seg_job_log(job: SegmentationBuildJob, message: str) -> None:
@@ -4580,6 +4714,63 @@ def _yolo_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) ->
     return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
 
 
+def _sanitize_rfdetr_run_id(raw: str) -> str:
+    return _sanitize_yolo_run_id(raw)
+
+
+def _rfdetr_run_dir(run_id: str, *, create: bool = False) -> Path:
+    safe_id = _sanitize_rfdetr_run_id(run_id)
+    candidate = (RFDETR_JOB_ROOT / safe_id).resolve()
+    if not str(candidate).startswith(str(RFDETR_JOB_ROOT.resolve())):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_run_id")
+    if create:
+        candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+def _rfdetr_load_run_meta(run_dir: Path) -> Dict[str, Any]:
+    meta_path = run_dir / RFDETR_RUN_META_NAME
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
+def _rfdetr_write_run_meta(run_dir: Path, meta: Dict[str, Any]) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = dict(meta or {})
+    now = time.time()
+    payload.setdefault("created_at", now)
+    payload["updated_at"] = now
+    (run_dir / RFDETR_RUN_META_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _rfdetr_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) -> Dict[str, Any]:
+    kept: List[str] = []
+    deleted: List[str] = []
+    freed = 0
+    if not run_dir.exists():
+        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    keep = set(keep_files or RFDETR_KEEP_FILES)
+    for child in list(run_dir.iterdir()):
+        if child.name in keep:
+            kept.append(child.name)
+            continue
+        try:
+            if child.is_dir():
+                freed += _dir_size_bytes(child)
+                shutil.rmtree(child)
+            else:
+                freed += child.stat().st_size
+                child.unlink()
+            deleted.append(child.name)
+        except Exception:
+            continue
+    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+
+
 def _collect_yolo_artifacts(run_dir: Path) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),
@@ -4589,6 +4780,19 @@ def _collect_yolo_artifacts(run_dir: Path) -> Dict[str, bool]:
         "args_yaml": (run_dir / "args.yaml").exists(),
         "labelmap": (run_dir / "labelmap.txt").exists(),
         "run_meta": (run_dir / YOLO_RUN_META_NAME).exists(),
+    }
+
+
+def _collect_rfdetr_artifacts(run_dir: Path) -> Dict[str, bool]:
+    return {
+        "best_regular": (run_dir / "checkpoint_best_regular.pth").exists(),
+        "best_ema": (run_dir / "checkpoint_best_ema.pth").exists(),
+        "best_total": (run_dir / "checkpoint_best_total.pth").exists(),
+        "results_json": (run_dir / "results.json").exists(),
+        "metrics_series": (run_dir / "metrics_series.json").exists(),
+        "log_txt": (run_dir / "log.txt").exists(),
+        "labelmap": (run_dir / "labelmap.txt").exists(),
+        "run_meta": (run_dir / RFDETR_RUN_META_NAME).exists(),
     }
 
 
@@ -4633,6 +4837,45 @@ def _list_yolo_runs() -> List[Dict[str, Any]]:
     return runs
 
 
+def _list_rfdetr_runs() -> List[Dict[str, Any]]:
+    runs: List[Dict[str, Any]] = []
+    active = _load_rfdetr_active()
+    active_id = active.get("run_id") if isinstance(active, dict) else None
+    for entry in RFDETR_JOB_ROOT.iterdir():
+        if not entry.is_dir():
+            continue
+        meta_path = entry / RFDETR_RUN_META_NAME
+        if not meta_path.exists():
+            continue
+        meta = _rfdetr_load_run_meta(entry)
+        run_id = meta.get("job_id") or entry.name
+        config = meta.get("config") or {}
+        dataset = config.get("dataset") or {}
+        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+        created_at = meta.get("created_at")
+        if not created_at:
+            try:
+                created_at = entry.stat().st_mtime
+            except Exception:
+                created_at = None
+        runs.append(
+            {
+                "run_id": run_id,
+                "run_name": run_name,
+                "status": meta.get("status"),
+                "message": meta.get("message"),
+                "created_at": created_at,
+                "updated_at": meta.get("updated_at"),
+                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+                "dataset_label": dataset.get("label"),
+                "artifacts": _collect_rfdetr_artifacts(entry),
+                "is_active": bool(active_id and run_id == active_id),
+            }
+        )
+    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return runs
+
+
 def _load_yolo_active() -> Dict[str, Any]:
     if not YOLO_ACTIVE_PATH.exists():
         return {}
@@ -4649,6 +4892,25 @@ def _save_yolo_active(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "created_at" not in data:
         data["created_at"] = data["updated_at"]
     YOLO_ACTIVE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return data
+
+
+def _load_rfdetr_active() -> Dict[str, Any]:
+    if not RFDETR_ACTIVE_PATH.exists():
+        return {}
+    try:
+        return json.loads(RFDETR_ACTIVE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _save_rfdetr_active(payload: Dict[str, Any]) -> Dict[str, Any]:
+    RFDETR_ACTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(payload or {})
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    RFDETR_ACTIVE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
     return data
 
 
@@ -4748,6 +5010,59 @@ def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
     }
 
 
+def _resolve_rfdetr_training_dataset(payload: RfDetrTrainRequest) -> Dict[str, Any]:
+    task = (payload.task or "detect").lower().strip()
+    dataset_id = (payload.dataset_id or "").strip()
+    dataset_root: Optional[Path] = None
+    entry: Optional[Dict[str, Any]] = None
+    if dataset_id:
+        entry = _resolve_dataset_entry(dataset_id)
+        if entry and entry.get("dataset_root"):
+            dataset_root = Path(entry["dataset_root"]).resolve()
+        else:
+            dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    elif payload.dataset_root:
+        dataset_root = Path(payload.dataset_root).expanduser().resolve()
+    if not dataset_root or not dataset_root.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
+    meta = _load_sam3_dataset_metadata(dataset_root) or {}
+    coco_train = meta.get("coco_train_json")
+    coco_val = meta.get("coco_val_json")
+    coco_ready = bool(coco_train and coco_val)
+    dataset_type = (entry.get("type") if entry else None) or meta.get("type", "bbox")
+    if task == "segment" and dataset_type != "seg":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_seg_requires_polygons")
+    if not coco_ready:
+        if entry and entry.get("yolo_ready"):
+            meta = _convert_yolo_dataset_to_coco(dataset_root)
+        elif entry and entry.get("qwen_ready"):
+            meta = _convert_qwen_dataset_to_coco(dataset_root)
+        else:
+            # Attempt to infer from on-disk layout.
+            layout = _detect_yolo_layout(dataset_root)
+            if layout.get("yolo_ready"):
+                meta = _convert_yolo_dataset_to_coco(dataset_root)
+            elif _load_qwen_dataset_metadata(dataset_root):
+                meta = _convert_qwen_dataset_to_coco(dataset_root)
+            else:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_ready")
+        coco_train = meta.get("coco_train_json")
+        coco_val = meta.get("coco_val_json")
+        coco_ready = bool(coco_train and coco_val)
+    if not coco_ready:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_ready")
+    dataset_label = entry.get("label") if entry else meta.get("label") or dataset_root.name
+    return {
+        "dataset_id": entry.get("id") if entry else dataset_root.name,
+        "dataset_root": str(dataset_root),
+        "dataset_label": dataset_label,
+        "task": task,
+        "coco_train_json": coco_train,
+        "coco_val_json": coco_val,
+        "type": dataset_type,
+    }
+
+
 def _yolo_resolve_split_paths(dataset_root: Path, layout: Optional[str]) -> Tuple[str, str]:
     if layout == "split":
         train_images = dataset_root / "train" / "images"
@@ -4773,6 +5088,83 @@ def _yolo_load_labelmap(labelmap_path: Path) -> List[str]:
         return [line.strip() for line in labelmap_path.read_text().splitlines() if line.strip()]
     except Exception:
         return []
+
+
+def _rfdetr_load_labelmap(dataset_root: Path, coco_train_json: Optional[str] = None) -> List[str]:
+    labelmap_path = dataset_root / "labelmap.txt"
+    if labelmap_path.exists():
+        return _yolo_load_labelmap(labelmap_path)
+    coco_path = Path(coco_train_json) if coco_train_json else None
+    if coco_path and coco_path.exists():
+        try:
+            data = json.loads(coco_path.read_text())
+            categories = data.get("categories", [])
+            categories = [c for c in categories if isinstance(c, dict) and "id" in c and "name" in c]
+            categories.sort(key=lambda c: int(c.get("id", 0)))
+            return [str(c["name"]) for c in categories]
+        except Exception:
+            return []
+    return []
+
+
+def _rfdetr_variant_info(task: str, variant: Optional[str]) -> Dict[str, Any]:
+    task_norm = (task or "detect").lower().strip()
+    variant_norm = (variant or "").strip().lower()
+    if task_norm == "segment":
+        variant_norm = "rfdetr-seg-preview"
+    if not variant_norm:
+        variant_norm = "rfdetr-medium" if task_norm == "detect" else "rfdetr-seg-preview"
+    variant_map = {entry["id"]: entry for entry in RFDETR_VARIANTS}
+    info = variant_map.get(variant_norm)
+    if not info:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_variant_unknown")
+    if task_norm == "segment" and info.get("task") != "segment":
+        variant_norm = "rfdetr-seg-preview"
+        info = variant_map.get(variant_norm)
+    return info or {}
+
+
+def _rfdetr_best_checkpoint(run_dir: Path) -> Optional[str]:
+    for name in ("checkpoint_best_total.pth", "checkpoint_best_ema.pth", "checkpoint_best_regular.pth"):
+        path = run_dir / name
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _rfdetr_parse_log_series(log_path: Path) -> List[Dict[str, Any]]:
+    if not log_path.exists():
+        return []
+    series: List[Dict[str, Any]] = []
+    for line in log_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            series.append(json.loads(line))
+        except Exception:
+            continue
+    return series
+
+
+def _rfdetr_sanitize_metric(metric: Dict[str, Any]) -> Dict[str, Any]:
+    def _coerce(obj: Any) -> Any:
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.generic):
+            try:
+                return obj.item()
+            except Exception:
+                return float(obj)
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, set):
+            return list(obj)
+        return obj
+
+    try:
+        return json.loads(json.dumps(metric, default=_coerce))
+    except Exception:
+        return {}
 
 
 def _yolo_write_data_yaml(run_dir: Path, dataset_root: Path, layout: Optional[str], labelmap_path: Optional[str]) -> Path:
@@ -22886,6 +23278,151 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
     thread.start()
 
 
+def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
+    def worker() -> None:
+        run_dir = _rfdetr_run_dir(job.job_id, create=True)
+        config = dict(job.config or {})
+        dataset_info = config.get("dataset") or {}
+        if job.cancel_event.is_set():
+            _rfdetr_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
+            _rfdetr_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        try:
+            from rfdetr import (
+                RFDETRBase,
+                RFDETRLarge,
+                RFDETRNano,
+                RFDETRSmall,
+                RFDETRMedium,
+                RFDETRSegPreview,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _rfdetr_job_update(job, status="failed", message="RF-DETR not installed", error=str(exc))
+            _rfdetr_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        try:
+            task = str(dataset_info.get("task") or config.get("task") or "detect").lower()
+            variant_info = _rfdetr_variant_info(task, config.get("variant"))
+            variant_id = variant_info.get("id")
+            variant_label = variant_info.get("label")
+            model_cls_map = {
+                "rfdetr-nano": RFDETRNano,
+                "rfdetr-small": RFDETRSmall,
+                "rfdetr-medium": RFDETRMedium,
+                "rfdetr-base": RFDETRBase,
+                "rfdetr-large": RFDETRLarge,
+                "rfdetr-seg-preview": RFDETRSegPreview,
+            }
+            model_cls = model_cls_map.get(variant_id)
+            if not model_cls:
+                raise RuntimeError("rfdetr_variant_unknown")
+            dataset_root = Path(dataset_info.get("dataset_root") or "")
+            coco_train = dataset_info.get("coco_train_json")
+            labelmap = _rfdetr_load_labelmap(dataset_root, coco_train)
+            if labelmap:
+                (run_dir / "labelmap.txt").write_text("\n".join(labelmap) + "\n")
+            model_kwargs: Dict[str, Any] = {}
+            if config.get("resolution"):
+                try:
+                    model_kwargs["resolution"] = int(config.get("resolution"))
+                except Exception:
+                    pass
+            model_kwargs["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+            if config.get("from_scratch"):
+                model_kwargs["pretrain_weights"] = None
+            elif config.get("pretrain_weights"):
+                model_kwargs["pretrain_weights"] = config.get("pretrain_weights")
+            if task == "segment":
+                model_kwargs["segmentation_head"] = True
+            _rfdetr_job_update(job, status="running", message=f"Starting RF-DETR training ({variant_label})", progress=0.0)
+            _rfdetr_job_log(job, "Preparing dataset + COCO annotations")
+            total_epochs = max(1, int(config.get("epochs") or 100))
+            train_kwargs: Dict[str, Any] = {
+                "dataset_dir": str(dataset_root),
+                "dataset_file": "roboflow",
+                "output_dir": str(run_dir),
+                "epochs": total_epochs,
+                "batch_size": config.get("batch"),
+                "grad_accum_steps": config.get("grad_accum"),
+                "num_workers": config.get("workers"),
+                "seed": config.get("seed"),
+                "use_ema": config.get("use_ema"),
+                "early_stopping": config.get("early_stopping"),
+                "early_stopping_patience": config.get("early_stopping_patience"),
+                "run": config.get("run_name") or job.job_id[:8],
+                "project": "rfdetr",
+            }
+            if task == "segment":
+                train_kwargs["segmentation_head"] = True
+            train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
+            rf_detr = model_cls(**model_kwargs)
+
+            def on_fit_epoch_end(stats: Dict[str, Any]) -> None:
+                metric = _rfdetr_sanitize_metric(stats)
+                if metric:
+                    _rfdetr_job_append_metric(job, metric)
+                epoch = metric.get("epoch") if metric else None
+                if epoch is not None:
+                    try:
+                        epoch_idx = int(epoch)
+                        progress = max(0.0, min(0.99, epoch_idx / total_epochs))
+                        _rfdetr_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+                    except Exception:
+                        pass
+                if job.cancel_event.is_set():
+                    try:
+                        rf_detr.model.request_early_stop()
+                    except Exception:
+                        pass
+
+            rf_detr.callbacks["on_fit_epoch_end"].append(on_fit_epoch_end)
+            _rfdetr_job_log(job, f"Model variant: {variant_id}")
+            _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
+            rf_detr.train(**train_kwargs)
+            if job.cancel_event.is_set():
+                _rfdetr_job_update(job, status="cancelled", message="Training cancelled", progress=job.progress)
+            else:
+                _rfdetr_job_update(job, status="succeeded", message="Training complete", progress=1.0)
+            metrics_series = job.metrics or []
+            if not metrics_series:
+                metrics_series = _rfdetr_parse_log_series(run_dir / "log.txt")
+                if metrics_series:
+                    job.metrics = metrics_series
+            if metrics_series:
+                try:
+                    (run_dir / "metrics_series.json").write_text(json.dumps(metrics_series, indent=2, sort_keys=True))
+                except Exception:
+                    pass
+            best_path = _rfdetr_best_checkpoint(run_dir)
+            result_payload = {
+                "run_dir": str(run_dir),
+                "best_path": best_path,
+                "results_path": str(run_dir / "results.json") if (run_dir / "results.json").exists() else None,
+                "metrics_series_path": str(run_dir / "metrics_series.json") if (run_dir / "metrics_series.json").exists() else None,
+                "log_path": str(run_dir / "log.txt") if (run_dir / "log.txt").exists() else None,
+            }
+            _rfdetr_prune_run_dir(run_dir)
+            job.result = result_payload
+        except Exception as exc:  # noqa: BLE001
+            _rfdetr_job_update(job, status="failed", message="Training failed", error=str(exc))
+        finally:
+            _rfdetr_write_run_meta(
+                run_dir,
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                    "result": job.result,
+                    "created_at": job.created_at,
+                    "updated_at": job.updated_at,
+                },
+            )
+
+    thread = threading.Thread(target=worker, name=f"rfdetr-train-{job.job_id}", daemon=True)
+    thread.start()
+
+
 def _get_sam3_job(job_id: str) -> Sam3TrainingJob:
     with SAM3_TRAINING_JOBS_LOCK:
         job = SAM3_TRAINING_JOBS.get(job_id)
@@ -22899,6 +23436,14 @@ def _get_yolo_job(job_id: str) -> YoloTrainingJob:
         job = YOLO_TRAINING_JOBS.get(job_id)
         if not job:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_job_not_found")
+        return job
+
+
+def _get_rfdetr_job(job_id: str) -> RfDetrTrainingJob:
+    with RFDETR_TRAINING_JOBS_LOCK:
+        job = RFDETR_TRAINING_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_job_not_found")
         return job
 
 
@@ -24627,6 +25172,148 @@ def cancel_yolo_training_job(job_id: str):
             },
         )
     return {"status": job.status}
+
+
+@app.post("/rfdetr/train/jobs")
+def create_rfdetr_training_job(payload: RfDetrTrainRequest):
+    if not payload.accept_tos:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_tos_required")
+    job_id = uuid.uuid4().hex
+    run_dir = _rfdetr_run_dir(job_id, create=True)
+    dataset_info = _resolve_rfdetr_training_dataset(payload)
+    config = payload.dict(exclude_none=True)
+    config["paths"] = {"run_dir": str(run_dir)}
+    config["dataset"] = dataset_info
+    message = "Queued (training not started)"
+    status = "queued"
+    job = RfDetrTrainingJob(job_id=job_id, config=config, message=message, status=status)
+    with RFDETR_TRAINING_JOBS_LOCK:
+        RFDETR_TRAINING_JOBS[job_id] = job
+        _rfdetr_job_log(job, job.message)
+    _rfdetr_write_run_meta(
+        run_dir,
+        {
+            "job_id": job_id,
+            "status": job.status,
+            "message": job.message,
+            "config": job.config,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+        },
+    )
+    _start_rfdetr_training_worker(job)
+    return {"job_id": job_id}
+
+
+@app.get("/rfdetr/train/jobs")
+def list_rfdetr_training_jobs():
+    _prune_job_registry(RFDETR_TRAINING_JOBS, RFDETR_TRAINING_JOBS_LOCK)
+    with RFDETR_TRAINING_JOBS_LOCK:
+        jobs = sorted(RFDETR_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+        return [_serialize_rfdetr_job(job) for job in jobs]
+
+
+@app.get("/rfdetr/train/jobs/{job_id}")
+def get_rfdetr_training_job(job_id: str):
+    job = _get_rfdetr_job(job_id)
+    return _serialize_rfdetr_job(job)
+
+
+@app.post("/rfdetr/train/jobs/{job_id}/cancel")
+def cancel_rfdetr_training_job(job_id: str):
+    job = _get_rfdetr_job(job_id)
+    with RFDETR_TRAINING_JOBS_LOCK:
+        if job.status in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        if job.cancel_event.is_set():
+            return {"status": job.status}
+        job.cancel_event.set()
+        next_status = job.status if job.status not in {"running", "queued"} else "cancelled"
+        _rfdetr_job_update(job, status=next_status, message="Cancellation requested ...")
+        run_dir = _rfdetr_run_dir(job.job_id, create=False)
+        _rfdetr_write_run_meta(
+            run_dir,
+            {
+                "job_id": job.job_id,
+                "status": job.status,
+                "message": job.message,
+                "config": job.config,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+            },
+        )
+    return {"status": job.status}
+
+
+@app.get("/rfdetr/variants")
+def list_rfdetr_variants(task: Optional[str] = Query(None)):
+    if task:
+        task_norm = task.strip().lower()
+        return [v for v in RFDETR_VARIANTS if v.get("task") == task_norm]
+    return RFDETR_VARIANTS
+
+
+@app.get("/rfdetr/runs")
+def list_rfdetr_runs():
+    return _list_rfdetr_runs()
+
+
+@app.get("/rfdetr/active")
+def get_rfdetr_active():
+    return _load_rfdetr_active()
+
+
+@app.post("/rfdetr/active")
+def set_rfdetr_active(payload: RfDetrActiveRequest):
+    run_dir = _rfdetr_run_dir(payload.run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    best_path = _rfdetr_best_checkpoint(run_dir)
+    if not best_path:
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="rfdetr_best_missing")
+    meta = _rfdetr_load_run_meta(run_dir)
+    config = meta.get("config") or {}
+    dataset = config.get("dataset") or {}
+    active_payload = {
+        "run_id": payload.run_id,
+        "run_name": config.get("run_name") or dataset.get("label") or payload.run_id,
+        "best_path": best_path,
+        "labelmap_path": str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None,
+        "task": config.get("task") or dataset.get("task"),
+        "variant": config.get("variant"),
+    }
+    return _save_rfdetr_active(active_payload)
+
+
+@app.get("/rfdetr/runs/{run_id}/download")
+def download_rfdetr_run(run_id: str):
+    run_dir = _rfdetr_run_dir(run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    meta = _rfdetr_load_run_meta(run_dir)
+    run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or run_id
+    safe_name = _sanitize_yolo_run_id(run_name)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename in sorted(RFDETR_KEEP_FILES):
+            path = run_dir / filename
+            if path.exists():
+                zf.write(path, arcname=filename)
+    buffer.seek(0)
+    headers = {"Content-Disposition": f'attachment; filename="{safe_name}.zip"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+@app.delete("/rfdetr/runs/{run_id}")
+def delete_rfdetr_run(run_id: str):
+    run_dir = _rfdetr_run_dir(run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    try:
+        shutil.rmtree(run_dir)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    return {"status": "deleted", "run_id": run_id}
 
 
 @app.get("/yolo/variants")

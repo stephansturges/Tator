@@ -5316,6 +5316,123 @@ def _rfdetr_sanitize_metric(metric: Dict[str, Any]) -> Dict[str, Any]:
         return {}
 
 
+def _rfdetr_normalize_aug_policy(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not raw or not isinstance(raw, dict):
+        return None
+    def _clamp(value: Any, default: float = 0.0, maximum: float = 1.0) -> float:
+        try:
+            num = float(value)
+        except Exception:
+            num = default
+        return max(0.0, min(maximum, num))
+
+    policy = {
+        "hsv_h": _clamp(raw.get("hsv_h"), 0.0, 0.5),
+        "hsv_s": _clamp(raw.get("hsv_s"), 0.0, 1.0),
+        "hsv_v": _clamp(raw.get("hsv_v"), 0.0, 1.0),
+        "blur_prob": _clamp(raw.get("blur_prob"), 0.0, 1.0),
+        "gray_prob": _clamp(raw.get("gray_prob"), 0.0, 1.0),
+    }
+    kernel = raw.get("blur_kernel")
+    try:
+        kernel = int(kernel)
+    except Exception:
+        kernel = 0
+    if kernel and kernel % 2 == 0:
+        kernel += 1
+    policy["blur_kernel"] = max(0, kernel)
+    if not any(
+        [
+            policy["hsv_h"],
+            policy["hsv_s"],
+            policy["hsv_v"],
+            policy["blur_prob"],
+            policy["gray_prob"],
+        ]
+    ):
+        return None
+    return policy
+
+
+def _rfdetr_install_augmentations(policy: Optional[Dict[str, Any]]) -> Optional[Tuple[Any, Any]]:
+    if not policy:
+        return None
+    try:
+        import random as _random
+        import torchvision.transforms as tvt
+        import rfdetr.datasets.coco as coco_mod
+    except Exception:
+        return None
+
+    class _ImageOnlyTransform:
+        def __init__(self, transform, p: float = 1.0) -> None:
+            self.transform = transform
+            self.p = float(p)
+
+        def __call__(self, img, target):
+            if self.p < 1.0 and _random.random() > self.p:
+                return img, target
+            return self.transform(img), target
+
+    aug_transforms = []
+    hsv_h = float(policy.get("hsv_h") or 0.0)
+    hsv_s = float(policy.get("hsv_s") or 0.0)
+    hsv_v = float(policy.get("hsv_v") or 0.0)
+    if hsv_h > 0 or hsv_s > 0 or hsv_v > 0:
+        color_jitter = tvt.ColorJitter(
+            brightness=hsv_v,
+            contrast=hsv_v,
+            saturation=hsv_s,
+            hue=min(0.5, hsv_h),
+        )
+        aug_transforms.append(_ImageOnlyTransform(color_jitter, p=1.0))
+    gray_prob = float(policy.get("gray_prob") or 0.0)
+    if gray_prob > 0:
+        aug_transforms.append(_ImageOnlyTransform(tvt.RandomGrayscale(p=1.0), p=gray_prob))
+    blur_prob = float(policy.get("blur_prob") or 0.0)
+    blur_kernel = int(policy.get("blur_kernel") or 0)
+    if blur_prob > 0 and blur_kernel >= 3:
+        blur_kernel = blur_kernel if blur_kernel % 2 == 1 else blur_kernel + 1
+        blur = tvt.GaussianBlur(kernel_size=blur_kernel, sigma=(0.1, 2.0))
+        aug_transforms.append(_ImageOnlyTransform(blur, p=blur_prob))
+
+    if not aug_transforms:
+        return None
+
+    original_make = coco_mod.make_coco_transforms
+    original_make_square = coco_mod.make_coco_transforms_square_div_64
+
+    def _wrap_make(make_func):
+        def _wrapped(*args, **kwargs):
+            base = make_func(*args, **kwargs)
+            try:
+                if hasattr(base, "transforms") and isinstance(base.transforms, list):
+                    insert_idx = max(0, len(base.transforms) - 1)
+                    base.transforms[insert_idx:insert_idx] = list(aug_transforms)
+            except Exception:
+                pass
+            return base
+        return _wrapped
+
+    coco_mod.make_coco_transforms = _wrap_make(original_make)
+    coco_mod.make_coco_transforms_square_div_64 = _wrap_make(original_make_square)
+    return (original_make, original_make_square)
+
+
+def _rfdetr_restore_augmentations(restore: Optional[Tuple[Any, Any]]) -> None:
+    if not restore:
+        return
+    try:
+        import rfdetr.datasets.coco as coco_mod
+    except Exception:
+        return
+    try:
+        coco_mod.make_coco_transforms = restore[0]
+        coco_mod.make_coco_transforms_square_div_64 = restore[1]
+    except Exception:
+        pass
+
+
 def _rfdetr_latest_checkpoint_epoch(run_dir: Path) -> Optional[int]:
     try:
         best = None
@@ -22337,6 +22454,7 @@ def _rfdetr_ddp_worker(
     variant_id: str,
     model_kwargs: Dict[str, Any],
     train_kwargs: Dict[str, Any],
+    aug_policy: Optional[Dict[str, Any]],
     dist_url: str,
 ) -> None:
     os.environ["RANK"] = str(rank)
@@ -22379,7 +22497,11 @@ def _rfdetr_ddp_worker(
     train_kwargs["world_size"] = world_size
     train_kwargs["dist_url"] = dist_url
     rf_detr = model_cls(**model_kwargs)
-    rf_detr.train(**train_kwargs)
+    restore = _rfdetr_install_augmentations(_rfdetr_normalize_aug_policy(aug_policy))
+    try:
+        rf_detr.train(**train_kwargs)
+    finally:
+        _rfdetr_restore_augmentations(restore)
 
 
 def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
@@ -23861,6 +23983,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 "run": config.get("run_name") or job.job_id[:8],
                 "project": "rfdetr",
             }
+            aug_policy = _rfdetr_normalize_aug_policy(config.get("augmentations"))
             multi_scale = config.get("multi_scale")
             if multi_scale is not None:
                 train_kwargs["multi_scale"] = bool(multi_scale)
@@ -23897,7 +24020,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 try:
                     mp.spawn(
                         _rfdetr_ddp_worker,
-                        args=(world_size, variant_id, model_kwargs, train_kwargs, dist_url),
+                        args=(world_size, variant_id, model_kwargs, train_kwargs, aug_policy, dist_url),
                         nprocs=world_size,
                         join=True,
                     )
@@ -23910,6 +24033,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                         os.environ["TATOR_SKIP_CLIP_LOAD"] = prev_skip_clip
             else:
                 rf_detr = model_cls(**model_kwargs)
+                restore = _rfdetr_install_augmentations(aug_policy)
 
                 def on_fit_epoch_end(stats: Dict[str, Any]) -> None:
                     metric = _rfdetr_sanitize_metric(stats)
@@ -23931,7 +24055,10 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
 
                 rf_detr.callbacks["on_fit_epoch_end"].append(on_fit_epoch_end)
                 _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
-                rf_detr.train(**train_kwargs)
+                try:
+                    rf_detr.train(**train_kwargs)
+                finally:
+                    _rfdetr_restore_augmentations(restore)
             if job.cancel_event.is_set():
                 _rfdetr_job_update(job, status="cancelled", message="Training cancelled", progress=job.progress)
             else:

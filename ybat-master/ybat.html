@@ -1389,6 +1389,34 @@
                                 <input type="number" id="rfdetrSeed" value="42" />
                             </div>
                         </div>
+                        <div class="training-subsection__title">Color &amp; Blur Augmentations</div>
+                        <div class="training-grid">
+                            <div>
+                                <label for="rfdetrAugHsvH">HSV H</label>
+                                <input type="number" id="rfdetrAugHsvH" min="0" max="0.5" step="0.01" value="0.015" />
+                            </div>
+                            <div>
+                                <label for="rfdetrAugHsvS">HSV S</label>
+                                <input type="number" id="rfdetrAugHsvS" min="0" max="1" step="0.01" value="0.7" />
+                            </div>
+                            <div>
+                                <label for="rfdetrAugHsvV">HSV V</label>
+                                <input type="number" id="rfdetrAugHsvV" min="0" max="1" step="0.01" value="0.4" />
+                            </div>
+                            <div>
+                                <label for="rfdetrAugBlurProb">Blur prob</label>
+                                <input type="number" id="rfdetrAugBlurProb" min="0" max="1" step="0.05" value="0.0" />
+                            </div>
+                            <div>
+                                <label for="rfdetrAugBlurKernel">Blur kernel</label>
+                                <input type="number" id="rfdetrAugBlurKernel" min="3" step="2" value="3" />
+                            </div>
+                            <div>
+                                <label for="rfdetrAugGrayProb">Gray prob</label>
+                                <input type="number" id="rfdetrAugGrayProb" min="0" max="1" step="0.05" value="0.0" />
+                            </div>
+                        </div>
+                        <div class="training-help">HSV maps to ColorJitter (H→hue, S→saturation, V→brightness/contrast). Blur/gray apply to the image only; boxes are unchanged.</div>
                         <div class="checkbox-row">
                             <label><input type="checkbox" id="rfdetrAcceptTos" /> I have read and accept the RF-DETR license/terms.</label>
                             <div class="training-help">Required to start training.</div>

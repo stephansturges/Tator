@@ -1421,6 +1421,12 @@
         workersInput: null,
         devicesInput: null,
         seedInput: null,
+        augHsvH: null,
+        augHsvS: null,
+        augHsvV: null,
+        augBlurProb: null,
+        augBlurKernel: null,
+        augGrayProb: null,
         acceptTos: null,
         startButton: null,
         cancelButton: null,
@@ -3238,6 +3244,14 @@ const sam3TrainState = {
         }
         const fromScratch = !!rfdetrTrainElements.fromScratchToggle?.checked;
         const pretrainRaw = rfdetrTrainElements.pretrainInput?.value?.trim() || "";
+        const augmentations = {
+            hsv_h: parseYoloNumber(rfdetrTrainElements.augHsvH?.value),
+            hsv_s: parseYoloNumber(rfdetrTrainElements.augHsvS?.value),
+            hsv_v: parseYoloNumber(rfdetrTrainElements.augHsvV?.value),
+            blur_prob: parseYoloNumber(rfdetrTrainElements.augBlurProb?.value),
+            blur_kernel: parseYoloNumber(rfdetrTrainElements.augBlurKernel?.value, { integer: true }),
+            gray_prob: parseYoloNumber(rfdetrTrainElements.augGrayProb?.value),
+        };
         const payload = {
             dataset_id: datasetId,
             run_name: rfdetrTrainElements.runNameInput?.value?.trim() || null,
@@ -3252,6 +3266,7 @@ const sam3TrainState = {
             resolution: parseYoloNumber(rfdetrTrainElements.resolutionInput?.value, { integer: true }),
             from_scratch: fromScratch,
             pretrain_weights: fromScratch ? null : pretrainRaw || null,
+            augmentations,
             multi_scale: rfdetrTrainElements.multiScaleToggle ? !!rfdetrTrainElements.multiScaleToggle.checked : null,
             expanded_scales: rfdetrTrainElements.expandedScalesToggle ? !!rfdetrTrainElements.expandedScalesToggle.checked : null,
             use_ema: !!rfdetrTrainElements.useEmaToggle?.checked,
@@ -9030,6 +9045,12 @@ function initQwenTrainingTab() {
         rfdetrTrainElements.workersInput = document.getElementById("rfdetrWorkers");
         rfdetrTrainElements.devicesInput = document.getElementById("rfdetrDevices");
         rfdetrTrainElements.seedInput = document.getElementById("rfdetrSeed");
+        rfdetrTrainElements.augHsvH = document.getElementById("rfdetrAugHsvH");
+        rfdetrTrainElements.augHsvS = document.getElementById("rfdetrAugHsvS");
+        rfdetrTrainElements.augHsvV = document.getElementById("rfdetrAugHsvV");
+        rfdetrTrainElements.augBlurProb = document.getElementById("rfdetrAugBlurProb");
+        rfdetrTrainElements.augBlurKernel = document.getElementById("rfdetrAugBlurKernel");
+        rfdetrTrainElements.augGrayProb = document.getElementById("rfdetrAugGrayProb");
         rfdetrTrainElements.acceptTos = document.getElementById("rfdetrAcceptTos");
         rfdetrTrainElements.startButton = document.getElementById("rfdetrTrainStartBtn");
         rfdetrTrainElements.cancelButton = document.getElementById("rfdetrTrainCancelBtn");

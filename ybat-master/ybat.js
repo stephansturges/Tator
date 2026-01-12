@@ -1889,11 +1889,19 @@ const sam3TrainState = {
 	                    if (entry.yolo_ready) {
 	                        const yoloBadge = document.createElement("span");
 	                        yoloBadge.className = "badge";
-	                        yoloBadge.textContent = "YOLO";
-	                        yoloBadge.title = "YOLO images/labels + labelmap.txt detected.";
+	                        yoloBadge.textContent = entry.yolo_seg_ready ? "YOLO-SEG" : "YOLO";
+	                        yoloBadge.title = entry.yolo_seg_ready
+	                            ? "YOLO polygon labels detected (segmentation-ready)."
+	                            : "YOLO images/labels + labelmap.txt detected.";
 	                        badgeWrap.appendChild(yoloBadge);
 	                    }
-	                    if (entry.coco_ready) {
+	                    if (entry.coco_seg_ready) {
+	                        const cocoSegBadge = document.createElement("span");
+	                        cocoSegBadge.className = "badge";
+	                        cocoSegBadge.textContent = "COCO-SEG";
+	                        cocoSegBadge.title = "COCO polygon annotations present (segmentation-ready).";
+	                        badgeWrap.appendChild(cocoSegBadge);
+	                    } else if (entry.coco_ready) {
 	                        const cocoBadge = document.createElement("span");
 	                        cocoBadge.className = "badge";
 	                        cocoBadge.textContent = "COCO";
@@ -1921,9 +1929,15 @@ const sam3TrainState = {
                     const convertBtn = document.createElement("button");
                     convertBtn.type = "button";
                     convertBtn.className = "button button-outline";
-                    convertBtn.textContent = entry.coco_ready ? "COCO ready" : "Convert to COCO";
-                    convertBtn.disabled = !!entry.coco_ready;
-                    convertBtn.title = entry.coco_ready
+                    const isSeg = entry.type === "seg";
+                    const cocoReady = isSeg ? !!entry.coco_seg_ready : !!entry.coco_ready;
+                    if (isSeg) {
+                        convertBtn.textContent = cocoReady ? "COCO-SEG ready" : "Convert to COCO-SEG";
+                    } else {
+                        convertBtn.textContent = cocoReady ? "COCO ready" : "Convert to COCO";
+                    }
+                    convertBtn.disabled = cocoReady;
+                    convertBtn.title = cocoReady
                         ? "COCO annotations are already present."
                         : "Generate COCO annotations for SAM3 training, prompt helper, and recipe mining.";
 	                    convertBtn.addEventListener("click", () => handleDatasetConvert(entry));
@@ -1950,7 +1964,11 @@ const sam3TrainState = {
 	                    const parts = [];
 	                    if (entry.source) parts.push(entry.source);
 	                    if (entry.format) parts.push(entry.format.toUpperCase());
-	                    parts.push(entry.coco_ready ? "COCO ready" : "COCO missing");
+	                    if (isSeg) {
+	                        parts.push(entry.coco_seg_ready ? "COCO-SEG ready" : "COCO-SEG missing");
+	                    } else {
+	                        parts.push(entry.coco_ready ? "COCO ready" : "COCO missing");
+	                    }
 	                    if (entry.qwen_ready) {
 	                        const qwenTrain = Number.isFinite(entry.qwen_train_count) ? entry.qwen_train_count : null;
 	                        const qwenVal = Number.isFinite(entry.qwen_val_count) ? entry.qwen_val_count : null;
@@ -2616,7 +2634,10 @@ const sam3TrainState = {
         const entry = getSelectedRfDetrDataset();
         if (entry) {
             const formatLabel = entry.format ? `format: ${entry.format}` : "format: unknown";
-            const cocoStatus = entry.coco_ready ? "COCO ready" : "COCO will be generated";
+            const isSeg = entry.type === "seg";
+            const cocoStatus = isSeg
+                ? (entry.coco_seg_ready ? "COCO-SEG ready" : "COCO-SEG will be generated")
+                : (entry.coco_ready ? "COCO ready" : "COCO will be generated");
             summaryEl.textContent = `Dataset "${entry.label || entry.id}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}) • ${formatLabel} • ${cocoStatus}`;
             return;
         }
@@ -2639,7 +2660,10 @@ const sam3TrainState = {
             rfdetrDatasetState.items.forEach((entry) => {
                 const option = document.createElement("option");
                 option.value = entry.id;
-                const status = entry.coco_ready ? "COCO ready" : "needs COCO";
+                const isSeg = entry.type === "seg";
+                const status = isSeg
+                    ? (entry.coco_seg_ready ? "COCO-SEG ready" : "needs COCO-SEG")
+                    : (entry.coco_ready ? "COCO ready" : "needs COCO");
                 option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images, ${status})`;
                 select.appendChild(option);
             });

@@ -17955,6 +17955,42 @@ def _build_qwen_instruction(context_text: str, class_names: List[str]) -> str:
     return " ".join(parts).strip()
 
 
+def _build_qwen_training_prompt(context_text: str, class_names: List[str], mode: str) -> str:
+    instruction = _build_qwen_instruction(context_text, class_names)
+    parts: List[str] = []
+    if instruction:
+        parts.append(instruction)
+    parts.append("Return detections for every labeled object.")
+    if mode == "point":
+        parts.append(
+            'Return a JSON object named "detections". Each detection must include "label" and "point" as [x,y] pixel coordinates near the object center. '
+            'If nothing is present, respond with {"detections": []}. Respond with JSON only.'
+        )
+    else:
+        parts.append(
+            'Return a JSON object named "detections". Each detection must include "label" and "bbox" as [x1,y1,x2,y2] pixel coordinates (integers). '
+            'If nothing is present, respond with {"detections": []}. Respond with JSON only.'
+        )
+    return " ".join(parts).strip()
+
+
+def _qwen_build_output_payload(detections: List[Dict[str, Any]], mode: str) -> str:
+    items: List[Dict[str, Any]] = []
+    for det in detections:
+        label = det.get("label")
+        if not label:
+            continue
+        if mode == "point":
+            point = det.get("point")
+            if point:
+                items.append({"label": label, "point": point})
+        else:
+            bbox = det.get("bbox")
+            if bbox:
+                items.append({"label": label, "bbox": bbox})
+    return json.dumps({"detections": items}, ensure_ascii=False)
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp_{uuid.uuid4().hex[:8]}")
@@ -18092,6 +18128,7 @@ def _build_qwen_dataset_from_yolo(dataset_root: Path, *, context_text: str = "",
         val_list = [train_list[0]]
 
     instruction = _build_qwen_instruction(context_text, labelmap)
+    qwen_format_version = "qwen3_conversation_v1"
     total_detections = 0
 
     def _label_path_for_image(img_path: Path, primary_images: Path, primary_labels: Path) -> Tuple[Path, Path]:
@@ -18114,6 +18151,14 @@ def _build_qwen_dataset_from_yolo(dataset_root: Path, *, context_text: str = "",
         out_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = out_dir / "annotations.jsonl"
         if jsonl_path.exists() and not force:
+            try:
+                meta = _load_sam3_dataset_metadata(dataset_root) or _load_registry_dataset_metadata(dataset_root) or {}
+                qwen_meta = meta.get("qwen") or {}
+                if qwen_meta.get("format_version") == qwen_format_version:
+                    with jsonl_path.open("r", encoding="utf-8") as handle:
+                        return sum(1 for _ in handle if _.strip())
+            except Exception:
+                pass
             # Assume existing annotations are valid; count entries quickly.
             try:
                 with jsonl_path.open("r", encoding="utf-8") as handle:
@@ -18140,13 +18185,18 @@ def _build_qwen_dataset_from_yolo(dataset_root: Path, *, context_text: str = "",
                         except Exception:
                             detections = []
                     total_detections += len(detections)
-                    record = {
-                        "image": str(rel.as_posix()),
-                        "context": instruction,
-                        "detections": detections,
-                    }
-                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    count += 1
+                    for mode in ("bbox", "point"):
+                        prompt_text = _build_qwen_training_prompt(instruction, labelmap, mode)
+                        output_text = _qwen_build_output_payload(detections, mode)
+                        record = {
+                            "image": str(rel.as_posix()),
+                            "conversations": [
+                                {"from": "human", "value": f"<image>\n{prompt_text}"},
+                                {"from": "gpt", "value": output_text},
+                            ],
+                        }
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        count += 1
             tmp_path.replace(jsonl_path)
         finally:
             try:
@@ -18156,7 +18206,12 @@ def _build_qwen_dataset_from_yolo(dataset_root: Path, *, context_text: str = "",
         return count
 
     train_count = _write_split("train", train_images, train_labels, train_list)
-    val_count = _write_split("val", val_images if val_images.exists() else train_images, val_labels if val_labels.exists() else train_labels, val_list)
+    val_count = _write_split(
+        "val",
+        val_images if val_images.exists() else train_images,
+        val_labels if val_labels.exists() else train_labels,
+        val_list,
+    )
     if total_detections <= 0:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_missing_labels")
 
@@ -18168,10 +18223,15 @@ def _build_qwen_dataset_from_yolo(dataset_root: Path, *, context_text: str = "",
         "classes": labelmap,
         "context": context_text,
         "created_at": time.time(),
-        "image_count": train_count + val_count,
+        "image_count": len(train_list) + len(val_list),
+        "record_count": train_count + val_count,
         "train_count": train_count,
         "val_count": val_count,
         "type": dataset_type,
+        "qwen": {
+            "format_version": qwen_format_version,
+            "model_family": "qwen3",
+        },
     }
     _atomic_write_json(dataset_root / QWEN_METADATA_FILENAME, meta_payload)
     return meta_payload
@@ -22295,18 +22355,41 @@ def _collect_labels_from_qwen_jsonl(jsonl_path: Path) -> List[str]:
                     payload = json.loads(line)
                 except Exception:
                     continue
-                detections = payload.get("detections") or []
-                if not isinstance(detections, list):
-                    continue
+                detections = _extract_qwen_detections_from_payload(payload)
                 for det in detections:
-                    if not isinstance(det, dict):
-                        continue
                     label = str(det.get("label", "")).strip()
                     if label:
                         labels.add(label)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to scan labels from %s: %s", jsonl_path, exc)
     return sorted(labels)
+
+
+def _extract_qwen_detections_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    detections = payload.get("detections")
+    if isinstance(detections, list):
+        return [det for det in detections if isinstance(det, dict)]
+    conversations = payload.get("conversations")
+    if not isinstance(conversations, list):
+        return []
+    for message in reversed(conversations):
+        if not isinstance(message, dict):
+            continue
+        if message.get("from") != "gpt":
+            continue
+        value = message.get("value")
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            continue
+        detections = parsed.get("detections")
+        if isinstance(detections, list):
+            return [det for det in detections if isinstance(det, dict)]
+    return []
 
 
 def _load_qwen_labelmap(dataset_root: Path) -> List[str]:
@@ -22972,12 +23055,8 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
                         )
                     image_id = images_lookup[image_rel]
                     width, height = image_sizes.get(image_rel, (None, None))
-                    detections = payload.get("detections") or []
-                    if not isinstance(detections, list):
-                        continue
+                    detections = _extract_qwen_detections_from_payload(payload)
                     for det in detections:
-                        if not isinstance(det, dict):
-                            continue
                         label = str(det.get("label", "")).strip()
                         if not label or label not in label_to_id:
                             continue

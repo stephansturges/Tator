@@ -3469,6 +3469,7 @@ class RfDetrTrainRequest(BaseModel):
     early_stopping_patience: Optional[int] = None
     multi_scale: Optional[bool] = None
     expanded_scales: Optional[bool] = None
+    augmentations: Optional[Dict[str, Any]] = None
     accept_tos: Optional[bool] = None
 
     @root_validator(skip_on_failure=True)
@@ -4561,10 +4562,16 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 and (path / "val" / "annotations.jsonl").exists()
             )
             dataset_format = "unknown"
+            dataset_type = meta.get("type", "bbox")
             if yolo_ready:
                 dataset_format = "yolo"
             elif qwen_ready:
                 dataset_format = "qwen"
+            yolo_seg_ready = False
+            if yolo_ready and yolo_labels_dir:
+                yolo_seg_ready = _yolo_labels_have_polygons(Path(yolo_labels_dir))
+                if yolo_seg_ready and dataset_type != "seg":
+                    dataset_type = "seg"
             signature = meta.get("signature") or ""
             key = signature or meta["id"]
             entry = {
@@ -4579,12 +4586,14 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 "context": meta.get("context", "") or meta.get("dataset_context", ""),
                 "signature": signature,
                 "source": meta.get("source") or source,
-                "type": meta.get("type", "bbox"),
+                "type": dataset_type,
                 "coco_ready": coco_ready,
+                "coco_seg_ready": bool(coco_ready and dataset_type == "seg"),
                 "coco_train_json": coco_train,
                 "coco_val_json": coco_val,
                 "format": dataset_format,
                 "yolo_ready": yolo_ready,
+                "yolo_seg_ready": yolo_seg_ready,
                 "yolo_images_dir": yolo_images_dir,
                 "yolo_labels_dir": yolo_labels_dir,
                 "yolo_labelmap_path": str(labelmap_path) if labelmap_path.exists() else None,
@@ -5087,6 +5096,38 @@ def _detect_yolo_layout(dataset_root: Path) -> Dict[str, Any]:
     }
 
 
+def _yolo_labels_have_polygons(
+    labels_dir: Optional[Path],
+    *,
+    max_files: int = 200,
+    max_lines: int = 2000,
+) -> bool:
+    if not labels_dir or not labels_dir.exists():
+        return False
+    checked_files = 0
+    checked_lines = 0
+    for label_path in labels_dir.rglob("*.txt"):
+        checked_files += 1
+        if checked_files > max_files:
+            break
+        try:
+            with label_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if checked_lines >= max_lines:
+                        return False
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    checked_lines += 1
+                    parts = stripped.split()
+                    # class + 4 bbox coords is 5 tokens; polygons add more.
+                    if len(parts) > 5:
+                        return True
+        except Exception:
+            continue
+    return False
+
+
 def _resolve_dataset_entry(dataset_id: str) -> Optional[Dict[str, Any]]:
     cleaned = (dataset_id or "").strip()
     if not cleaned:
@@ -5138,6 +5179,9 @@ def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
         yolo_labelmap_path = layout.get("yolo_labelmap_path")
         yolo_layout = layout.get("yolo_layout")
         source = "registry" if entry else "custom"
+    yolo_seg_ready = False
+    if yolo_ready and yolo_labels_dir:
+        yolo_seg_ready = _yolo_labels_have_polygons(Path(yolo_labels_dir))
     return {
         "dataset_id": entry.get("id") if entry else dataset_root.name,
         "dataset_root": str(dataset_root),
@@ -5145,6 +5189,7 @@ def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
         "signature": dataset_signature,
         "task": task,
         "yolo_ready": yolo_ready,
+        "yolo_seg_ready": yolo_seg_ready,
         "yolo_images_dir": yolo_images_dir,
         "yolo_labels_dir": yolo_labels_dir,
         "yolo_labelmap_path": yolo_labelmap_path,
@@ -5175,6 +5220,12 @@ def _resolve_rfdetr_training_dataset(payload: RfDetrTrainRequest) -> Dict[str, A
     coco_val = meta.get("coco_val_json")
     coco_ready = bool(coco_train and coco_val)
     dataset_type = (entry.get("type") if entry else None) or meta.get("type", "bbox")
+    yolo_layout = _detect_yolo_layout(dataset_root)
+    yolo_seg_ready = False
+    if yolo_layout.get("yolo_ready") and yolo_layout.get("yolo_labels_dir"):
+        yolo_seg_ready = _yolo_labels_have_polygons(Path(yolo_layout["yolo_labels_dir"]))
+        if yolo_seg_ready and dataset_type != "seg":
+            dataset_type = "seg"
     if task == "segment" and dataset_type != "seg":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_seg_requires_polygons")
     if not coco_ready:
@@ -5194,6 +5245,7 @@ def _resolve_rfdetr_training_dataset(payload: RfDetrTrainRequest) -> Dict[str, A
         coco_train = meta.get("coco_train_json")
         coco_val = meta.get("coco_val_json")
         coco_ready = bool(coco_train and coco_val)
+        dataset_type = meta.get("type", dataset_type)
     if not coco_ready:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_ready")
     if coco_train:
@@ -25819,6 +25871,8 @@ def create_yolo_training_job(payload: YoloTrainRequest):
     job_id = uuid.uuid4().hex
     run_dir = _yolo_run_dir(job_id, create=True)
     dataset_info = _resolve_yolo_training_dataset(payload)
+    if payload.task == "segment" and dataset_info.get("yolo_ready") and not dataset_info.get("yolo_seg_ready"):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_seg_requires_polygons")
     config = payload.dict(exclude_none=True)
     config["paths"] = {"run_dir": str(run_dir)}
     config["dataset"] = dataset_info

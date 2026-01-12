@@ -46,6 +46,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **YOLOv8 training** – launch detect/segment runs from the UI, track progress, and keep only `best.pt` + metrics for easy sharing.
 - **RF-DETR training** – launch detect/segment runs from the UI, track progress, and keep best checkpoints + metrics for easy sharing.
+- **Segmentation safeguards** – segmentation training only runs on polygon datasets; Dataset Management shows YOLO‑SEG / COCO‑SEG readiness.
 - **Prometheus metrics** – enable `/metrics` via `.env` for operational visibility.
 
 ## Repository Layout
@@ -120,6 +121,7 @@ Tator/
 - Optional GPU with CUDA for faster CLIP/SAM inference.
 - Ultralytics YOLOv8 (AGPL‑3.0) for the Train YOLO tab. Review the license terms before use: https://github.com/ultralytics/ultralytics/blob/main/LICENSE and https://www.ultralytics.com/license
 - RF-DETR (Apache‑2.0) for the Train RF-DETR tab. Review the license terms before use: https://github.com/roboflow/rf-detr/blob/main/LICENSE
+- Segmentation training requires polygon labels (YOLO‑SEG or COCO‑SEG). Dataset Management shows which formats are ready.
 - Model weights: `sam_vit_h_4b8939.pth` (SAM1). Optional SAM3 checkpoints/configs are supported; see `sam3integration.txt` for sample commands and Hugging Face IDs.
 
 ## Quick Start
@@ -185,6 +187,13 @@ Tator/
    - Import existing YOLO boxes via **Import Bboxes…** — you can point it at a folder of `.txt` files or drop a `.zip` containing them.
    - Enable **SAM Mode** and/or **Auto Class** and start annotating.
 7. **Train CLIP (recommended first):** use the **Train CLIP** tab to train on the same `images/` + `labels/` folders, then activate the resulting `.pkl` via the **CLIP Model** tab. This is the foundation for Auto Class, fast verification, and the best results when searching/mining recipes. It can run quickly on CPU/MPS too (e.g. on an M1 MacBook) and works the same whether your backend is local or on a remote GPU host.
+
+### Dataset readiness badges (YOLO/COCO/SEG)
+Dataset Management displays readiness tags so you can see when a dataset is usable:
+- **YOLO** – images/labels + `labelmap.txt` detected.
+- **YOLO‑SEG** – YOLO polygon labels detected (required for YOLOv8 segmentation training).
+- **COCO** – COCO annotations present (used by SAM3 training + recipe mining).
+- **COCO‑SEG** – COCO polygon annotations present (required for RF‑DETR segmentation training).
 
 ### Optional: Setting up SAM3
 SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):

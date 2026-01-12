@@ -64,7 +64,7 @@
 	        <div class="tab-bar" role="tablist">
 	            <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train Class Predictor</button>
-            <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen</button>
+            <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen 3</button>
             <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
             <button class="tab-button" data-tab="yolo-train" id="tabYoloTrainButton" type="button">Train YOLO</button>
             <button class="tab-button" data-tab="rfdetr-train" id="tabRfDetrTrainButton" type="button">Train RF-DETR</button>
@@ -186,7 +186,7 @@
                             </div>
                             <section class="qwen-panel" aria-labelledby="qwenPanelTitle">
                                 <div class="qwen-panel__header">
-                                    <span id="qwenPanelTitle">Qwen 2.5 Assist</span>
+                                    <span id="qwenPanelTitle">Qwen 3 Assist</span>
                                     <span id="qwenActiveModelLabel" class="qwen-active-model-label"></span>
                                     <span id="qwenStatusLabel" class="qwen-status-label">Checking…</span>
                                 </div>
@@ -664,26 +664,24 @@
             <div class="tab-panel" id="tabQwenTrain" data-tab-panel="qwen-train">
                 <div class="training-wrapper two-col">
 	                    <section class="training-form-section">
-	                        <h2>Fine-tune Qwen 2.5 VL</h2>
+	                        <h2>Fine-tune Qwen 3 VL</h2>
 	                        <p class="qwen-train-intro">
-	                            Fine-tune Qwen on a dataset managed in the Dataset Management tab. Upload a YOLO / YOLO-seg dataset first, then build Qwen
-	                            annotations (JSONL) so Qwen can learn to return JSON detections (bbox + point) for every class in your label map.
+	                            Fine-tune Qwen 3 on a dataset managed in the Dataset Management tab. Upload a YOLO / YOLO-seg dataset first, then build Qwen
+	                            annotations (conversation JSONL) so Qwen learns to return JSON detections (bbox + point) for every class in your label map.
 	                        </p>
                         <div class="qwen-train-callouts">
                             <div>
-                                <strong>LoRA</strong>
-                                <p>Trains lightweight adapters on top of the base FP16 model. Fast and easy when you have ≥24&nbsp;GB VRAM.</p>
+                                <strong>Official LoRA</strong>
+                                <p>Uses the Qwen3 training recipe with LoRA adapters on the full-precision base model. Best quality if you have enough VRAM.</p>
                             </div>
                             <div>
-                                <strong>QLoRA</strong>
-                                <p>Quantizes the base model to 4-bit (NF4) and only trains adapters. Ideal for 18–24&nbsp;GB GPUs.</p>
+                                <strong>TRL QLoRA</strong>
+                                <p>Quantizes the base model to 4-bit (NF4) and trains adapters via TRL. Ideal when GPU memory is tight.</p>
                             </div>
                         </div>
                         <p class="qwen-train-note">
-                            Each training sample reuses your description plus the system prompt here. For every epoch we randomly ask Qwen to return
-                            either bounding boxes or click points, and we vary the scope of the request: sometimes all classes, sometimes a single class
-                            that exists in the image, and sometimes a small subset. The targets are filtered to match that instruction so the adapters learn
-                            both broad sweeps and class-specific prompts without duplicating the dataset on disk.
+                            Training uses conversation JSONL samples built from your dataset. Each record includes a prompt with an <code>&lt;image&gt;</code>
+                            tag plus a JSON response containing detections. We store both bbox and point variants so Qwen learns both output styles.
                         </p>
                         <div class="training-field">
                             <label for="qwenTrainRunName">Run name / subfolder</label>
@@ -696,7 +694,7 @@
 	                                <select id="qwenDatasetSelect"></select>
 	                                <button type="button" class="training-button" id="qwenDatasetRefresh">Refresh</button>
 	                            </div>
-	                            <div class="training-help" id="qwenDatasetSummary">If the selected dataset says "needs Qwen build", go to Dataset Management and click "Build Qwen".</div>
+	                            <div class="training-help" id="qwenDatasetSummary">If the selected dataset says "needs Qwen3 build", go to Dataset Management and click "Build Qwen3".</div>
 	                        </div>
                         <div class="training-grid">
                             <div class="checkbox-row">
@@ -719,41 +717,46 @@
                             </div>
                         </div>
                         <div class="training-field">
-                            <label for="qwenTrainModelId">Base model repo</label>
-                            <input type="text" id="qwenTrainModelId" value="Qwen/Qwen2.5-VL-3B-Instruct" />
+                            <label>Base model</label>
+                            <div class="training-grid">
+                                <div>
+                                    <label for="qwenTrainModelSize">Size</label>
+                                    <select id="qwenTrainModelSize">
+                                        <option value="2B">2B</option>
+                                        <option value="4B" selected>4B</option>
+                                        <option value="8B">8B</option>
+                                        <option value="32B">32B</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="qwenTrainModelVariant">Variant</label>
+                                    <select id="qwenTrainModelVariant">
+                                        <option value="Instruct" selected>Instruct</option>
+                                        <option value="Thinking">Thinking</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="training-help">Resolved model ID: <code id="qwenTrainModelIdPreview">Qwen/Qwen3-VL-4B-Instruct</code></div>
                         </div>
                         <div class="training-field">
                             <label for="qwenTrainSystemPrompt">System prompt</label>
                             <textarea id="qwenTrainSystemPrompt" rows="3">You are an annotation assistant that only returns JSON shaped like {"detections":[{"label":"class","bbox":[x1,y1,x2,y2]} or {"label":"class","point":[x,y]}]}. Respond with JSON only.</textarea>
                             <div class="training-help">Shared system message for every conversation. The user prompt still toggles between bbox vs. point instructions per sample.</div>
                         </div>
-                        <div class="training-field">
-                            <label for="qwenTrainPromptNoise">System prompt noise (0–0.30)</label>
-                            <input type="number" id="qwenTrainPromptNoise" min="0" max="0.3" step="0.01" value="0.05" />
-                            <div class="training-help">We randomly drop this fraction of characters from the system prompt for each sample to make the model more robust.</div>
-                        </div>
-                        <div class="training-field">
-                            <label for="qwenTrainAccelerator">Accelerator</label>
-                            <select id="qwenTrainAccelerator">
-                                <option value="gpu" selected>GPU (recommended)</option>
-                                <option value="auto">Auto</option>
-                                <option value="cpu">CPU (debug only)</option>
-                            </select>
-                        </div>
                         <fieldset class="qwen-radio-group">
-                            <legend>Adapter strategy</legend>
+                            <legend>Training mode</legend>
                             <label class="qwen-radio">
-                                <input type="radio" name="qwenLoraMode" value="qlora" checked />
+                                <input type="radio" name="qwenTrainMode" value="official_lora" checked />
                                 <span>
-                                    <strong>QLoRA (default)</strong>
-                                    <small>Quantize the backbone to 4-bit NF4 and train adapters. Lower VRAM, same accuracy.</small>
+                                    <strong>Official LoRA (default)</strong>
+                                    <small>Qwen3 training recipe with LoRA adapters on the full-precision base model.</small>
                                 </span>
                             </label>
                             <label class="qwen-radio">
-                                <input type="radio" name="qwenLoraMode" value="lora" />
+                                <input type="radio" name="qwenTrainMode" value="trl_qlora" />
                                 <span>
-                                    <strong>LoRA</strong>
-                                    <small>Keep the base model in FP16/BF16 and only train adapters. Requires more VRAM but slightly simpler.</small>
+                                    <strong>TRL QLoRA</strong>
+                                    <small>4-bit NF4 quantization + adapters via TRL. Use when GPU memory is tight.</small>
                                 </span>
                             </label>
                         </fieldset>
@@ -775,11 +778,6 @@
                                 <input type="number" id="qwenTrainAccumulate" value="8" min="1" />
                             </div>
                             <div>
-                                <label for="qwenTrainDevices">Device IDs</label>
-                                <input type="text" id="qwenTrainDevices" placeholder="e.g., 0,1" />
-                                <div class="training-help">Leave blank for a single GPU. Enter comma-separated CUDA IDs to train on multiple GPUs.</div>
-                            </div>
-                            <div>
                                 <label for="qwenTrainLoraRank">LoRA rank</label>
                                 <input type="number" id="qwenTrainLoraRank" value="8" min="1" />
                             </div>
@@ -792,18 +790,28 @@
                                 <input type="number" id="qwenTrainLoraDropout" value="0.05" step="0.01" min="0" max="1" />
                             </div>
                             <div>
-                                <label for="qwenTrainPatience">Early stop patience</label>
-                                <input type="number" id="qwenTrainPatience" value="3" min="1" />
+                                <label for="qwenTrainLogSteps">Log every N steps</label>
+                                <input type="number" id="qwenTrainLogSteps" value="10" min="1" />
                             </div>
                             <div>
-                                <label for="qwenTrainMaxImageDim">Max image dimension (px)</label>
-                                <input type="number" id="qwenTrainMaxImageDim" value="1024" min="256" max="4096" step="64" />
-                                <div class="training-help">Images larger than this shrink on the longest side before reaching Qwen.</div>
+                                <label for="qwenTrainMinPixels">Min pixel budget</label>
+                                <input type="number" id="qwenTrainMinPixels" value="12544" min="1024" step="256" />
+                                <div class="training-help">Minimum pixel budget enforced by the Qwen3 processor.</div>
                             </div>
                             <div>
-                                <label for="qwenTrainMaxDetections">Max detections per sample</label>
-                                <input type="number" id="qwenTrainMaxDetections" value="200" min="1" max="200" />
-                                <div class="training-help">Uses the same per-class-aware cap from the trainer; drop below 200 to ease VRAM pressure.</div>
+                                <label for="qwenTrainMaxPixels">Max pixel budget</label>
+                                <input type="number" id="qwenTrainMaxPixels" value="451584" min="65536" step="1024" />
+                                <div class="training-help">Higher values preserve detail but increase VRAM usage.</div>
+                            </div>
+                            <div>
+                                <label for="qwenTrainMaxLength">Max sequence length</label>
+                                <input type="number" id="qwenTrainMaxLength" placeholder="leave blank" min="256" />
+                                <div class="training-help">Leave blank to avoid truncating image tokens.</div>
+                            </div>
+                            <div>
+                                <label for="qwenTrainLoraTargets">LoRA target modules</label>
+                                <input type="text" id="qwenTrainLoraTargets" value="q_proj,k_proj,v_proj,o_proj" />
+                                <div class="training-help">Comma-separated module names.</div>
                             </div>
                         </div>
                         <div class="training-actions">

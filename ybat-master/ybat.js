@@ -1197,7 +1197,7 @@
     };
     const DEFAULT_QWEN_METADATA = {
         id: "default",
-        label: "Base Qwen",
+        label: "Base Qwen 3",
         dataset_context: "",
         classes: [],
         system_prompt: "",
@@ -1307,22 +1307,23 @@
 
 	const qwenTrainElements = {
 	        runNameInput: null,
-	        modelIdInput: null,
+	        modelSizeSelect: null,
+	        modelVariantSelect: null,
+	        modelIdPreview: null,
 	        systemPromptInput: null,
-	        systemPromptNoiseInput: null,
-	        acceleratorSelect: null,
-        loraRadios: null,
+        trainModeRadios: null,
         batchSizeInput: null,
         epochsInput: null,
         lrInput: null,
         accumulateInput: null,
-        devicesInput: null,
         loraRankInput: null,
         loraAlphaInput: null,
         loraDropoutInput: null,
-	        patienceInput: null,
-	        maxImageDimInput: null,
-	        maxDetectionsInput: null,
+        loraTargetsInput: null,
+        logStepsInput: null,
+        minPixelsInput: null,
+        maxPixelsInput: null,
+        maxLengthInput: null,
 	        datasetSelect: null,
 	        datasetRefresh: null,
 	        datasetSummary: null,
@@ -1945,7 +1946,7 @@ const sam3TrainState = {
 	                    const qwenBtn = document.createElement("button");
 	                    qwenBtn.type = "button";
 	                    qwenBtn.className = "button button-outline";
-	                    qwenBtn.textContent = entry.qwen_ready ? "Qwen ready" : "Build Qwen";
+	                    qwenBtn.textContent = entry.qwen_ready ? "Qwen3 ready" : "Build Qwen3";
 	                    qwenBtn.disabled = !!entry.qwen_ready;
 	                    qwenBtn.title = entry.qwen_ready
 	                        ? "Qwen JSONL annotations are already present."
@@ -1973,12 +1974,12 @@ const sam3TrainState = {
 	                        const qwenTrain = Number.isFinite(entry.qwen_train_count) ? entry.qwen_train_count : null;
 	                        const qwenVal = Number.isFinite(entry.qwen_val_count) ? entry.qwen_val_count : null;
 	                        if (qwenTrain !== null && qwenVal !== null) {
-	                            parts.push(`Qwen ready (train ${qwenTrain} / val ${qwenVal})`);
+	                            parts.push(`Qwen3 ready (train ${qwenTrain} / val ${qwenVal})`);
 	                        } else {
-	                            parts.push("Qwen ready");
+	                            parts.push("Qwen3 ready");
 	                        }
 	                    } else {
-	                        parts.push("Qwen missing");
+	                        parts.push("Qwen3 missing");
 	                    }
 	                    const counts = [];
 	                    if (entry.image_count) counts.push(`${entry.image_count} img`);
@@ -2470,7 +2471,7 @@ const sam3TrainState = {
 	            const context = entry.context ? ` Context: ${entry.context}` : "";
 	            const qwenTrain = Number.isFinite(entry.qwen_train_count) ? entry.qwen_train_count : null;
 	            const qwenVal = Number.isFinite(entry.qwen_val_count) ? entry.qwen_val_count : null;
-	            const qwenCounts = (qwenTrain !== null && qwenVal !== null) ? `Qwen: train ${qwenTrain} / val ${qwenVal}` : (entry.qwen_ready ? "Qwen ready" : "Qwen missing");
+	            const qwenCounts = (qwenTrain !== null && qwenVal !== null) ? `Qwen3: train ${qwenTrain} / val ${qwenVal}` : (entry.qwen_ready ? "Qwen3 ready" : "Qwen3 missing");
 	            summaryEl.textContent = `Dataset "${entry.label}" (${entry.image_count || 0} images, train ${entry.train_count || 0} / val ${entry.val_count || 0}) • ${qwenCounts}.${context}`;
 	            return;
 	        }
@@ -2503,7 +2504,7 @@ const sam3TrainState = {
 		            qwenDatasetState.items.forEach((entry) => {
 		                const option = document.createElement("option");
 		                option.value = entry.id;
-		                const status = entry.qwen_ready ? "Qwen ready" : "needs Qwen build";
+		                const status = entry.qwen_ready ? "Qwen3 ready" : "needs Qwen3 build";
 	                option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images, ${status})`;
 	                select.appendChild(option);
 	            });
@@ -4770,9 +4771,21 @@ function readNumberInput(input, { integer = false } = {}) {
     return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function getSelectedQwenLoraMode() {
-    const selected = document.querySelector('input[name="qwenLoraMode"]:checked');
-    return selected ? selected.value : "qlora";
+function getSelectedQwenTrainMode() {
+    const selected = document.querySelector('input[name="qwenTrainMode"]:checked');
+    return selected ? selected.value : "official_lora";
+}
+
+function resolveQwenModelId() {
+    const size = qwenTrainElements.modelSizeSelect?.value || "4B";
+    const variant = qwenTrainElements.modelVariantSelect?.value || "Instruct";
+    return `Qwen/Qwen3-VL-${size}-${variant}`;
+}
+
+function updateQwenModelPreview() {
+    if (qwenTrainElements.modelIdPreview) {
+        qwenTrainElements.modelIdPreview.textContent = resolveQwenModelId();
+    }
 }
 
 function shuffleArray(input) {
@@ -7575,23 +7588,12 @@ async function cancelQwenDatasetUpload(jobId) {
     if (splitSeed !== undefined) {
         payload.split_seed = splitSeed;
     }
-    const modelId = qwenTrainElements.modelIdInput?.value?.trim();
-    if (modelId) {
-        payload.model_id = modelId;
-    }
+    payload.model_id = resolveQwenModelId();
+    payload.training_mode = getSelectedQwenTrainMode();
     const systemPrompt = qwenTrainElements.systemPromptInput?.value?.trim();
     if (systemPrompt) {
         payload.system_prompt = systemPrompt;
     }
-    const promptNoise = readNumberInput(qwenTrainElements.systemPromptNoiseInput, { integer: false });
-    if (promptNoise !== undefined) {
-        payload.system_prompt_noise = promptNoise;
-    }
-    const accelerator = qwenTrainElements.acceleratorSelect?.value;
-    if (accelerator) {
-        payload.accelerator = accelerator;
-    }
-    payload.use_qlora = getSelectedQwenLoraMode() !== "lora";
     const numericMap = [
         ["batch_size", qwenTrainElements.batchSizeInput, { integer: true }],
         ["max_epochs", qwenTrainElements.epochsInput, { integer: true }],
@@ -7600,7 +7602,10 @@ async function cancelQwenDatasetUpload(jobId) {
         ["lora_rank", qwenTrainElements.loraRankInput, { integer: true }],
         ["lora_alpha", qwenTrainElements.loraAlphaInput, { integer: true }],
         ["lora_dropout", qwenTrainElements.loraDropoutInput, { integer: false }],
-        ["patience", qwenTrainElements.patienceInput, { integer: true }],
+        ["log_every_n_steps", qwenTrainElements.logStepsInput, { integer: true }],
+        ["min_pixels", qwenTrainElements.minPixelsInput, { integer: true }],
+        ["max_pixels", qwenTrainElements.maxPixelsInput, { integer: true }],
+        ["max_length", qwenTrainElements.maxLengthInput, { integer: true }],
     ];
     numericMap.forEach(([key, input, opts]) => {
         const value = readNumberInput(input, opts || {});
@@ -7608,24 +7613,9 @@ async function cancelQwenDatasetUpload(jobId) {
             payload[key] = value;
         }
     });
-    const maxImageDim = readNumberInput(qwenTrainElements.maxImageDimInput, { integer: true });
-    if (maxImageDim !== undefined) {
-        const clampedDim = Math.min(Math.max(maxImageDim, 256), 4096);
-        payload.max_image_dim = clampedDim;
-    }
-    const maxDetections = readNumberInput(qwenTrainElements.maxDetectionsInput, { integer: true });
-    if (maxDetections !== undefined) {
-        const clampedDetections = Math.min(Math.max(maxDetections, 1), 200);
-        payload.max_detections_per_sample = clampedDetections;
-    }
-    if (qwenTrainElements.devicesInput) {
-        const rawDevices = (qwenTrainElements.devicesInput.value || "").trim();
-        if (rawDevices) {
-            const parsed = rawDevices.split(",").map((value) => parseInt(value.trim(), 10)).filter((value) => Number.isFinite(value));
-            if (parsed.length) {
-                payload.devices = parsed;
-            }
-        }
+    const rawTargets = qwenTrainElements.loraTargetsInput?.value?.trim();
+    if (rawTargets) {
+        payload.lora_target_modules = rawTargets.split(",").map((value) => value.trim()).filter(Boolean);
     }
     return payload;
 }
@@ -8434,21 +8424,22 @@ function initQwenTrainingTab() {
 	            return;
 	        }
 	        qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
-	        qwenTrainElements.modelIdInput = document.getElementById("qwenTrainModelId");
+	        qwenTrainElements.modelSizeSelect = document.getElementById("qwenTrainModelSize");
+	        qwenTrainElements.modelVariantSelect = document.getElementById("qwenTrainModelVariant");
+	        qwenTrainElements.modelIdPreview = document.getElementById("qwenTrainModelIdPreview");
 	        qwenTrainElements.systemPromptInput = document.getElementById("qwenTrainSystemPrompt");
-	        qwenTrainElements.systemPromptNoiseInput = document.getElementById("qwenTrainPromptNoise");
-        qwenTrainElements.acceleratorSelect = document.getElementById("qwenTrainAccelerator");
         qwenTrainElements.batchSizeInput = document.getElementById("qwenTrainBatchSize");
         qwenTrainElements.epochsInput = document.getElementById("qwenTrainEpochs");
         qwenTrainElements.lrInput = document.getElementById("qwenTrainLR");
         qwenTrainElements.accumulateInput = document.getElementById("qwenTrainAccumulate");
-        qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
         qwenTrainElements.loraRankInput = document.getElementById("qwenTrainLoraRank");
         qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
 	        qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
-	        qwenTrainElements.patienceInput = document.getElementById("qwenTrainPatience");
-	        qwenTrainElements.maxImageDimInput = document.getElementById("qwenTrainMaxImageDim");
-	        qwenTrainElements.maxDetectionsInput = document.getElementById("qwenTrainMaxDetections");
+	        qwenTrainElements.loraTargetsInput = document.getElementById("qwenTrainLoraTargets");
+	        qwenTrainElements.logStepsInput = document.getElementById("qwenTrainLogSteps");
+	        qwenTrainElements.minPixelsInput = document.getElementById("qwenTrainMinPixels");
+	        qwenTrainElements.maxPixelsInput = document.getElementById("qwenTrainMaxPixels");
+	        qwenTrainElements.maxLengthInput = document.getElementById("qwenTrainMaxLength");
 	        qwenTrainElements.datasetSelect = document.getElementById("qwenDatasetSelect");
 	        qwenTrainElements.datasetRefresh = document.getElementById("qwenDatasetRefresh");
 	        qwenTrainElements.datasetSummary = document.getElementById("qwenDatasetSummary");
@@ -8457,7 +8448,7 @@ function initQwenTrainingTab() {
         qwenTrainElements.splitSeed = document.getElementById("qwenTrainSplitSeed");
         qwenTrainElements.cacheInfo = document.getElementById("qwenCacheInfo");
         qwenTrainElements.cachePurge = document.getElementById("qwenCachePurge");
-        qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
+        qwenTrainElements.trainModeRadios = document.querySelectorAll('input[name="qwenTrainMode"]');
         qwenTrainElements.sampleButton = document.getElementById("qwenSampleBtn");
         qwenTrainElements.sampleCanvas = document.getElementById("qwenSampleCanvas");
         qwenTrainElements.samplePrompt = document.getElementById("qwenSamplePrompt");
@@ -8487,11 +8478,18 @@ function initQwenTrainingTab() {
             });
             qwenTrainElements.cancelButton.disabled = true;
         }
-	        if (qwenTrainElements.sampleButton) {
-	            qwenTrainElements.sampleButton.addEventListener("click", () => {
-	                generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
-	            });
-	        }
+        if (qwenTrainElements.sampleButton) {
+            qwenTrainElements.sampleButton.addEventListener("click", () => {
+                generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
+            });
+        }
+        if (qwenTrainElements.modelSizeSelect) {
+            qwenTrainElements.modelSizeSelect.addEventListener("change", updateQwenModelPreview);
+        }
+        if (qwenTrainElements.modelVariantSelect) {
+            qwenTrainElements.modelVariantSelect.addEventListener("change", updateQwenModelPreview);
+        }
+        updateQwenModelPreview();
 	        if (qwenTrainElements.datasetSelect) {
 	            qwenTrainElements.datasetSelect.addEventListener("change", () => {
 	                qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
@@ -13857,17 +13855,16 @@ function initQwenTrainingTab() {
         }
         const classes = Array.isArray(metadata.classes) ? metadata.classes.join(", ") : "(not specified)";
         const context = metadata.dataset_context || "(not specified)";
-        const maxDimValue = Number(metadata.max_image_dim);
-        const maxDim = Number.isFinite(maxDimValue) && maxDimValue > 0 ? maxDimValue : 1024;
-        const detCapValue = Number(metadata.max_detections_per_sample);
-        const detectionCap = Number.isFinite(detCapValue) && detCapValue > 0 ? detCapValue : 200;
+        const minPixelsValue = Number(metadata.min_pixels);
+        const maxPixelsValue = Number(metadata.max_pixels);
+        const minPixels = Number.isFinite(minPixelsValue) && minPixelsValue > 0 ? minPixelsValue : 12544;
+        const maxPixels = Number.isFinite(maxPixelsValue) && maxPixelsValue > 0 ? maxPixelsValue : 451584;
         qwenModelElements.details.innerHTML = `
             <p><strong>Name:</strong> ${metadata.label || metadata.id || "Custom Run"}</p>
-            <p><strong>Base model:</strong> ${metadata.model_id || "Qwen/Qwen2.5-VL-3B-Instruct"}</p>
+            <p><strong>Base model:</strong> ${metadata.model_id || "Qwen/Qwen3-VL-4B-Instruct"}</p>
             <p><strong>Context hint:</strong> ${context}</p>
             <p><strong>Classes:</strong> ${classes}</p>
-            <p><strong>Image resize cap:</strong> ${maxDim}px longest side</p>
-            <p><strong>Detections/sample:</strong> ${detectionCap} (per-class budget)</p>
+            <p><strong>Pixel budget:</strong> ${minPixels}–${maxPixels}</p>
             <label>System prompt</label>
             <pre>${metadata.system_prompt || ""}</pre>
         `;

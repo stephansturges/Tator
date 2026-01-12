@@ -3467,6 +3467,8 @@ class RfDetrTrainRequest(BaseModel):
     use_ema: Optional[bool] = None
     early_stopping: Optional[bool] = None
     early_stopping_patience: Optional[int] = None
+    multi_scale: Optional[bool] = None
+    expanded_scales: Optional[bool] = None
     accept_tos: Optional[bool] = None
 
     @root_validator(skip_on_failure=True)
@@ -23859,6 +23861,10 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 "run": config.get("run_name") or job.job_id[:8],
                 "project": "rfdetr",
             }
+            multi_scale = config.get("multi_scale")
+            if multi_scale is not None:
+                train_kwargs["multi_scale"] = bool(multi_scale)
+                train_kwargs["expanded_scales"] = bool(config.get("expanded_scales")) if multi_scale else False
             if task == "segment":
                 train_kwargs["segmentation_head"] = True
             train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}

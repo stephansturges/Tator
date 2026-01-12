@@ -19431,7 +19431,7 @@ def _sanitize_prompts(prompts: List[str]) -> List[str]:
 
 def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
     prompts = _sanitize_prompts(prompts)
-    if not prompts or Qwen2_5_VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
+    if not prompts or Qwen3VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
         return prompts
     try:
         prompt_text = (
@@ -19454,7 +19454,7 @@ def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
 def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
     """Ask Qwen to self-critique the candidate prompts against the target class and return only credible entries."""
     prompts = _sanitize_prompts(prompts)
-    if not prompts or Qwen2_5_VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
+    if not prompts or Qwen3VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
         return prompts
     try:
         prompt_text = (
@@ -26595,7 +26595,7 @@ def qwen_train_cache_purge():
 def list_qwen_models():
     default_entry = {
         "id": "default",
-        "label": "Base Qwen 2.5",
+        "label": "Base Qwen 3",
         "type": "builtin",
         "metadata": _default_qwen_metadata(),
         "path": None,

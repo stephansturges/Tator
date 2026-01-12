@@ -1292,6 +1292,17 @@
                     <section class="training-form-section">
                         <h2>Train RF-DETR</h2>
                         <p class="training-help">Train RF-DETR on datasets from the Dataset Management tab. We keep only best checkpoints + metrics.</p>
+                        <div class="training-help" style="margin: 8px 0 14px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
+                            <div style="font-weight: 600; color: #0f172a;">Model scale &amp; resolution</div>
+                            <div style="margin-top: 6px;">
+                                Each variant (Nano/Small/Medium/Base/Large) has a default resolution and backbone patch sizing. If you override
+                                resolution, pick a value divisible by the model’s patch window size (Large uses 56; e.g., 672 works, 640 does not).
+                            </div>
+                            <div style="margin-top: 6px;">
+                                With multi-scale on (default), the chosen resolution is the <em>center</em> of a range of random scales. Expanded scales
+                                widens that range for more small-object coverage but adds training variance. Turn multi-scale off to train at a fixed size.
+                            </div>
+                        </div>
                         <div class="training-field">
                             <label>Dataset</label>
                             <div class="sam3-dataset-row">

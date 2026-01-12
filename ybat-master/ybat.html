@@ -631,7 +631,7 @@
                         <button type="button" id="startTrainingBtn">Start Training</button>
                         <div class="training-toggle-row">
                             <label title="Speeds up repeat runs by reusing cached embeddings. If you change labels or class definitions, disable this once to rebuild the cache."><input type="checkbox" id="trainReuseEmbeddings" checked /> Cache and reuse embeddings</label>
-                            <label><input type="checkbox" id="trainHardMining" checked /> Hard example mining</label>
+                            <label title="Boosts misclassified or low-confidence samples in later passes. Can improve recall but adds a bit of training time."><input type="checkbox" id="trainHardMining" checked /> Hard example mining</label>
                         </div>
                         <div class="training-message" id="trainingMessage" role="status"></div>
                     </section>

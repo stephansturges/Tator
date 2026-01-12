@@ -2526,7 +2526,7 @@ def _ensure_qwen_ready():
                 detail = f"{detail}:{PEFT_IMPORT_ERROR}"
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         try:
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
                 str(base_model_id),
                 **load_kwargs,
             )
@@ -3360,27 +3360,23 @@ class QwenTrainRequest(BaseModel):
     dataset_root: Optional[str] = None
     run_name: Optional[str] = None
     model_id: Optional[str] = None
+    training_mode: Optional[Literal["official_lora", "trl_qlora"]] = None
     system_prompt: Optional[str] = None
-    system_prompt_noise: Optional[float] = None
     batch_size: Optional[int] = None
     max_epochs: Optional[int] = None
     lr: Optional[float] = None
     accumulate_grad_batches: Optional[int] = None
-    check_val_every_n_epoch: Optional[int] = None
-    gradient_clip_val: Optional[float] = None
     warmup_steps: Optional[int] = None
     num_workers: Optional[int] = None
-    use_qlora: Optional[bool] = None
     lora_rank: Optional[int] = None
     lora_alpha: Optional[int] = None
     lora_dropout: Optional[float] = None
-    patience: Optional[int] = None
-    accelerator: Optional[str] = None
-    devices: Optional[List[int]] = None
-    device_map: Optional[Any] = None
+    lora_target_modules: Optional[List[str]] = None
+    log_every_n_steps: Optional[int] = None
+    min_pixels: Optional[int] = None
+    max_pixels: Optional[int] = None
+    max_length: Optional[int] = None
     seed: Optional[int] = None
-    max_detections_per_sample: Optional[int] = None
-    max_image_dim: Optional[int] = None
     random_split: Optional[bool] = None
     val_percent: Optional[float] = None
     split_seed: Optional[int] = None
@@ -17082,7 +17078,7 @@ def _persist_qwen_run_metadata(
         "dataset_context": dataset_meta.get("context", ""),
         "classes": dataset_meta.get("classes", []) or [],
         "model_id": config.model_id,
-        "use_qlora": config.use_qlora,
+        "training_mode": getattr(config, "training_mode", None),
         "max_image_dim": config.max_image_dim,
         "max_detections_per_sample": config.max_detections_per_sample,
         "created_at": time.time(),
@@ -17175,7 +17171,7 @@ def _infer_qwen_run_metadata_from_artifacts(run_dir: Path) -> Optional[Dict[str,
         "dataset_context": dataset_meta.get("context", ""),
         "classes": dataset_meta.get("classes", []) or [],
         "model_id": base_model_id,
-        "use_qlora": dataset_meta.get("use_qlora"),
+        "training_mode": dataset_meta.get("training_mode"),
         "created_at": dataset_meta.get("created_at") or run_dir.stat().st_mtime,
         "latest_checkpoint": str(latest_dir),
         "source_dataset": str(dataset_dir) if dataset_dir.exists() else None,
@@ -17428,55 +17424,35 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str, job_logs: Optiona
     if result_path.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
     system_prompt = (payload.system_prompt or DEFAULT_SYSTEM_PROMPT).strip() or DEFAULT_SYSTEM_PROMPT
+    training_mode = payload.training_mode or "official_lora"
     cfg_kwargs: Dict[str, Any] = {
         "dataset_root": str(dataset_root),
         "result_path": str(result_path),
-        "model_id": payload.model_id or "Qwen/Qwen2.5-VL-3B-Instruct",
+        "model_id": payload.model_id or QWEN_MODEL_NAME,
         "run_name": run_name,
         "system_prompt": system_prompt,
+        "training_mode": training_mode,
     }
     defaults = {
         "batch_size": payload.batch_size,
         "max_epochs": payload.max_epochs,
         "lr": payload.lr,
         "accumulate_grad_batches": payload.accumulate_grad_batches,
-        "check_val_every_n_epoch": payload.check_val_every_n_epoch,
-        "gradient_clip_val": payload.gradient_clip_val,
         "warmup_steps": payload.warmup_steps,
         "num_workers": payload.num_workers,
         "lora_rank": payload.lora_rank,
         "lora_alpha": payload.lora_alpha,
         "lora_dropout": payload.lora_dropout,
-        "patience": payload.patience,
-        "accelerator": payload.accelerator,
-        "device_map": payload.device_map,
+        "lora_target_modules": payload.lora_target_modules,
+        "log_every_n_steps": payload.log_every_n_steps,
+        "min_pixels": payload.min_pixels,
+        "max_pixels": payload.max_pixels,
+        "max_length": payload.max_length,
         "seed": payload.seed,
     }
     for key, value in defaults.items():
         if value is not None:
             cfg_kwargs[key] = value
-    if payload.devices is not None:
-        cfg_kwargs["devices"] = payload.devices
-    if payload.use_qlora is not None:
-        cfg_kwargs["use_qlora"] = payload.use_qlora
-    if payload.system_prompt_noise is not None:
-        try:
-            noise_val = float(payload.system_prompt_noise)
-        except (TypeError, ValueError):
-            noise_val = 0.05
-        cfg_kwargs["system_prompt_noise"] = max(0.0, min(noise_val, 0.3))
-    if payload.max_detections_per_sample is not None:
-        try:
-            max_dets = int(payload.max_detections_per_sample)
-        except (TypeError, ValueError):
-            max_dets = 200
-        cfg_kwargs["max_detections_per_sample"] = max(1, min(max_dets, 200))
-    if payload.max_image_dim is not None:
-        try:
-            max_dim = int(payload.max_image_dim)
-        except (TypeError, ValueError):
-            max_dim = 1024
-        cfg_kwargs["max_image_dim"] = max(64, min(max_dim, 4096))
     return QwenTrainingConfig(**cfg_kwargs)
 
 

@@ -475,6 +475,11 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
 
+## 2026-01-12 – Segmentation Dataset Guards + Badges
+- Enforced **segmentation-only training** for YOLOv8‑seg: bbox‑only datasets are rejected to prevent invalid runs.
+- RF‑DETR segmentation now accepts YOLO‑seg datasets by auto‑converting polygons to COCO‑SEG when needed.
+- Dataset Management now surfaces **YOLO‑SEG / COCO‑SEG** readiness so you can see polygon availability at a glance.
+
 ## 2025-12-25 – DINOv3 MLP Benchmarks + Soft Targets
 - Benchmarked **DINOv3 + MLP** heads (small/base/large) with and without **label smoothing** and logged results to the comparison tables.
 - Added a concise methodology (`classifier_testing_methodology.md`) so future classifier runs are evaluated on the same split + metrics.

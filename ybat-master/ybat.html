@@ -645,6 +645,11 @@
                             <button type="button" class="training-button training-button-danger" id="cancelTrainingBtn" disabled>Cancel Job</button>
                         </div>
                         <div class="training-summary" id="trainingSummary"></div>
+                        <div class="training-chart">
+                            <h3>Validation Metric</h3>
+                            <canvas id="trainingMetricCanvas" height="160"></canvas>
+                            <div class="training-help" id="trainingChartStatus">Metrics appear after training completes.</div>
+                        </div>
                         <div class="training-logs">
                             <h3>Logs</h3>
                             <pre id="trainingLog"></pre>

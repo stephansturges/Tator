@@ -67,6 +67,7 @@ CLIP_OVERSAMPLE_MAX_MULTIPLIER = 4.0
 
 ProgressCallback = Callable[[float, str], None]
 CancelCallback = Callable[[], bool]
+MetricsCallback = Callable[[Dict[str, Any]], None]
 
 
 class TrainingError(RuntimeError):
@@ -849,6 +850,7 @@ def train_clip_from_yolo(
     convergence_tol: float = 1e-4,
     bg_class_count: int = 2,
     progress_cb: Optional[ProgressCallback] = None,
+    metrics_cb: Optional[MetricsCallback] = None,
     should_cancel: Optional[CancelCallback] = None,
 ) -> TrainingArtifacts:
     """Train a CLIP+LogReg model from a YOLO-style dataset.
@@ -1920,7 +1922,7 @@ def train_clip_from_yolo(
                             converged = True
                             break
 
-                convergence_trace.append({
+                entry = {
                     "iteration": epoch,
                     "train_loss": train_loss,
                     "train_accuracy": train_acc,
@@ -1928,7 +1930,15 @@ def train_clip_from_yolo(
                     "val_accuracy": val_acc,
                     "coef_delta": None,
                     "loss_delta": None,
-                })
+                }
+                convergence_trace.append(entry)
+                if metrics_cb:
+                    try:
+                        metric_payload = dict(entry)
+                        metric_payload["epoch"] = epoch
+                        metrics_cb(metric_payload)
+                    except Exception:
+                        pass
                 iterations_run = epoch
                 progress_fraction = 0.45 + 0.15 * (epoch / max(1, mlp_epochs))
                 status_parts = [
@@ -2221,7 +2231,7 @@ def train_clip_from_yolo(
                 if prev_loss is not None:
                     loss_delta = float(abs(prev_loss - train_loss))
 
-                convergence_trace.append({
+                entry = {
                     "iteration": iteration,
                     "train_loss": train_loss,
                     "train_accuracy": train_acc,
@@ -2229,7 +2239,15 @@ def train_clip_from_yolo(
                     "val_accuracy": val_acc,
                     "coef_delta": coef_delta,
                     "loss_delta": loss_delta,
-                })
+                }
+                convergence_trace.append(entry)
+                if metrics_cb:
+                    try:
+                        metric_payload = dict(entry)
+                        metric_payload["epoch"] = iteration
+                        metrics_cb(metric_payload)
+                    except Exception:
+                        pass
                 iteration_counter += 1
 
                 progress_fraction = 0.45 + 0.15 * (iteration / max(1, max_iter))

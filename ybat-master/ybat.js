@@ -8123,13 +8123,15 @@ function drawMetricChartCanvas(canvas, points, lineColor = "#16a34a") {
     ctx.restore();
 }
 
-function updateClipTrainingChart(artifacts) {
+function updateClipTrainingChart(metricsOrArtifacts) {
     if (!trainingElements.metricCanvas || !trainingElements.chartStatus) {
         return;
     }
-    const trace = artifacts && Array.isArray(artifacts.convergence_trace)
-        ? artifacts.convergence_trace
-        : [];
+    const trace = Array.isArray(metricsOrArtifacts)
+        ? metricsOrArtifacts
+        : (metricsOrArtifacts && Array.isArray(metricsOrArtifacts.convergence_trace)
+            ? metricsOrArtifacts.convergence_trace
+            : []);
     if (!trace.length) {
         trainingElements.chartStatus.textContent = "Metrics appear after training completes.";
         const ctx = trainingElements.metricCanvas.getContext("2d");
@@ -8164,7 +8166,11 @@ function updateClipTrainingChart(artifacts) {
             if (!Number.isFinite(y)) {
                 return null;
             }
-            const x = Number.isFinite(entry.epoch) ? entry.epoch : idx + 1;
+            const x = Number.isFinite(entry.epoch)
+                ? entry.epoch
+                : Number.isFinite(entry.iteration)
+                    ? entry.iteration
+                    : idx + 1;
             return { x, y: Number(y) };
         })
         .filter(Boolean);
@@ -9316,10 +9322,10 @@ function initQwenTrainingTab() {
                 const convergenceHtml = renderConvergenceTable(art.convergence_trace);
                 trainingElements.summary.innerHTML = summaryHtml + perClassHtml + convergenceHtml;
                 trainingState.latestArtifacts = art;
-                updateClipTrainingChart(art);
+                updateClipTrainingChart(status.metrics && status.metrics.length ? status.metrics : art);
             } else if (status.status !== "succeeded") {
                 trainingElements.summary.textContent = "";
-                updateClipTrainingChart(null);
+                updateClipTrainingChart(status.metrics && status.metrics.length ? status.metrics : null);
             }
         }
         if (status.status === "succeeded" && status.artifacts) {
@@ -9339,7 +9345,7 @@ function initQwenTrainingTab() {
             const message = status.error || "Training failed.";
             setTrainingMessage(message, "error");
             setActiveMessage(message, "error");
-            updateClipTrainingChart(status.artifacts || null);
+            updateClipTrainingChart(status.metrics && status.metrics.length ? status.metrics : status.artifacts);
             stopTrainingPoll();
             if (trainingElements.cancelButton) {
                 trainingElements.cancelButton.disabled = true;
@@ -9347,7 +9353,7 @@ function initQwenTrainingTab() {
         } else if (status.status === "cancelled") {
             setTrainingMessage("Training cancelled.", "warn");
             setActiveMessage("Training cancelled.", "warn");
-            updateClipTrainingChart(status.artifacts || null);
+            updateClipTrainingChart(status.metrics && status.metrics.length ? status.metrics : status.artifacts);
             stopTrainingPoll();
             if (trainingElements.cancelButton) {
                 trainingElements.cancelButton.disabled = true;
@@ -9355,14 +9361,14 @@ function initQwenTrainingTab() {
         } else if (status.status === "cancelling") {
             setTrainingMessage("Cancellation in progress…", "warn");
             setActiveMessage("Cancellation in progress…", "warn");
-            updateClipTrainingChart(status.artifacts || null);
+            updateClipTrainingChart(status.metrics && status.metrics.length ? status.metrics : status.artifacts);
             trainingState.pollHandle = setTimeout(() => {
                 pollTrainingJob(status.job_id).catch((err) => {
                     console.error("Training poll error", err);
                 });
             }, 1500);
         } else if (status.status === "running" || status.status === "queued") {
-            updateClipTrainingChart(status.artifacts || null);
+            updateClipTrainingChart(status.metrics && status.metrics.length ? status.metrics : status.artifacts);
             trainingState.pollHandle = setTimeout(() => {
                 pollTrainingJob(status.job_id).catch((err) => {
                     console.error("Training poll error", err);

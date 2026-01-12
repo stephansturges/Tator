@@ -3596,6 +3596,7 @@ class ClipTrainingJob:
     progress: float = 0.0
     message: str = "Queued"
     logs: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
     artifacts: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
@@ -3996,6 +3997,15 @@ def _job_log(job: ClipTrainingJob, message: str) -> None:
         pass
 
 
+def _clip_job_append_metric(job: ClipTrainingJob, metric: Dict[str, Any]) -> None:
+    if not metric:
+        return
+    job.metrics.append(metric)
+    if len(job.metrics) > 2000:
+        job.metrics[:] = job.metrics[-2000:]
+    job.updated_at = time.time()
+
+
 def _job_update(job: ClipTrainingJob, *, status: Optional[str] = None, message: Optional[str] = None,
                 progress: Optional[float] = None, error: Optional[str] = None,
                 artifacts: Optional[Dict[str, Any]] = None) -> None:
@@ -4062,6 +4072,7 @@ def _serialize_job(job: ClipTrainingJob) -> Dict[str, Any]:
         "progress": job.progress,
         "message": job.message,
         "logs": job.logs,
+        "metrics": job.metrics,
         "artifacts": job.artifacts,
         "error": job.error,
         "created_at": job.created_at,
@@ -4198,6 +4209,15 @@ def _yolo_job_log(job: YoloTrainingJob, message: str) -> None:
         logger.info("[yolo-train %s] %s", job.job_id[:8], message)
     except Exception:
         pass
+
+
+def _yolo_job_append_metric(job: YoloTrainingJob, metric: Dict[str, Any]) -> None:
+    if not metric:
+        return
+    job.metrics.append(metric)
+    if len(job.metrics) > 2000:
+        job.metrics[:] = job.metrics[-2000:]
+    job.updated_at = time.time()
 
 
 def _serialize_rfdetr_job(job: RfDetrTrainingJob) -> Dict[str, Any]:
@@ -5577,6 +5597,31 @@ def _yolo_parse_results_csv(results_path: Path) -> List[Dict[str, Any]]:
     except Exception:  # noqa: BLE001
         return []
     return rows
+
+
+def _yolo_monitor_training(job: YoloTrainingJob, run_dir: Path, total_epochs: int, stop_event: threading.Event) -> None:
+    results_path = run_dir / "train" / "results.csv"
+    last_len = 0
+    while not stop_event.is_set():
+        if job.cancel_event.is_set() or job.status not in {"running", "queued"}:
+            break
+        series = _yolo_parse_results_csv(results_path)
+        if series and len(series) > last_len:
+            new_entries = series[last_len:]
+            for metric in new_entries:
+                _yolo_job_append_metric(job, metric)
+            last_len = len(series)
+            latest = series[-1]
+            epoch = latest.get("epoch")
+            if isinstance(epoch, (int, float)):
+                try:
+                    epoch_idx = int(epoch)
+                except Exception:
+                    epoch_idx = None
+                if epoch_idx is not None and total_epochs > 0:
+                    progress = max(0.0, min(0.99, epoch_idx / total_epochs))
+                    _yolo_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+        stop_event.wait(12.0)
 
 
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
@@ -23670,9 +23715,18 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
         _yolo_job_log(job, f"Model source: {model_source}")
         train_kwargs.update(_yolo_build_aug_args(config.get("augmentations")))
         train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
+        monitor_stop = threading.Event()
+        monitor_thread = None
         try:
             model = YOLO(model_source)
             _yolo_job_log(job, "Training started")
+            monitor_thread = threading.Thread(
+                target=_yolo_monitor_training,
+                args=(job, run_dir, int(config.get("epochs") or 0), monitor_stop),
+                name=f"yolo-monitor-{job.job_id[:8]}",
+                daemon=True,
+            )
+            monitor_thread.start()
             results = model.train(**train_kwargs)
             train_dir = run_dir / "train"
             best_path = train_dir / "weights" / "best.pt"
@@ -23712,6 +23766,9 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
         except Exception as exc:  # noqa: BLE001
             _yolo_job_update(job, status="failed", message="Training failed", error=str(exc))
         finally:
+            monitor_stop.set()
+            if monitor_thread:
+                monitor_thread.join(timeout=2.0)
             _finalize_training_environment()
             _yolo_write_run_meta(
                 run_dir,
@@ -24729,6 +24786,12 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 return
             _job_update(job, status="running", progress=value, message=message)
 
+    def metrics_cb(metric: Dict[str, Any]) -> None:
+        if not metric:
+            return
+        with TRAINING_JOBS_LOCK:
+            _clip_job_append_metric(job, metric)
+
     def worker() -> None:
         try:
             _prepare_for_training()
@@ -24797,6 +24860,7 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 bg_class_count=bg_class_count,
                 device=device_override,
                 progress_cb=progress_cb,
+                metrics_cb=metrics_cb,
                 should_cancel=cancel_event.is_set,
             )
             artifacts = _publish_clip_training_artifacts(artifacts)

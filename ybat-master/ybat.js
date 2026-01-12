@@ -4931,6 +4931,29 @@ function buildQwenSampleUserPrompt(context, labels, mode, type) {
     return parts.filter(Boolean).join(" ").trim();
 }
 
+function buildQwenOutputPayload(detections, type) {
+    const items = [];
+    (detections || []).forEach((det) => {
+        if (!det || !det.label) return;
+        if (type === "bbox" && Array.isArray(det.bbox)) {
+            items.push({ label: det.label, bbox: det.bbox });
+        } else if (type === "point" && Array.isArray(det.point)) {
+            items.push({ label: det.label, point: det.point });
+        }
+    });
+    return JSON.stringify({ detections: items });
+}
+
+function buildQwenConversationRecord(imageName, promptText, outputText) {
+    return JSON.stringify({
+        image: imageName,
+        conversations: [
+            { from: "human", value: `<image>\n${promptText}` },
+            { from: "gpt", value: outputText },
+        ],
+    });
+}
+
 function pickQwenValidationSet(imageNames) {
     const shuffled = shuffleArray(imageNames);
     if (!shuffled.length) {
@@ -7512,27 +7535,35 @@ async function cancelQwenDatasetUpload(jobId) {
             const safeName = makeUniqueFilename(baseName, usedNames);
             const detections = buildDetectionRecords(imageKey, imageRecord);
             totalBoxes += detections.length;
-            const annotation = JSON.stringify({
-                image: safeName,
-                context: instruction,
-                detections,
-            });
             const split = valSet.has(imageKey) ? "val" : "train";
-            const recordPayload = {
-                imageName: safeName,
-                annotation,
-                file: imageRecord.meta,
-            };
-            await uploadQwenDatasetChunk(jobId, split, recordPayload);
-            if (split === "train") {
-                uploadedTrain += 1;
-                if (!firstTrainRecord) {
-                    firstTrainRecord = recordPayload;
-                }
-            } else {
-                uploadedVal += 1;
-                if (!firstValRecord) {
-                    firstValRecord = recordPayload;
+            const bboxPrompt = buildQwenSampleUserPrompt(instruction, classNames, "all", "bbox");
+            const pointPrompt = buildQwenSampleUserPrompt(instruction, classNames, "all", "point");
+            const bboxOutput = buildQwenOutputPayload(detections, "bbox");
+            const pointOutput = buildQwenOutputPayload(detections, "point");
+            const recordPayloads = [
+                {
+                    imageName: safeName,
+                    annotation: buildQwenConversationRecord(safeName, bboxPrompt, bboxOutput),
+                    file: imageRecord.meta,
+                },
+                {
+                    imageName: safeName,
+                    annotation: buildQwenConversationRecord(safeName, pointPrompt, pointOutput),
+                    file: imageRecord.meta,
+                },
+            ];
+            for (const recordPayload of recordPayloads) {
+                await uploadQwenDatasetChunk(jobId, split, recordPayload);
+                if (split === "train") {
+                    uploadedTrain += 1;
+                    if (!firstTrainRecord) {
+                        firstTrainRecord = recordPayload;
+                    }
+                } else {
+                    uploadedVal += 1;
+                    if (!firstValRecord) {
+                        firstValRecord = recordPayload;
+                    }
                 }
             }
             processed += 1;

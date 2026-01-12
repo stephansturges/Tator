@@ -156,13 +156,28 @@ def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optio
     return None
 
 
-def _conversation_to_messages(conversations: List[Dict[str, Any]], image: Image.Image) -> List[Dict[str, Any]]:
+def _conversation_to_messages(
+    conversations: List[Dict[str, Any]],
+    image: Image.Image,
+    system_prompt: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     messages: List[Dict[str, Any]] = []
+    cleaned_system = (system_prompt or "").strip()
+    if cleaned_system:
+        messages.append({"role": "system", "content": [{"type": "text", "text": cleaned_system}]})
     for turn in conversations:
         if not isinstance(turn, dict):
             continue
-        role = "user" if turn.get("from") == "human" else "assistant"
-        value = str(turn.get("value") or "").strip()
+        role_raw = str(turn.get("from") or turn.get("role") or "").strip().lower()
+        if role_raw in {"human", "user"}:
+            role = "user"
+        elif role_raw in {"assistant", "gpt"}:
+            role = "assistant"
+        elif role_raw == "system":
+            role = "system"
+        else:
+            role = "assistant"
+        value = str(turn.get("value") or turn.get("text") or "").strip()
         if role == "user":
             parts = value.split("<image>")
             content: List[Dict[str, Any]] = []
@@ -172,6 +187,9 @@ def _conversation_to_messages(conversations: List[Dict[str, Any]], image: Image.
                 if idx < len(parts) - 1:
                     content.append({"type": "image", "image": image})
             messages.append({"role": "user", "content": content})
+        elif role == "system":
+            if value:
+                messages.append({"role": "system", "content": [{"type": "text", "text": value}]})
         else:
             messages.append({"role": "assistant", "content": [{"type": "text", "text": value}]})
     return messages
@@ -183,11 +201,13 @@ class QwenConversationDataset(Dataset):
         dataset_root: Path,
         split: str,
         processor,
+        system_prompt: Optional[str] = None,
         max_items: Optional[int] = None,
     ) -> None:
         self.dataset_root = dataset_root
         self.split = split
         self.processor = processor
+        self.system_prompt = system_prompt
         self.entries: List[Dict[str, Any]] = []
         jsonl_path = dataset_root / split / "annotations.jsonl"
         if not jsonl_path.exists():
@@ -230,7 +250,7 @@ class QwenConversationDataset(Dataset):
         conversations = entry.get("conversations") or []
         if not isinstance(conversations, list):
             raise TrainingError("qwen_training_bad_conversations")
-        messages = _conversation_to_messages(conversations, image)
+        messages = _conversation_to_messages(conversations, image, self.system_prompt)
         return {
             "messages": messages,
             "images": [image],
@@ -350,8 +370,20 @@ def _train_official_lora(
     model = get_peft_model(model, lora_cfg)
     model.config.use_cache = False
 
-    train_dataset = QwenConversationDataset(dataset_root, "train", processor, config.train_limit)
-    val_dataset = QwenConversationDataset(dataset_root, "val", processor, config.val_limit)
+    train_dataset = QwenConversationDataset(
+        dataset_root,
+        "train",
+        processor,
+        config.system_prompt,
+        config.train_limit,
+    )
+    val_dataset = QwenConversationDataset(
+        dataset_root,
+        "val",
+        processor,
+        config.system_prompt,
+        config.val_limit,
+    )
 
     collator = QwenConversationCollator(processor, config.max_length)
 
@@ -434,8 +466,20 @@ def _train_trl_qlora(
         quantization_config=quant_config,
     )
 
-    train_dataset = QwenConversationDataset(dataset_root, "train", processor, config.train_limit)
-    val_dataset = QwenConversationDataset(dataset_root, "val", processor, config.val_limit)
+    train_dataset = QwenConversationDataset(
+        dataset_root,
+        "train",
+        processor,
+        config.system_prompt,
+        config.train_limit,
+    )
+    val_dataset = QwenConversationDataset(
+        dataset_root,
+        "val",
+        processor,
+        config.system_prompt,
+        config.val_limit,
+    )
     collator = QwenConversationCollator(processor, config.max_length)
 
     training_args = SFTConfig(

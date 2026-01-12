@@ -13884,6 +13884,8 @@ function initQwenTrainingTab() {
             qwenModelElements.details.innerHTML = "Select a model to see its prompts and defaults.";
             return;
         }
+        const modelFamily = metadata.model_family || "qwen3";
+        const familyLabel = modelFamily !== "qwen3" ? "Legacy (read-only)" : "Qwen3";
         const classes = Array.isArray(metadata.classes) ? metadata.classes.join(", ") : "(not specified)";
         const context = metadata.dataset_context || "(not specified)";
         const minPixelsValue = Number(metadata.min_pixels);
@@ -13893,6 +13895,7 @@ function initQwenTrainingTab() {
         qwenModelElements.details.innerHTML = `
             <p><strong>Name:</strong> ${metadata.label || metadata.id || "Custom Run"}</p>
             <p><strong>Base model:</strong> ${metadata.model_id || "Qwen/Qwen3-VL-4B-Instruct"}</p>
+            <p><strong>Model family:</strong> ${familyLabel}</p>
             <p><strong>Context hint:</strong> ${context}</p>
             <p><strong>Classes:</strong> ${classes}</p>
             <p><strong>Pixel budget:</strong> ${minPixels}–${maxPixels}</p>
@@ -13915,14 +13918,24 @@ function initQwenTrainingTab() {
             const metaText = document.createElement("p");
             const context = entry.metadata?.dataset_context;
             const classes = Array.isArray(entry.metadata?.classes) ? entry.metadata.classes.join(", ") : "";
-            metaText.textContent = [context, classes].filter(Boolean).join(" • ") || "No context provided";
+            const modelFamily = entry.metadata?.model_family || "qwen3";
+            const legacyTag = modelFamily !== "qwen3" ? "Legacy (read-only)" : "";
+            metaText.textContent = [context, classes, legacyTag].filter(Boolean).join(" • ") || "No context provided";
             card.appendChild(metaText);
             const button = document.createElement("button");
             button.type = "button";
             button.className = "training-button";
-            button.textContent = entry.active ? "Active" : "Activate";
-            button.disabled = !!entry.active;
-            button.addEventListener("click", () => activateQwenModel(entry.id));
+            const isLegacy = modelFamily !== "qwen3";
+            if (isLegacy) {
+                card.classList.add("legacy");
+            }
+            button.textContent = entry.active ? "Active" : isLegacy ? "Legacy" : "Activate";
+            button.disabled = !!entry.active || isLegacy;
+            if (isLegacy) {
+                button.title = "Legacy Qwen2.5 checkpoints stay on disk but cannot be activated.";
+            } else {
+                button.addEventListener("click", () => activateQwenModel(entry.id));
+            }
             card.appendChild(button);
             qwenModelElements.list.appendChild(card);
         });

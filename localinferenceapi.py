@@ -17091,6 +17091,7 @@ def _persist_qwen_run_metadata(
         "classes": dataset_meta.get("classes", []) or [],
         "model_id": config.model_id,
         "training_mode": getattr(config, "training_mode", None),
+        "model_family": "qwen3",
         "min_pixels": config.min_pixels,
         "max_pixels": config.max_pixels,
         "max_length": config.max_length,
@@ -17180,6 +17181,7 @@ def _infer_qwen_run_metadata_from_artifacts(run_dir: Path) -> Optional[Dict[str,
         or dataset_meta.get("model_id")
         or QWEN_MODEL_NAME
     )
+    model_family = "qwen3" if "qwen3" in str(base_model_id).lower() else "legacy"
     metadata = {
         "id": run_dir.name,
         "label": dataset_meta.get("label") or dataset_meta.get("id") or run_dir.name,
@@ -17188,6 +17190,7 @@ def _infer_qwen_run_metadata_from_artifacts(run_dir: Path) -> Optional[Dict[str,
         "classes": dataset_meta.get("classes", []) or [],
         "model_id": base_model_id,
         "training_mode": dataset_meta.get("training_mode"),
+        "model_family": model_family,
         "min_pixels": dataset_meta.get("min_pixels", QWEN_MIN_PIXELS),
         "max_pixels": dataset_meta.get("max_pixels", QWEN_MAX_PIXELS),
         "lora_rank": adapter_meta.get("r"),

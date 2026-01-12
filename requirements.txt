@@ -36,14 +36,15 @@ fvcore>=0.1.5,<0.1.6
 iopath>=0.1.10,<0.1.11
 tensorboard>=2.14,<3.0
 
-# Qwen 2.5 visual-language (optional but enabled by default)
-transformers>=4.56,<5.0
+# Qwen 3 visual-language (optional but enabled by default)
+transformers>=4.57,<5.0
 accelerate>=0.30,<1.0
 qwen-vl-utils>=0.0.8
 safetensors>=0.4,<0.5
 sentencepiece>=0.1.99,<0.2
 peft>=0.11,<1.0
 bitsandbytes>=0.43,<1.0
+trl>=0.10,<1.0
 lightning>=2.4,<3.0
 nltk>=3.8,<4.0
 decord>=0.6,<1.0

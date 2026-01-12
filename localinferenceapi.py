@@ -17,6 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, root_validator, Field
 from omegaconf import OmegaConf
 import psutil
+try:
+    from packaging import version as packaging_version
+except Exception:  # noqa: BLE001
+    packaging_version = None
 from starlette.background import BackgroundTask
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
@@ -74,16 +78,14 @@ else:
 
 try:
     from transformers import (
-        Qwen2_5_VLForConditionalGeneration,
         AutoProcessor,
-        Qwen2_5_VLProcessor,
+        Qwen3VLForConditionalGeneration,
     )
     from qwen_vl_utils import process_vision_info
 except Exception as exc:  # noqa: BLE001
     QWEN_IMPORT_ERROR = exc
-    Qwen2_5_VLForConditionalGeneration = None  # type: ignore[assignment]
+    Qwen3VLForConditionalGeneration = None  # type: ignore[assignment]
     AutoProcessor = None  # type: ignore[assignment]
-    Qwen2_5_VLProcessor = None  # type: ignore[assignment]
     process_vision_info = None  # type: ignore[assignment]
 else:
     QWEN_IMPORT_ERROR = None
@@ -186,7 +188,8 @@ AGENT_CASCADE_MAX_BYTES = _env_int("AGENT_CASCADE_MAX_BYTES", 8 * 1024 * 1024 * 
 CLIP_TRAIN_UPLOAD_MAX_BYTES = _env_int("CLIP_TRAIN_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 CLIP_TRAIN_UPLOAD_QUOTA_BYTES = _env_int("CLIP_TRAIN_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 
-QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen2.5-VL-3B-Instruct")
+QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen3-VL-4B-Instruct")
+QWEN_MIN_TRANSFORMERS = "4.57.0"
 QWEN_MIN_PIXELS = _env_int("QWEN_MIN_PIXELS", 256 * 28 * 28)
 QWEN_MAX_PIXELS = _env_int("QWEN_MAX_PIXELS", 1280 * 28 * 28)
 QWEN_MAX_NEW_TOKENS = _env_int("QWEN_MAX_NEW_TOKENS", 1024)
@@ -2466,9 +2469,23 @@ def _run_sam3_visual_inference_multi(
 
 def _ensure_qwen_ready():
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
-    if QWEN_IMPORT_ERROR is not None or Qwen2_5_VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
+    if QWEN_IMPORT_ERROR is not None or Qwen3VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
         detail = f"qwen_dependencies_missing:{QWEN_IMPORT_ERROR}"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    if packaging_version is not None:
+        try:
+            import transformers  # local import to avoid import-time failures
+
+            if packaging_version.parse(transformers.__version__) < packaging_version.parse(QWEN_MIN_TRANSFORMERS):
+                raise HTTPException(
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"qwen_transformers_too_old:{transformers.__version__}<{QWEN_MIN_TRANSFORMERS}",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            # If we cannot resolve version info, continue and let the load fail if incompatible.
+            pass
     if (
         qwen_model is not None
         and qwen_processor is not None
@@ -2519,18 +2536,11 @@ def _ensure_qwen_ready():
                 model.to(device)
             model.eval()
             processor_source = str(adapter_path) if adapter_path else str(base_model_id)
-            if adapter_path and Qwen2_5_VLProcessor is not None:
-                processor = Qwen2_5_VLProcessor.from_pretrained(
-                    processor_source,
-                    min_pixels=QWEN_MIN_PIXELS,
-                    max_pixels=QWEN_MAX_PIXELS,
-                )
-            else:
-                processor = AutoProcessor.from_pretrained(
-                    processor_source,
-                    min_pixels=QWEN_MIN_PIXELS,
-                    max_pixels=QWEN_MAX_PIXELS,
-                )
+        processor = AutoProcessor.from_pretrained(
+            processor_source,
+            min_pixels=QWEN_MIN_PIXELS,
+            max_pixels=QWEN_MAX_PIXELS,
+        )
         except Exception as exc:  # noqa: BLE001
             qwen_last_error = str(exc)
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc

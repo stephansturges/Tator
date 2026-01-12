@@ -211,14 +211,15 @@ QWEN_METADATA_FILENAME = "metadata.json"
 def _default_qwen_metadata() -> Dict[str, Any]:
     return {
         "id": "default",
-        "label": "Base Qwen 2.5",
+        "label": "Base Qwen 3",
         "system_prompt": DEFAULT_SYSTEM_PROMPT,
         "dataset_context": "",
         "classes": [],
         "model_id": QWEN_MODEL_NAME,
+        "model_family": "qwen3",
         "source": "huggingface",
-        "max_image_dim": 1024,
-        "max_detections_per_sample": 200,
+        "min_pixels": QWEN_MIN_PIXELS,
+        "max_pixels": QWEN_MAX_PIXELS,
     }
 
 
@@ -2575,7 +2576,7 @@ def _unload_qwen_runtime() -> None:
 
 
 def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, int]:
-    """Execute a Qwen 2.5 VL inference following the reference blog recipe."""
+    """Execute a Qwen 3 VL inference following the reference recipe."""
     model, processor = _ensure_qwen_ready()
     messages: List[Dict[str, Any]] = []
     sys_prompt = (active_qwen_metadata or {}).get("system_prompt")

@@ -496,14 +496,20 @@ clip_model = None
 clip_preprocess = None
 clip_model_name: Optional[str] = None
 _clip_reload_needed = False
-try:
-    print("Loading CLIP model...")
-    clip_model, clip_preprocess = clip.load(DEFAULT_CLIP_MODEL, device=device)
-    clip_model_name = DEFAULT_CLIP_MODEL
-except Exception as e:
-    print(f"Failed to load CLIP model: {e}")
+_skip_clip_load = os.environ.get("TATOR_SKIP_CLIP_LOAD", "").strip() == "1"
+if _skip_clip_load:
+    print("Skipping CLIP model load (TATOR_SKIP_CLIP_LOAD=1).")
     clip_initialized = False
     clip_model_name = None
+else:
+    try:
+        print("Loading CLIP model...")
+        clip_model, clip_preprocess = clip.load(DEFAULT_CLIP_MODEL, device=device)
+        clip_model_name = DEFAULT_CLIP_MODEL
+    except Exception as e:
+        print(f"Failed to load CLIP model: {e}")
+        clip_initialized = False
+        clip_model_name = None
 
 clip_lock = threading.Lock()
 if clip_model is None or clf is None:
@@ -5286,6 +5292,87 @@ def _rfdetr_sanitize_metric(metric: Dict[str, Any]) -> Dict[str, Any]:
         return json.loads(json.dumps(metric, default=_coerce))
     except Exception:
         return {}
+
+
+def _rfdetr_latest_checkpoint_epoch(run_dir: Path) -> Optional[int]:
+    try:
+        best = None
+        for path in run_dir.glob("checkpoint*.pth"):
+            name = path.name
+            if not name.startswith("checkpoint") or not name.endswith(".pth"):
+                continue
+            token = name[len("checkpoint") : -len(".pth")]
+            if not token.isdigit():
+                continue
+            value = int(token)
+            if best is None or value > best:
+                best = value
+        return best
+    except Exception:
+        return None
+
+
+def _rfdetr_monitor_training(job: RfDetrTrainingJob, run_dir: Path, total_epochs: int, stop_event: threading.Event) -> None:
+    log_path = run_dir / "log.txt"
+    last_pos = 0
+    pending = ""
+    last_epoch: Optional[int] = None
+    while not stop_event.is_set():
+        if job.cancel_event.is_set() or job.status not in {"running", "queued"}:
+            break
+        new_metrics: List[Dict[str, Any]] = []
+        if log_path.exists():
+            try:
+                with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    handle.seek(last_pos)
+                    chunk = handle.read()
+                    last_pos = handle.tell()
+            except Exception:
+                chunk = ""
+            if chunk:
+                chunk = pending + chunk
+                pending = ""
+                if not chunk.endswith("\n"):
+                    last_newline = chunk.rfind("\n")
+                    if last_newline == -1:
+                        pending = chunk
+                        chunk = ""
+                    else:
+                        pending = chunk[last_newline + 1 :]
+                        chunk = chunk[: last_newline + 1]
+                for line in chunk.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        metric = json.loads(line)
+                    except Exception:
+                        continue
+                    metric = _rfdetr_sanitize_metric(metric)
+                    if metric:
+                        new_metrics.append(metric)
+        if new_metrics:
+            for metric in new_metrics:
+                _rfdetr_job_append_metric(job, metric)
+            latest = new_metrics[-1]
+            epoch = latest.get("epoch")
+            if isinstance(epoch, (int, float)):
+                try:
+                    epoch_idx = int(epoch)
+                except Exception:
+                    epoch_idx = None
+                if epoch_idx is not None and epoch_idx != last_epoch:
+                    last_epoch = epoch_idx
+                    if total_epochs > 0:
+                        progress = max(0.0, min(0.99, epoch_idx / total_epochs))
+                        _rfdetr_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+        else:
+            checkpoint_epoch = _rfdetr_latest_checkpoint_epoch(run_dir)
+            if checkpoint_epoch is not None and checkpoint_epoch != last_epoch:
+                last_epoch = checkpoint_epoch
+                if total_epochs > 0:
+                    progress = max(0.0, min(0.99, checkpoint_epoch / total_epochs))
+                    _rfdetr_job_update(job, progress=progress, message=f"Epoch {checkpoint_epoch}/{total_epochs}")
+        stop_event.wait(15.0)
 
 
 def _yolo_write_data_yaml(run_dir: Path, dataset_root: Path, layout: Optional[str], labelmap_path: Optional[str]) -> Path:
@@ -23733,13 +23820,31 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 world_size = len(device_ids)
                 _rfdetr_job_log(job, f"Multi-GPU enabled: devices={cuda_visible} world_size={world_size}")
                 _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
-                import torch.multiprocessing as mp
-                mp.spawn(
-                    _rfdetr_ddp_worker,
-                    args=(world_size, variant_id, model_kwargs, train_kwargs, dist_url),
-                    nprocs=world_size,
-                    join=True,
+                monitor_stop = threading.Event()
+                monitor_thread = threading.Thread(
+                    target=_rfdetr_monitor_training,
+                    args=(job, run_dir, total_epochs, monitor_stop),
+                    name=f"rfdetr-monitor-{job.job_id[:8]}",
+                    daemon=True,
                 )
+                monitor_thread.start()
+                prev_skip_clip = os.environ.get("TATOR_SKIP_CLIP_LOAD")
+                os.environ["TATOR_SKIP_CLIP_LOAD"] = "1"
+                import torch.multiprocessing as mp
+                try:
+                    mp.spawn(
+                        _rfdetr_ddp_worker,
+                        args=(world_size, variant_id, model_kwargs, train_kwargs, dist_url),
+                        nprocs=world_size,
+                        join=True,
+                    )
+                finally:
+                    monitor_stop.set()
+                    monitor_thread.join(timeout=2.0)
+                    if prev_skip_clip is None:
+                        os.environ.pop("TATOR_SKIP_CLIP_LOAD", None)
+                    else:
+                        os.environ["TATOR_SKIP_CLIP_LOAD"] = prev_skip_clip
             else:
                 rf_detr = model_cls(**model_kwargs)
 

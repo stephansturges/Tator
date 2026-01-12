@@ -397,6 +397,10 @@ body {
     overflow-y: auto;
 }
 
+.tab-panel[data-tab-panel="settings"] {
+    overflow-y: auto;
+}
+
 form {
     height: 100%
 }
@@ -923,6 +927,7 @@ hr {
     display: flex;
     flex-direction: column;
     gap: 16px;
+    min-width: 0;
 }
 
 .qwen-models-help {
@@ -997,6 +1002,9 @@ hr {
     border-radius: 8px;
     font-size: 12px;
     overflow: auto;
+    max-width: 100%;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .qwen-active-model-label {

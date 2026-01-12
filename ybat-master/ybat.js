@@ -1408,6 +1408,8 @@
         variantSelect: null,
         variantHelp: null,
         resolutionInput: null,
+        multiScaleToggle: null,
+        expandedScalesToggle: null,
         fromScratchToggle: null,
         pretrainInput: null,
         useEmaToggle: null,
@@ -3218,6 +3220,17 @@ const sam3TrainState = {
         }
     }
 
+    function updateRfDetrScaleToggles() {
+        if (!rfdetrTrainElements.expandedScalesToggle) {
+            return;
+        }
+        const enabled = !!rfdetrTrainElements.multiScaleToggle?.checked;
+        rfdetrTrainElements.expandedScalesToggle.disabled = !enabled;
+        if (!enabled) {
+            rfdetrTrainElements.expandedScalesToggle.checked = false;
+        }
+    }
+
     function buildRfDetrTrainingPayload() {
         const datasetId = rfdetrDatasetState.selectedId;
         if (!datasetId) {
@@ -3239,6 +3252,8 @@ const sam3TrainState = {
             resolution: parseYoloNumber(rfdetrTrainElements.resolutionInput?.value, { integer: true }),
             from_scratch: fromScratch,
             pretrain_weights: fromScratch ? null : pretrainRaw || null,
+            multi_scale: rfdetrTrainElements.multiScaleToggle ? !!rfdetrTrainElements.multiScaleToggle.checked : null,
+            expanded_scales: rfdetrTrainElements.expandedScalesToggle ? !!rfdetrTrainElements.expandedScalesToggle.checked : null,
             use_ema: !!rfdetrTrainElements.useEmaToggle?.checked,
             early_stopping: !!rfdetrTrainElements.earlyStopToggle?.checked,
             early_stopping_patience: parseYoloNumber(rfdetrTrainElements.earlyStopPatienceInput?.value, { integer: true }),
@@ -9002,6 +9017,8 @@ function initQwenTrainingTab() {
         rfdetrTrainElements.variantSelect = document.getElementById("rfdetrVariant");
         rfdetrTrainElements.variantHelp = document.getElementById("rfdetrVariantHelp");
         rfdetrTrainElements.resolutionInput = document.getElementById("rfdetrResolution");
+        rfdetrTrainElements.multiScaleToggle = document.getElementById("rfdetrMultiScale");
+        rfdetrTrainElements.expandedScalesToggle = document.getElementById("rfdetrExpandedScales");
         rfdetrTrainElements.fromScratchToggle = document.getElementById("rfdetrFromScratch");
         rfdetrTrainElements.pretrainInput = document.getElementById("rfdetrPretrainWeights");
         rfdetrTrainElements.useEmaToggle = document.getElementById("rfdetrUseEma");
@@ -9030,6 +9047,10 @@ function initQwenTrainingTab() {
         rfdetrTrainElements.runDownload = document.getElementById("rfdetrRunDownload");
         rfdetrTrainElements.runDelete = document.getElementById("rfdetrRunDelete");
         rfdetrTrainElements.runSummary = document.getElementById("rfdetrRunSummary");
+        if (rfdetrTrainElements.multiScaleToggle) {
+            rfdetrTrainElements.multiScaleToggle.addEventListener("change", updateRfDetrScaleToggles);
+        }
+        updateRfDetrScaleToggles();
         if (rfdetrTrainElements.startButton) {
             rfdetrTrainElements.startButton.addEventListener("click", () => {
                 handleStartRfDetrTraining().catch((error) => console.error("RF-DETR training start failed", error));

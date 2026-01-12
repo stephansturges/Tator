@@ -1324,6 +1324,14 @@
                                 <div class="training-help">Overrides the default resolution for the selected variant.</div>
                             </div>
                             <div class="checkbox-row">
+                                <label><input type="checkbox" id="rfdetrMultiScale" checked /> Multi-scale resize (default on)</label>
+                                <div class="training-help">Randomly resizes images to several scales around the target resolution. Helps small objects but adds variance.</div>
+                            </div>
+                            <div class="checkbox-row">
+                                <label><input type="checkbox" id="rfdetrExpandedScales" checked /> Expanded scale range (default on)</label>
+                                <div class="training-help">Wider scale range for multi-scale (more small‑object coverage, slower). Ignored if multi-scale is off.</div>
+                            </div>
+                            <div class="checkbox-row">
                                 <label><input type="checkbox" id="rfdetrFromScratch" /> Train from scratch (no pretrained weights)</label>
                                 <div class="training-help">Starts with random weights. Use only for large datasets or extreme domain shifts (slower + lower early accuracy).</div>
                             </div>

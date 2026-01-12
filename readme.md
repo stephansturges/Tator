@@ -475,10 +475,26 @@ Use `--resume-cache` to reuse embeddings and `--hard-example-mining` to emphasis
 ## Credits
 Built on top of [YBAT](https://github.com/drainingsun/ybat), [OpenAI CLIP](https://github.com/openai/CLIP), and Meta’s [SAM](https://github.com/facebookresearch/segment-anything). Novel code is released under the MIT License (see below). GIF assets in this README showcase the Auto Class workflows.
 
-## 2026-01-12 – Segmentation Dataset Guards + Badges
+## 2026-01-12 – Segmentation Guards + Training UX
 - Enforced **segmentation-only training** for YOLOv8‑seg: bbox‑only datasets are rejected to prevent invalid runs.
 - RF‑DETR segmentation now accepts YOLO‑seg datasets by auto‑converting polygons to COCO‑SEG when needed.
-- Dataset Management now surfaces **YOLO‑SEG / COCO‑SEG** readiness so you can see polygon availability at a glance.
+- Dataset Management now surfaces **YOLO‑SEG / COCO‑SEG** readiness so polygon availability is visible at a glance.
+- RF‑DETR training now exposes **multi-scale + expanded scales** with clarified scale/resolution guidance.
+- Added lightweight **color/blur augmentations** for RF‑DETR (HSV jitter, grayscale, blur).
+- Training charts now live-update for **CLIP / classifier heads / YOLO**, plus RF‑DETR DDP log streaming.
+
+## 2026-01-11 – RF‑DETR Integration
+- Added the **RF‑DETR training tab** with job/run management and export handling.
+- Added **multi‑GPU training** for RF‑DETR plus optimized export for inference.
+- RF‑DETR now supports **region inference** from the Label Images panel, with a model selector.
+
+## 2026-01-09 – YOLO Region Guidance
+- Added **YOLO region inference** warnings + shortcut toasts for quicker discoverability.
+
+## 2026-01-08 – YOLO Training Pipeline
+- Added **YOLO training run management** (job list, downloads, cleanup, metrics chart).
+- Added **active run selection** for YOLO inference in the Label Images panel.
+- Enforced **Ultralytics TOS acceptance** and documented the dependency/licensing.
 
 ## 2025-12-25 – DINOv3 MLP Benchmarks + Soft Targets
 - Benchmarked **DINOv3 + MLP** heads (small/base/large) with and without **label smoothing** and logged results to the comparison tables.

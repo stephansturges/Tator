@@ -2537,11 +2537,11 @@ def _ensure_qwen_ready():
                 model.to(device)
             model.eval()
             processor_source = str(adapter_path) if adapter_path else str(base_model_id)
-        processor = AutoProcessor.from_pretrained(
-            processor_source,
-            min_pixels=QWEN_MIN_PIXELS,
-            max_pixels=QWEN_MAX_PIXELS,
-        )
+            processor = AutoProcessor.from_pretrained(
+                processor_source,
+                min_pixels=QWEN_MIN_PIXELS,
+                max_pixels=QWEN_MAX_PIXELS,
+            )
         except Exception as exc:  # noqa: BLE001
             qwen_last_error = str(exc)
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
@@ -2641,10 +2641,22 @@ def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, in
         clean_up_tokenization_spaces=False,
     )[0]
     grid = inputs.get("image_grid_thw")
+    patch_size = 14
+    try:
+        vision_cfg = getattr(model, "config", None)
+        vision_cfg = getattr(vision_cfg, "vision_config", None)
+        if vision_cfg is not None and getattr(vision_cfg, "patch_size", None):
+            patch_size = int(vision_cfg.patch_size)
+        elif getattr(processor, "image_processor", None) is not None:
+            patch = getattr(processor.image_processor, "patch_size", None)
+            if patch:
+                patch_size = int(patch)
+    except Exception:
+        patch_size = 14
     if grid is not None:
         grid_values = grid[0]
-        input_height = int(grid_values[1].item() * 14)
-        input_width = int(grid_values[2].item() * 14)
+        input_height = int(grid_values[1].item() * patch_size)
+        input_width = int(grid_values[2].item() * patch_size)
     else:
         input_height = pil_img.height
         input_width = pil_img.width
@@ -17075,13 +17087,17 @@ def _persist_qwen_run_metadata(
         "id": config.run_name or result_path.name,
         "label": config.run_name or result_path.name,
         "system_prompt": config.system_prompt,
-        "system_prompt_noise": config.system_prompt_noise,
         "dataset_context": dataset_meta.get("context", ""),
         "classes": dataset_meta.get("classes", []) or [],
         "model_id": config.model_id,
         "training_mode": getattr(config, "training_mode", None),
-        "max_image_dim": config.max_image_dim,
-        "max_detections_per_sample": config.max_detections_per_sample,
+        "min_pixels": config.min_pixels,
+        "max_pixels": config.max_pixels,
+        "max_length": config.max_length,
+        "lora_rank": config.lora_rank,
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "lora_target_modules": list(config.lora_target_modules or []),
         "created_at": time.time(),
         "latest_checkpoint": training_result.latest_checkpoint,
         "source_dataset": config.dataset_root,
@@ -17167,12 +17183,17 @@ def _infer_qwen_run_metadata_from_artifacts(run_dir: Path) -> Optional[Dict[str,
     metadata = {
         "id": run_dir.name,
         "label": dataset_meta.get("label") or dataset_meta.get("id") or run_dir.name,
-        "system_prompt": dataset_meta.get("system_prompt", ""),
-        "system_prompt_noise": dataset_meta.get("system_prompt_noise", 0.05),
+        "system_prompt": dataset_meta.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
         "dataset_context": dataset_meta.get("context", ""),
         "classes": dataset_meta.get("classes", []) or [],
         "model_id": base_model_id,
         "training_mode": dataset_meta.get("training_mode"),
+        "min_pixels": dataset_meta.get("min_pixels", QWEN_MIN_PIXELS),
+        "max_pixels": dataset_meta.get("max_pixels", QWEN_MAX_PIXELS),
+        "lora_rank": adapter_meta.get("r"),
+        "lora_alpha": adapter_meta.get("lora_alpha"),
+        "lora_dropout": adapter_meta.get("lora_dropout"),
+        "lora_target_modules": adapter_meta.get("target_modules", []),
         "created_at": dataset_meta.get("created_at") or run_dir.stat().st_mtime,
         "latest_checkpoint": str(latest_dir),
         "source_dataset": str(dataset_dir) if dataset_dir.exists() else None,
@@ -17821,6 +17842,7 @@ def qwen_dataset_finalize(
         safe_name = alt_name
     shutil.move(str(job.root_dir), str(dest_dir))
     job.completed = True
+    qwen_format_version = "qwen3_conversation_v1"
     dataset_meta = {
         "id": safe_name,
         "label": meta_obj.get("label") or safe_name,
@@ -17828,9 +17850,14 @@ def qwen_dataset_finalize(
         "context": meta_obj.get("context") or "",
         "created_at": time.time(),
         "image_count": job.train_count + job.val_count,
+        "record_count": job.train_count + job.val_count,
         "train_count": job.train_count,
         "val_count": job.val_count,
         "signature": signature,
+        "qwen": {
+            "format_version": qwen_format_version,
+            "model_family": "qwen3",
+        },
     }
     _persist_qwen_dataset_metadata(dest_dir, dataset_meta)
     logger.info(

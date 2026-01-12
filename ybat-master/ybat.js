@@ -1296,6 +1296,8 @@
         message: null,
         summary: null,
         log: null,
+        metricCanvas: null,
+        chartStatus: null,
         historyContainer: null,
         reuseEmbeddingsCheckbox: null,
         hardMiningCheckbox: null,
@@ -8121,6 +8123,59 @@ function drawMetricChartCanvas(canvas, points, lineColor = "#16a34a") {
     ctx.restore();
 }
 
+function updateClipTrainingChart(artifacts) {
+    if (!trainingElements.metricCanvas || !trainingElements.chartStatus) {
+        return;
+    }
+    const trace = artifacts && Array.isArray(artifacts.convergence_trace)
+        ? artifacts.convergence_trace
+        : [];
+    if (!trace.length) {
+        trainingElements.chartStatus.textContent = "Metrics appear after training completes.";
+        const ctx = trainingElements.metricCanvas.getContext("2d");
+        if (ctx) {
+            ctx.clearRect(0, 0, trainingElements.metricCanvas.width, trainingElements.metricCanvas.height);
+        }
+        return;
+    }
+    let metricKey = null;
+    let label = null;
+    let color = "#16a34a";
+    if (trace.some((entry) => Number.isFinite(entry?.val_accuracy))) {
+        metricKey = "val_accuracy";
+        label = "Validation accuracy";
+    } else if (trace.some((entry) => Number.isFinite(entry?.val_loss))) {
+        metricKey = "val_loss";
+        label = "Validation loss";
+        color = "#2563eb";
+    } else if (trace.some((entry) => Number.isFinite(entry?.loss))) {
+        metricKey = "loss";
+        label = "Training loss";
+        color = "#2563eb";
+    }
+    if (!metricKey) {
+        trainingElements.chartStatus.textContent = "No numeric metrics available yet.";
+        return;
+    }
+    const series = trace
+        .map((entry, idx) => {
+            if (!entry) return null;
+            const y = entry[metricKey];
+            if (!Number.isFinite(y)) {
+                return null;
+            }
+            const x = Number.isFinite(entry.epoch) ? entry.epoch : idx + 1;
+            return { x, y: Number(y) };
+        })
+        .filter(Boolean);
+    if (!series.length) {
+        trainingElements.chartStatus.textContent = "No numeric metrics available yet.";
+        return;
+    }
+    drawMetricChartCanvas(trainingElements.metricCanvas, series, color);
+    trainingElements.chartStatus.textContent = `${label} over ${series.length} step${series.length === 1 ? "" : "s"}.`;
+}
+
 function drawYoloMetricChart(points) {
     drawMetricChartCanvas(yoloTrainElements.metricCanvas, points, "#16a34a");
 }
@@ -9261,8 +9316,10 @@ function initQwenTrainingTab() {
                 const convergenceHtml = renderConvergenceTable(art.convergence_trace);
                 trainingElements.summary.innerHTML = summaryHtml + perClassHtml + convergenceHtml;
                 trainingState.latestArtifacts = art;
+                updateClipTrainingChart(art);
             } else if (status.status !== "succeeded") {
                 trainingElements.summary.textContent = "";
+                updateClipTrainingChart(null);
             }
         }
         if (status.status === "succeeded" && status.artifacts) {
@@ -9282,6 +9339,7 @@ function initQwenTrainingTab() {
             const message = status.error || "Training failed.";
             setTrainingMessage(message, "error");
             setActiveMessage(message, "error");
+            updateClipTrainingChart(status.artifacts || null);
             stopTrainingPoll();
             if (trainingElements.cancelButton) {
                 trainingElements.cancelButton.disabled = true;
@@ -9289,6 +9347,7 @@ function initQwenTrainingTab() {
         } else if (status.status === "cancelled") {
             setTrainingMessage("Training cancelled.", "warn");
             setActiveMessage("Training cancelled.", "warn");
+            updateClipTrainingChart(status.artifacts || null);
             stopTrainingPoll();
             if (trainingElements.cancelButton) {
                 trainingElements.cancelButton.disabled = true;
@@ -9296,12 +9355,14 @@ function initQwenTrainingTab() {
         } else if (status.status === "cancelling") {
             setTrainingMessage("Cancellation in progress…", "warn");
             setActiveMessage("Cancellation in progress…", "warn");
+            updateClipTrainingChart(status.artifacts || null);
             trainingState.pollHandle = setTimeout(() => {
                 pollTrainingJob(status.job_id).catch((err) => {
                     console.error("Training poll error", err);
                 });
             }, 1500);
         } else if (status.status === "running" || status.status === "queued") {
+            updateClipTrainingChart(status.artifacts || null);
             trainingState.pollHandle = setTimeout(() => {
                 pollTrainingJob(status.job_id).catch((err) => {
                     console.error("Training poll error", err);
@@ -9732,6 +9793,7 @@ function initQwenTrainingTab() {
             if (trainingElements.log) {
                 trainingElements.log.textContent = "";
             }
+            updateClipTrainingChart(null);
             if (trainingElements.progressFill) {
                 trainingElements.progressFill.style.width = "0%";
             }
@@ -10189,6 +10251,8 @@ function initQwenTrainingTab() {
         trainingElements.message = document.getElementById("trainingMessage");
         trainingElements.summary = document.getElementById("trainingSummary");
         trainingElements.log = document.getElementById("trainingLog");
+        trainingElements.metricCanvas = document.getElementById("trainingMetricCanvas");
+        trainingElements.chartStatus = document.getElementById("trainingChartStatus");
         trainingElements.historyContainer = document.getElementById("trainingHistory");
         trainingElements.reuseEmbeddingsCheckbox = document.getElementById("trainReuseEmbeddings");
         trainingElements.hardMiningCheckbox = document.getElementById("trainHardMining");

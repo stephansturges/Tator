@@ -28,6 +28,7 @@ except Exception:  # noqa: BLE001
 try:
     from transformers import (
         AutoProcessor,
+        BitsAndBytesConfig,
         Qwen3VLForConditionalGeneration,
         Trainer,
         TrainingArguments,
@@ -49,6 +50,15 @@ except Exception as exc:  # noqa: BLE001
     PEFT_IMPORT_ERROR = exc
 else:
     PEFT_IMPORT_ERROR = None
+
+try:
+    from trl import SFTConfig, SFTTrainer
+except Exception as exc:  # noqa: BLE001
+    SFTConfig = None  # type: ignore[assignment]
+    SFTTrainer = None  # type: ignore[assignment]
+    TRL_IMPORT_ERROR = exc
+else:
+    TRL_IMPORT_ERROR = None
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +396,93 @@ def _train_official_lora(
     return result
 
 
+def _train_trl_qlora(
+    config: QwenTrainingConfig,
+    progress_cb: Optional[ProgressCallback],
+    cancel_cb: Optional[CancelCallback],
+    metrics_cb: Optional[TelemetryCallback],
+) -> QwenTrainingResult:
+    _ensure_transformers_ready()
+    if TRL_IMPORT_ERROR is not None or SFTTrainer is None or SFTConfig is None:
+        raise TrainingError(f"qwen_trl_missing:{TRL_IMPORT_ERROR}")
+    if PEFT_IMPORT_ERROR is not None or LoraConfig is None:
+        raise TrainingError(f"qwen_peft_missing:{PEFT_IMPORT_ERROR}")
+    _seed_all(config.seed)
+
+    dataset_root = Path(config.dataset_root)
+    result_path = Path(config.result_path)
+    result_path.mkdir(parents=True, exist_ok=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device != "cuda":
+        raise TrainingError("qwen_trl_qlora_requires_cuda")
+
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+    processor = AutoProcessor.from_pretrained(
+        config.model_id,
+        min_pixels=config.min_pixels,
+        max_pixels=config.max_pixels,
+    )
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        config.model_id,
+        device_map="auto",
+        quantization_config=quant_config,
+    )
+
+    train_dataset = QwenConversationDataset(dataset_root, "train", processor, config.train_limit)
+    val_dataset = QwenConversationDataset(dataset_root, "val", processor, config.val_limit)
+    collator = QwenConversationCollator(processor, config.max_length)
+
+    training_args = SFTConfig(
+        output_dir=str(result_path),
+        per_device_train_batch_size=config.batch_size,
+        per_device_eval_batch_size=max(1, config.batch_size),
+        gradient_accumulation_steps=config.accumulate_grad_batches,
+        learning_rate=config.lr,
+        num_train_epochs=config.max_epochs,
+        warmup_steps=config.warmup_steps,
+        logging_steps=config.log_every_n_steps,
+        report_to="none",
+    )
+
+    peft_config = LoraConfig(
+        r=config.lora_rank,
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        target_modules=list(config.lora_target_modules),
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+    callback = _QwenTrainingCallback(progress_cb, cancel_cb, metrics_cb)
+    trainer = SFTTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=collator,
+        peft_config=peft_config,
+        callbacks=[callback],
+    )
+    trainer.train()
+    latest_dir = result_path / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    trainer.save_model(str(latest_dir))
+    processor.save_pretrained(str(latest_dir))
+    result = QwenTrainingResult(
+        config=config,
+        checkpoints=[str(latest_dir)],
+        latest_checkpoint=str(latest_dir),
+        epochs_ran=int(config.max_epochs),
+    )
+    return result
+
+
 def train_qwen_model(
     config: QwenTrainingConfig,
     *,
@@ -394,7 +491,7 @@ def train_qwen_model(
     metrics_cb: Optional[TelemetryCallback] = None,
 ) -> QwenTrainingResult:
     if config.training_mode == "trl_qlora":
-        raise TrainingError("qwen_training_mode_not_implemented:trl_qlora")
+        return _train_trl_qlora(config, progress_cb, cancel_cb, metrics_cb)
     return _train_official_lora(config, progress_cb, cancel_cb, metrics_cb)
 
 

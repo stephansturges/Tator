@@ -26955,6 +26955,7 @@ def qwen_status():
         "available": dependency_error is None,
         "loaded": qwen_model is not None,
         "model_name": QWEN_MODEL_NAME,
+        "model_family": (active_qwen_metadata or {}).get("model_family", "qwen3"),
         "device": device_guess,
         "max_new_tokens": QWEN_MAX_NEW_TOKENS,
         "min_pixels": QWEN_MIN_PIXELS,

@@ -1328,6 +1328,8 @@
         captionPreset: null,
         captionPresetApply: null,
         captionPresetRandom: null,
+        captionStyleList: null,
+        captionStyleInspiration: null,
         captionModel: null,
         captionVariant: null,
         captionMaxTokens: null,
@@ -12536,6 +12538,8 @@ function initQwenTrainingTab() {
         qwenElements.captionPreset = document.getElementById("qwenCaptionPreset");
         qwenElements.captionPresetApply = document.getElementById("qwenCaptionPresetApply");
         qwenElements.captionPresetRandom = document.getElementById("qwenCaptionPresetRandom");
+        qwenElements.captionStyleList = document.getElementById("qwenCaptionStyleList");
+        qwenElements.captionStyleInspiration = document.getElementById("qwenCaptionStyleInspiration");
         qwenElements.captionModel = document.getElementById("qwenCaptionModel");
         qwenElements.captionVariant = document.getElementById("qwenCaptionVariant");
         qwenElements.captionMaxTokens = document.getElementById("qwenCaptionMaxTokens");
@@ -14274,6 +14278,26 @@ function initQwenTrainingTab() {
         }
     }
 
+    function buildCaptionStylePrompt() {
+        const raw = (qwenElements.captionStyleList?.value || "").trim();
+        if (!raw) {
+            return "";
+        }
+        const lines = raw
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean);
+        if (!lines.length) {
+            return "";
+        }
+        const joined = lines.join(" / ");
+        const inspirationOnly = qwenElements.captionStyleInspiration?.checked;
+        if (inspirationOnly) {
+            return `Style inspirations (do not quote verbatim): ${joined}.`;
+        }
+        return `Use one of these styles as a starting point: ${joined}.`;
+    }
+
     function setQwenCaptionStatus(message) {
         if (!qwenElements.captionStatus) {
             return;
@@ -14686,6 +14710,7 @@ function initQwenTrainingTab() {
             const modelPick = qwenElements.captionModel?.value || "active";
             const basePreset = getCaptionPresetText();
             const customHint = (qwenElements.captionHint?.value || "").trim();
+            const stylePrompt = buildCaptionStylePrompt();
             let combinedPrompt = "";
             if (basePreset) {
                 combinedPrompt = basePreset;
@@ -14694,6 +14719,9 @@ function initQwenTrainingTab() {
                 }
             } else {
                 combinedPrompt = customHint;
+            }
+            if (stylePrompt) {
+                combinedPrompt = combinedPrompt ? `${combinedPrompt} ${stylePrompt}` : stylePrompt;
             }
             let modelOverride = null;
             if (modelPick !== "active") {

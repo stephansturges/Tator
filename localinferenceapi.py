@@ -2887,6 +2887,20 @@ def _run_qwen_inference(
     gen_kwargs: Dict[str, Any] = {
         "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
     }
+    if not QWEN_DO_SAMPLE:
+        gen_config = getattr(model, "generation_config", None)
+        if gen_config is not None and hasattr(gen_config, "clone"):
+            try:
+                gen_config = gen_config.clone()
+            except Exception:
+                gen_config = None
+        if gen_config is not None:
+            for attr in ("temperature", "top_p", "top_k"):
+                if hasattr(gen_config, attr):
+                    setattr(gen_config, attr, None)
+            if hasattr(gen_config, "do_sample"):
+                gen_config.do_sample = False
+            gen_kwargs["generation_config"] = gen_config
     if QWEN_DO_SAMPLE:
         gen_kwargs.update(
             {

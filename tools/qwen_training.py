@@ -74,6 +74,42 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+def _build_legacy_prompt(context_text: str, mode: str) -> str:
+    parts: List[str] = []
+    context_text = (context_text or "").strip()
+    if context_text:
+        parts.append(context_text)
+    parts.append("Return detections for every labeled object.")
+    if mode == "point":
+        parts.append(
+            'Return a JSON object named "detections". Each detection must include "label" and "point" as [x,y] pixel coordinates near the object center. '
+            'If nothing is present, respond with {"detections": []}. Respond with JSON only.'
+        )
+    else:
+        parts.append(
+            'Return a JSON object named "detections". Each detection must include "label" and "bbox" as [x1,y1,x2,y2] pixel coordinates (integers). '
+            'If nothing is present, respond with {"detections": []}. Respond with JSON only.'
+        )
+    return " ".join(parts).strip()
+
+
+def _build_output_payload(detections: List[Dict[str, Any]], mode: str) -> str:
+    items: List[Dict[str, Any]] = []
+    for det in detections:
+        label = det.get("label")
+        if not label:
+            continue
+        if mode == "point":
+            point = det.get("point")
+            if point:
+                items.append({"label": label, "point": point})
+        else:
+            bbox = det.get("bbox")
+            if bbox:
+                items.append({"label": label, "bbox": bbox})
+    return json.dumps({"detections": items}, ensure_ascii=False)
+
+
 class TrainingError(RuntimeError):
     """Raised when the Qwen training pipeline fails in a recoverable way."""
 
@@ -223,9 +259,30 @@ class QwenConversationDataset(Dataset):
                     continue
                 if not isinstance(payload, dict):
                     continue
-                if "conversations" not in payload or "image" not in payload:
+                image_name = payload.get("image")
+                if not isinstance(image_name, str):
                     continue
-                self.entries.append(payload)
+                if "conversations" in payload:
+                    self.entries.append(payload)
+                elif "detections" in payload:
+                    detections = payload.get("detections") or []
+                    if not isinstance(detections, list):
+                        detections = []
+                    context_text = payload.get("context") or ""
+                    for mode in ("bbox", "point"):
+                        prompt_text = _build_legacy_prompt(context_text, mode)
+                        output_text = _build_output_payload(detections, mode)
+                        self.entries.append(
+                            {
+                                "image": image_name,
+                                "conversations": [
+                                    {"from": "human", "value": f"<image>\n{prompt_text}"},
+                                    {"from": "gpt", "value": output_text},
+                                ],
+                            }
+                        )
+                else:
+                    continue
                 if max_items and len(self.entries) >= max_items:
                     break
         if not self.entries:

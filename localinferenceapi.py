@@ -2684,6 +2684,22 @@ def _unload_qwen_runtime() -> None:
 
 def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
+    if QWEN_IMPORT_ERROR is not None or Qwen3VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
+        detail = f"qwen_dependencies_missing:{QWEN_IMPORT_ERROR}"
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    if packaging_version is not None:
+        try:
+            import transformers  # local import to avoid import-time failures
+
+            if packaging_version.parse(transformers.__version__) < packaging_version.parse(QWEN_MIN_TRANSFORMERS):
+                raise HTTPException(
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"qwen_transformers_too_old:{transformers.__version__}<{QWEN_MIN_TRANSFORMERS}",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     cache_key = f"caption:{model_id_override}"
     if (
         qwen_model is not None
@@ -2795,7 +2811,7 @@ def _build_qwen_caption_prompt(
         sorted_hints = sorted(
             hints_payload,
             key=lambda entry: (
-                -(entry["confidence"] if entry["confidence"] is not None else -1.0),
+                -(entry["confidence"] if entry["confidence"] is not None else 0.0),
                 -entry["area"],
             ),
         )

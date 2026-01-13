@@ -1325,11 +1325,17 @@
         maxResults: null,
         runButton: null,
         captionHint: null,
+        captionPreset: null,
+        captionPresetApply: null,
+        captionPresetRandom: null,
+        captionModel: null,
         captionVariant: null,
         captionMaxTokens: null,
         captionMaxBoxes: null,
         captionIncludeCounts: null,
         captionIncludeCoords: null,
+        captionFinalOnly: null,
+        captionSaveText: null,
         captionRunButton: null,
         captionOutput: null,
         captionCopyButton: null,
@@ -1425,7 +1431,16 @@
         activeId: "default",
         activeMetadata: DEFAULT_QWEN_METADATA,
     };
+    const CAPTION_PRESETS = [
+        { id: "concise", label: "Concise scene caption", text: "Write a short caption (1-2 sentences) describing the scene and main objects." },
+        { id: "context", label: "Context + setting", text: "Describe the scene, setting, and activity in one concise paragraph." },
+        { id: "objects", label: "Objects only", text: "List the key objects and their relationships in one sentence." },
+        { id: "aerial", label: "Aerial / drone view", text: "Caption the image as aerial/drone footage, noting roads, vehicles, and structures." },
+        { id: "safety", label: "Safety / inspection", text: "Write a safety/inspection style caption focusing on equipment and hazards." },
+        { id: "custom", label: "Custom (hint only)", text: "" },
+    ];
     let sam3TextUiInitialized = false;
+    let textLabels = {};
 
     let settingsUiInitialized = false;
     const backendFuzzerElements = {
@@ -12517,16 +12532,42 @@ function initQwenTrainingTab() {
         qwenElements.maxResults = document.getElementById("qwenMaxResults");
         qwenElements.runButton = document.getElementById("qwenRunButton");
         qwenElements.captionHint = document.getElementById("qwenCaptionHint");
+        qwenElements.captionPreset = document.getElementById("qwenCaptionPreset");
+        qwenElements.captionPresetApply = document.getElementById("qwenCaptionPresetApply");
+        qwenElements.captionPresetRandom = document.getElementById("qwenCaptionPresetRandom");
+        qwenElements.captionModel = document.getElementById("qwenCaptionModel");
         qwenElements.captionVariant = document.getElementById("qwenCaptionVariant");
         qwenElements.captionMaxTokens = document.getElementById("qwenCaptionMaxTokens");
         qwenElements.captionMaxBoxes = document.getElementById("qwenCaptionMaxBoxes");
         qwenElements.captionIncludeCounts = document.getElementById("qwenCaptionIncludeCounts");
         qwenElements.captionIncludeCoords = document.getElementById("qwenCaptionIncludeCoords");
+        qwenElements.captionFinalOnly = document.getElementById("qwenCaptionFinalOnly");
+        qwenElements.captionSaveText = document.getElementById("qwenCaptionSaveText");
         qwenElements.captionRunButton = document.getElementById("qwenCaptionRunButton");
         qwenElements.captionOutput = document.getElementById("qwenCaptionOutput");
         qwenElements.captionCopyButton = document.getElementById("qwenCaptionCopy");
         qwenElements.captionMeta = document.getElementById("qwenCaptionMeta");
         qwenElements.captionStatus = document.getElementById("qwenCaptionStatus");
+        if (qwenElements.captionPreset) {
+            qwenElements.captionPreset.innerHTML = "";
+            CAPTION_PRESETS.forEach((preset) => {
+                const option = document.createElement("option");
+                option.value = preset.id;
+                option.textContent = preset.label;
+                qwenElements.captionPreset.appendChild(option);
+            });
+            qwenElements.captionPreset.value = CAPTION_PRESETS[0].id;
+        }
+        if (qwenElements.captionPresetApply) {
+            qwenElements.captionPresetApply.addEventListener("click", () => {
+                applyCaptionPreset({ randomize: false });
+            });
+        }
+        if (qwenElements.captionPresetRandom) {
+            qwenElements.captionPresetRandom.addEventListener("click", () => {
+                applyCaptionPreset({ randomize: true });
+            });
+        }
         if (qwenElements.runButton) {
             qwenElements.runButton.addEventListener("click", () => {
                 handleQwenRun().catch((error) => {
@@ -14210,6 +14251,27 @@ function initQwenTrainingTab() {
         qwenElements.captionRunButton.textContent = qwenCaptionActive ? "Captioning…" : "Caption image";
     }
 
+    function getCaptionPresetText() {
+        const presetId = qwenElements.captionPreset?.value || CAPTION_PRESETS[0].id;
+        const preset = CAPTION_PRESETS.find((entry) => entry.id === presetId) || CAPTION_PRESETS[0];
+        return preset.text || "";
+    }
+
+    function applyCaptionPreset({ randomize = false } = {}) {
+        if (!qwenElements.captionPreset || !qwenElements.captionHint) {
+            return;
+        }
+        if (randomize) {
+            const selectable = CAPTION_PRESETS.filter((preset) => preset.id !== "custom");
+            const pick = selectable[Math.floor(Math.random() * selectable.length)] || CAPTION_PRESETS[0];
+            qwenElements.captionPreset.value = pick.id;
+        }
+        const presetText = getCaptionPresetText();
+        if (presetText) {
+            qwenElements.captionHint.value = presetText;
+        }
+    }
+
     function setQwenCaptionStatus(message) {
         if (!qwenElements.captionStatus) {
             return;
@@ -14617,9 +14679,27 @@ function initQwenTrainingTab() {
             const includeCounts = !!qwenElements.captionIncludeCounts?.checked;
             const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
             const variant = qwenElements.captionVariant?.value || "auto";
+            const finalOnly = !!qwenElements.captionFinalOnly?.checked;
+            const modelPick = qwenElements.captionModel?.value || "active";
+            const basePreset = getCaptionPresetText();
+            const customHint = (qwenElements.captionHint?.value || "").trim();
+            let combinedPrompt = "";
+            if (basePreset) {
+                combinedPrompt = basePreset;
+                if (customHint && basePreset !== customHint) {
+                    combinedPrompt = `${basePreset} ${customHint}`;
+                }
+            } else {
+                combinedPrompt = customHint;
+            }
+            let modelOverride = null;
+            if (modelPick !== "active") {
+                const variantSuffix = variant === "Thinking" ? "Thinking" : "Instruct";
+                modelOverride = `Qwen/Qwen3-VL-${modelPick}-${variantSuffix}`;
+            }
             const hints = collectCaptionLabelHints();
             const result = await invokeQwenCaption({
-                user_prompt: (qwenElements.captionHint?.value || "").trim(),
+                user_prompt: combinedPrompt,
                 label_hints: hints,
                 image_width: currentImage.width,
                 image_height: currentImage.height,
@@ -14628,6 +14708,8 @@ function initQwenTrainingTab() {
                 max_boxes: maxBoxes,
                 max_new_tokens: maxTokens,
                 model_variant: variant,
+                model_id: modelOverride,
+                final_answer_only: finalOnly,
             });
             if (qwenElements.captionOutput) {
                 qwenElements.captionOutput.value = result?.caption || "";
@@ -14638,7 +14720,14 @@ function initQwenTrainingTab() {
                     ? Object.entries(countEntries).map(([label, count]) => `${label}: ${count}`).join(" • ")
                     : "No label hints";
                 const truncBadge = result?.truncated ? " • summarized" : "";
-                qwenElements.captionMeta.textContent = `Hints: ${hints.length} • Used boxes: ${result?.used_boxes ?? 0}${truncBadge} • ${countSummary}`;
+                const savedLabel = qwenElements.captionSaveText?.checked ? " • saved to text labels" : "";
+                qwenElements.captionMeta.textContent = `Hints: ${hints.length} • Used boxes: ${result?.used_boxes ?? 0}${truncBadge} • ${countSummary}${savedLabel}`;
+            }
+            if (qwenElements.captionSaveText?.checked && currentImage?.name) {
+                if (!textLabels) {
+                    textLabels = {};
+                }
+                textLabels[currentImage.name] = (result?.caption || "").trim();
             }
             setQwenCaptionStatus("Ready");
             setSamStatus("Caption ready.", { variant: "success", duration: 3500 });
@@ -22321,6 +22410,7 @@ function initQwenTrainingTab() {
         document.getElementById("imageList").innerHTML = "";
         images = {};
         bboxes = {};
+        textLabels = {};
         currentImage = null;
         if (typeof refreshSam3CascadeControls === "function") {
             refreshSam3CascadeControls();
@@ -22658,6 +22748,7 @@ function initQwenTrainingTab() {
 
     const resetBboxes = () => {
         bboxes = {};
+        textLabels = {};
         setDatasetType("bbox");
     };
 
@@ -22873,6 +22964,7 @@ function initQwenTrainingTab() {
                 return;
             }
             const zip = new JSZip();
+            const textFolder = zip.folder("text_labels");
             for (let imageName in bboxes) {
                 const image = images[imageName];
                 if (!image) continue;
@@ -22902,6 +22994,20 @@ function initQwenTrainingTab() {
                     }
                 }
                 zip.file(name.join("."), result.join("\n"));
+                const textLabel = textLabels?.[imageName];
+                if (textFolder && textLabel) {
+                    textFolder.file(name.join("."), String(textLabel).trim());
+                }
+            }
+            if (textFolder && textLabels) {
+                Object.keys(textLabels).forEach((imageName) => {
+                    if (bboxes[imageName]) {
+                        return;
+                    }
+                    const name = imageName.split(".");
+                    name[name.length - 1] = "txt";
+                    textFolder.file(name.join("."), String(textLabels[imageName]).trim());
+                });
             }
             zip.generateAsync({ type: "blob" })
                 .then((blob) => {

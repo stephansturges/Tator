@@ -219,15 +219,31 @@
                                         <strong>Caption current image</strong>
                                         <span id="qwenCaptionStatus" class="qwen-caption-status"></span>
                                     </div>
+                                    <label for="qwenCaptionPreset">Caption style</label>
+                                    <div class="qwen-caption-row">
+                                        <select id="qwenCaptionPreset"></select>
+                                        <button type="button" id="qwenCaptionPresetApply" class="training-button secondary">Use</button>
+                                        <button type="button" id="qwenCaptionPresetRandom" class="training-button secondary">Random</button>
+                                    </div>
                                     <label for="qwenCaptionHint">Caption hint (optional)</label>
                                     <textarea id="qwenCaptionHint" rows="2" placeholder="e.g., drone footage at dusk"></textarea>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenCaptionVariant">Model variant</label>
+                                            <label for="qwenCaptionModel">Caption model</label>
+                                            <select id="qwenCaptionModel">
+                                                <option value="active" selected>Use active model</option>
+                                                <option value="2B">Qwen3-VL 2B</option>
+                                                <option value="4B">Qwen3-VL 4B</option>
+                                                <option value="8B">Qwen3-VL 8B</option>
+                                                <option value="32B">Qwen3-VL 32B</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionVariant">Variant</label>
                                             <select id="qwenCaptionVariant">
-                                                <option value="auto" selected>Use active model</option>
-                                                <option value="Instruct">Base Instruct</option>
-                                                <option value="Thinking">Base Thinking</option>
+                                                <option value="auto" selected>Auto (active)</option>
+                                                <option value="Instruct">Instruct</option>
+                                                <option value="Thinking">Thinking</option>
                                             </select>
                                         </div>
                                         <div>
@@ -242,6 +258,8 @@
                                     <div class="qwen-caption-options">
                                         <label><input type="checkbox" id="qwenCaptionIncludeCounts" checked /> Include counts by class</label>
                                         <label><input type="checkbox" id="qwenCaptionIncludeCoords" checked /> Include box coords</label>
+                                        <label><input type="checkbox" id="qwenCaptionFinalOnly" checked /> Final answer only (no reasoning)</label>
+                                        <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Save to text labels</label>
                                     </div>
                                     <button type="button" id="qwenCaptionRunButton" class="training-button secondary">Caption image</button>
                                     <div class="qwen-caption-output">
@@ -249,6 +267,7 @@
                                         <textarea id="qwenCaptionOutput" rows="3" readonly></textarea>
                                         <button type="button" id="qwenCaptionCopy" class="training-button secondary">Copy caption</button>
                                         <div id="qwenCaptionMeta" class="training-help"></div>
+                                        <div class="training-help">Saved captions are exported under <code>text_labels/</code> in the YOLO zip.</div>
                                     </div>
                                 </div>
                                 <section class="sam3-text-panel" id="sam3TextPanel" aria-labelledby="sam3TextTitle">

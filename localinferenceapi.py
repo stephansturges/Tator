@@ -3734,6 +3734,9 @@ RFDETR_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 RFDETR_MODEL_ROOT = Path(os.environ.get("RFDETR_MODEL_ROOT", "./uploads/rfdetr_models"))
 RFDETR_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
 RFDETR_ACTIVE_PATH = RFDETR_MODEL_ROOT / "active.json"
+DETECTOR_PREFS_ROOT = Path(os.environ.get("DETECTOR_PREFS_ROOT", "./uploads/detectors"))
+DETECTOR_PREFS_ROOT.mkdir(parents=True, exist_ok=True)
+DETECTOR_DEFAULT_PATH = DETECTOR_PREFS_ROOT / "default.json"
 RFDETR_RUN_META_NAME = "run.json"
 RFDETR_KEEP_FILES = {
     "checkpoint_best_regular.pth",
@@ -5125,6 +5128,34 @@ def _save_rfdetr_active(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "created_at" not in data:
         data["created_at"] = data["updated_at"]
     RFDETR_ACTIVE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return data
+
+
+def _load_detector_default() -> Dict[str, Any]:
+    if not DETECTOR_DEFAULT_PATH.exists():
+        return {"mode": "rfdetr"}
+    try:
+        payload = json.loads(DETECTOR_DEFAULT_PATH.read_text())
+        if isinstance(payload, dict):
+            mode = str(payload.get("mode") or "").strip().lower()
+            if mode in {"yolo", "rfdetr"}:
+                return payload
+    except Exception:
+        pass
+    return {"mode": "rfdetr"}
+
+
+def _save_detector_default(payload: Dict[str, Any]) -> Dict[str, Any]:
+    DETECTOR_DEFAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(payload or {})
+    mode = str(data.get("mode") or "").strip().lower()
+    if mode not in {"yolo", "rfdetr"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="detector_mode_invalid")
+    data["mode"] = mode
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    DETECTOR_DEFAULT_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
     return data
 
 
@@ -26183,6 +26214,21 @@ def set_rfdetr_active(payload: RfDetrActiveRequest):
         "variant": config.get("variant"),
     }
     return _save_rfdetr_active(active_payload)
+
+
+@app.get("/detectors/default")
+def get_default_detector():
+    return _load_detector_default()
+
+
+class DetectorDefaultRequest(BaseModel):
+    mode: str
+
+
+@app.post("/detectors/default")
+def set_default_detector(payload: DetectorDefaultRequest):
+    data = {"mode": payload.mode}
+    return _save_detector_default(data)
 
 
 @app.get("/rfdetr/runs/{run_id}/download")

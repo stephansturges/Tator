@@ -276,6 +276,7 @@
     const TAB_PROMPT_HELPER = "prompt-helper";
     const TAB_DATASETS = "datasets";
     const TAB_SAM3_PROMPT_MODELS = "sam3-prompt-models";
+    const TAB_DETECTORS = "detectors";
     const TAB_ACTIVE = "active";
     const TAB_QWEN = "qwen";
     const TAB_PREDICTORS = "predictors";
@@ -286,6 +287,116 @@
         const gb = mb / 1024;
         if (!Number.isFinite(bytes) || bytes < 0) return "n/a";
         return gb >= 1 ? `${gb.toFixed(1)} GB` : `${mb.toFixed(1)} MB`;
+    }
+
+    function syncRegionDetectorInputs() {
+        if (regionDetectorSelect && yoloRegionIouInput) {
+            const mode = (regionDetectorSelect.value || "yolo").toLowerCase();
+            yoloRegionIouInput.disabled = mode !== "yolo";
+        }
+    }
+
+    async function fetchDetectorDefault() {
+        try {
+            const resp = await fetch(`${API_ROOT}/detectors/default`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            const mode = String(data?.mode || "").toLowerCase();
+            if (mode === "yolo" || mode === "rfdetr") {
+                detectorState.mode = mode;
+            }
+            return detectorState.mode;
+        } catch (err) {
+            console.warn("Detector default fetch failed", err);
+            return detectorState.mode;
+        }
+    }
+
+    function renderDetectorStatus() {
+        if (!detectorElements.status) return;
+        const yoloName = detectorState.yoloActive?.run_name || detectorState.yoloActive?.run_id;
+        const rfdetrName = detectorState.rfdetrActive?.run_name || detectorState.rfdetrActive?.run_id;
+        const yoloLabel = yoloName ? `YOLO active: ${yoloName}` : "YOLO active: none";
+        const rfdetrLabel = rfdetrName ? `RF-DETR active: ${rfdetrName}` : "RF-DETR active: none";
+        detectorElements.status.textContent = `${yoloLabel} • ${rfdetrLabel}`;
+    }
+
+    async function refreshDetectorStatus() {
+        try {
+            const [yoloResp, rfdetrResp] = await Promise.all([
+                fetch(`${API_ROOT}/yolo/active`),
+                fetch(`${API_ROOT}/rfdetr/active`),
+            ]);
+            detectorState.yoloActive = yoloResp.ok ? await yoloResp.json() : null;
+            detectorState.rfdetrActive = rfdetrResp.ok ? await rfdetrResp.json() : null;
+        } catch (err) {
+            console.warn("Detector status fetch failed", err);
+            detectorState.yoloActive = null;
+            detectorState.rfdetrActive = null;
+        }
+        renderDetectorStatus();
+    }
+
+    function applyDetectorDefault(mode) {
+        const normalized = String(mode || "").toLowerCase();
+        if (normalized !== "yolo" && normalized !== "rfdetr") return;
+        detectorState.mode = normalized;
+        if (detectorElements.defaultSelect) {
+            detectorElements.defaultSelect.value = normalized;
+        }
+        if (regionDetectorSelect) {
+            regionDetectorSelect.value = normalized;
+            syncRegionDetectorInputs();
+        }
+    }
+
+    async function saveDetectorDefault() {
+        if (!detectorElements.defaultSelect) return;
+        const mode = detectorElements.defaultSelect.value || "rfdetr";
+        if (detectorElements.message) {
+            detectorElements.message.textContent = "Saving default detector…";
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/detectors/default`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ mode }),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            applyDetectorDefault(mode);
+            if (detectorElements.message) {
+                detectorElements.message.textContent = `Default detector set to ${mode.toUpperCase()}.`;
+            }
+        } catch (err) {
+            console.warn("Default detector save failed", err);
+            if (detectorElements.message) {
+                detectorElements.message.textContent = `Failed to set default detector: ${err.message || err}`;
+            }
+        }
+    }
+
+    async function initDetectorPanel() {
+        detectorElements.defaultSelect = document.getElementById("detectorDefaultSelect");
+        detectorElements.defaultSave = document.getElementById("detectorDefaultSave");
+        detectorElements.defaultRefresh = document.getElementById("detectorDefaultRefresh");
+        detectorElements.status = document.getElementById("detectorActiveStatus");
+        detectorElements.message = document.getElementById("detectorDefaultMessage");
+        if (detectorElements.defaultSave) {
+            detectorElements.defaultSave.addEventListener("click", () => {
+                saveDetectorDefault().catch((err) => console.warn("Detector default save failed", err));
+            });
+        }
+        if (detectorElements.defaultRefresh) {
+            detectorElements.defaultRefresh.addEventListener("click", () => {
+                refreshDetectorStatus().catch((err) => console.warn("Detector status refresh failed", err));
+                fetchDetectorDefault()
+                    .then((mode) => applyDetectorDefault(mode))
+                    .catch((err) => console.warn("Detector default refresh failed", err));
+            });
+        }
+        const mode = await fetchDetectorDefault();
+        applyDetectorDefault(mode);
+        await refreshDetectorStatus();
     }
 
     function initHelpTooltips() {
@@ -1084,6 +1195,7 @@
         agentMiningButton: null,
         promptHelperButton: null,
         sam3PromptModelsButton: null,
+        detectorsButton: null,
         datasetsButton: null,
         activeButton: null,
         qwenButton: null,
@@ -1098,11 +1210,25 @@
         agentMiningPanel: null,
         promptHelperPanel: null,
         sam3PromptModelsPanel: null,
+        detectorsPanel: null,
         datasetsPanel: null,
         activePanel: null,
         qwenPanel: null,
         predictorsPanel: null,
         settingsPanel: null,
+    };
+
+    const detectorElements = {
+        defaultSelect: null,
+        defaultSave: null,
+        defaultRefresh: null,
+        status: null,
+        message: null,
+    };
+    const detectorState = {
+        mode: "rfdetr",
+        yoloActive: null,
+        rfdetrActive: null,
     };
 
 
@@ -10059,6 +10185,7 @@ function initQwenTrainingTab() {
         tabElements.agentMiningButton = document.getElementById("tabAgentMiningButton");
         tabElements.promptHelperButton = document.getElementById("tabPromptHelperButton");
         tabElements.sam3PromptModelsButton = document.getElementById("tabSam3PromptModelsButton");
+        tabElements.detectorsButton = document.getElementById("tabDetectorsButton");
         tabElements.datasetsButton = document.getElementById("tabDatasetsButton");
         tabElements.activeButton = document.getElementById("tabActiveButton");
         tabElements.qwenButton = document.getElementById("tabQwenButton");
@@ -10073,6 +10200,7 @@ function initQwenTrainingTab() {
         tabElements.agentMiningPanel = document.getElementById("tabAgentMining");
         tabElements.promptHelperPanel = document.getElementById("tabPromptHelper");
         tabElements.sam3PromptModelsPanel = document.getElementById("tabSam3PromptModels");
+        tabElements.detectorsPanel = document.getElementById("tabDetectors");
         tabElements.datasetsPanel = document.getElementById("tabDatasets");
         tabElements.activePanel = document.getElementById("tabActive");
         tabElements.qwenPanel = document.getElementById("tabQwen");
@@ -10104,6 +10232,9 @@ function initQwenTrainingTab() {
         }
         if (tabElements.sam3PromptModelsButton) {
             tabElements.sam3PromptModelsButton.addEventListener("click", () => setActiveTab(TAB_SAM3_PROMPT_MODELS));
+        }
+        if (tabElements.detectorsButton) {
+            tabElements.detectorsButton.addEventListener("click", () => setActiveTab(TAB_DETECTORS));
         }
         if (tabElements.datasetsButton) {
             tabElements.datasetsButton.addEventListener("click", () => setActiveTab(TAB_DATASETS));
@@ -10153,6 +10284,9 @@ function initQwenTrainingTab() {
         if (tabElements.sam3PromptModelsButton) {
             tabElements.sam3PromptModelsButton.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
         }
+        if (tabElements.detectorsButton) {
+            tabElements.detectorsButton.classList.toggle("active", tabName === TAB_DETECTORS);
+        }
         if (tabElements.datasetsButton) {
             tabElements.datasetsButton.classList.toggle("active", tabName === TAB_DATASETS);
         }
@@ -10195,6 +10329,9 @@ function initQwenTrainingTab() {
         if (tabElements.sam3PromptModelsPanel) {
             tabElements.sam3PromptModelsPanel.classList.toggle("active", tabName === TAB_SAM3_PROMPT_MODELS);
         }
+        if (tabElements.detectorsPanel) {
+            tabElements.detectorsPanel.classList.toggle("active", tabName === TAB_DETECTORS);
+        }
         if (tabElements.datasetsPanel) {
             tabElements.datasetsPanel.classList.toggle("active", tabName === TAB_DATASETS);
         }
@@ -10217,6 +10354,9 @@ function initQwenTrainingTab() {
             if (trainingState.activeJobId) {
                 loadTrainingJob(trainingState.activeJobId, { forcePoll: true });
             }
+        }
+        if (tabName === TAB_DETECTORS && previous !== TAB_DETECTORS) {
+            refreshDetectorStatus().catch((err) => console.warn("Detector status refresh failed", err));
         }
         if (tabName === TAB_QWEN_TRAIN && previous !== TAB_QWEN_TRAIN) {
             initQwenTrainingTab();
@@ -18797,12 +18937,8 @@ function initQwenTrainingTab() {
         }
 
         if (regionDetectorSelect && yoloRegionIouInput) {
-            const syncRegionDetector = () => {
-                const mode = (regionDetectorSelect.value || "yolo").toLowerCase();
-                yoloRegionIouInput.disabled = mode !== "yolo";
-            };
-            regionDetectorSelect.addEventListener("change", syncRegionDetector);
-            syncRegionDetector();
+            regionDetectorSelect.addEventListener("change", syncRegionDetectorInputs);
+            syncRegionDetectorInputs();
         }
 
 
@@ -18842,6 +18978,8 @@ function initQwenTrainingTab() {
         updateSamPreloadState(Boolean(samPreloadCheckbox?.checked));
         setPolygonDrawEnabled(datasetType === "seg", { silent: true });
         applyDatasetModeConstraints();
+
+        initDetectorPanel().catch((err) => console.warn("Detector panel init failed", err));
     });
 
     // Helper that extracts base64 from currentImage

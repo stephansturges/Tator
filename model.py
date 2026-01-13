@@ -1,4 +1,5 @@
 from collections import OrderedDict
+import inspect
 from typing import Tuple, Union
 
 import numpy as np
@@ -432,5 +433,11 @@ def build_model(state_dict: dict):
             del state_dict[key]
 
     convert_weights(model)
-    model.load_state_dict(state_dict)
+    load_kwargs = {}
+    try:
+        if "assign" in inspect.signature(model.load_state_dict).parameters:
+            load_kwargs["assign"] = True
+    except Exception:
+        load_kwargs = {}
+    model.load_state_dict(state_dict, **load_kwargs)
     return model.eval()

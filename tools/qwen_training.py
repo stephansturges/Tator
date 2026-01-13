@@ -144,6 +144,8 @@ class QwenTrainingConfig:
     max_length: Optional[int] = None
     train_limit: Optional[int] = None
     val_limit: Optional[int] = None
+    vram_estimate_mb: Optional[float] = None
+    vram_estimate_note: Optional[str] = None
 
 
 @dataclass
@@ -447,7 +449,7 @@ def _train_official_lora(
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         config.model_id,
         torch_dtype=dtype if device == "cuda" else torch.float32,
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=False,
     )
     lora_cfg = LoraConfig(
         r=config.lora_rank,
@@ -559,6 +561,7 @@ def _train_trl_qlora(
         config.model_id,
         device_map="auto",
         quantization_config=quant_config,
+        low_cpu_mem_usage=False,
     )
 
     train_dataset = QwenConversationDataset(

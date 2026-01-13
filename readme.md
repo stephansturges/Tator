@@ -43,6 +43,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **Predictor budget control** – dial the number of warm SAM predictors (1–3) and monitor their RAM usage so the UI can stay snappy on machines with more headroom.
 - **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
 - **Qwen 3 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. The active model (selected on the Qwen Models tab) always supplies the system prompt and defaults so inference matches training.
+- **Qwen 3 captioning** – generate long-form captions with label hints and optional reasoning models, then save them into a `text_labels/` folder alongside YOLO exports (use the Label Images panel).
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **YOLOv8 training** – launch detect/segment runs from the UI, track progress, and keep only `best.pt` + metrics for easy sharing.
 - **RF-DETR training** – launch detect/segment runs from the UI, track progress, and keep best checkpoints + metrics for easy sharing.
@@ -105,6 +106,7 @@ Tator/
 - **CLIP / DINOv3 heads (recommended first)**: `Train CLIP` tab → `/clip/train` job → activate via `/clip/active_model` → used by Auto Class, CLIP verification (CLIP only), and as a **pretrained head** for Agent Mining / cascade scoring.
 - **SAM assists (Label Images tab)**: UI actions → SAM endpoints (SAM1/2/3 depending on `SAM_VARIANT`) → detections written into the current image session.
 - **SAM3 text prompt**: `SAM3 Text Prompt` panel → SAM3 processor runtime → returns boxes/polygons via the same `QwenDetection` response model used elsewhere.
+- **Qwen captioning**: `Label Images` panel → `/qwen/caption` → prompt uses scene hints + optional label hints → captions can be saved into `text_labels/` in YOLO exports.
 - **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → results include per-class recipes in either:
   - `sam3_greedy`: prompt bank + optional crop bank (positives/negatives) + optional embedded pretrained CLIP head
   - `sam3_steps` (`schema_version=2`): explicit multi-step prompt chain (step list), plus optional embedded pretrained CLIP head
@@ -194,6 +196,25 @@ Dataset Management displays readiness tags so you can see when a dataset is usab
 - **YOLO‑SEG** – YOLO polygon labels detected (required for YOLOv8 segmentation training).
 - **COCO** – COCO annotations present (used by SAM3 training + recipe mining).
 - **COCO‑SEG** – COCO polygon annotations present (required for RF‑DETR segmentation training).
+
+### Captioning with Qwen3 (Label Images tab)
+1. Load an image and click **Qwen Captioning** in the Label Images panel.
+2. Pick a caption model (active run or a base Qwen3 size) plus a variant (Instruct/Thinking).
+3. Optionally add style prompts and opening phrases (JSON list or one per line).
+4. Click **Run caption** and optionally save the caption as a `text_labels` entry.
+5. Export as YOLO ZIP: captions live under `text_labels/` next to label files.
+
+### Training detectors (YOLOv8 + RF-DETR)
+1. Open **Train YOLO** or **Train RF-DETR**.
+2. Select a dataset; the UI will only allow segmentation if polygon labels exist.
+3. Choose model size and training mode (fine-tune vs from-scratch).
+4. Start a run and watch the right-hand metrics card update.
+5. Download `best.pt` and metrics from the Saved Runs panel.
+
+## Updates
+- 2026-01-13: Added Qwen3 captioning flow with editable style + opening lists, label-hint injection, and `text_labels/` export.
+- 2026-01-13: Added YOLOv8 + RF-DETR training UIs, run tracking, and saved-run management with best checkpoints only.
+- 2026-01-13: Expanded model catalog (Thinking/Instruct + FP8 options) and GPU capability warnings for large caption models.
 
 ### Optional: Setting up SAM3
 SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):

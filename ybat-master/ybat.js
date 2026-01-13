@@ -1330,6 +1330,7 @@
         captionPresetRandom: null,
         captionStyleList: null,
         captionStyleInspiration: null,
+        captionVaryOpening: null,
         captionModel: null,
         captionVariant: null,
         captionMaxTokens: null,
@@ -1441,6 +1442,22 @@
         { id: "aerial", label: "Aerial / drone view", text: "Caption the image as aerial/drone footage, noting roads, vehicles, and structures." },
         { id: "safety", label: "Safety / inspection", text: "Write a safety/inspection style caption focusing on equipment and hazards." },
         { id: "custom", label: "Custom (hint only)", text: "" },
+    ];
+    const DEFAULT_CAPTION_STYLE_LINES = [
+        "A close-up photograph",
+        "A wide establishing shot",
+        "An overhead view",
+        "A street-level documentary shot",
+        "A candid scene",
+    ];
+    const DEFAULT_CAPTION_OPENERS = [
+        "The scene shows",
+        "The image shows",
+        "In this scene",
+        "From a high angle",
+        "Looking down",
+        "A top-down view shows",
+        "A wide shot shows",
     ];
     let sam3TextUiInitialized = false;
     let textLabels = {};
@@ -12214,6 +12231,7 @@ function initQwenTrainingTab() {
             imageRamMb: coerceNumber(data.image_ram_mb, 0),
             gpuTotalMb: coerceNumber(data.gpu_total_mb, 0),
             gpuFreeMb: coerceNumber(data.gpu_free_mb, 0),
+            gpuComputeCapability: data.gpu_compute_capability || null,
         };
         samPredictorBudget = predictorSettings.maxPredictors;
         if (predictorElements.countInput) {
@@ -12252,6 +12270,21 @@ function initQwenTrainingTab() {
             return "--";
         }
         return `${value.toFixed(1)} MB`;
+    }
+
+    function warnIfFp8Unsupported(modelId) {
+        if (!modelId || !modelId.includes("FP8")) {
+            return;
+        }
+        const ccRaw = predictorSettings.gpuComputeCapability;
+        const cc = ccRaw ? Number.parseFloat(ccRaw) : null;
+        if (!cc || Number.isNaN(cc)) {
+            setSamStatus("FP8 models require GPU compute capability ≥ 8.9 (e.g., 4090/H100). Current GPU capability unknown.", { variant: "warn", duration: 4500 });
+            return;
+        }
+        if (cc < 8.9) {
+            setSamStatus(`FP8 models require GPU compute capability ≥ 8.9 (e.g., 4090/H100). Current: ${ccRaw}.`, { variant: "warn", duration: 4500 });
+        }
     }
 
     async function refreshPredictorMetrics(options = {}) {
@@ -12540,6 +12573,8 @@ function initQwenTrainingTab() {
         qwenElements.captionPresetRandom = document.getElementById("qwenCaptionPresetRandom");
         qwenElements.captionStyleList = document.getElementById("qwenCaptionStyleList");
         qwenElements.captionStyleInspiration = document.getElementById("qwenCaptionStyleInspiration");
+        qwenElements.captionVaryOpening = document.getElementById("qwenCaptionVaryOpening");
+        qwenElements.captionOpeningList = document.getElementById("qwenCaptionOpeningList");
         qwenElements.captionModel = document.getElementById("qwenCaptionModel");
         qwenElements.captionVariant = document.getElementById("qwenCaptionVariant");
         qwenElements.captionMaxTokens = document.getElementById("qwenCaptionMaxTokens");
@@ -12554,6 +12589,14 @@ function initQwenTrainingTab() {
         qwenElements.captionCopyButton = document.getElementById("qwenCaptionCopy");
         qwenElements.captionMeta = document.getElementById("qwenCaptionMeta");
         qwenElements.captionStatus = document.getElementById("qwenCaptionStatus");
+        if (qwenElements.captionModel) {
+            qwenElements.captionModel.addEventListener("change", () => {
+                const selected = qwenElements.captionModel.value;
+                if (selected && selected !== "active") {
+                    warnIfFp8Unsupported(selected);
+                }
+            });
+        }
         if (qwenElements.captionPreset) {
             qwenElements.captionPreset.innerHTML = "";
             CAPTION_PRESETS.forEach((preset) => {
@@ -12563,6 +12606,12 @@ function initQwenTrainingTab() {
                 qwenElements.captionPreset.appendChild(option);
             });
             qwenElements.captionPreset.value = CAPTION_PRESETS[0].id;
+        }
+        if (qwenElements.captionStyleList && !qwenElements.captionStyleList.value.trim()) {
+            qwenElements.captionStyleList.value = DEFAULT_CAPTION_STYLE_LINES.join("\n");
+        }
+        if (qwenElements.captionOpeningList && !qwenElements.captionOpeningList.value.trim()) {
+            qwenElements.captionOpeningList.value = JSON.stringify(DEFAULT_CAPTION_OPENERS, null, 2);
         }
         if (qwenElements.captionPresetApply) {
             qwenElements.captionPresetApply.addEventListener("click", () => {
@@ -14293,9 +14342,44 @@ function initQwenTrainingTab() {
         const joined = lines.join(" / ");
         const inspirationOnly = qwenElements.captionStyleInspiration?.checked;
         if (inspirationOnly) {
-            return `Style inspirations (do not quote verbatim): ${joined}.`;
+            return "Style inspirations (for tone/angle only; rephrase, do not quote verbatim): "
+                + `${joined}.`;
         }
         return `Use one of these styles as a starting point: ${joined}.`;
+    }
+
+    function parseCaptionList(raw) {
+        const cleaned = (raw || "").trim();
+        if (!cleaned) {
+            return [];
+        }
+        if (cleaned.startsWith("[")) {
+            try {
+                const parsed = JSON.parse(cleaned);
+                if (Array.isArray(parsed)) {
+                    return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+                }
+            } catch (error) {
+                // Fall back to newline parsing.
+            }
+        }
+        return cleaned
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean);
+    }
+
+    function buildCaptionOpeningPrompt() {
+        if (qwenElements.captionVaryOpening && !qwenElements.captionVaryOpening.checked) {
+            return "";
+        }
+        const raw = (qwenElements.captionOpeningList?.value || "").trim();
+        const lines = parseCaptionList(raw);
+        if (!lines.length) {
+            return "";
+        }
+        const joined = lines.join(" / ");
+        return `Preferred opening phrases (choose one and rephrase if needed): ${joined}.`;
     }
 
     function setQwenCaptionStatus(message) {
@@ -14711,6 +14795,7 @@ function initQwenTrainingTab() {
             const basePreset = getCaptionPresetText();
             const customHint = (qwenElements.captionHint?.value || "").trim();
             const stylePrompt = buildCaptionStylePrompt();
+            const openingPrompt = buildCaptionOpeningPrompt();
             let combinedPrompt = "";
             if (basePreset) {
                 combinedPrompt = basePreset;
@@ -14723,10 +14808,18 @@ function initQwenTrainingTab() {
             if (stylePrompt) {
                 combinedPrompt = combinedPrompt ? `${combinedPrompt} ${stylePrompt}` : stylePrompt;
             }
+            if (openingPrompt) {
+                combinedPrompt = combinedPrompt ? `${combinedPrompt} ${openingPrompt}` : openingPrompt;
+            }
             let modelOverride = null;
             if (modelPick !== "active") {
-                const variantSuffix = variant === "Thinking" ? "Thinking" : "Instruct";
-                modelOverride = `Qwen/Qwen3-VL-${modelPick}-${variantSuffix}`;
+                if (modelPick.includes("/")) {
+                    modelOverride = modelPick;
+                } else {
+                    const variantSuffix = variant === "Thinking" ? "Thinking" : "Instruct";
+                    modelOverride = `Qwen/Qwen3-VL-${modelPick}-${variantSuffix}`;
+                }
+                warnIfFp8Unsupported(modelOverride);
             }
             const hints = collectCaptionLabelHints();
             const result = await invokeQwenCaption({

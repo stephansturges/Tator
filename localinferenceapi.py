@@ -2843,6 +2843,19 @@ def _build_qwen_caption_prompt(
     return "\n".join(lines), counts, len(selected), truncated
 
 
+def _collapse_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> str:
+    cleaned = text.strip()
+    if marker:
+        match = re.search(rf"{marker}\\s*:?\\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
+        if match:
+            cleaned = match.group(1)
+    return _collapse_whitespace(cleaned) if cleaned else text.strip()
+
+
 def _run_qwen_inference(
     prompt: str,
     pil_img: Image.Image,
@@ -3638,6 +3651,7 @@ class QwenCaptionRequest(BaseModel):
     model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
     model_id: Optional[str] = None
     final_answer_only: Optional[bool] = True
+    two_stage_refine: Optional[bool] = False
 
     @root_validator(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
@@ -3674,6 +3688,7 @@ class QwenCaptionRequest(BaseModel):
         model_id = (values.get("model_id") or "").strip()
         values["model_id"] = model_id or None
         values["final_answer_only"] = bool(values.get("final_answer_only", True))
+        values["two_stage_refine"] = bool(values.get("two_stage_refine", False))
         return values
 
 
@@ -27575,6 +27590,8 @@ def qwen_caption(payload: QwenCaptionRequest):
             active_qwen_model_id,
         )
     final_only = bool(payload.final_answer_only)
+    two_stage = bool(payload.two_stage_refine)
+    is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
     system_prompt = (
         "You are a concise captioning assistant. Use the image as truth. The label hints are suggestions; "
         "if they conflict with the image, mention the uncertainty briefly."
@@ -27582,13 +27599,42 @@ def qwen_caption(payload: QwenCaptionRequest):
     if final_only:
         system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
     try:
-        qwen_text, _, _ = _run_qwen_inference(
-            prompt_text,
-            pil_img,
-            max_new_tokens=max_new_tokens,
-            system_prompt_override=system_prompt,
-            model_id_override=desired_model_id if desired_model_id != base_model_id else None,
-        )
+        if two_stage and is_thinking:
+            draft_prompt = (
+                "Step 1: Look at the image and form a draft caption.\n"
+                "Respond with: DRAFT: <caption>"
+            )
+            draft_system = f"{system_prompt} Return only a line starting with 'DRAFT:'."
+            draft_text, _, _ = _run_qwen_inference(
+                draft_prompt,
+                pil_img,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=draft_system,
+                model_id_override=desired_model_id if desired_model_id != base_model_id else None,
+            )
+            draft_caption = _extract_caption_from_text(draft_text, marker="DRAFT")
+            refine_prompt = (
+                f"{prompt_text}\nDraft caption: {draft_caption}\n"
+                "Step 2: Refine the caption using the label hints. Respond with: FINAL: <caption>"
+            )
+            refine_system = f"{system_prompt} Return only a line starting with 'FINAL:'."
+            qwen_text, _, _ = _run_qwen_inference(
+                refine_prompt,
+                pil_img,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=refine_system,
+                model_id_override=desired_model_id if desired_model_id != base_model_id else None,
+            )
+            caption_text = _extract_caption_from_text(qwen_text, marker="FINAL")
+        else:
+            qwen_text, _, _ = _run_qwen_inference(
+                prompt_text,
+                pil_img,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=system_prompt,
+                model_id_override=desired_model_id if desired_model_id != base_model_id else None,
+            )
+            caption_text = _extract_caption_from_text(qwen_text, marker=None)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -27603,7 +27649,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         final_only,
     )
     return QwenCaptionResponse(
-        caption=qwen_text.strip(),
+        caption=caption_text,
         used_counts=counts,
         used_boxes=used_boxes,
         truncated=truncated,

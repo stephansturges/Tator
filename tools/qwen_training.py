@@ -490,6 +490,7 @@ def _train_official_lora(
         "report_to": [],
         "bf16": (device == "cuda" and torch.cuda.is_bf16_supported()),
         "fp16": (device == "cuda" and not torch.cuda.is_bf16_supported()),
+        "remove_unused_columns": False,
     }
     eval_key = _select_eval_strategy_key(TrainingArguments)
     if eval_key:

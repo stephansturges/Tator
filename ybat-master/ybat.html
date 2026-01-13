@@ -72,6 +72,7 @@
             <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
             <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
             <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM Model Selection</button>
+            <button class="tab-button" data-tab="detectors" id="tabDetectorsButton" type="button">Detector Selection</button>
             <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">Class Predictor Settings</button>
             <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
             <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">SAM Predictors</button>
@@ -2445,6 +2446,31 @@
                             <button type="button" class="training-button" id="sam3PromptActivate">Activate model</button>
                         </div>
                         <div class="training-message" id="sam3PromptMessage" role="status"></div>
+                    </section>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabDetectors" data-tab-panel="detectors">
+                <div class="training-wrapper single-wide">
+                    <section class="training-form-section">
+                        <h2>Detector Selection</h2>
+                        <p class="training-help">Choose which detector the labeling page should use by default. Models load on demand when you run region detection.</p>
+                        <div class="training-field">
+                            <label for="detectorDefaultSelect">Default detector</label>
+                            <div class="sam3-dataset-row">
+                                <select id="detectorDefaultSelect">
+                                    <option value="rfdetr">RF-DETR</option>
+                                    <option value="yolo">YOLOv8</option>
+                                </select>
+                                <button type="button" class="training-button" id="detectorDefaultSave">Set default</button>
+                                <button type="button" class="training-button training-button--ghost" id="detectorDefaultRefresh">Refresh</button>
+                            </div>
+                            <div class="training-help" id="detectorDefaultHelp">Controls the detector used when you hold R to run region inference in the labeling page.</div>
+                        </div>
+                        <div class="training-field">
+                            <label>Active detectors</label>
+                            <div class="training-help" id="detectorActiveStatus">Loading active detector status…</div>
+                        </div>
+                        <div class="training-message" id="detectorDefaultMessage" role="status"></div>
                     </section>
                 </div>
             </div>

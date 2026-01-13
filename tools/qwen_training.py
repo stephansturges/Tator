@@ -8,6 +8,7 @@ Supports two training modes:
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import random
 import time
@@ -31,6 +32,7 @@ try:
         BitsAndBytesConfig,
         Qwen3VLForConditionalGeneration,
         Trainer,
+        TrainerCallback,
         TrainingArguments,
     )
 except Exception as exc:  # noqa: BLE001
@@ -38,6 +40,7 @@ except Exception as exc:  # noqa: BLE001
     Qwen3VLForConditionalGeneration = None  # type: ignore[assignment]
     Trainer = None  # type: ignore[assignment]
     TrainingArguments = None  # type: ignore[assignment]
+    TrainerCallback = object  # type: ignore[assignment]
     TRANSFORMERS_IMPORT_ERROR = exc
 else:
     TRANSFORMERS_IMPORT_ERROR = None
@@ -174,6 +177,31 @@ def _seed_all(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def _filter_kwargs_for(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    if cls is None:
+        return kwargs
+    try:
+        params = inspect.signature(cls).parameters
+    except Exception:
+        return kwargs
+    allowed = set(params.keys())
+    return {key: value for key, value in kwargs.items() if key in allowed}
+
+
+def _select_eval_strategy_key(cls) -> Optional[str]:
+    if cls is None:
+        return None
+    try:
+        params = inspect.signature(cls).parameters
+    except Exception:
+        return None
+    if "evaluation_strategy" in params:
+        return "evaluation_strategy"
+    if "eval_strategy" in params:
+        return "eval_strategy"
+    return None
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
@@ -359,12 +387,15 @@ class QwenConversationCollator:
         return inputs
 
 
-class _QwenTrainingCallback:
+class _QwenTrainingCallback(TrainerCallback):
     def __init__(self, progress_cb: Optional[ProgressCallback], cancel_cb: Optional[CancelCallback], metrics_cb: Optional[TelemetryCallback]):
         self.progress_cb = progress_cb
         self.cancel_cb = cancel_cb
         self.metrics_cb = metrics_cb
         self.total_steps: Optional[int] = None
+
+    def on_init_end(self, args, state, control, **kwargs):  # noqa: ANN001
+        return control
 
     def on_train_begin(self, args, state, control, **kwargs):  # noqa: ANN001
         if self.total_steps is None:
@@ -381,11 +412,13 @@ class _QwenTrainingCallback:
         if self.progress_cb and self.total_steps:
             progress = min(0.99, max(0.01, state.global_step / max(1, self.total_steps)))
             self.progress_cb(progress, f"step {state.global_step}/{self.total_steps}")
+        return control
 
     def on_step_end(self, args, state, control, **kwargs):  # noqa: ANN001
         if self.cancel_cb and self.cancel_cb():
             control.should_training_stop = True
             control.should_save = True
+        return control
 
 
 def _train_official_lora(
@@ -444,21 +477,25 @@ def _train_official_lora(
 
     collator = QwenConversationCollator(processor, config.max_length)
 
-    training_args = TrainingArguments(
-        output_dir=str(result_path),
-        per_device_train_batch_size=config.batch_size,
-        per_device_eval_batch_size=max(1, config.batch_size),
-        gradient_accumulation_steps=config.accumulate_grad_batches,
-        learning_rate=config.lr,
-        num_train_epochs=config.max_epochs,
-        warmup_steps=config.warmup_steps,
-        logging_steps=config.log_every_n_steps,
-        save_strategy="epoch",
-        evaluation_strategy="epoch",
-        report_to=[],
-        bf16=(device == "cuda" and torch.cuda.is_bf16_supported()),
-        fp16=(device == "cuda" and not torch.cuda.is_bf16_supported()),
-    )
+    training_kwargs: Dict[str, Any] = {
+        "output_dir": str(result_path),
+        "per_device_train_batch_size": config.batch_size,
+        "per_device_eval_batch_size": max(1, config.batch_size),
+        "gradient_accumulation_steps": config.accumulate_grad_batches,
+        "learning_rate": config.lr,
+        "num_train_epochs": config.max_epochs,
+        "warmup_steps": config.warmup_steps,
+        "logging_steps": config.log_every_n_steps,
+        "save_strategy": "epoch",
+        "report_to": [],
+        "bf16": (device == "cuda" and torch.cuda.is_bf16_supported()),
+        "fp16": (device == "cuda" and not torch.cuda.is_bf16_supported()),
+    }
+    eval_key = _select_eval_strategy_key(TrainingArguments)
+    if eval_key:
+        training_kwargs[eval_key] = "epoch"
+    training_kwargs = _filter_kwargs_for(TrainingArguments, training_kwargs)
+    training_args = TrainingArguments(**training_kwargs)
 
     callback = _QwenTrainingCallback(progress_cb, cancel_cb, metrics_cb)
     trainer = Trainer(

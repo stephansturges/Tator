@@ -2847,13 +2847,16 @@ def _collapse_whitespace(text: str) -> str:
     return " ".join(text.split())
 
 
-def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> str:
+def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple[str, bool]:
     cleaned = text.strip()
+    marker_found = False
     if marker:
         match = re.search(rf"{marker}\\s*:?\\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
         if match:
             cleaned = match.group(1)
-    return _collapse_whitespace(cleaned) if cleaned else text.strip()
+            marker_found = True
+    cleaned = _collapse_whitespace(cleaned) if cleaned else text.strip()
+    return cleaned, marker_found
 
 
 def _run_qwen_inference(
@@ -27612,12 +27615,15 @@ def qwen_caption(payload: QwenCaptionRequest):
                 system_prompt_override=draft_system,
                 model_id_override=desired_model_id if desired_model_id != base_model_id else None,
             )
-            draft_caption = _extract_caption_from_text(draft_text, marker="DRAFT")
+            draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
             refine_prompt = (
                 f"{prompt_text}\nDraft caption: {draft_caption}\n"
                 "Step 2: Refine the caption using the label hints. Respond with: FINAL: <caption>"
             )
-            refine_system = f"{system_prompt} Return only a line starting with 'FINAL:'."
+            refine_system = (
+                f"{system_prompt} Return only a line starting with 'FINAL:'. "
+                "Do not include any other text."
+            )
             qwen_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
@@ -27625,7 +27631,25 @@ def qwen_caption(payload: QwenCaptionRequest):
                 system_prompt_override=refine_system,
                 model_id_override=desired_model_id if desired_model_id != base_model_id else None,
             )
-            caption_text = _extract_caption_from_text(qwen_text, marker="FINAL")
+            caption_text, marker_found = _extract_caption_from_text(qwen_text, marker="FINAL")
+            if final_only and not marker_found:
+                fallback_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+                fallback_prompt = (
+                    f"{prompt_text}\nDraft caption: {draft_caption}\n"
+                    "Return only the final caption. Do not include reasoning."
+                )
+                fallback_system = (
+                    "You are a concise captioning assistant. Use the image as truth. "
+                    "Return only the final caption."
+                )
+                fallback_text, _, _ = _run_qwen_inference(
+                    fallback_prompt,
+                    pil_img,
+                    max_new_tokens=max_new_tokens,
+                    system_prompt_override=fallback_system,
+                    model_id_override=fallback_model if fallback_model != base_model_id else None,
+                )
+                caption_text, _ = _extract_caption_from_text(fallback_text, marker=None)
         else:
             qwen_text, _, _ = _run_qwen_inference(
                 prompt_text,
@@ -27634,7 +27658,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 system_prompt_override=system_prompt,
                 model_id_override=desired_model_id if desired_model_id != base_model_id else None,
             )
-            caption_text = _extract_caption_from_text(qwen_text, marker=None)
+            caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

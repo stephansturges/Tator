@@ -3636,6 +3636,8 @@ class QwenCaptionRequest(BaseModel):
     max_boxes: Optional[int] = 25
     max_new_tokens: Optional[int] = 128
     model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
+    model_id: Optional[str] = None
+    final_answer_only: Optional[bool] = True
 
     @root_validator(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
@@ -3669,6 +3671,9 @@ class QwenCaptionRequest(BaseModel):
                 values[key] = max(1, int(val))
             except (TypeError, ValueError):
                 values[key] = None
+        model_id = (values.get("model_id") or "").strip()
+        values["model_id"] = model_id or None
+        values["final_answer_only"] = bool(values.get("final_answer_only", True))
         return values
 
 
@@ -27558,13 +27563,24 @@ def qwen_caption(payload: QwenCaptionRequest):
     )
     base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
     variant = payload.model_variant or "auto"
-    desired_model_id = _resolve_qwen_variant_model_id(base_model_id, variant)
+    model_id_override = payload.model_id or ""
+    if model_id_override:
+        desired_model_id = model_id_override
+    else:
+        desired_model_id = _resolve_qwen_variant_model_id(base_model_id, variant)
     if active_qwen_model_path and desired_model_id != base_model_id:
-        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_variant_not_available_for_adapter")
+        logger.info(
+            "[qwen-caption] using base model override (%s) while adapter %s is active",
+            desired_model_id,
+            active_qwen_model_id,
+        )
+    final_only = bool(payload.final_answer_only)
     system_prompt = (
         "You are a concise captioning assistant. Use the image as truth. The label hints are suggestions; "
         "if they conflict with the image, mention the uncertainty briefly."
     )
+    if final_only:
+        system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
     try:
         qwen_text, _, _ = _run_qwen_inference(
             prompt_text,
@@ -27578,11 +27594,13 @@ def qwen_caption(payload: QwenCaptionRequest):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_caption_failed:{exc}") from exc
     logger.info(
-        "[qwen-caption] hints=%s used=%s truncated=%s variant=%s",
+        "[qwen-caption] hints=%s used=%s truncated=%s variant=%s model=%s final_only=%s",
         len(payload.label_hints or []),
         used_boxes,
         truncated,
         variant,
+        desired_model_id,
+        final_only,
     )
     return QwenCaptionResponse(
         caption=qwen_text.strip(),

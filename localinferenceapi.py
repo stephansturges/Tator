@@ -267,6 +267,8 @@ qwen_device: Optional[str] = None
 qwen_last_error: Optional[str] = None
 qwen_lock = threading.RLock()
 qwen_config_lock = threading.RLock()
+qwen_caption_cache: Dict[str, Tuple[Any, Any]] = {}
+qwen_caption_order: deque[str] = deque()
 
 QWEN_METADATA_FILENAME = "metadata.json"
 
@@ -2663,6 +2665,7 @@ def _ensure_qwen_ready():
 def _unload_qwen_runtime() -> None:
     """Release Qwen model/processor to free device memory."""
     global qwen_model, qwen_processor, qwen_device, loaded_qwen_model_id
+    global qwen_caption_cache, qwen_caption_order
     try:
         del qwen_model
     except Exception:
@@ -2674,6 +2677,8 @@ def _unload_qwen_runtime() -> None:
     qwen_model = None
     qwen_processor = None
     loaded_qwen_model_id = None
+    qwen_caption_cache = {}
+    qwen_caption_order = deque()
     if torch.cuda.is_available():
         try:
             torch.cuda.empty_cache()
@@ -2683,7 +2688,8 @@ def _unload_qwen_runtime() -> None:
 
 
 def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
-    global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
+    global qwen_device, qwen_last_error
+    global qwen_caption_cache, qwen_caption_order
     if QWEN_IMPORT_ERROR is not None or Qwen3VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
         detail = f"qwen_dependencies_missing:{QWEN_IMPORT_ERROR}"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
@@ -2701,19 +2707,23 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
         except Exception:
             pass
     cache_key = f"caption:{model_id_override}"
-    if (
-        qwen_model is not None
-        and qwen_processor is not None
-        and loaded_qwen_model_id == cache_key
-    ):
-        return qwen_model, qwen_processor
+    cached = qwen_caption_cache.get(cache_key)
+    if cached:
+        try:
+            qwen_caption_order.remove(cache_key)
+        except ValueError:
+            pass
+        qwen_caption_order.append(cache_key)
+        return cached
     with qwen_lock:
-        if (
-            qwen_model is not None
-            and qwen_processor is not None
-            and loaded_qwen_model_id == cache_key
-        ):
-            return qwen_model, qwen_processor
+        cached = qwen_caption_cache.get(cache_key)
+        if cached:
+            try:
+                qwen_caption_order.remove(cache_key)
+            except ValueError:
+                pass
+            qwen_caption_order.append(cache_key)
+            return cached
         try:
             device = _resolve_qwen_device()
         except RuntimeError as exc:  # noqa: BLE001
@@ -2747,11 +2757,23 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
         except Exception as exc:  # noqa: BLE001
             qwen_last_error = str(exc)
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
-        qwen_model = model
-        qwen_processor = processor
         qwen_device = device
         qwen_last_error = None
-        loaded_qwen_model_id = cache_key
+        qwen_caption_cache[cache_key] = (model, processor)
+        qwen_caption_order.append(cache_key)
+        while len(qwen_caption_order) > 2:
+            evict_key = qwen_caption_order.popleft()
+            evict_model = qwen_caption_cache.pop(evict_key, None)
+            if evict_model:
+                try:
+                    del evict_model
+                except Exception:
+                    pass
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
         return model, processor
 
 
@@ -27618,38 +27640,21 @@ def qwen_caption(payload: QwenCaptionRequest):
             draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
             refine_prompt = (
                 f"{prompt_text}\nDraft caption: {draft_caption}\n"
-                "Step 2: Refine the caption using the label hints. Respond with: FINAL: <caption>"
+                "Step 2: Refine the caption using the label hints. Return only the final caption."
             )
             refine_system = (
-                f"{system_prompt} Return only a line starting with 'FINAL:'. "
-                "Do not include any other text."
+                "You are a concise captioning assistant. Use the image as truth. "
+                "Return only the final caption."
             )
+            refine_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
             qwen_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
                 max_new_tokens=max_new_tokens,
                 system_prompt_override=refine_system,
-                model_id_override=desired_model_id if desired_model_id != base_model_id else None,
+                model_id_override=refine_model if refine_model != base_model_id else None,
             )
-            caption_text, marker_found = _extract_caption_from_text(qwen_text, marker="FINAL")
-            if final_only and not marker_found:
-                fallback_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
-                fallback_prompt = (
-                    f"{prompt_text}\nDraft caption: {draft_caption}\n"
-                    "Return only the final caption. Do not include reasoning."
-                )
-                fallback_system = (
-                    "You are a concise captioning assistant. Use the image as truth. "
-                    "Return only the final caption."
-                )
-                fallback_text, _, _ = _run_qwen_inference(
-                    fallback_prompt,
-                    pil_img,
-                    max_new_tokens=max_new_tokens,
-                    system_prompt_override=fallback_system,
-                    model_id_override=fallback_model if fallback_model != base_model_id else None,
-                )
-                caption_text, _ = _extract_caption_from_text(fallback_text, marker=None)
+            caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
         else:
             qwen_text, _, _ = _run_qwen_inference(
                 prompt_text,

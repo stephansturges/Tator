@@ -2652,8 +2652,34 @@ def _ensure_qwen_ready():
                 max_pixels=QWEN_MAX_PIXELS,
             )
         except Exception as exc:  # noqa: BLE001
-            qwen_last_error = str(exc)
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
+            fallback_id = _strip_qwen_model_suffix(str(base_model_id))
+            if fallback_id:
+                try:
+                    logger.warning("Qwen model %s not found; falling back to %s", base_model_id, fallback_id)
+                    model = Qwen3VLForConditionalGeneration.from_pretrained(
+                        str(fallback_id),
+                        **load_kwargs,
+                    )
+                    if adapter_path:
+                        model = PeftModel.from_pretrained(model, str(adapter_path))
+                    if not load_kwargs.get("device_map"):
+                        model.to(device)
+                    model.eval()
+                    processor_source = str(adapter_path) if adapter_path else str(fallback_id)
+                    processor = AutoProcessor.from_pretrained(
+                        processor_source,
+                        min_pixels=QWEN_MIN_PIXELS,
+                        max_pixels=QWEN_MAX_PIXELS,
+                    )
+                except Exception as fallback_exc:  # noqa: BLE001
+                    qwen_last_error = str(fallback_exc)
+                    raise HTTPException(
+                        status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"qwen_load_failed:{fallback_exc}",
+                    ) from fallback_exc
+            else:
+                qwen_last_error = str(exc)
+                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
         qwen_model = model
         qwen_processor = processor
         qwen_device = device
@@ -2755,8 +2781,33 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
                 max_pixels=QWEN_MAX_PIXELS,
             )
         except Exception as exc:  # noqa: BLE001
-            qwen_last_error = str(exc)
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
+            fallback_id = _strip_qwen_model_suffix(str(model_id_override))
+            if fallback_id:
+                try:
+                    logger.warning("Qwen model %s not found; falling back to %s", model_id_override, fallback_id)
+                    model = Qwen3VLForConditionalGeneration.from_pretrained(
+                        str(fallback_id),
+                        **load_kwargs,
+                    )
+                    if not load_kwargs.get("device_map"):
+                        model.to(device)
+                    model.eval()
+                    processor = AutoProcessor.from_pretrained(
+                        str(fallback_id),
+                        min_pixels=QWEN_MIN_PIXELS,
+                        max_pixels=QWEN_MAX_PIXELS,
+                    )
+                    qwen_caption_cache[cache_key] = (model, processor)
+                    qwen_caption_order.append(cache_key)
+                except Exception as fallback_exc:  # noqa: BLE001
+                    qwen_last_error = str(fallback_exc)
+                    raise HTTPException(
+                        status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"qwen_load_failed:{fallback_exc}",
+                    ) from fallback_exc
+            else:
+                qwen_last_error = str(exc)
+                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
         qwen_device = device
         qwen_last_error = None
         qwen_caption_cache[cache_key] = (model, processor)
@@ -2793,6 +2844,12 @@ def _resolve_qwen_variant_model_id(base_model_id: str, variant: Optional[str]) -
     return base_model_id
 
 
+def _strip_qwen_model_suffix(model_id: str) -> Optional[str]:
+    if model_id.endswith("-2507"):
+        return model_id[: -len("-2507")]
+    return None
+
+
 def _build_qwen_caption_prompt(
     user_prompt: str,
     label_hints: Sequence[QwenCaptionHint],
@@ -2826,9 +2883,15 @@ def _build_qwen_caption_prompt(
                 "area": (x2 - x1) * (y2 - y1) if x1 is not None else 0.0,
             }
         )
-    if max_boxes == 0:
-        selected = []
-        truncated = bool(hints_payload)
+    if max_boxes <= 0:
+        selected = sorted(
+            hints_payload,
+            key=lambda entry: (
+                -(entry["confidence"] if entry["confidence"] is not None else 0.0),
+                -entry["area"],
+            ),
+        )
+        truncated = False
     else:
         sorted_hints = sorted(
             hints_payload,
@@ -2842,10 +2905,17 @@ def _build_qwen_caption_prompt(
     lines: List[str] = []
     if user_prompt:
         lines.append(f"User hint: {user_prompt}")
+        if "style inspirations" in user_prompt.lower():
+            lines.append(
+                "Style guidance: use inspirations for tone/angle only. Rephrase, do not copy wording."
+            )
     lines.append(f"Image size: {safe_width}x{safe_height} pixels.")
     if include_counts and counts:
         counts_text = ", ".join(f"{label}: {count}" for label, count in counts.items())
         lines.append(f"Object counts (all hints): {counts_text}.")
+        lines.append("Use the counts to mention key objects explicitly (e.g., \"three cars\").")
+    elif counts:
+        lines.append("Use the label hints to mention the main objects you see.")
     if selected:
         if include_coords:
             lines.append("Labeled boxes (xyxy pixel coords on the original image):")
@@ -2854,6 +2924,7 @@ def _build_qwen_caption_prompt(
                 if coords:
                     coord_text = ", ".join(f"{int(round(val))}" for val in coords)
                     lines.append(f"- {entry['label']}: [{coord_text}]")
+            lines.append("Use relative positions from the boxes (e.g., top-left, center) when describing layout.")
         else:
             labels_only = ", ".join(entry["label"] for entry in selected)
             lines.append(f"Labeled objects (one per box): {labels_only}.")
@@ -2861,7 +2932,16 @@ def _build_qwen_caption_prompt(
         lines.append("Labels provided but box details omitted.")
     if truncated:
         lines.append("Note: Only a subset of boxes is shown; counts reflect all hints.")
-    lines.append("Write a concise caption (1-2 sentences). Use the image as truth; if hints conflict, mention it briefly.")
+    lines.append(
+        "Write a concise caption (1-2 sentences). Use the image as truth and incorporate the label hints; "
+        "if hints conflict with the image, mention the uncertainty briefly."
+    )
+    lines.append("Describe what the main objects are doing or how they are arranged when it is visible.")
+    lines.append(
+        "Be maximally descriptive: longer captions are acceptable when there is a lot to see. "
+        "The labeled boxes are especially important and should be mentioned explicitly unless counts are overwhelming "
+        "(e.g., summarize many cars as a parking lot)."
+    )
     return "\n".join(lines), counts, len(selected), truncated
 
 
@@ -2877,8 +2957,17 @@ def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple
         if match:
             cleaned = match.group(1)
             marker_found = True
+    if not marker_found:
+        match = re.search(r"FINAL\\s*:?\\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
+        if match:
+            cleaned = match.group(1)
+            marker_found = True
     cleaned = _collapse_whitespace(cleaned) if cleaned else text.strip()
     return cleaned, marker_found
+
+
+def _caption_needs_english_rewrite(text: str) -> bool:
+    return bool(re.search(r"[^\x00-\x7F]", text))
 
 
 def _run_qwen_inference(
@@ -3402,6 +3491,7 @@ class PredictorSettings(BaseModel):
     image_ram_mb: float
     gpu_total_mb: Optional[float] = None
     gpu_free_mb: Optional[float] = None
+    gpu_compute_capability: Optional[str] = None
 
 
 class PredictorSettingsUpdate(BaseModel):
@@ -27409,11 +27499,14 @@ def _predictor_settings_payload() -> PredictorSettings:
     image_memory = predictor_manager.total_image_memory_bytes()
     gpu_total_mb = None
     gpu_free_mb = None
+    gpu_cc = None
     if torch.cuda.is_available():
         try:
             free_bytes, total_bytes = torch.cuda.mem_get_info()
             gpu_total_mb = _bytes_to_mb(int(total_bytes))
             gpu_free_mb = _bytes_to_mb(int(free_bytes))
+            major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+            gpu_cc = f"{major}.{minor}"
         except Exception:
             gpu_total_mb = None
             gpu_free_mb = None
@@ -27435,6 +27528,7 @@ def _predictor_settings_payload() -> PredictorSettings:
         image_ram_mb=image_mb,
         gpu_total_mb=gpu_total_mb,
         gpu_free_mb=gpu_free_mb,
+        gpu_compute_capability=gpu_cc,
     )
 
 
@@ -27621,8 +27715,14 @@ def qwen_caption(payload: QwenCaptionRequest):
         "You are a concise captioning assistant. Use the image as truth. The label hints are suggestions; "
         "if they conflict with the image, mention the uncertainty briefly."
     )
+    system_prompt = f"{system_prompt} Respond in English only."
     if final_only:
         system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
+    if is_thinking:
+        system_prompt = f"{system_prompt} Think step-by-step internally before answering."
+    use_caption_cache = True
+    if active_qwen_model_path and not model_id_override and desired_model_id == base_model_id and variant == "auto":
+        use_caption_cache = False
     try:
         if two_stage and is_thinking:
             draft_prompt = (
@@ -27635,7 +27735,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 pil_img,
                 max_new_tokens=max_new_tokens,
                 system_prompt_override=draft_system,
-                model_id_override=desired_model_id if desired_model_id != base_model_id else None,
+                model_id_override=desired_model_id if use_caption_cache else None,
             )
             draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
             refine_prompt = (
@@ -27644,7 +27744,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             refine_system = (
                 "You are a concise captioning assistant. Use the image as truth. "
-                "Return only the final caption."
+                "Return only the final caption. Respond in English only."
             )
             refine_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
             qwen_text, _, _ = _run_qwen_inference(
@@ -27652,7 +27752,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 pil_img,
                 max_new_tokens=max_new_tokens,
                 system_prompt_override=refine_system,
-                model_id_override=refine_model if refine_model != base_model_id else None,
+                model_id_override=refine_model if use_caption_cache else None,
             )
             caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
         else:
@@ -27661,9 +27761,24 @@ def qwen_caption(payload: QwenCaptionRequest):
                 pil_img,
                 max_new_tokens=max_new_tokens,
                 system_prompt_override=system_prompt,
-                model_id_override=desired_model_id if desired_model_id != base_model_id else None,
+                model_id_override=desired_model_id if use_caption_cache else None,
             )
             caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
+        if caption_text and _caption_needs_english_rewrite(caption_text):
+            rewrite_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+            rewrite_prompt = (
+                "Rewrite the caption in English only, preserving meaning and brevity.\n"
+                f"Caption: {caption_text}"
+            )
+            rewrite_system = "Return only the rewritten caption in English."
+            rewrite_text, _, _ = _run_qwen_inference(
+                rewrite_prompt,
+                pil_img,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=rewrite_system,
+                model_id_override=rewrite_model if use_caption_cache else None,
+            )
+            caption_text, _ = _extract_caption_from_text(rewrite_text, marker=None)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

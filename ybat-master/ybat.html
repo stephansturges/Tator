@@ -227,8 +227,11 @@
                                     </div>
                                     <label for="qwenCaptionStyleList">Style prompts (one per line)</label>
                                     <textarea id="qwenCaptionStyleList" rows="2" placeholder="An aerial view\nA drone image\nA bird’s-eye view"></textarea>
+                                    <label for="qwenCaptionOpeningList">Opening phrases (JSON list or one per line)</label>
+                                    <textarea id="qwenCaptionOpeningList" rows="2" placeholder="[&quot;The scene shows&quot;, &quot;In this scene&quot;, &quot;From a high angle&quot;]"></textarea>
                                     <div class="qwen-caption-options">
                                         <label><input type="checkbox" id="qwenCaptionStyleInspiration" checked /> Use as inspiration (don’t force exact wording)</label>
+                                        <label><input type="checkbox" id="qwenCaptionVaryOpening" checked /> Use opening inspirations</label>
                                     </div>
                                     <label for="qwenCaptionHint">Caption hint (optional)</label>
                                     <textarea id="qwenCaptionHint" rows="2" placeholder="e.g., drone footage at dusk"></textarea>
@@ -236,11 +239,17 @@
                                         <div>
                                             <label for="qwenCaptionModel">Caption model</label>
                                             <select id="qwenCaptionModel">
-                                                <option value="active" selected>Use active model</option>
+                                                <option value="active">Use active model</option>
                                                 <option value="2B">Qwen3-VL 2B</option>
                                                 <option value="4B">Qwen3-VL 4B</option>
                                                 <option value="8B">Qwen3-VL 8B</option>
                                                 <option value="32B">Qwen3-VL 32B</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Instruct">Qwen3-VL 30B-A3B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Thinking" selected>Qwen3-VL 30B-A3B Thinking</option>
+                                                <option value="Qwen/Qwen3-VL-8B-Instruct-FP8">Qwen3-VL 8B Instruct (FP8)</option>
+                                                <option value="Qwen/Qwen3-VL-8B-Thinking-FP8">Qwen3-VL 8B Thinking (FP8)</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8">Qwen3-VL 30B-A3B Instruct (FP8)</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Thinking-FP8">Qwen3-VL 30B-A3B Thinking (FP8)</option>
                                             </select>
                                         </div>
                                         <div>
@@ -256,8 +265,8 @@
                                             <input type="number" id="qwenCaptionMaxTokens" min="32" max="512" value="128" />
                                         </div>
                                         <div>
-                                            <label for="qwenCaptionMaxBoxes">Max boxes</label>
-                                            <input type="number" id="qwenCaptionMaxBoxes" min="0" max="200" value="25" />
+                                            <label for="qwenCaptionMaxBoxes">Max boxes (0 = all)<span class="help-icon" title="How many labeled boxes to include in the prompt. Use 0 to include all hints (can be long).">?</span></label>
+                                            <input type="number" id="qwenCaptionMaxBoxes" min="0" max="200" value="0" />
                                         </div>
                                     </div>
                                     <div class="qwen-caption-options">

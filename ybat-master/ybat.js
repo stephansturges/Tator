@@ -337,6 +337,61 @@
         renderDetectorStatus();
     }
 
+    async function fetchDetectorRuns(mode) {
+        const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        const resp = await fetch(`${API_ROOT}/${endpoint}/runs`);
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+        return Array.isArray(data) ? data : [];
+    }
+
+    async function maybeAutoSelectDetectorRun() {
+        const mode = detectorState.mode;
+        const active = mode === "yolo" ? detectorState.yoloActive : detectorState.rfdetrActive;
+        const hasActive = active && (active.best_path || active.run_id || active.run_name);
+        if (hasActive) return;
+        if (detectorState.prompted[mode]) return;
+        detectorState.prompted[mode] = true;
+        if (detectorElements.message) {
+            detectorElements.message.textContent = `${mode.toUpperCase()} default has no active run.`;
+        }
+        let runs = [];
+        try {
+            runs = await fetchDetectorRuns(mode);
+        } catch (err) {
+            console.warn("Detector runs fetch failed", err);
+            return;
+        }
+        if (!runs.length) {
+            if (detectorElements.message) {
+                detectorElements.message.textContent = `${mode.toUpperCase()} default has no saved runs. Train one first.`;
+            }
+            return;
+        }
+        const candidate = runs[0];
+        const name = candidate.run_name || candidate.run_id || "latest run";
+        const ok = confirm(`${mode.toUpperCase()} default has no active run. Activate "${name}" now?`);
+        if (!ok) return;
+        const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        try {
+            const resp = await fetch(`${API_ROOT}/${endpoint}/active`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ run_id: candidate.run_id }),
+            });
+            if (!resp.ok) throw new Error(await resp.text());
+            await refreshDetectorStatus();
+            if (detectorElements.message) {
+                detectorElements.message.textContent = `Activated ${mode.toUpperCase()} run "${name}".`;
+            }
+        } catch (err) {
+            console.warn("Detector activation failed", err);
+            if (detectorElements.message) {
+                detectorElements.message.textContent = `Failed to activate ${mode.toUpperCase()} run: ${err.message || err}`;
+            }
+        }
+    }
+
     function applyDetectorDefault(mode) {
         const normalized = String(mode || "").toLowerCase();
         if (normalized !== "yolo" && normalized !== "rfdetr") return;
@@ -367,6 +422,8 @@
             if (detectorElements.message) {
                 detectorElements.message.textContent = `Default detector set to ${mode.toUpperCase()}.`;
             }
+            await refreshDetectorStatus();
+            await maybeAutoSelectDetectorRun();
         } catch (err) {
             console.warn("Default detector save failed", err);
             if (detectorElements.message) {
@@ -397,6 +454,7 @@
         const mode = await fetchDetectorDefault();
         applyDetectorDefault(mode);
         await refreshDetectorStatus();
+        await maybeAutoSelectDetectorRun();
     }
 
     function initHelpTooltips() {
@@ -1229,6 +1287,10 @@
         mode: "rfdetr",
         yoloActive: null,
         rfdetrActive: null,
+        prompted: {
+            yolo: false,
+            rfdetr: false,
+        },
     };
 
 
@@ -10356,7 +10418,9 @@ function initQwenTrainingTab() {
             }
         }
         if (tabName === TAB_DETECTORS && previous !== TAB_DETECTORS) {
-            refreshDetectorStatus().catch((err) => console.warn("Detector status refresh failed", err));
+            refreshDetectorStatus()
+                .then(() => maybeAutoSelectDetectorRun())
+                .catch((err) => console.warn("Detector status refresh failed", err));
         }
         if (tabName === TAB_QWEN_TRAIN && previous !== TAB_QWEN_TRAIN) {
             initQwenTrainingTab();

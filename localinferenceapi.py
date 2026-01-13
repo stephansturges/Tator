@@ -26565,8 +26565,8 @@ def create_qwen_training_job(payload: QwenTrainRequest):
     logger.info(
         "[qwen-train %s] create job accelerator=%s devices=%s dataset=%s",
         job_id[:8],
-        payload.accelerator or config_dict.get("accelerator"),
-        payload.devices or config_dict.get("devices"),
+        getattr(payload, "accelerator", None) or config_dict.get("accelerator"),
+        getattr(payload, "devices", None) or config_dict.get("devices"),
         payload.dataset_root,
     )
     with QWEN_TRAINING_JOBS_LOCK:

@@ -1335,6 +1335,7 @@
         captionIncludeCounts: null,
         captionIncludeCoords: null,
         captionFinalOnly: null,
+        captionTwoStage: null,
         captionSaveText: null,
         captionRunButton: null,
         captionOutput: null,
@@ -12542,6 +12543,7 @@ function initQwenTrainingTab() {
         qwenElements.captionIncludeCounts = document.getElementById("qwenCaptionIncludeCounts");
         qwenElements.captionIncludeCoords = document.getElementById("qwenCaptionIncludeCoords");
         qwenElements.captionFinalOnly = document.getElementById("qwenCaptionFinalOnly");
+        qwenElements.captionTwoStage = document.getElementById("qwenCaptionTwoStage");
         qwenElements.captionSaveText = document.getElementById("qwenCaptionSaveText");
         qwenElements.captionRunButton = document.getElementById("qwenCaptionRunButton");
         qwenElements.captionOutput = document.getElementById("qwenCaptionOutput");
@@ -14680,6 +14682,7 @@ function initQwenTrainingTab() {
             const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
             const variant = qwenElements.captionVariant?.value || "auto";
             const finalOnly = !!qwenElements.captionFinalOnly?.checked;
+            const twoStage = !!qwenElements.captionTwoStage?.checked;
             const modelPick = qwenElements.captionModel?.value || "active";
             const basePreset = getCaptionPresetText();
             const customHint = (qwenElements.captionHint?.value || "").trim();
@@ -14710,6 +14713,7 @@ function initQwenTrainingTab() {
                 model_variant: variant,
                 model_id: modelOverride,
                 final_answer_only: finalOnly,
+                two_stage_refine: twoStage,
             });
             if (qwenElements.captionOutput) {
                 qwenElements.captionOutput.value = result?.caption || "";

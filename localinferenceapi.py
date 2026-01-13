@@ -327,7 +327,7 @@ def _prepare_for_training() -> None:
 
 
 def _finalize_training_environment() -> None:
-    _resume_clip_backbone()
+    _resume_classifier_backbone()
     if torch.cuda.is_available():
         try:
             torch.cuda.empty_cache()
@@ -467,7 +467,7 @@ try:
 except Exception:
     pass
 
-# 3) Attempt to load the CLIP model
+# 3) Attempt to load the CLIP model (only when the active classifier uses CLIP)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 if torch.cuda.is_available():
     try:
@@ -506,14 +506,21 @@ if _skip_clip_load:
     clip_initialized = False
     clip_model_name = None
 else:
-    try:
-        print("Loading CLIP model...")
-        clip_model, clip_preprocess = clip.load(DEFAULT_CLIP_MODEL, device=device)
-        clip_model_name = DEFAULT_CLIP_MODEL
-    except Exception as e:
-        print(f"Failed to load CLIP model: {e}")
+    encoder_type_norm = str(active_encoder_type or "clip").strip().lower()
+    if encoder_type_norm != "clip" or not active_classifier_path:
+        print(f"Skipping CLIP model load (active encoder={active_encoder_type}).")
         clip_initialized = False
         clip_model_name = None
+    else:
+        try:
+            clip_name = active_encoder_model or DEFAULT_CLIP_MODEL
+            print(f"Loading CLIP model ({clip_name})...")
+            clip_model, clip_preprocess = clip.load(clip_name, device=device)
+            clip_model_name = clip_name
+        except Exception as e:
+            print(f"Failed to load CLIP model: {e}")
+            clip_initialized = False
+            clip_model_name = None
 
 clip_lock = threading.Lock()
 if clip_model is None or clf is None:
@@ -578,6 +585,40 @@ def _resume_clip_backbone() -> None:
             logger.warning("Failed to reload CLIP backbone %s: %s", clip_name, exc)
         finally:
             _clip_reload_needed = False
+
+
+def _resume_classifier_backbone() -> None:
+    """Reload the active encoder backbone after training, based on user-selected classifier."""
+    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized
+    global clip_model_name, _clip_reload_needed
+    encoder_type = str(active_encoder_type or "clip").strip().lower()
+    if encoder_type == "dinov3":
+        model_name = str(active_encoder_model or "").strip()
+        if not model_name:
+            dinov3_initialized = False
+            return
+        with dinov3_lock:
+            if dinov3_model is not None and dinov3_processor is not None and dinov3_model_name == model_name:
+                dinov3_initialized = True
+                return
+            model, processor = _load_dinov3_backbone(model_name, device)
+            if model is None or processor is None:
+                dinov3_model = None
+                dinov3_processor = None
+                dinov3_model_name = None
+                dinov3_initialized = False
+                return
+            dinov3_model = model
+            dinov3_processor = processor
+            dinov3_model_name = model_name
+            dinov3_initialized = True
+        return
+    if encoder_type != "clip":
+        _clip_reload_needed = False
+        return
+    if active_encoder_model:
+        clip_model_name = active_encoder_model
+    _resume_clip_backbone()
 
 
 def _ensure_clip_backbone_for_mining() -> Tuple[Optional[Any], Optional[Any]]:

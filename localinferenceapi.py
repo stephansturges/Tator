@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable
-from collections import deque
+from collections import deque, Counter
 import torch, clip, joblib, tiktoken
 from io import BytesIO
 from PIL import Image
@@ -197,6 +197,69 @@ QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", False)
 QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
 QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
 QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
+
+# Rough VRAM estimates (GB) for Qwen3 training defaults (batch=1, default pixel budget).
+# These are approximate and should be treated as guidance, not a hard guarantee.
+QWEN_VRAM_ESTIMATE_GB = {
+    "official_lora": {
+        "2B": 12.0,
+        "4B": 20.0,
+        "8B": 96.0,
+        "32B": 192.0,
+    },
+    "trl_qlora": {
+        "2B": 8.0,
+        "4B": 10.0,
+        "8B": 16.0,
+        "32B": 48.0,
+    },
+}
+QWEN_VRAM_THINKING_SCALE = 1.08
+QWEN_VRAM_PIXEL_BASE = 451584
+QWEN_VRAM_PIXEL_SCALE_MIN = 0.6
+QWEN_VRAM_PIXEL_SCALE_MAX = 1.6
+
+
+def _infer_qwen_model_size(model_id: str) -> Optional[str]:
+    for size in ("2B", "4B", "8B", "32B"):
+        if size in model_id:
+            return size
+    return None
+
+
+def _estimate_qwen_vram_mb(
+    model_id: str,
+    training_mode: str,
+    *,
+    max_pixels: Optional[int] = None,
+    batch_size: Optional[int] = None,
+) -> Tuple[Optional[float], Optional[str]]:
+    size = _infer_qwen_model_size(model_id)
+    if not size:
+        return None, None
+    mode = training_mode if training_mode in QWEN_VRAM_ESTIMATE_GB else "official_lora"
+    base_gb = QWEN_VRAM_ESTIMATE_GB.get(mode, {}).get(size)
+    if base_gb is None:
+        return None, None
+    scale = 1.0
+    if "Thinking" in model_id:
+        scale *= QWEN_VRAM_THINKING_SCALE
+    if max_pixels:
+        try:
+            pixel_scale = max_pixels / max(1, QWEN_VRAM_PIXEL_BASE)
+        except Exception:
+            pixel_scale = 1.0
+        pixel_scale = min(QWEN_VRAM_PIXEL_SCALE_MAX, max(QWEN_VRAM_PIXEL_SCALE_MIN, pixel_scale))
+        scale *= pixel_scale
+    if batch_size and batch_size > 1:
+        scale *= float(batch_size)
+    estimate_mb = base_gb * 1024.0 * scale
+    note = None
+    if mode == "official_lora" and size in {"8B", "32B"}:
+        note = "Official LoRA is very VRAM-hungry; 8B/32B often exceed 48GB even at smaller pixel budgets."
+    if mode == "trl_qlora" and size == "32B" and "Thinking" in model_id:
+        note = "32B Thinking QLoRA is experimental; some setups hit device-map gradient issues."
+    return estimate_mb, note
 
 qwen_model = None
 qwen_processor = None
@@ -2619,11 +2682,165 @@ def _unload_qwen_runtime() -> None:
     qwen_device = None
 
 
-def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, int]:
+def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
+    global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
+    cache_key = f"caption:{model_id_override}"
+    if (
+        qwen_model is not None
+        and qwen_processor is not None
+        and loaded_qwen_model_id == cache_key
+    ):
+        return qwen_model, qwen_processor
+    with qwen_lock:
+        if (
+            qwen_model is not None
+            and qwen_processor is not None
+            and loaded_qwen_model_id == cache_key
+        ):
+            return qwen_model, qwen_processor
+        try:
+            device = _resolve_qwen_device()
+        except RuntimeError as exc:  # noqa: BLE001
+            qwen_last_error = str(exc)
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}") from exc
+        use_auto_map = QWEN_DEVICE_PREF == "auto" and device.startswith("cuda") and torch.cuda.is_available()
+        if use_auto_map:
+            load_kwargs = {
+                "torch_dtype": "auto",
+                "device_map": "auto",
+            }
+        else:
+            dtype = torch.float16 if device.startswith(("cuda", "mps")) else torch.float32
+            load_kwargs = {
+                "torch_dtype": dtype,
+                "low_cpu_mem_usage": True,
+            }
+        try:
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                str(model_id_override),
+                **load_kwargs,
+            )
+            if not load_kwargs.get("device_map"):
+                model.to(device)
+            model.eval()
+            processor = AutoProcessor.from_pretrained(
+                str(model_id_override),
+                min_pixels=QWEN_MIN_PIXELS,
+                max_pixels=QWEN_MAX_PIXELS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            qwen_last_error = str(exc)
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
+        qwen_model = model
+        qwen_processor = processor
+        qwen_device = device
+        qwen_last_error = None
+        loaded_qwen_model_id = cache_key
+        return model, processor
+
+
+def _resolve_qwen_variant_model_id(base_model_id: str, variant: Optional[str]) -> str:
+    if not variant or variant == "auto":
+        return base_model_id
+    if "Thinking" in base_model_id:
+        if variant == "Thinking":
+            return base_model_id
+        if variant == "Instruct":
+            return base_model_id.replace("Thinking", "Instruct")
+    if "Instruct" in base_model_id:
+        if variant == "Instruct":
+            return base_model_id
+        if variant == "Thinking":
+            return base_model_id.replace("Instruct", "Thinking")
+    return base_model_id
+
+
+def _build_qwen_caption_prompt(
+    user_prompt: str,
+    label_hints: Sequence[QwenCaptionHint],
+    image_width: int,
+    image_height: int,
+    include_counts: bool,
+    include_coords: bool,
+    max_boxes: int,
+) -> Tuple[str, Dict[str, int], int, bool]:
+    safe_width = max(1, int(image_width))
+    safe_height = max(1, int(image_height))
+    counts: Dict[str, int] = dict(Counter([hint.label for hint in label_hints if hint.label]))
+    hints_payload = []
+    for hint in label_hints:
+        bbox = hint.bbox or []
+        if len(bbox) == 4:
+            x1, y1, x2, y2 = bbox
+            x1 = max(0.0, min(float(x1), safe_width))
+            y1 = max(0.0, min(float(y1), safe_height))
+            x2 = max(0.0, min(float(x2), safe_width))
+            y2 = max(0.0, min(float(y2), safe_height))
+            if x2 <= x1 or y2 <= y1:
+                continue
+        else:
+            x1 = y1 = x2 = y2 = None
+        hints_payload.append(
+            {
+                "label": hint.label,
+                "bbox": [x1, y1, x2, y2] if x1 is not None else None,
+                "confidence": hint.confidence if hint.confidence is not None else None,
+                "area": (x2 - x1) * (y2 - y1) if x1 is not None else 0.0,
+            }
+        )
+    if max_boxes == 0:
+        selected = []
+        truncated = bool(hints_payload)
+    else:
+        sorted_hints = sorted(
+            hints_payload,
+            key=lambda entry: (
+                -(entry["confidence"] if entry["confidence"] is not None else -1.0),
+                -entry["area"],
+            ),
+        )
+        selected = sorted_hints[:max_boxes]
+        truncated = len(sorted_hints) > len(selected)
+    lines: List[str] = []
+    if user_prompt:
+        lines.append(f"User hint: {user_prompt}")
+    lines.append(f"Image size: {safe_width}x{safe_height} pixels.")
+    if include_counts and counts:
+        counts_text = ", ".join(f"{label}: {count}" for label, count in counts.items())
+        lines.append(f"Object counts (all hints): {counts_text}.")
+    if selected:
+        if include_coords:
+            lines.append("Labeled boxes (xyxy pixel coords on the original image):")
+            for entry in selected:
+                coords = entry["bbox"]
+                if coords:
+                    coord_text = ", ".join(f"{int(round(val))}" for val in coords)
+                    lines.append(f"- {entry['label']}: [{coord_text}]")
+        else:
+            labels_only = ", ".join(entry["label"] for entry in selected)
+            lines.append(f"Labeled objects (one per box): {labels_only}.")
+    elif hints_payload and not include_counts:
+        lines.append("Labels provided but box details omitted.")
+    if truncated:
+        lines.append("Note: Only a subset of boxes is shown; counts reflect all hints.")
+    lines.append("Write a concise caption (1-2 sentences). Use the image as truth; if hints conflict, mention it briefly.")
+    return "\n".join(lines), counts, len(selected), truncated
+
+
+def _run_qwen_inference(
+    prompt: str,
+    pil_img: Image.Image,
+    max_new_tokens: Optional[int] = None,
+    system_prompt_override: Optional[str] = None,
+    model_id_override: Optional[str] = None,
+) -> Tuple[str, int, int]:
     """Execute a Qwen 3 VL inference following the reference recipe."""
-    model, processor = _ensure_qwen_ready()
+    if model_id_override:
+        model, processor = _ensure_qwen_ready_for_caption(model_id_override)
+    else:
+        model, processor = _ensure_qwen_ready()
     messages: List[Dict[str, Any]] = []
-    sys_prompt = (active_qwen_metadata or {}).get("system_prompt")
+    sys_prompt = system_prompt_override if system_prompt_override is not None else (active_qwen_metadata or {}).get("system_prompt")
     if sys_prompt:
         messages.append(
             {
@@ -2652,7 +2869,7 @@ def _run_qwen_inference(prompt: str, pil_img: Image.Image) -> Tuple[str, int, in
     device = qwen_device or _resolve_qwen_device()
     inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
-        "max_new_tokens": QWEN_MAX_NEW_TOKENS,
+        "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
     }
     if QWEN_DO_SAMPLE:
         gen_kwargs.update(
@@ -3350,6 +3567,86 @@ class QwenInferenceResponse(BaseModel):
     prompt_type: Literal["bbox", "point", "bbox_sam"]
     warnings: List[str] = Field(default_factory=list)
     image_token: Optional[str] = None
+
+
+class QwenCaptionHint(BaseModel):
+    label: str
+    bbox: Optional[List[float]] = None
+    confidence: Optional[float] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_hint(cls, values):  # noqa: N805
+        label = (values.get("label") or "").strip()
+        if not label:
+            raise ValueError("label_required")
+        values["label"] = label
+        bbox = values.get("bbox")
+        if bbox is not None:
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                raise ValueError("invalid_bbox")
+            cleaned = []
+            for val in bbox:
+                try:
+                    cleaned.append(float(val))
+                except (TypeError, ValueError):
+                    cleaned.append(0.0)
+            values["bbox"] = cleaned
+        return values
+
+
+class QwenCaptionRequest(BaseModel):
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
+    user_prompt: Optional[str] = None
+    label_hints: Optional[List[QwenCaptionHint]] = None
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+    include_counts: Optional[bool] = True
+    include_coords: Optional[bool] = True
+    max_boxes: Optional[int] = 25
+    max_new_tokens: Optional[int] = 128
+    model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
+
+    @root_validator(skip_on_failure=True)
+    def _validate_caption_payload(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_payload_missing")
+        user_prompt = (values.get("user_prompt") or "").strip()
+        values["user_prompt"] = user_prompt
+        max_boxes = values.get("max_boxes")
+        if max_boxes is not None:
+            try:
+                max_boxes_val = int(max_boxes)
+            except (TypeError, ValueError):
+                max_boxes_val = 25
+            values["max_boxes"] = max(0, min(max_boxes_val, 200))
+        else:
+            values["max_boxes"] = 25
+        max_tokens = values.get("max_new_tokens")
+        if max_tokens is not None:
+            try:
+                max_tokens_val = int(max_tokens)
+            except (TypeError, ValueError):
+                max_tokens_val = 128
+            values["max_new_tokens"] = max(32, min(max_tokens_val, 512))
+        else:
+            values["max_new_tokens"] = 128
+        for key in ("image_width", "image_height"):
+            val = values.get(key)
+            if val is None:
+                continue
+            try:
+                values[key] = max(1, int(val))
+            except (TypeError, ValueError):
+                values[key] = None
+        return values
+
+
+class QwenCaptionResponse(BaseModel):
+    caption: str
+    used_counts: Dict[str, int] = Field(default_factory=dict)
+    used_boxes: int
+    truncated: bool
 
 
 class Sam3TextPromptResponse(BaseModel):
@@ -17553,7 +17850,30 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str, job_logs: Optiona
     for key, value in defaults.items():
         if value is not None:
             cfg_kwargs[key] = value
-    return QwenTrainingConfig(**cfg_kwargs)
+    config = QwenTrainingConfig(**cfg_kwargs)
+    estimate_mb, estimate_note = _estimate_qwen_vram_mb(
+        config.model_id,
+        config.training_mode,
+        max_pixels=config.max_pixels,
+        batch_size=config.batch_size,
+    )
+    config.vram_estimate_mb = estimate_mb
+    config.vram_estimate_note = estimate_note
+    if job_logs is not None and estimate_mb:
+        gpu_total_mb = None
+        if torch.cuda.is_available():
+            try:
+                _, total_bytes = torch.cuda.mem_get_info()
+                gpu_total_mb = _bytes_to_mb(int(total_bytes))
+            except Exception:
+                gpu_total_mb = None
+        gpu_note = f" (GPU total ~{gpu_total_mb:.0f} MB)" if gpu_total_mb else ""
+        job_logs.append(
+            f"Estimated VRAM: ~{estimate_mb:.0f} MB for {config.model_id} ({config.training_mode}){gpu_note}."
+        )
+        if estimate_note:
+            job_logs.append(f"VRAM note: {estimate_note}")
+    return config
 
 
 def _normalise_relative_path(name: Optional[str]) -> Path:
@@ -27181,6 +27501,64 @@ def qwen_infer(payload: QwenInferenceRequest):
         prompt_type=prompt_type,  # type: ignore[arg-type]
         warnings=warnings,
         image_token=token,
+    )
+
+
+@app.post("/qwen/caption", response_model=QwenCaptionResponse)
+def qwen_caption(payload: QwenCaptionRequest):
+    pil_img, _, _ = resolve_image_payload(payload.image_base64, payload.image_token, None)
+    user_prompt = (payload.user_prompt or "").strip()
+    include_counts = bool(payload.include_counts)
+    include_coords = bool(payload.include_coords)
+    max_boxes = payload.max_boxes if payload.max_boxes is not None else 25
+    max_new_tokens = payload.max_new_tokens if payload.max_new_tokens is not None else 128
+    label_hints = payload.label_hints or []
+    if len(label_hints) > 500:
+        label_hints = label_hints[:500]
+    image_width = payload.image_width or pil_img.width
+    image_height = payload.image_height or pil_img.height
+    prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt(
+        user_prompt,
+        label_hints,
+        image_width,
+        image_height,
+        include_counts,
+        include_coords,
+        max_boxes,
+    )
+    base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    variant = payload.model_variant or "auto"
+    desired_model_id = _resolve_qwen_variant_model_id(base_model_id, variant)
+    if active_qwen_model_path and desired_model_id != base_model_id:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_variant_not_available_for_adapter")
+    system_prompt = (
+        "You are a concise captioning assistant. Use the image as truth. The label hints are suggestions; "
+        "if they conflict with the image, mention the uncertainty briefly."
+    )
+    try:
+        qwen_text, _, _ = _run_qwen_inference(
+            prompt_text,
+            pil_img,
+            max_new_tokens=max_new_tokens,
+            system_prompt_override=system_prompt,
+            model_id_override=desired_model_id if desired_model_id != base_model_id else None,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_caption_failed:{exc}") from exc
+    logger.info(
+        "[qwen-caption] hints=%s used=%s truncated=%s variant=%s",
+        len(payload.label_hints or []),
+        used_boxes,
+        truncated,
+        variant,
+    )
+    return QwenCaptionResponse(
+        caption=qwen_text.strip(),
+        used_counts=counts,
+        used_boxes=used_boxes,
+        truncated=truncated,
     )
 
 

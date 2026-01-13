@@ -1324,6 +1324,17 @@
         classSelect: null,
         maxResults: null,
         runButton: null,
+        captionHint: null,
+        captionVariant: null,
+        captionMaxTokens: null,
+        captionMaxBoxes: null,
+        captionIncludeCounts: null,
+        captionIncludeCoords: null,
+        captionRunButton: null,
+        captionOutput: null,
+        captionCopyButton: null,
+        captionMeta: null,
+        captionStatus: null,
     };
     const sam3TextElements = {
         panel: null,
@@ -1399,6 +1410,7 @@
     };
     let qwenAvailable = false;
     let qwenRequestActive = false;
+    let qwenCaptionActive = false;
     let sam3TextRequestActive = false;
     let sam3SimilarityRequestActive = false;
     let sam3TextBatchActive = false;
@@ -1497,8 +1509,10 @@
 	        runNameInput: null,
 	        modelSizeSelect: null,
 	        modelVariantSelect: null,
-	        modelIdPreview: null,
-	        systemPromptInput: null,
+        modelIdPreview: null,
+        vramEstimate: null,
+        vramBreakdown: null,
+		systemPromptInput: null,
         trainModeRadios: null,
         batchSizeInput: null,
         epochsInput: null,
@@ -1689,6 +1703,8 @@ const qwenTrainState = {
     pollHandle: null,
     chartSmoothing: 15,
     lastJobSnapshot: null,
+    gpuTotalMb: null,
+    trainModeTouched: false,
 };
 
 const YOLO_TOS_STORAGE_KEY = "yoloTrainingTosAccepted";
@@ -4964,6 +4980,127 @@ function getSelectedQwenTrainMode() {
     return selected ? selected.value : "official_lora";
 }
 
+const QWEN_VRAM_ESTIMATE_GB = {
+    official_lora: { "2B": 12.0, "4B": 20.0, "8B": 96.0, "32B": 192.0 },
+    trl_qlora: { "2B": 8.0, "4B": 10.0, "8B": 16.0, "32B": 48.0 },
+};
+const QWEN_VRAM_THINKING_SCALE = 1.08;
+const QWEN_VRAM_PIXEL_BASE = 451584;
+const QWEN_VRAM_PIXEL_SCALE_MIN = 0.6;
+const QWEN_VRAM_PIXEL_SCALE_MAX = 1.6;
+
+function inferQwenModelSize(modelId) {
+    const sizes = ["2B", "4B", "8B", "32B"];
+    for (const size of sizes) {
+        if (modelId.includes(size)) return size;
+    }
+    return null;
+}
+
+function estimateQwenVram({ modelId, trainingMode, maxPixels, batchSize }) {
+    const size = inferQwenModelSize(modelId || "");
+    if (!size) return { estimateMb: null, note: null };
+    const mode = QWEN_VRAM_ESTIMATE_GB[trainingMode] ? trainingMode : "official_lora";
+    const baseGb = QWEN_VRAM_ESTIMATE_GB[mode]?.[size];
+    if (!baseGb) return { estimateMb: null, note: null };
+    let scale = 1.0;
+    let pixelScale = 1.0;
+    let batchScale = 1.0;
+    if (modelId.includes("Thinking")) {
+        scale *= QWEN_VRAM_THINKING_SCALE;
+    }
+    if (typeof maxPixels === "number" && maxPixels > 0) {
+        pixelScale = maxPixels / Math.max(1, QWEN_VRAM_PIXEL_BASE);
+        pixelScale = Math.min(QWEN_VRAM_PIXEL_SCALE_MAX, Math.max(QWEN_VRAM_PIXEL_SCALE_MIN, pixelScale));
+        scale *= pixelScale;
+    }
+    if (typeof batchSize === "number" && batchSize > 1) {
+        batchScale = batchSize;
+        scale *= batchSize;
+    }
+    const estimateMb = baseGb * 1024 * scale;
+    let note = null;
+    if (mode === "official_lora" && (size === "8B" || size === "32B")) {
+        note = "Official LoRA is very VRAM-hungry; 8B/32B often exceed 48GB even at smaller pixel budgets.";
+    }
+    if (mode === "trl_qlora" && size === "32B" && modelId.includes("Thinking")) {
+        note = "32B Thinking QLoRA is experimental; some setups hit multi-GPU gradient issues.";
+    }
+    if (mode === "trl_qlora" && size === "8B" && maxPixels === QWEN_VRAM_PIXEL_BASE) {
+        note = "Verified: 8B QLoRA fits on a 48GB GPU at default pixel budget.";
+    }
+    return {
+        estimateMb,
+        note,
+        baseGb,
+        pixelScale,
+        batchScale,
+        totalGb: estimateMb / 1024,
+    };
+}
+
+function maybeAutoSelectQwenTrainMode() {
+    if (qwenTrainState.trainModeTouched) return;
+    const modelId = resolveQwenModelId();
+    const size = inferQwenModelSize(modelId || "");
+    if (!qwenTrainElements.trainModeRadios) return;
+    if (size === "8B" || size === "32B") {
+        qwenTrainElements.trainModeRadios.forEach((radio) => {
+            if (radio.value === "trl_qlora") radio.checked = true;
+        });
+    } else {
+        qwenTrainElements.trainModeRadios.forEach((radio) => {
+            if (radio.value === "official_lora") radio.checked = true;
+        });
+    }
+}
+
+function updateQwenVramEstimate() {
+    if (!qwenTrainElements.vramEstimate) return;
+    const modelId = resolveQwenModelId();
+    const trainingMode = getSelectedQwenTrainMode();
+    const maxPixels = readNumberInput(qwenTrainElements.maxPixelsInput, { integer: true });
+    const batchSize = readNumberInput(qwenTrainElements.batchSizeInput, { integer: true });
+    const { estimateMb, note, baseGb, pixelScale, batchScale, totalGb } = estimateQwenVram({
+        modelId,
+        trainingMode,
+        maxPixels,
+        batchSize,
+    });
+    if (!estimateMb) {
+        qwenTrainElements.vramEstimate.textContent = "Estimated VRAM: --";
+        if (qwenTrainElements.vramBreakdown) {
+            qwenTrainElements.vramBreakdown.textContent = "VRAM budget: --";
+        }
+        qwenTrainElements.vramEstimate.classList.remove("warn");
+        return;
+    }
+    let text = `Estimated VRAM: ~${totalGb.toFixed(1)} GB`;
+    if (qwenTrainState.gpuTotalMb) {
+        const gpuGb = qwenTrainState.gpuTotalMb / 1024;
+        const fits = estimateMb <= qwenTrainState.gpuTotalMb;
+        text += ` • GPU: ${gpuGb.toFixed(1)} GB (${fits ? "likely fits" : "likely OOM"})`;
+        qwenTrainElements.vramEstimate.classList.toggle("warn", !fits);
+    } else {
+        qwenTrainElements.vramEstimate.classList.remove("warn");
+    }
+    if (note) {
+        text += ` • ${note}`;
+    }
+    qwenTrainElements.vramEstimate.textContent = text;
+    if (qwenTrainElements.vramBreakdown && baseGb) {
+        const parts = [
+            `VRAM budget: base ${baseGb.toFixed(1)} GB`,
+            `pixel ×${pixelScale.toFixed(2)}`,
+        ];
+        if (batchScale > 1.0) {
+            parts.push(`batch ×${batchScale.toFixed(1)}`);
+        }
+        parts.push(`= ${totalGb.toFixed(1)} GB`);
+        qwenTrainElements.vramBreakdown.textContent = parts.join(" ");
+    }
+}
+
 function resolveQwenModelId() {
     const size = qwenTrainElements.modelSizeSelect?.value || "4B";
     const variant = qwenTrainElements.modelVariantSelect?.value || "Instruct";
@@ -4971,8 +5108,26 @@ function resolveQwenModelId() {
 }
 
 function updateQwenModelPreview() {
+    maybeAutoSelectQwenTrainMode();
     if (qwenTrainElements.modelIdPreview) {
         qwenTrainElements.modelIdPreview.textContent = resolveQwenModelId();
+    }
+    updateQwenVramEstimate();
+}
+
+async function refreshQwenGpuInfo() {
+    try {
+        const resp = await fetch(`${API_ROOT}/predictor_settings`);
+        if (!resp.ok) {
+            throw new Error(await resp.text() || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        const total = typeof data.gpuTotalMb === "number" ? data.gpuTotalMb : null;
+        qwenTrainState.gpuTotalMb = total && total > 0 ? total : null;
+    } catch (error) {
+        qwenTrainState.gpuTotalMb = null;
+    } finally {
+        updateQwenVramEstimate();
     }
 }
 
@@ -8645,7 +8800,9 @@ function initQwenTrainingTab() {
 	        qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
 	        qwenTrainElements.modelSizeSelect = document.getElementById("qwenTrainModelSize");
 	        qwenTrainElements.modelVariantSelect = document.getElementById("qwenTrainModelVariant");
-	        qwenTrainElements.modelIdPreview = document.getElementById("qwenTrainModelIdPreview");
+        qwenTrainElements.modelIdPreview = document.getElementById("qwenTrainModelIdPreview");
+        qwenTrainElements.vramEstimate = document.getElementById("qwenTrainVramEstimate");
+        qwenTrainElements.vramBreakdown = document.getElementById("qwenTrainVramBreakdown");
 	        qwenTrainElements.systemPromptInput = document.getElementById("qwenTrainSystemPrompt");
         qwenTrainElements.batchSizeInput = document.getElementById("qwenTrainBatchSize");
         qwenTrainElements.epochsInput = document.getElementById("qwenTrainEpochs");
@@ -8708,7 +8865,22 @@ function initQwenTrainingTab() {
         if (qwenTrainElements.modelVariantSelect) {
             qwenTrainElements.modelVariantSelect.addEventListener("change", updateQwenModelPreview);
         }
+        if (qwenTrainElements.trainModeRadios && qwenTrainElements.trainModeRadios.forEach) {
+            qwenTrainElements.trainModeRadios.forEach((radio) => {
+                radio.addEventListener("change", () => {
+                    qwenTrainState.trainModeTouched = true;
+                    updateQwenVramEstimate();
+                });
+            });
+        }
+        if (qwenTrainElements.batchSizeInput) {
+            qwenTrainElements.batchSizeInput.addEventListener("input", updateQwenVramEstimate);
+        }
+        if (qwenTrainElements.maxPixelsInput) {
+            qwenTrainElements.maxPixelsInput.addEventListener("input", updateQwenVramEstimate);
+        }
         updateQwenModelPreview();
+        refreshQwenGpuInfo().catch((error) => console.debug("Failed to refresh Qwen GPU info", error));
 	        if (qwenTrainElements.datasetSelect) {
 	            qwenTrainElements.datasetSelect.addEventListener("change", () => {
 	                qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
@@ -12344,11 +12516,44 @@ function initQwenTrainingTab() {
         qwenElements.promptType = document.getElementById("qwenPromptType");
         qwenElements.maxResults = document.getElementById("qwenMaxResults");
         qwenElements.runButton = document.getElementById("qwenRunButton");
+        qwenElements.captionHint = document.getElementById("qwenCaptionHint");
+        qwenElements.captionVariant = document.getElementById("qwenCaptionVariant");
+        qwenElements.captionMaxTokens = document.getElementById("qwenCaptionMaxTokens");
+        qwenElements.captionMaxBoxes = document.getElementById("qwenCaptionMaxBoxes");
+        qwenElements.captionIncludeCounts = document.getElementById("qwenCaptionIncludeCounts");
+        qwenElements.captionIncludeCoords = document.getElementById("qwenCaptionIncludeCoords");
+        qwenElements.captionRunButton = document.getElementById("qwenCaptionRunButton");
+        qwenElements.captionOutput = document.getElementById("qwenCaptionOutput");
+        qwenElements.captionCopyButton = document.getElementById("qwenCaptionCopy");
+        qwenElements.captionMeta = document.getElementById("qwenCaptionMeta");
+        qwenElements.captionStatus = document.getElementById("qwenCaptionStatus");
         if (qwenElements.runButton) {
             qwenElements.runButton.addEventListener("click", () => {
                 handleQwenRun().catch((error) => {
                     console.error("Qwen request failed", error);
                 });
+            });
+        }
+        if (qwenElements.captionRunButton) {
+            qwenElements.captionRunButton.addEventListener("click", () => {
+                handleQwenCaption().catch((error) => {
+                    console.error("Qwen caption request failed", error);
+                });
+            });
+        }
+        if (qwenElements.captionCopyButton) {
+            qwenElements.captionCopyButton.addEventListener("click", async () => {
+                const caption = qwenElements.captionOutput?.value || "";
+                if (!caption) {
+                    setSamStatus("No caption to copy yet.", { variant: "warn", duration: 2500 });
+                    return;
+                }
+                try {
+                    await navigator.clipboard.writeText(caption);
+                    setSamStatus("Caption copied to clipboard.", { variant: "success", duration: 2500 });
+                } catch (error) {
+                    setSamStatus("Unable to copy caption.", { variant: "warn", duration: 2500 });
+                }
             });
         }
         if (qwenElements.classSelect) {
@@ -12362,6 +12567,8 @@ function initQwenTrainingTab() {
         toggleQwenAdvanced(false);
         applyActiveQwenMetadata(qwenModelState.activeMetadata);
         updateQwenRunButton();
+        updateQwenCaptionButton();
+        setQwenCaptionStatus("Idle");
         updateQwenClassOptions({ resetOverride: true });
         initSam3TextUi();
         updateSam3TextButtons();
@@ -13995,6 +14202,21 @@ function initQwenTrainingTab() {
         qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Use Qwen";
     }
 
+    function updateQwenCaptionButton() {
+        if (!qwenElements.captionRunButton) {
+            return;
+        }
+        qwenElements.captionRunButton.disabled = !qwenAvailable || qwenCaptionActive;
+        qwenElements.captionRunButton.textContent = qwenCaptionActive ? "Captioning…" : "Caption image";
+    }
+
+    function setQwenCaptionStatus(message) {
+        if (!qwenElements.captionStatus) {
+            return;
+        }
+        qwenElements.captionStatus.textContent = message || "";
+    }
+
     function getSam3TargetClass() {
         if (sam3TextElements.classSelect && sam3TextElements.classSelect.value) {
             return sam3TextElements.classSelect.value;
@@ -14026,6 +14248,7 @@ function initQwenTrainingTab() {
         }
         qwenAvailable = false;
         updateQwenRunButton();
+        updateQwenCaptionButton();
         try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 6000);
@@ -14053,6 +14276,7 @@ function initQwenTrainingTab() {
             qwenAvailable = false;
         } finally {
             updateQwenRunButton();
+            updateQwenCaptionButton();
         }
     }
 
@@ -14279,6 +14503,153 @@ function initQwenTrainingTab() {
         } finally {
             qwenRequestActive = false;
             updateQwenRunButton();
+        }
+    }
+
+    function collectCaptionLabelHints() {
+        if (!currentImage || !bboxes[currentImage.name]) {
+            return [];
+        }
+        const hints = [];
+        const buckets = bboxes[currentImage.name];
+        Object.keys(buckets).forEach((className) => {
+            (buckets[className] || []).forEach((bboxRecord) => {
+                if (!bboxRecord) {
+                    return;
+                }
+                let x1 = null;
+                let y1 = null;
+                let x2 = null;
+                let y2 = null;
+                const isPoly = bboxRecord.type === "polygon" || (Array.isArray(bboxRecord.points) && bboxRecord.points.length >= 3);
+                if (isPoly) {
+                    const xs = bboxRecord.points.map((p) => p.x);
+                    const ys = bboxRecord.points.map((p) => p.y);
+                    x1 = Math.min(...xs);
+                    y1 = Math.min(...ys);
+                    x2 = Math.max(...xs);
+                    y2 = Math.max(...ys);
+                } else if (Number.isFinite(bboxRecord.x) && Number.isFinite(bboxRecord.y)) {
+                    x1 = bboxRecord.x;
+                    y1 = bboxRecord.y;
+                    x2 = bboxRecord.x + (bboxRecord.width || 0);
+                    y2 = bboxRecord.y + (bboxRecord.height || 0);
+                }
+                if (x1 === null || y1 === null || x2 === null || y2 === null) {
+                    return;
+                }
+                const hint = {
+                    label: className,
+                    bbox: [x1, y1, x2, y2],
+                };
+                if (Number.isFinite(bboxRecord.score)) {
+                    hint.confidence = bboxRecord.score;
+                }
+                hints.push(hint);
+            });
+        });
+        return hints;
+    }
+
+    async function invokeQwenCaption(requestFields) {
+        if (!currentImage) {
+            throw new Error("No active image");
+        }
+        const imageNameForRequest = currentImage.name;
+        const variantForRequest = samVariant;
+        const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
+        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        if (imageNameForRequest && !payload.image_name) {
+            payload.image_name = imageNameForRequest;
+        }
+        payload.sam_variant = variantForRequest;
+        let resp = await fetch(`${API_ROOT}/qwen/caption`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...requestFields, ...payload }),
+        });
+        if (resp.status === 428) {
+            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            if (imageNameForRequest && !payload.image_name) {
+                payload.image_name = imageNameForRequest;
+            }
+            payload.sam_variant = variantForRequest;
+            resp = await fetch(`${API_ROOT}/qwen/caption`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...requestFields, ...payload }),
+            });
+        }
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    async function handleQwenCaption() {
+        if (qwenCaptionActive) {
+            return;
+        }
+        if (!qwenAvailable) {
+            setSamStatus("Qwen backend is unavailable", { variant: "warn", duration: 3500 });
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSamStatus("Load an image before captioning", { variant: "warn", duration: 3000 });
+            return;
+        }
+        qwenCaptionActive = true;
+        updateQwenCaptionButton();
+        setQwenCaptionStatus("Running…");
+        setSamStatus("Running Qwen caption…", { variant: "info", duration: 0 });
+        try {
+            let maxTokens = parseInt(qwenElements.captionMaxTokens?.value || "128", 10);
+            if (Number.isNaN(maxTokens)) {
+                maxTokens = 128;
+            }
+            maxTokens = Math.min(Math.max(maxTokens, 32), 512);
+            let maxBoxes = parseInt(qwenElements.captionMaxBoxes?.value || "25", 10);
+            if (Number.isNaN(maxBoxes)) {
+                maxBoxes = 25;
+            }
+            maxBoxes = Math.min(Math.max(maxBoxes, 0), 200);
+            const includeCounts = !!qwenElements.captionIncludeCounts?.checked;
+            const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
+            const variant = qwenElements.captionVariant?.value || "auto";
+            const hints = collectCaptionLabelHints();
+            const result = await invokeQwenCaption({
+                user_prompt: (qwenElements.captionHint?.value || "").trim(),
+                label_hints: hints,
+                image_width: currentImage.width,
+                image_height: currentImage.height,
+                include_counts: includeCounts,
+                include_coords: includeCoords,
+                max_boxes: maxBoxes,
+                max_new_tokens: maxTokens,
+                model_variant: variant,
+            });
+            if (qwenElements.captionOutput) {
+                qwenElements.captionOutput.value = result?.caption || "";
+            }
+            if (qwenElements.captionMeta) {
+                const countEntries = result?.used_counts || {};
+                const countSummary = Object.keys(countEntries).length
+                    ? Object.entries(countEntries).map(([label, count]) => `${label}: ${count}`).join(" • ")
+                    : "No label hints";
+                const truncBadge = result?.truncated ? " • summarized" : "";
+                qwenElements.captionMeta.textContent = `Hints: ${hints.length} • Used boxes: ${result?.used_boxes ?? 0}${truncBadge} • ${countSummary}`;
+            }
+            setQwenCaptionStatus("Ready");
+            setSamStatus("Caption ready.", { variant: "success", duration: 3500 });
+        } catch (error) {
+            const message = error?.message || error;
+            setQwenCaptionStatus("Error");
+            setSamStatus(`Caption error: ${message}`, { variant: "error", duration: 5000 });
+            console.error("Qwen caption failed", error);
+        } finally {
+            qwenCaptionActive = false;
+            updateQwenCaptionButton();
         }
     }
 

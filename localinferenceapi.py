@@ -550,7 +550,10 @@ def _suspend_clip_backbone() -> None:
     with clip_lock:
         if clip_model is None:
             return
-        logger.info("Suspending CLIP backbone to free GPU memory for training.")
+        if str(active_encoder_type or "clip").strip().lower() == "clip":
+            logger.info("Suspending CLIP backbone to free GPU memory for training.")
+        else:
+            logger.debug("Suspending CLIP backbone (inactive classifier) to free GPU memory for training.")
         clip_model = None
         clip_preprocess = None
         clip_initialized = False

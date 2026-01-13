@@ -214,6 +214,43 @@
                                 <input type="number" id="qwenMaxResults" min="1" max="50" value="8" />
                                 <button type="button" id="qwenRunButton" class="training-button" disabled>Use Qwen</button>
                                 <p class="qwen-hint">Uses the prompts saved with the active Qwen model; add extra context via the advanced overrides when needed.</p>
+                                <div class="qwen-caption">
+                                    <div class="qwen-caption__header">
+                                        <strong>Caption current image</strong>
+                                        <span id="qwenCaptionStatus" class="qwen-caption-status"></span>
+                                    </div>
+                                    <label for="qwenCaptionHint">Caption hint (optional)</label>
+                                    <textarea id="qwenCaptionHint" rows="2" placeholder="e.g., drone footage at dusk"></textarea>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenCaptionVariant">Model variant</label>
+                                            <select id="qwenCaptionVariant">
+                                                <option value="auto" selected>Use active model</option>
+                                                <option value="Instruct">Base Instruct</option>
+                                                <option value="Thinking">Base Thinking</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionMaxTokens">Max tokens</label>
+                                            <input type="number" id="qwenCaptionMaxTokens" min="32" max="512" value="128" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionMaxBoxes">Max boxes</label>
+                                            <input type="number" id="qwenCaptionMaxBoxes" min="0" max="200" value="25" />
+                                        </div>
+                                    </div>
+                                    <div class="qwen-caption-options">
+                                        <label><input type="checkbox" id="qwenCaptionIncludeCounts" checked /> Include counts by class</label>
+                                        <label><input type="checkbox" id="qwenCaptionIncludeCoords" checked /> Include box coords</label>
+                                    </div>
+                                    <button type="button" id="qwenCaptionRunButton" class="training-button secondary">Caption image</button>
+                                    <div class="qwen-caption-output">
+                                        <label for="qwenCaptionOutput">Caption</label>
+                                        <textarea id="qwenCaptionOutput" rows="3" readonly></textarea>
+                                        <button type="button" id="qwenCaptionCopy" class="training-button secondary">Copy caption</button>
+                                        <div id="qwenCaptionMeta" class="training-help"></div>
+                                    </div>
+                                </div>
                                 <section class="sam3-text-panel" id="sam3TextPanel" aria-labelledby="sam3TextTitle">
                                     <div class="sam3-text-panel__header">
                                         <span id="sam3TextTitle"><strong>SAM3 Text Prompt</strong></span>
@@ -738,6 +775,9 @@
                                 </div>
                             </div>
                             <div class="training-help">Resolved model ID: <code id="qwenTrainModelIdPreview">Qwen/Qwen3-VL-4B-Instruct</code></div>
+                            <div class="training-help" id="qwenTrainVramEstimate">Estimated VRAM: --</div>
+                            <div class="training-help" id="qwenTrainVramBreakdown">VRAM budget: --</div>
+                            <div class="training-help">Tip: on 48GB GPUs, 8B/32B usually require QLoRA. Official LoRA is best for 2B/4B.</div>
                         </div>
                         <div class="training-field">
                             <label for="qwenTrainSystemPrompt">System prompt</label>

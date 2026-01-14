@@ -3901,7 +3901,7 @@ class QwenCaptionRequest(BaseModel):
                 max_tokens_val = int(max_tokens)
             except (TypeError, ValueError):
                 max_tokens_val = 128
-            values["max_new_tokens"] = max(32, min(max_tokens_val, 512))
+            values["max_new_tokens"] = max(32, min(max_tokens_val, 2000))
         else:
             values["max_new_tokens"] = 128
         for key in ("image_width", "image_height"):
@@ -27847,9 +27847,9 @@ def qwen_caption(payload: QwenCaptionRequest):
     two_stage = bool(payload.two_stage_refine)
     is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
     if is_thinking:
-        max_new_tokens = max(max_new_tokens, 512)
+        max_new_tokens = max(max_new_tokens, 1000)
     if caption_mode == "windowed":
-        max_new_tokens = max(max_new_tokens, 768 if is_thinking else 512)
+        max_new_tokens = max(max_new_tokens, 1500 if is_thinking else 1200)
     system_prompt = (
         "You are a concise captioning assistant. Use the image as truth. The label hints are suggestions; "
         "if they conflict with the image, mention the uncertainty briefly."

@@ -14863,6 +14863,11 @@ function initQwenTrainingTab() {
                 warnIfFp8Unsupported(modelOverride);
             }
             const hints = collectCaptionLabelHints();
+            if (variant === "Thinking") {
+                maxTokens = Math.max(maxTokens, captionMode === "windowed" ? 768 : 512);
+            } else if (captionMode === "windowed") {
+                maxTokens = Math.max(maxTokens, 512);
+            }
             const result = await invokeQwenCaption({
                 user_prompt: combinedPrompt,
                 label_hints: hints,

@@ -27846,6 +27846,10 @@ def qwen_caption(payload: QwenCaptionRequest):
     final_only = bool(payload.final_answer_only)
     two_stage = bool(payload.two_stage_refine)
     is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
+    if is_thinking:
+        max_new_tokens = max(max_new_tokens, 512)
+    if caption_mode == "windowed":
+        max_new_tokens = max(max_new_tokens, 768 if is_thinking else 512)
     system_prompt = (
         "You are a concise captioning assistant. Use the image as truth. The label hints are suggestions; "
         "if they conflict with the image, mention the uncertainty briefly."

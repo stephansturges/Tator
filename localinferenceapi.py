@@ -2673,13 +2673,15 @@ def _ensure_qwen_ready():
                     )
                 except Exception as fallback_exc:  # noqa: BLE001
                     qwen_last_error = str(fallback_exc)
+                    detail = _format_qwen_load_error(fallback_exc)
                     raise HTTPException(
                         status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                        detail=f"qwen_load_failed:{fallback_exc}",
+                        detail=f"qwen_load_failed:{detail}",
                     ) from fallback_exc
             else:
                 qwen_last_error = str(exc)
-                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
+                detail = _format_qwen_load_error(exc)
+                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{detail}") from exc
         qwen_model = model
         qwen_processor = processor
         qwen_device = device
@@ -2801,13 +2803,15 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
                     qwen_caption_order.append(cache_key)
                 except Exception as fallback_exc:  # noqa: BLE001
                     qwen_last_error = str(fallback_exc)
+                    detail = _format_qwen_load_error(fallback_exc)
                     raise HTTPException(
                         status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                        detail=f"qwen_load_failed:{fallback_exc}",
+                        detail=f"qwen_load_failed:{detail}",
                     ) from fallback_exc
             else:
                 qwen_last_error = str(exc)
-                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{exc}") from exc
+                detail = _format_qwen_load_error(exc)
+                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{detail}") from exc
         qwen_device = device
         qwen_last_error = None
         qwen_caption_cache[cache_key] = (model, processor)
@@ -2968,6 +2972,24 @@ def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple
 
 def _caption_needs_english_rewrite(text: str) -> bool:
     return bool(re.search(r"[^\x00-\x7F]", text))
+
+
+def _format_qwen_load_error(exc: Exception) -> str:
+    msg = str(exc)
+    if "FP8" in msg and "compute capability" in msg:
+        cc = None
+        if torch.cuda.is_available():
+            try:
+                major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+                cc = f"{major}.{minor}"
+            except Exception:
+                cc = None
+        cc_note = f" Current GPU compute capability: {cc}." if cc else ""
+        return (
+            f"{msg} FP8 models require GPU compute capability >= 8.9 (e.g., 4090/H100)."
+            f"{cc_note} Use a non-FP8 model on lower-capability GPUs."
+        )
+    return msg
 
 
 def _run_qwen_inference(

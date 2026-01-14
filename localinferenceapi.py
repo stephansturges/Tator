@@ -201,6 +201,7 @@ QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", False)
 QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
 QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
 QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
+QWEN_TRUST_REMOTE_CODE = _env_bool("QWEN_TRUST_REMOTE_CODE", False)
 QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
 QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
 
@@ -3185,6 +3186,21 @@ def _run_qwen_inference(
 def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any]) -> Any:
     if AutoConfig is None or AutoModelForCausalLM is None:
         return Qwen3VLForConditionalGeneration.from_pretrained(str(model_id), **load_kwargs)
+    if not QWEN_TRUST_REMOTE_CODE:
+        try:
+            config = AutoConfig.from_pretrained(str(model_id), trust_remote_code=False)
+            model_type = getattr(config, "model_type", None)
+            if model_type not in (None, "qwen3_vl"):
+                logging.warning(
+                    "Qwen model_type=%s may require trust_remote_code; set QWEN_TRUST_REMOTE_CODE=1 to enable.",
+                    model_type,
+                )
+        except Exception as exc:
+            logging.warning(
+                "Qwen config load failed without trust_remote_code; set QWEN_TRUST_REMOTE_CODE=1 if needed. (%s)",
+                exc,
+            )
+        return Qwen3VLForConditionalGeneration.from_pretrained(str(model_id), **load_kwargs)
     try:
         config = AutoConfig.from_pretrained(str(model_id), trust_remote_code=True)
     except Exception:
@@ -3980,6 +3996,14 @@ class QwenPromptSection(BaseModel):
 class QwenPromptConfig(BaseModel):
     bbox: QwenPromptSection
     point: QwenPromptSection
+
+
+class QwenRuntimeSettings(BaseModel):
+    trust_remote_code: bool = False
+
+
+class QwenRuntimeSettingsUpdate(BaseModel):
+    trust_remote_code: Optional[bool] = None
 
 
 DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
@@ -27706,6 +27730,22 @@ def qwen_status():
         "active_model": active_qwen_model_id,
         "active_metadata": active_qwen_metadata,
     }
+
+
+@app.get("/qwen/settings", response_model=QwenRuntimeSettings)
+def qwen_settings():
+    return QwenRuntimeSettings(trust_remote_code=QWEN_TRUST_REMOTE_CODE)
+
+
+@app.post("/qwen/settings", response_model=QwenRuntimeSettings)
+def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
+    global QWEN_TRUST_REMOTE_CODE
+    if payload.trust_remote_code is not None:
+        desired = bool(payload.trust_remote_code)
+        if desired != QWEN_TRUST_REMOTE_CODE:
+            QWEN_TRUST_REMOTE_CODE = desired
+            _unload_qwen_runtime()
+    return QwenRuntimeSettings(trust_remote_code=QWEN_TRUST_REMOTE_CODE)
 
 
 @app.post("/qwen/unload")

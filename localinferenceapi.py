@@ -2994,6 +2994,24 @@ def _format_qwen_load_error(exc: Exception) -> str:
     return msg
 
 
+def _sanitize_qwen_caption(text: str) -> str:
+    if not text:
+        return text
+    cleaned = text.strip()
+    final_match = re.search(r"<final>(.*?)</final>", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    if final_match:
+        cleaned = final_match.group(1).strip()
+    if re.search(r"</think>", cleaned, flags=re.IGNORECASE):
+        parts = re.split(r"</think>", cleaned, flags=re.IGNORECASE)
+        cleaned = parts[-1].strip()
+    if re.search(r"\bFINAL\b", cleaned, flags=re.IGNORECASE):
+        cleaned, _ = _extract_caption_from_text(cleaned, marker="FINAL")
+    cleaned = cleaned.strip()
+    if cleaned.startswith(":"):
+        cleaned = cleaned.lstrip(":").strip()
+    return cleaned
+
+
 def _resolve_qwen_window_size(requested: Optional[int], image_width: int, image_height: int) -> int:
     base = requested if requested is not None else QWEN_WINDOW_DEFAULT_SIZE
     try:
@@ -27881,6 +27899,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         model_id_override=desired_model_id if use_caption_cache else None,
                     )
                     window_caption, _ = _extract_caption_from_text(qwen_text, marker=None)
+                    window_caption = _sanitize_qwen_caption(window_caption)
                     if window_caption:
                         windowed_captions.append((x0, y0, window_size, window_caption))
             if windowed_captions:
@@ -27903,6 +27922,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 model_id_override=desired_model_id if use_caption_cache else None,
             )
             draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
+            draft_caption = _sanitize_qwen_caption(draft_caption)
             refine_prompt = (
                 f"{prompt_text}\nDraft caption: {draft_caption}\n"
                 "Step 2: Refine the caption using the label hints. Return only the final caption."
@@ -27920,6 +27940,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 model_id_override=refine_model if use_caption_cache else None,
             )
             caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
+            if final_only or is_thinking:
+                caption_text = _sanitize_qwen_caption(caption_text)
         else:
             qwen_text, _, _ = _run_qwen_inference(
                 prompt_text,
@@ -27929,6 +27951,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 model_id_override=desired_model_id if use_caption_cache else None,
             )
             caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
+            if final_only or is_thinking:
+                caption_text = _sanitize_qwen_caption(caption_text)
         if caption_text and _caption_needs_english_rewrite(caption_text):
             rewrite_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
             rewrite_prompt = (
@@ -27944,6 +27968,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 model_id_override=rewrite_model if use_caption_cache else None,
             )
             caption_text, _ = _extract_caption_from_text(rewrite_text, marker=None)
+            if final_only or is_thinking:
+                caption_text = _sanitize_qwen_caption(caption_text)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

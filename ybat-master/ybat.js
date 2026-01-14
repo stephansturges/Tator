@@ -14812,7 +14812,7 @@ function initQwenTrainingTab() {
             if (Number.isNaN(maxTokens)) {
                 maxTokens = 128;
             }
-            maxTokens = Math.min(Math.max(maxTokens, 32), 512);
+            maxTokens = Math.min(Math.max(maxTokens, 32), 2000);
             let maxBoxes = parseInt(qwenElements.captionMaxBoxes?.value || "25", 10);
             if (Number.isNaN(maxBoxes)) {
                 maxBoxes = 25;
@@ -14864,9 +14864,9 @@ function initQwenTrainingTab() {
             }
             const hints = collectCaptionLabelHints();
             if (variant === "Thinking") {
-                maxTokens = Math.max(maxTokens, captionMode === "windowed" ? 768 : 512);
+                maxTokens = Math.max(maxTokens, captionMode === "windowed" ? 1500 : 1000);
             } else if (captionMode === "windowed") {
-                maxTokens = Math.max(maxTokens, 512);
+                maxTokens = Math.max(maxTokens, 1200);
             }
             const result = await invokeQwenCaption({
                 user_prompt: combinedPrompt,

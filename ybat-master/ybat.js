@@ -1312,6 +1312,12 @@
         status: null,
     };
 
+    const qwenSettingsElements = {
+        trustRemoteCode: null,
+        applyButton: null,
+        status: null,
+    };
+
     const qwenElements = {
         statusLabel: null,
         itemsInput: null,
@@ -12372,6 +12378,9 @@ function initQwenTrainingTab() {
         settingsElements.applyButton = document.getElementById("settingsApply");
         settingsElements.testButton = document.getElementById("settingsTest");
         settingsElements.status = document.getElementById("settingsStatus");
+        qwenSettingsElements.trustRemoteCode = document.getElementById("qwenTrustRemoteCode");
+        qwenSettingsElements.applyButton = document.getElementById("qwenSettingsApply");
+        qwenSettingsElements.status = document.getElementById("qwenSettingsStatus");
     backendFuzzerElements.runButton = document.getElementById("runBackendFuzzer");
     backendFuzzerElements.status = document.getElementById("backendFuzzerStatus");
     backendFuzzerElements.log = document.getElementById("backendFuzzerLog");
@@ -12389,11 +12398,17 @@ function initQwenTrainingTab() {
         if (settingsElements.testButton) {
             settingsElements.testButton.addEventListener("click", () => testApiRootCandidate(settingsElements.apiInput?.value || API_ROOT));
         }
+        if (qwenSettingsElements.applyButton) {
+            qwenSettingsElements.applyButton.addEventListener("click", () => {
+                applyQwenSettings().catch((err) => console.error("Failed to apply Qwen settings", err));
+            });
+        }
         if (backendFuzzerElements.runButton) {
             backendFuzzerElements.runButton.addEventListener("click", () => {
                 runBackendFuzzer().catch((err) => console.error("Backend fuzzer failed", err));
             });
         }
+        refreshQwenSettings().catch(() => {});
     }
 
     function setSettingsStatus(message, variant = "info") {
@@ -12402,6 +12417,69 @@ function initQwenTrainingTab() {
         }
         settingsElements.status.textContent = message || "";
         settingsElements.status.className = variant ? `settings-status ${variant}` : "settings-status";
+    }
+
+    function setQwenSettingsStatus(message, variant = "info") {
+        if (!qwenSettingsElements.status) {
+            return;
+        }
+        qwenSettingsElements.status.textContent = message || "";
+        qwenSettingsElements.status.className = variant ? `settings-status ${variant}` : "settings-status";
+    }
+
+    async function refreshQwenSettings() {
+        if (!qwenSettingsElements.trustRemoteCode || !qwenSettingsElements.applyButton) {
+            return;
+        }
+        qwenSettingsElements.applyButton.disabled = true;
+        setQwenSettingsStatus("Loading Qwen settings…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/settings`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const payload = await resp.json();
+            qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
+            setQwenSettingsStatus("Qwen settings loaded.", "success");
+        } catch (err) {
+            console.warn("Qwen settings unavailable", err);
+            qwenSettingsElements.trustRemoteCode.checked = false;
+            qwenSettingsElements.trustRemoteCode.disabled = true;
+            qwenSettingsElements.applyButton.disabled = true;
+            setQwenSettingsStatus("Qwen settings not available on this backend.", "warn");
+            return;
+        }
+        qwenSettingsElements.trustRemoteCode.disabled = false;
+        qwenSettingsElements.applyButton.disabled = false;
+    }
+
+    async function applyQwenSettings() {
+        if (!qwenSettingsElements.trustRemoteCode || !qwenSettingsElements.applyButton) {
+            return;
+        }
+        qwenSettingsElements.applyButton.disabled = true;
+        setQwenSettingsStatus("Applying Qwen settings…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/settings`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    trust_remote_code: Boolean(qwenSettingsElements.trustRemoteCode.checked),
+                }),
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+            const payload = await resp.json();
+            qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
+            setQwenSettingsStatus("Qwen settings updated (models unloaded).", "success");
+        } catch (err) {
+            console.error("Failed to update Qwen settings", err);
+            setQwenSettingsStatus("Failed to update Qwen settings.", "warn");
+        } finally {
+            qwenSettingsElements.applyButton.disabled = false;
+        }
     }
 
     async function runBackendFuzzer() {

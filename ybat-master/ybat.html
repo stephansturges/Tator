@@ -2650,6 +2650,18 @@
                         <div class="qwen-model-toolbar">
                             <button type="button" class="training-button" id="qwenModelRefreshBtn">Refresh</button>
                         </div>
+                        <div class="training-divider"></div>
+                        <h3>Qwen Runtime (advanced)</h3>
+                        <p class="settings-help">These controls affect how Qwen models are loaded. Changes unload any loaded Qwen model so it can reload with the new setting.</p>
+                        <label style="display: inline-flex; align-items: center; gap: 8px;">
+                            <input type="checkbox" id="qwenTrustRemoteCode" />
+                            Allow Qwen models to run remote code
+                            <span class="help-icon" title="Allows model repos to execute their own Python when loading. Enable only for trusted models. Requires reload.">?</span>
+                        </label>
+                        <div class="settings-actions" style="margin-top: 8px;">
+                            <button type="button" id="qwenSettingsApply" class="training-button">Apply Qwen settings</button>
+                        </div>
+                        <div id="qwenSettingsStatus" class="settings-status" role="status" aria-live="polite"></div>
                         <div class="qwen-model-grid" id="qwenModelList"></div>
                     </section>
                     <section class="qwen-model-details">
@@ -2722,19 +2734,6 @@
                     </div>
                     <div id="backendFuzzerStatus" class="settings-status" role="status" aria-live="polite"></div>
                     <pre id="backendFuzzerLog" class="training-log" style="max-height: 220px; overflow-y: auto;"></pre>
-                    <div class="training-divider"></div>
-                    <h3>Qwen Runtime (advanced)</h3>
-                    <p class="settings-help">These controls affect how Qwen models are loaded. Changes unload any loaded Qwen model so it can reload with the new setting.</p>
-                    <label style="display: inline-flex; align-items: center; gap: 8px;">
-                        <input type="checkbox" id="qwenTrustRemoteCode" />
-                        Allow Qwen models to run remote code
-                        <span class="help-icon" title="Allows model repos to execute their own Python when loading. Enable only for trusted models. Requires reload.">?</span>
-                    </label>
-                    <div class="settings-actions">
-                        <button type="button" id="qwenSettingsApply" class="training-button">Apply Qwen settings</button>
-                    </div>
-                    <div id="qwenSettingsStatus" class="settings-status" role="status" aria-live="polite"></div>
-                    <div class="training-divider"></div>
                     <h3>Default upload and payload limits</h3>
                     <p class="settings-help">
                         Defaults are tuned for LAN use. You can override any of these on the backend by setting

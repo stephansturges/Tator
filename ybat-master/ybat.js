@@ -1459,6 +1459,8 @@
         "A top-down view shows",
         "A wide shot shows",
     ];
+    const DEFAULT_CAPTION_WINDOW_SIZE = 672;
+    const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.2;
     let sam3TextUiInitialized = false;
     let textLabels = {};
 
@@ -12575,6 +12577,9 @@ function initQwenTrainingTab() {
         qwenElements.captionStyleInspiration = document.getElementById("qwenCaptionStyleInspiration");
         qwenElements.captionVaryOpening = document.getElementById("qwenCaptionVaryOpening");
         qwenElements.captionOpeningList = document.getElementById("qwenCaptionOpeningList");
+        qwenElements.captionMode = document.getElementById("qwenCaptionMode");
+        qwenElements.captionWindowSize = document.getElementById("qwenCaptionWindowSize");
+        qwenElements.captionWindowOverlap = document.getElementById("qwenCaptionWindowOverlap");
         qwenElements.captionModel = document.getElementById("qwenCaptionModel");
         qwenElements.captionVariant = document.getElementById("qwenCaptionVariant");
         qwenElements.captionMaxTokens = document.getElementById("qwenCaptionMaxTokens");
@@ -12612,6 +12617,18 @@ function initQwenTrainingTab() {
         }
         if (qwenElements.captionOpeningList && !qwenElements.captionOpeningList.value.trim()) {
             qwenElements.captionOpeningList.value = JSON.stringify(DEFAULT_CAPTION_OPENERS, null, 2);
+        }
+        if (qwenElements.captionWindowSize && !qwenElements.captionWindowSize.value.trim()) {
+            qwenElements.captionWindowSize.value = DEFAULT_CAPTION_WINDOW_SIZE;
+        }
+        if (qwenElements.captionWindowOverlap && !qwenElements.captionWindowOverlap.value.trim()) {
+            qwenElements.captionWindowOverlap.value = DEFAULT_CAPTION_WINDOW_OVERLAP;
+        }
+        if (qwenElements.captionMode) {
+            qwenElements.captionMode.addEventListener("change", () => {
+                updateCaptionWindowMode();
+            });
+            updateCaptionWindowMode();
         }
         if (qwenElements.captionPresetApply) {
             qwenElements.captionPresetApply.addEventListener("click", () => {
@@ -14382,6 +14399,21 @@ function initQwenTrainingTab() {
         return `Preferred opening phrases (choose one and rephrase if needed): ${joined}.`;
     }
 
+    function updateCaptionWindowMode() {
+        if (!qwenElements.captionMode) {
+            return;
+        }
+        const isWindowed = qwenElements.captionMode.value === "windowed";
+        const controls = [qwenElements.captionWindowSize, qwenElements.captionWindowOverlap];
+        controls.forEach((control) => {
+            if (!control) {
+                return;
+            }
+            control.disabled = !isWindowed;
+            control.closest("div")?.classList.toggle("is-disabled", !isWindowed);
+        });
+    }
+
     function setQwenCaptionStatus(message) {
         if (!qwenElements.captionStatus) {
             return;
@@ -14786,6 +14818,15 @@ function initQwenTrainingTab() {
                 maxBoxes = 25;
             }
             maxBoxes = Math.min(Math.max(maxBoxes, 0), 200);
+            const captionMode = qwenElements.captionMode?.value || "full";
+            let windowSize = parseInt(qwenElements.captionWindowSize?.value || `${DEFAULT_CAPTION_WINDOW_SIZE}`, 10);
+            if (Number.isNaN(windowSize)) {
+                windowSize = DEFAULT_CAPTION_WINDOW_SIZE;
+            }
+            let windowOverlap = parseFloat(qwenElements.captionWindowOverlap?.value || `${DEFAULT_CAPTION_WINDOW_OVERLAP}`);
+            if (Number.isNaN(windowOverlap)) {
+                windowOverlap = DEFAULT_CAPTION_WINDOW_OVERLAP;
+            }
             const includeCounts = !!qwenElements.captionIncludeCounts?.checked;
             const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
             const variant = qwenElements.captionVariant?.value || "auto";
@@ -14835,6 +14876,9 @@ function initQwenTrainingTab() {
                 model_id: modelOverride,
                 final_answer_only: finalOnly,
                 two_stage_refine: twoStage,
+                caption_mode: captionMode,
+                window_size: captionMode === "windowed" ? windowSize : null,
+                window_overlap: captionMode === "windowed" ? windowOverlap : null,
             });
             if (qwenElements.captionOutput) {
                 qwenElements.captionOutput.value = result?.caption || "";

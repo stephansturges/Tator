@@ -197,6 +197,8 @@ QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", False)
 QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
 QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
 QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
+QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", int(round(math.sqrt(QWEN_VRAM_PIXEL_BASE))))
+QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
 
 # Rough VRAM estimates (GB) for Qwen3 training defaults (batch=1, default pixel budget).
 # These are approximate and should be treated as guidance, not a hard guarantee.
@@ -2992,6 +2994,73 @@ def _format_qwen_load_error(exc: Exception) -> str:
     return msg
 
 
+def _resolve_qwen_window_size(requested: Optional[int], image_width: int, image_height: int) -> int:
+    base = requested if requested is not None else QWEN_WINDOW_DEFAULT_SIZE
+    try:
+        base = int(base)
+    except (TypeError, ValueError):
+        base = QWEN_WINDOW_DEFAULT_SIZE
+    base = max(128, min(base, 4096))
+    return max(64, min(base, int(image_width), int(image_height)))
+
+
+def _resolve_qwen_window_overlap(requested: Optional[float]) -> float:
+    try:
+        overlap = float(requested) if requested is not None else QWEN_WINDOW_DEFAULT_OVERLAP
+    except (TypeError, ValueError):
+        overlap = QWEN_WINDOW_DEFAULT_OVERLAP
+    return max(0.0, min(overlap, 0.9))
+
+
+def _window_positions(total: int, window: int, overlap: float) -> List[int]:
+    if total <= window:
+        return [0]
+    step = max(1, int(round(window * (1.0 - overlap))))
+    positions = list(range(0, max(1, total - window + 1), step))
+    last = total - window
+    if positions[-1] != last:
+        positions.append(last)
+    return sorted(set(positions))
+
+
+def _filter_hints_for_window(
+    label_hints: Sequence[QwenCaptionHint],
+    x0: int,
+    y0: int,
+    window: int,
+    image_width: int,
+    image_height: int,
+) -> List[QwenCaptionHint]:
+    window_hints: List[QwenCaptionHint] = []
+    x1 = x0 + window
+    y1 = y0 + window
+    for hint in label_hints:
+        if not hint.bbox or len(hint.bbox) != 4:
+            continue
+        bx1, by1, bx2, by2 = hint.bbox
+        try:
+            cx = (float(bx1) + float(bx2)) * 0.5
+            cy = (float(by1) + float(by2)) * 0.5
+        except (TypeError, ValueError):
+            continue
+        if cx < x0 or cx > x1 or cy < y0 or cy > y1:
+            continue
+        nx1 = max(0.0, min(float(bx1) - x0, window))
+        ny1 = max(0.0, min(float(by1) - y0, window))
+        nx2 = max(0.0, min(float(bx2) - x0, window))
+        ny2 = max(0.0, min(float(by2) - y0, window))
+        if nx2 <= nx1 or ny2 <= ny1:
+            continue
+        window_hints.append(
+            QwenCaptionHint(
+                label=hint.label,
+                bbox=[nx1, ny1, nx2, ny2],
+                confidence=hint.confidence,
+            )
+        )
+    return window_hints
+
+
 def _run_qwen_inference(
     prompt: str,
     pil_img: Image.Image,
@@ -3789,6 +3858,9 @@ class QwenCaptionRequest(BaseModel):
     model_id: Optional[str] = None
     final_answer_only: Optional[bool] = True
     two_stage_refine: Optional[bool] = False
+    caption_mode: Optional[Literal["full", "windowed"]] = "full"
+    window_size: Optional[int] = None
+    window_overlap: Optional[float] = None
 
     @root_validator(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
@@ -3822,6 +3894,22 @@ class QwenCaptionRequest(BaseModel):
                 values[key] = max(1, int(val))
             except (TypeError, ValueError):
                 values[key] = None
+        caption_mode = (values.get("caption_mode") or "full").strip().lower()
+        if caption_mode not in {"full", "windowed"}:
+            caption_mode = "full"
+        values["caption_mode"] = caption_mode
+        window_size = values.get("window_size")
+        if window_size is not None:
+            try:
+                values["window_size"] = max(64, int(window_size))
+            except (TypeError, ValueError):
+                values["window_size"] = None
+        window_overlap = values.get("window_overlap")
+        if window_overlap is not None:
+            try:
+                values["window_overlap"] = float(window_overlap)
+            except (TypeError, ValueError):
+                values["window_overlap"] = None
         model_id = (values.get("model_id") or "").strip()
         values["model_id"] = model_id or None
         values["final_answer_only"] = bool(values.get("final_answer_only", True))
@@ -27708,6 +27796,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         label_hints = label_hints[:500]
     image_width = payload.image_width or pil_img.width
     image_height = payload.image_height or pil_img.height
+    caption_mode = payload.caption_mode or "full"
     prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt(
         user_prompt,
         label_hints,
@@ -27746,6 +27835,54 @@ def qwen_caption(payload: QwenCaptionRequest):
     if active_qwen_model_path and not model_id_override and desired_model_id == base_model_id and variant == "auto":
         use_caption_cache = False
     try:
+        windowed_captions: List[Tuple[int, int, int, str]] = []
+        if caption_mode == "windowed":
+            window_size = _resolve_qwen_window_size(payload.window_size, image_width, image_height)
+            overlap = _resolve_qwen_window_overlap(payload.window_overlap)
+            x_positions = _window_positions(image_width, window_size, overlap)
+            y_positions = _window_positions(image_height, window_size, overlap)
+            for y0 in y_positions:
+                for x0 in x_positions:
+                    window_hints = _filter_hints_for_window(
+                        label_hints,
+                        x0,
+                        y0,
+                        window_size,
+                        image_width,
+                        image_height,
+                    )
+                    if not window_hints:
+                        continue
+                    window_prompt, _, _, _ = _build_qwen_caption_prompt(
+                        user_prompt,
+                        window_hints,
+                        window_size,
+                        window_size,
+                        include_counts,
+                        include_coords,
+                        max_boxes,
+                    )
+                    window_prompt = (
+                        f"Window region in full image: [{x0}, {y0}] to [{x0 + window_size}, {y0 + window_size}].\n"
+                        f"Focus only on this region.\n{window_prompt}"
+                    )
+                    window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
+                    qwen_text, _, _ = _run_qwen_inference(
+                        window_prompt,
+                        window_img,
+                        max_new_tokens=max_new_tokens,
+                        system_prompt_override=system_prompt,
+                        model_id_override=desired_model_id if use_caption_cache else None,
+                    )
+                    window_caption, _ = _extract_caption_from_text(qwen_text, marker=None)
+                    if window_caption:
+                        windowed_captions.append((x0, y0, window_size, window_caption))
+            if windowed_captions:
+                window_lines = ["Window summaries (subregions of the image):"]
+                for x0, y0, size, caption in windowed_captions:
+                    window_lines.append(f"- [{x0},{y0},{x0 + size},{y0 + size}]: {caption}")
+                window_lines.append("Use the window summaries to enrich the final caption.")
+                prompt_text = f\"{prompt_text}\\n\" + \"\\n\".join(window_lines)
         if two_stage and is_thinking:
             draft_prompt = (
                 "Step 1: Look at the image and form a draft caption.\n"

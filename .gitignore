@@ -258,3 +258,11 @@ SESSION_SUMMARY.txt
 SESSION.md
 recipe_brief_*.txt
 AGENTS.md
+
+# Local vendor clones / docs / screenshots
+Qwen3-VL/
+rf-detr/
+qwen30vltraining.txt
+qwen3_upgrade_brief.txt
+qwencaptioning.txt
+scrn.png

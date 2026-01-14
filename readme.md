@@ -201,7 +201,8 @@ Dataset Management displays readiness tags so you can see when a dataset is usab
 1. Load an image and click **Qwen Captioning** in the Label Images panel.
 2. Pick a caption model (active run or a base Qwen3 size) plus a variant (Instruct/Thinking).
 3. Optionally add style prompts and opening phrases (JSON list or one per line).
-4. Click **Run caption** and optionally save the caption as a `text_labels` entry.
+4. If you need extra detail, switch **Caption detail** to *Detailed (windowed)* and tune the window size + overlap.
+5. Click **Run caption** and optionally save the caption as a `text_labels` entry.
 5. Export as YOLO ZIP: captions live under `text_labels/` next to label files.
 
 ### Training detectors (YOLOv8 + RF-DETR)

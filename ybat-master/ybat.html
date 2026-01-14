@@ -237,6 +237,21 @@
                                     <textarea id="qwenCaptionHint" rows="2" placeholder="e.g., drone footage at dusk"></textarea>
                                     <div class="qwen-caption-grid">
                                         <div>
+                                            <label for="qwenCaptionMode">Caption detail</label>
+                                            <select id="qwenCaptionMode">
+                                                <option value="full">Full image</option>
+                                                <option value="windowed">Detailed (windowed)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionWindowSize" title="Windowed mode splits the image into overlapping tiles. This is the tile size in pixels.">Window size (px)</label>
+                                            <input id="qwenCaptionWindowSize" type="number" min="128" max="4096" placeholder="672">
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionWindowOverlap" title="Overlap between window tiles in windowed mode (0.0–0.9).">Window overlap</label>
+                                            <input id="qwenCaptionWindowOverlap" type="number" min="0" max="0.9" step="0.05" placeholder="0.2">
+                                        </div>
+                                        <div>
                                             <label for="qwenCaptionModel">Caption model</label>
                                             <select id="qwenCaptionModel">
                                                 <option value="active">Use active model</option>

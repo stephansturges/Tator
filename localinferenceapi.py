@@ -79,12 +79,16 @@ else:
 try:
     from transformers import (
         AutoProcessor,
+        AutoConfig,
+        AutoModelForCausalLM,
         Qwen3VLForConditionalGeneration,
     )
     from qwen_vl_utils import process_vision_info
 except Exception as exc:  # noqa: BLE001
     QWEN_IMPORT_ERROR = exc
     Qwen3VLForConditionalGeneration = None  # type: ignore[assignment]
+    AutoConfig = None  # type: ignore[assignment]
+    AutoModelForCausalLM = None  # type: ignore[assignment]
     AutoProcessor = None  # type: ignore[assignment]
     process_vision_info = None  # type: ignore[assignment]
 else:
@@ -2638,10 +2642,7 @@ def _ensure_qwen_ready():
                 detail = f"{detail}:{PEFT_IMPORT_ERROR}"
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
         try:
-            model = Qwen3VLForConditionalGeneration.from_pretrained(
-                str(base_model_id),
-                **load_kwargs,
-            )
+            model = _load_qwen_vl_model(str(base_model_id), load_kwargs)
             if adapter_path:
                 model = PeftModel.from_pretrained(model, str(adapter_path))
             if not load_kwargs.get("device_map"):
@@ -2658,10 +2659,7 @@ def _ensure_qwen_ready():
             if fallback_id:
                 try:
                     logger.warning("Qwen model %s not found; falling back to %s", base_model_id, fallback_id)
-                    model = Qwen3VLForConditionalGeneration.from_pretrained(
-                        str(fallback_id),
-                        **load_kwargs,
-                    )
+                    model = _load_qwen_vl_model(str(fallback_id), load_kwargs)
                     if adapter_path:
                         model = PeftModel.from_pretrained(model, str(adapter_path))
                     if not load_kwargs.get("device_map"):
@@ -2772,10 +2770,7 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
                 "low_cpu_mem_usage": True,
             }
         try:
-            model = Qwen3VLForConditionalGeneration.from_pretrained(
-                str(model_id_override),
-                **load_kwargs,
-            )
+            model = _load_qwen_vl_model(str(model_id_override), load_kwargs)
             if not load_kwargs.get("device_map"):
                 model.to(device)
             model.eval()
@@ -2789,10 +2784,7 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
             if fallback_id:
                 try:
                     logger.warning("Qwen model %s not found; falling back to %s", model_id_override, fallback_id)
-                    model = Qwen3VLForConditionalGeneration.from_pretrained(
-                        str(fallback_id),
-                        **load_kwargs,
-                    )
+                    model = _load_qwen_vl_model(str(fallback_id), load_kwargs)
                     if not load_kwargs.get("device_map"):
                         model.to(device)
                     model.eval()
@@ -3188,6 +3180,18 @@ def _run_qwen_inference(
         input_height = pil_img.height
         input_width = pil_img.width
     return output_text, input_width, input_height
+
+
+def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any]) -> Any:
+    if AutoConfig is None or AutoModelForCausalLM is None:
+        return Qwen3VLForConditionalGeneration.from_pretrained(str(model_id), **load_kwargs)
+    try:
+        config = AutoConfig.from_pretrained(str(model_id), trust_remote_code=True)
+    except Exception:
+        config = None
+    if config is not None and getattr(config, "model_type", None) not in (None, "qwen3_vl"):
+        return AutoModelForCausalLM.from_pretrained(str(model_id), trust_remote_code=True, **load_kwargs)
+    return Qwen3VLForConditionalGeneration.from_pretrained(str(model_id), **load_kwargs)
 
 
 def _generate_qwen_text(
@@ -27907,10 +27911,20 @@ def qwen_caption(payload: QwenCaptionRequest):
                     if window_caption:
                         windowed_captions.append((x0, y0, window_size, window_caption))
             if windowed_captions:
-                window_lines = ["Window summaries (subregions of the image):"]
+                window_lines = ["Close-up observations from subregions (use these to enrich the final caption):"]
                 for x0, y0, size, caption in windowed_captions:
-                    window_lines.append(f"- [{x0},{y0},{x0 + size},{y0 + size}]: {caption}")
-                window_lines.append("Use the window summaries to enrich the final caption.")
+                    x_center = x0 + size / 2.0
+                    y_center = y0 + size / 2.0
+                    horiz = "left" if x_center < image_width / 3.0 else "right" if x_center > image_width * 2 / 3.0 else "center"
+                    vert = "top" if y_center < image_height / 3.0 else "bottom" if y_center > image_height * 2 / 3.0 else "middle"
+                    region = f"{vert}-{horiz}"
+                    window_lines.append(
+                        f"- {region} ([{x0},{y0},{x0 + size},{y0 + size}]): {caption}"
+                    )
+                window_lines.append(
+                    "Now describe the full image in detail, using the close-up observations and the labeled objects. "
+                    "Summarize repetitive objects (e.g., many cars as a parking lot) unless only a few are present or a specific action stands out."
+                )
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
             draft_prompt = (

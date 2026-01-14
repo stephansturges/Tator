@@ -197,7 +197,7 @@ QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", False)
 QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
 QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
 QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
-QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", int(round(math.sqrt(QWEN_VRAM_PIXEL_BASE))))
+QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
 QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
 
 # Rough VRAM estimates (GB) for Qwen3 training defaults (batch=1, default pixel budget).
@@ -27686,6 +27686,12 @@ def qwen_status():
     }
 
 
+@app.post("/qwen/unload")
+def qwen_unload():
+    _unload_qwen_runtime()
+    return {"status": "unloaded"}
+
+
 @app.post("/qwen/infer", response_model=QwenInferenceResponse)
 def qwen_infer(payload: QwenInferenceRequest):
     prompt_type = payload.prompt_type.lower()
@@ -27882,7 +27888,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 for x0, y0, size, caption in windowed_captions:
                     window_lines.append(f"- [{x0},{y0},{x0 + size},{y0 + size}]: {caption}")
                 window_lines.append("Use the window summaries to enrich the final caption.")
-                prompt_text = f\"{prompt_text}\\n\" + \"\\n\".join(window_lines)
+                prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
             draft_prompt = (
                 "Step 1: Look at the image and form a draft caption.\n"

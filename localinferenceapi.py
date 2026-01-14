@@ -82,11 +82,13 @@ try:
         AutoConfig,
         AutoModelForCausalLM,
         Qwen3VLForConditionalGeneration,
+        Qwen3VLMoeForConditionalGeneration,
     )
     from qwen_vl_utils import process_vision_info
 except Exception as exc:  # noqa: BLE001
     QWEN_IMPORT_ERROR = exc
     Qwen3VLForConditionalGeneration = None  # type: ignore[assignment]
+    Qwen3VLMoeForConditionalGeneration = None  # type: ignore[assignment]
     AutoConfig = None  # type: ignore[assignment]
     AutoModelForCausalLM = None  # type: ignore[assignment]
     AutoProcessor = None  # type: ignore[assignment]
@@ -3195,7 +3197,9 @@ def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any]) -> Any:
         try:
             config = AutoConfig.from_pretrained(str(model_id), trust_remote_code=False)
             model_type = getattr(config, "model_type", None)
-            if model_type not in (None, "qwen3_vl"):
+            if model_type == "qwen3_vl_moe" and Qwen3VLMoeForConditionalGeneration is not None:
+                return Qwen3VLMoeForConditionalGeneration.from_pretrained(str(model_id), **load_kwargs)
+            if model_type not in (None, "qwen3_vl", "qwen3_vl_moe"):
                 logging.warning(
                     "Qwen model_type=%s may require trust_remote_code; set QWEN_TRUST_REMOTE_CODE=1 to enable.",
                     model_type,
@@ -3210,8 +3214,12 @@ def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any]) -> Any:
         config = AutoConfig.from_pretrained(str(model_id), trust_remote_code=True)
     except Exception:
         config = None
-    if config is not None and getattr(config, "model_type", None) not in (None, "qwen3_vl"):
-        return AutoModelForCausalLM.from_pretrained(str(model_id), trust_remote_code=True, **load_kwargs)
+    if config is not None:
+        model_type = getattr(config, "model_type", None)
+        if model_type == "qwen3_vl_moe" and Qwen3VLMoeForConditionalGeneration is not None:
+            return Qwen3VLMoeForConditionalGeneration.from_pretrained(str(model_id), **load_kwargs)
+        if model_type not in (None, "qwen3_vl", "qwen3_vl_moe"):
+            return AutoModelForCausalLM.from_pretrained(str(model_id), trust_remote_code=True, **load_kwargs)
     return Qwen3VLForConditionalGeneration.from_pretrained(str(model_id), **load_kwargs)
 
 

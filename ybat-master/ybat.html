@@ -214,6 +214,9 @@
                                 <input type="number" id="qwenMaxResults" min="1" max="50" value="8" />
                                 <button type="button" id="qwenRunButton" class="training-button" disabled>Use Qwen</button>
                                 <p class="qwen-hint">Uses the prompts saved with the active Qwen model; add extra context via the advanced overrides when needed.</p>
+                                <div class="qwen-caption-options">
+                                    <label><input type="checkbox" id="qwenUnloadOthers" /> Unload other models before Qwen run<span class="help-icon" title="Frees GPU memory by unloading SAM predictors, detectors, and classifier backbones before running Qwen. Slower if you switch back.">?</span></label>
+                                </div>
                                 <div class="qwen-caption">
                                     <div class="qwen-caption__header">
                                         <strong>Caption current image</strong>

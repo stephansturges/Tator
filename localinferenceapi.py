@@ -379,12 +379,12 @@ def _unload_detector_inference() -> None:
     rfdetr_infer_variant = None
 
 
-def _prepare_for_training() -> None:
-    """Free heavy inference runtimes before starting a training job."""
+def _unload_inference_runtimes() -> None:
+    """Free heavy inference runtimes (SAM, detectors, Qwen, classifier backbones)."""
     try:
         predictor_manager.unload_all()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to unload SAM predictors before training: %s", exc)
+        logger.warning("Failed to unload SAM predictors: %s", exc)
     _unload_sam3_text_runtime()
     _unload_qwen_runtime()
     _unload_prompt_llm_runtime()
@@ -396,6 +396,11 @@ def _prepare_for_training() -> None:
             torch.cuda.empty_cache()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _prepare_for_training() -> None:
+    """Free heavy inference runtimes before starting a training job."""
+    _unload_inference_runtimes()
 
 
 def _finalize_training_environment() -> None:
@@ -27746,6 +27751,12 @@ def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
             QWEN_TRUST_REMOTE_CODE = desired
             _unload_qwen_runtime()
     return QwenRuntimeSettings(trust_remote_code=QWEN_TRUST_REMOTE_CODE)
+
+
+@app.post("/runtime/unload")
+def unload_all_runtimes():
+    _unload_inference_runtimes()
+    return {"status": "unloaded"}
 
 
 @app.post("/qwen/unload")

@@ -1351,6 +1351,7 @@
         captionCopyButton: null,
         captionMeta: null,
         captionStatus: null,
+        unloadOthers: null,
     };
     const sam3TextElements = {
         panel: null,
@@ -12672,6 +12673,7 @@ function initQwenTrainingTab() {
         qwenElements.captionCopyButton = document.getElementById("qwenCaptionCopy");
         qwenElements.captionMeta = document.getElementById("qwenCaptionMeta");
         qwenElements.captionStatus = document.getElementById("qwenCaptionStatus");
+        qwenElements.unloadOthers = document.getElementById("qwenUnloadOthers");
         if (qwenElements.captionModel) {
             qwenElements.captionModel.addEventListener("change", () => {
                 const selected = qwenElements.captionModel.value;
@@ -14750,6 +14752,14 @@ function initQwenTrainingTab() {
         updateQwenRunButton();
         setSamStatus(`Running Qwen (${promptType === "point" ? "points" : "bbox"}) for ${targetClass}…`, { variant: "info", duration: 0 });
         try {
+            if (qwenElements.unloadOthers?.checked) {
+                setSamStatus("Unloading other models before Qwen run…", { variant: "info", duration: 2000 });
+                try {
+                    await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                } catch (error) {
+                    console.warn("Failed to unload other runtimes", error);
+                }
+            }
             const requestFields = {
                 prompt_type: promptType,
                 max_results: maxResults,
@@ -14886,6 +14896,14 @@ function initQwenTrainingTab() {
         setQwenCaptionStatus("Running…");
         setSamStatus("Running Qwen caption…", { variant: "info", duration: 0 });
         try {
+            if (qwenElements.unloadOthers?.checked) {
+                setSamStatus("Unloading other models before Qwen run…", { variant: "info", duration: 2000 });
+                try {
+                    await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                } catch (error) {
+                    console.warn("Failed to unload other runtimes", error);
+                }
+            }
             let maxTokens = parseInt(qwenElements.captionMaxTokens?.value || "128", 10);
             if (Number.isNaN(maxTokens)) {
                 maxTokens = 128;

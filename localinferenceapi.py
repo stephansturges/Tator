@@ -27295,7 +27295,7 @@ def yolo_predict_region(payload: YoloRegionRequest):
     if payload.image_is_cropped:
         if payload.full_width is None or payload.full_height is None:
             warnings.append("full_size_missing")
-        if int(right - left) != img_w or int(bottom - top) != img_h:
+        if abs((right - left) - img_w) > 0.5 or abs((bottom - top) - img_h) > 0.5:
             warnings.append("region_crop_mismatch")
         right = min(full_w, left + img_w)
         bottom = min(full_h, top + img_h)
@@ -27377,7 +27377,7 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
     if payload.image_is_cropped:
         if payload.full_width is None or payload.full_height is None:
             warnings.append("full_size_missing")
-        if int(right - left) != img_w or int(bottom - top) != img_h:
+        if abs((right - left) - img_w) > 0.5 or abs((bottom - top) - img_h) > 0.5:
             warnings.append("region_crop_mismatch")
         right = min(full_w, left + img_w)
         bottom = min(full_h, top + img_h)

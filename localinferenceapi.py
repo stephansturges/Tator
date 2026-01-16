@@ -6331,6 +6331,53 @@ def _yolo_load_labelmap(labelmap_path: Path) -> List[str]:
         return []
 
 
+def _validate_yolo_label_ids(labels_dir: Path, label_count: int) -> None:
+    if label_count <= 0:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_empty")
+    if not labels_dir.exists():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labels_dir_missing")
+    for label_path in labels_dir.rglob("*.txt"):
+        rel_name = None
+        try:
+            rel_name = str(label_path.relative_to(labels_dir))
+        except Exception:
+            rel_name = str(label_path.name)
+        try:
+            with label_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line_no, line in enumerate(handle, 1):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    parts = stripped.split()
+                    if not parts:
+                        continue
+                    try:
+                        raw = float(parts[0])
+                    except Exception:
+                        raise HTTPException(
+                            status_code=HTTP_400_BAD_REQUEST,
+                            detail=f"labelmap_class_id_invalid:{rel_name}:{line_no}",
+                        )
+                    idx = int(raw)
+                    if abs(raw - idx) > 1e-6:
+                        raise HTTPException(
+                            status_code=HTTP_400_BAD_REQUEST,
+                            detail=f"labelmap_class_id_non_int:{rel_name}:{line_no}",
+                        )
+                    if idx < 0 or idx >= label_count:
+                        raise HTTPException(
+                            status_code=HTTP_400_BAD_REQUEST,
+                            detail=f"labelmap_class_id_out_of_range:{idx}/{label_count}:{rel_name}:{line_no}",
+                        )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"labelmap_label_read_failed:{rel_name}:{exc}",
+            ) from exc
+
+
 def _rfdetr_load_labelmap(dataset_root: Path, coco_train_json: Optional[str] = None) -> List[str]:
     labelmap_path = dataset_root / "labelmap.txt"
     if labelmap_path.exists():
@@ -19294,6 +19341,17 @@ def build_dataset_qwen_artifact(
     payload: QwenDatasetBuildRequest = Body(default_factory=QwenDatasetBuildRequest),
 ):
     dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    labelmap_path = dataset_root / "labelmap.txt"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    root_images = dataset_root / "images"
+    root_labels = dataset_root / "labels"
+    has_yolo = labelmap_path.exists() and (
+        (train_images.exists() and train_labels.exists())
+        or (root_images.exists() and root_labels.exists())
+    )
+    if not has_yolo:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_layout_missing")
     entry = None
     for candidate in _list_all_datasets(prefer_registry=True):
         if dataset_id in (candidate.get("id"), candidate.get("signature")):
@@ -19361,6 +19419,9 @@ async def upload_dataset_zip(
                 labelmap = [line.strip() for line in handle if line.strip()]
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"labelmap_txt_invalid:{exc}") from exc
+        if not labelmap:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_empty")
+        _validate_yolo_label_ids(train_labels, len(labelmap))
         shutil.move(str(dataset_root), str(target_dir))
         dataset_kind = (dataset_type or "").strip().lower() or _infer_yolo_dataset_type(target_dir / "train" / "labels", "bbox")
         if dataset_kind not in {"bbox", "seg"}:

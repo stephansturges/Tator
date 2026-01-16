@@ -27410,6 +27410,7 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
         scores = getattr(results, "confidence", None)
         class_ids = getattr(results, "class_id", None)
         if xyxy is not None and len(xyxy):
+            raw_entries: List[Tuple[Optional[float], RfDetrRegionDetection]] = []
             for idx, box in enumerate(xyxy):
                 x1, y1, x2, y2 = [float(v) for v in box[:4]]
                 cx = (x1 + x2) / 2 + left
@@ -27427,16 +27428,21 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
                 if class_id >= 0 and class_id < len(labelmap):
                     class_name = labelmap[class_id]
                 score = float(scores[idx]) if scores is not None else None
-                detections.append(
-                    RfDetrRegionDetection(
-                        bbox=[abs_x, abs_y, abs_w, abs_h],
-                        class_id=class_id,
-                        class_name=class_name,
-                        score=score,
+                raw_entries.append(
+                    (
+                        score,
+                        RfDetrRegionDetection(
+                            bbox=[abs_x, abs_y, abs_w, abs_h],
+                            class_id=class_id,
+                            class_name=class_name,
+                            score=score,
+                        ),
                     )
                 )
-                if len(detections) >= max_det:
-                    break
+            if raw_entries:
+                if any(score is not None for score, _ in raw_entries):
+                    raw_entries.sort(key=lambda item: item[0] if item[0] is not None else -1.0, reverse=True)
+                detections = [entry for _, entry in raw_entries[:max_det]]
     return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 

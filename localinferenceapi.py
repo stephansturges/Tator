@@ -5585,6 +5585,13 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 if yolo_seg_ready and dataset_type != "seg":
                     dataset_type = "seg"
             signature = meta.get("signature") or ""
+            caption_count, caption_dir_present = _count_caption_labels(path)
+            image_total = meta.get("image_count")
+            if not image_total:
+                image_total = _count_dataset_images(path)
+            caption_percent = None
+            if image_total and image_total > 0:
+                caption_percent = (caption_count / image_total) * 100.0
             key = signature or meta["id"]
             entry = {
                 "id": meta.get("id") or path.name,
@@ -5613,6 +5620,10 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 "qwen_ready": qwen_ready,
                 "qwen_train_count": qwen_meta.get("train_count") if qwen_meta else None,
                 "qwen_val_count": qwen_meta.get("val_count") if qwen_meta else None,
+                "caption_count": caption_count,
+                "caption_dir": caption_dir_present,
+                "caption_percent": caption_percent,
+                "caption_total": image_total,
             }
             existing = seen.get(key)
             if existing is not None:
@@ -19020,6 +19031,50 @@ def _count_images_in_dir(images_dir: Path) -> int:
         if path.is_file() and path.suffix.lower() in exts:
             count += 1
     return count
+
+
+def _count_dataset_images(dataset_root: Path) -> int:
+    train_images = dataset_root / "train" / "images"
+    val_images = dataset_root / "val" / "images"
+    root_images = dataset_root / "images"
+    count = 0
+    if train_images.exists():
+        count += _count_images_in_dir(train_images)
+        if val_images.exists():
+            count += _count_images_in_dir(val_images)
+        return count
+    if root_images.exists():
+        return _count_images_in_dir(root_images)
+    return 0
+
+
+def _count_caption_labels(dataset_root: Path) -> Tuple[int, bool]:
+    captions_dir = dataset_root / "text_labels"
+    if not captions_dir.exists():
+        return 0, False
+    stems: set[str] = set()
+    jsonl_path = captions_dir / "captions.jsonl"
+    if jsonl_path.exists():
+        try:
+            with jsonl_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except Exception:
+                        continue
+                    image_name = payload.get("image")
+                    if isinstance(image_name, str) and image_name.strip():
+                        stems.add(Path(image_name).stem)
+        except Exception:
+            pass
+    for path in captions_dir.rglob("*.txt"):
+        if path.name == "captions.jsonl":
+            continue
+        stems.add(path.stem)
+    return len(stems), True
 
 
 def _infer_yolo_dataset_type(labels_dir: Path, fallback: str = "bbox") -> str:

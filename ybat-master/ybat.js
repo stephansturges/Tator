@@ -2168,13 +2168,30 @@ const sam3TrainState = {
 	                        cocoBadge.title = "COCO annotations present (used by SAM3 training + recipe mining).";
 	                        badgeWrap.appendChild(cocoBadge);
 	                    }
-	                    if (entry.qwen_ready) {
-	                        const qwenBadge = document.createElement("span");
-	                        qwenBadge.className = "badge";
-	                        qwenBadge.textContent = "QWEN";
-	                        qwenBadge.title = "Qwen JSONL annotations present (used by Qwen training).";
-	                        badgeWrap.appendChild(qwenBadge);
-	                    }
+                    if (entry.qwen_ready) {
+                        const qwenBadge = document.createElement("span");
+                        qwenBadge.className = "badge";
+                        qwenBadge.textContent = "QWEN";
+                        qwenBadge.title = "Qwen JSONL annotations present (used by Qwen training).";
+                        badgeWrap.appendChild(qwenBadge);
+                    }
+                    if (entry.caption_count || entry.caption_dir) {
+                        const captionBadge = document.createElement("span");
+                        captionBadge.className = "badge";
+                        const percent = typeof entry.caption_percent === "number"
+                            ? Math.round(entry.caption_percent)
+                            : null;
+                        if (percent !== null && Number.isFinite(percent)) {
+                            captionBadge.textContent = `CAPTIONS ${percent}%`;
+                            captionBadge.title = `Captions for ${entry.caption_count || 0} of ${entry.caption_total || 0} images.`;
+                        } else {
+                            captionBadge.textContent = entry.caption_count ? "CAPTIONS" : "CAPTIONS none";
+                            captionBadge.title = entry.caption_count
+                                ? `Captions detected (${entry.caption_count}).`
+                                : "No caption labels detected.";
+                        }
+                        badgeWrap.appendChild(captionBadge);
+                    }
 	                    header.appendChild(title);
 	                    header.appendChild(badgeWrap);
 	                    const actions = document.createElement("div");

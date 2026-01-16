@@ -148,17 +148,17 @@
                                 <input type="checkbox" id="multiPointMode" name="multiPointMode" />
                             </div>
                             <div class="training-field">
-                                <label for="regionDetector">Region detector</label>
+                                <label for="regionDetector">Detector model</label>
                                 <select id="regionDetector">
                                     <option value="rfdetr" selected>RF-DETR</option>
                                     <option value="yolo">YOLOv8</option>
                                 </select>
-                                <div class="training-help">Used when you hold R and drag a region on the canvas.</div>
+                                <div class="training-help">Used for region, full-image, and windowed detection runs.</div>
                             </div>
                             <div class="training-field">
-                                <label for="yoloRegionConf">Region conf<span class="help-icon" title="Hold R and drag to run the selected detector only on the region. Zooming in gives the model more detail. Lower = more detections, higher = stricter.">?</span></label>
+                                <label for="yoloRegionConf">Detector conf<span class="help-icon" title="Runs the selected detector. Lower = more detections, higher = stricter.">?</span></label>
                                 <input type="number" id="yoloRegionConf" value="0.25" min="0" max="1" step="0.01" />
-                                <div class="training-help">Runs the selected detector on the crop at full model resolution. Detections are kept if their center lands inside the region.</div>
+                                <div class="training-help">Used for region, full-image, and windowed detection.</div>
                             </div>
                             <div class="training-field">
                                 <label for="yoloRegionIou">Region IoU<span class="help-icon" title="Non-max suppression threshold (YOLO only). Higher keeps more overlapping boxes.">?</span></label>
@@ -167,6 +167,46 @@
                             <div class="training-field">
                                 <label for="yoloRegionMaxDet">Region max dets<span class="help-icon" title="Max boxes returned for the selected region.">?</span></label>
                                 <input type="number" id="yoloRegionMaxDet" value="100" min="1" step="1" />
+                            </div>
+                            <div class="training-field">
+                                <label for="detectorRunMode">Detector mode</label>
+                                <select id="detectorRunMode">
+                                    <option value="full" selected>Full image</option>
+                                    <option value="windowed">Windowed (SAHI)</option>
+                                </select>
+                                <div class="training-help">Full image runs once; windowed splits the image into overlapping tiles for small-object recall.</div>
+                            </div>
+                            <div id="detectorWindowOptions">
+                                <div class="training-field">
+                                    <label for="detectorSliceSize">Window size (px)<span class="help-icon" title="Tile size for windowed detection. Smaller tiles find tiny objects but cost more time.">?</span></label>
+                                    <input type="number" id="detectorSliceSize" value="640" min="64" step="32" />
+                                </div>
+                                <div class="training-field">
+                                    <label for="detectorSliceOverlap">Window overlap<span class="help-icon" title="Overlap between tiles (0–0.9). Higher overlap reduces missed objects at tile edges.">?</span></label>
+                                    <input type="number" id="detectorSliceOverlap" value="0.2" min="0" max="0.9" step="0.05" />
+                                </div>
+                                <div class="training-field">
+                                    <label for="detectorMergeIou">Merge IoU<span class="help-icon" title="NMS threshold used to merge detections across tiles. Higher keeps more overlaps.">?</span></label>
+                                    <input type="number" id="detectorMergeIou" value="0.5" min="0" max="1" step="0.05" />
+                                </div>
+                            </div>
+                            <div class="training-actions" style="margin-top: 6px;">
+                                <button type="button" id="detectorRunButton" class="training-button secondary">Run detector (current image)</button>
+                            </div>
+                            <div class="training-field">
+                                <label for="detectorBatchCount">Apply to next N images</label>
+                                <input type="number" id="detectorBatchCount" min="1" max="999" value="5" />
+                            </div>
+                            <div class="training-field training-field--inline">
+                                <label for="detectorBatchIncludeCurrent">Include current image</label>
+                                <input type="checkbox" id="detectorBatchIncludeCurrent" checked />
+                            </div>
+                            <div class="training-actions">
+                                <button type="button" id="detectorBatchRunButton" class="training-button secondary">Run detector batch</button>
+                                <button type="button" id="detectorBatchStopButton" class="training-button secondary" disabled>Stop batch</button>
+                            </div>
+                            <div class="training-actions">
+                                <button type="button" id="detectorBatchAllButton" class="training-button secondary">Run detector on entire dataset</button>
                             </div>
                             <div class="training-field" id="polygonSimplifyField">
                                 <label for="polygonSimplifyEpsilon">Polygon detail</label>
@@ -2571,13 +2611,55 @@
                                 <button type="button" class="training-button" id="detectorDefaultSave">Set default</button>
                                 <button type="button" class="training-button training-button--ghost" id="detectorDefaultRefresh">Refresh</button>
                             </div>
-                            <div class="training-help" id="detectorDefaultHelp">Controls the detector used when you hold R to run region inference in the labeling page.</div>
+                            <div class="training-help" id="detectorDefaultHelp">Controls the detector used for region, full-image, and windowed inference in the labeling page.</div>
                         </div>
                         <div class="training-field">
                             <label>Active detectors</label>
                             <div class="training-help" id="detectorActiveStatus">Loading active detector status…</div>
                         </div>
                         <div class="training-message" id="detectorDefaultMessage" role="status"></div>
+                        <div class="training-card" style="margin-top: 16px;">
+                            <div class="training-card__header">
+                                <div class="training-card__title">YOLO runs</div>
+                            </div>
+                            <div class="training-card__body">
+                                <label for="detectorYoloRunSelect">Saved YOLO runs</label>
+                                <div class="sam3-dataset-row">
+                                    <select id="detectorYoloRunSelect"></select>
+                                    <button type="button" class="training-button" id="detectorYoloRunRefresh">Refresh</button>
+                                </div>
+                                <div class="training-actions">
+                                    <button type="button" class="training-button secondary" id="detectorYoloRunActivate">Activate</button>
+                                    <button type="button" class="training-button secondary" id="detectorYoloRunDownload">Download</button>
+                                    <button type="button" class="training-button secondary" id="detectorYoloRunDelete">Delete</button>
+                                </div>
+                                <div class="training-help" id="detectorYoloRunSummary"></div>
+                                <div class="training-help" id="detectorYoloRunMetrics"></div>
+                                <div class="training-help" id="detectorYoloRunLabelmap"></div>
+                                <div class="training-message" id="detectorYoloRunMessage" role="status"></div>
+                            </div>
+                        </div>
+                        <div class="training-card" style="margin-top: 16px;">
+                            <div class="training-card__header">
+                                <div class="training-card__title">RF-DETR runs</div>
+                            </div>
+                            <div class="training-card__body">
+                                <label for="detectorRfDetrRunSelect">Saved RF-DETR runs</label>
+                                <div class="sam3-dataset-row">
+                                    <select id="detectorRfDetrRunSelect"></select>
+                                    <button type="button" class="training-button" id="detectorRfDetrRunRefresh">Refresh</button>
+                                </div>
+                                <div class="training-actions">
+                                    <button type="button" class="training-button secondary" id="detectorRfDetrRunActivate">Activate</button>
+                                    <button type="button" class="training-button secondary" id="detectorRfDetrRunDownload">Download</button>
+                                    <button type="button" class="training-button secondary" id="detectorRfDetrRunDelete">Delete</button>
+                                </div>
+                                <div class="training-help" id="detectorRfDetrRunSummary"></div>
+                                <div class="training-help" id="detectorRfDetrRunMetrics"></div>
+                                <div class="training-help" id="detectorRfDetrRunLabelmap"></div>
+                                <div class="training-message" id="detectorRfDetrRunMessage" role="status"></div>
+                            </div>
+                        </div>
                     </section>
                 </div>
             </div>

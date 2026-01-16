@@ -54,5 +54,8 @@ decord>=0.6,<1.0
 # opencv-python       # common image ops (not strictly required)
 # matplotlib          # plotting in notebooks/scripts
 
+# Windowed detection helper
+sahi>=0.11,<0.12
+
 # Observability (optional)
 prometheus-client>=0.16,<1.0

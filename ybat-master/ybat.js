@@ -194,6 +194,19 @@
     let yoloRegionConfInput = null;
     let yoloRegionIouInput = null;
     let yoloRegionMaxDetInput = null;
+    let detectorRunModeSelect = null;
+    let detectorSliceSizeInput = null;
+    let detectorSliceOverlapInput = null;
+    let detectorMergeIouInput = null;
+    let detectorWindowOptions = null;
+    let detectorRunButton = null;
+    let detectorBatchCountInput = null;
+    let detectorBatchIncludeCurrentToggle = null;
+    let detectorBatchRunButton = null;
+    let detectorBatchStopButton = null;
+    let detectorBatchAllButton = null;
+    let detectorBatchActive = false;
+    let detectorBatchCancel = false;
     let samModeCheckbox = null;
     let pointModeCheckbox = null;
     let multiPointModeCheckbox = null;
@@ -294,6 +307,14 @@
             const mode = (regionDetectorSelect.value || "yolo").toLowerCase();
             yoloRegionIouInput.disabled = mode !== "yolo";
         }
+    }
+
+    function syncDetectorRunModeInputs() {
+        if (!detectorRunModeSelect || !detectorWindowOptions) {
+            return;
+        }
+        const mode = (detectorRunModeSelect.value || "full").toLowerCase();
+        detectorWindowOptions.style.display = mode === "windowed" ? "" : "none";
     }
 
     async function fetchDetectorDefault() {
@@ -438,6 +459,24 @@
         detectorElements.defaultRefresh = document.getElementById("detectorDefaultRefresh");
         detectorElements.status = document.getElementById("detectorActiveStatus");
         detectorElements.message = document.getElementById("detectorDefaultMessage");
+        detectorElements.yoloSelect = document.getElementById("detectorYoloRunSelect");
+        detectorElements.yoloRefresh = document.getElementById("detectorYoloRunRefresh");
+        detectorElements.yoloActivate = document.getElementById("detectorYoloRunActivate");
+        detectorElements.yoloDownload = document.getElementById("detectorYoloRunDownload");
+        detectorElements.yoloDelete = document.getElementById("detectorYoloRunDelete");
+        detectorElements.yoloSummary = document.getElementById("detectorYoloRunSummary");
+        detectorElements.yoloMetrics = document.getElementById("detectorYoloRunMetrics");
+        detectorElements.yoloLabelmap = document.getElementById("detectorYoloRunLabelmap");
+        detectorElements.yoloMessage = document.getElementById("detectorYoloRunMessage");
+        detectorElements.rfdetrSelect = document.getElementById("detectorRfDetrRunSelect");
+        detectorElements.rfdetrRefresh = document.getElementById("detectorRfDetrRunRefresh");
+        detectorElements.rfdetrActivate = document.getElementById("detectorRfDetrRunActivate");
+        detectorElements.rfdetrDownload = document.getElementById("detectorRfDetrRunDownload");
+        detectorElements.rfdetrDelete = document.getElementById("detectorRfDetrRunDelete");
+        detectorElements.rfdetrSummary = document.getElementById("detectorRfDetrRunSummary");
+        detectorElements.rfdetrMetrics = document.getElementById("detectorRfDetrRunMetrics");
+        detectorElements.rfdetrLabelmap = document.getElementById("detectorRfDetrRunLabelmap");
+        detectorElements.rfdetrMessage = document.getElementById("detectorRfDetrRunMessage");
         if (detectorElements.defaultSave) {
             detectorElements.defaultSave.addEventListener("click", () => {
                 saveDetectorDefault().catch((err) => console.warn("Detector default save failed", err));
@@ -455,6 +494,60 @@
         applyDetectorDefault(mode);
         await refreshDetectorStatus();
         await maybeAutoSelectDetectorRun();
+        if (detectorElements.yoloRefresh) {
+            detectorElements.yoloRefresh.addEventListener("click", () => {
+                loadYoloRunList(true).catch((err) => console.warn("Detector YOLO refresh failed", err));
+            });
+        }
+        if (detectorElements.rfdetrRefresh) {
+            detectorElements.rfdetrRefresh.addEventListener("click", () => {
+                loadRfDetrRunList(true).catch((err) => console.warn("Detector RF-DETR refresh failed", err));
+            });
+        }
+        if (detectorElements.yoloSelect) {
+            detectorElements.yoloSelect.addEventListener("change", () => {
+                yoloRunState.selectedId = detectorElements.yoloSelect.value || null;
+                updateDetectorRunSummary("yolo").catch((err) => console.warn("Detector YOLO summary failed", err));
+            });
+        }
+        if (detectorElements.rfdetrSelect) {
+            detectorElements.rfdetrSelect.addEventListener("change", () => {
+                rfdetrRunState.selectedId = detectorElements.rfdetrSelect.value || null;
+                updateDetectorRunSummary("rfdetr").catch((err) => console.warn("Detector RF-DETR summary failed", err));
+            });
+        }
+        if (detectorElements.yoloActivate) {
+            detectorElements.yoloActivate.addEventListener("click", () => {
+                setActiveDetectorRun("yolo").catch((err) => console.warn("Detector YOLO activate failed", err));
+            });
+        }
+        if (detectorElements.rfdetrActivate) {
+            detectorElements.rfdetrActivate.addEventListener("click", () => {
+                setActiveDetectorRun("rfdetr").catch((err) => console.warn("Detector RF-DETR activate failed", err));
+            });
+        }
+        if (detectorElements.yoloDownload) {
+            detectorElements.yoloDownload.addEventListener("click", () => {
+                downloadDetectorRun("yolo").catch((err) => console.warn("Detector YOLO download failed", err));
+            });
+        }
+        if (detectorElements.rfdetrDownload) {
+            detectorElements.rfdetrDownload.addEventListener("click", () => {
+                downloadDetectorRun("rfdetr").catch((err) => console.warn("Detector RF-DETR download failed", err));
+            });
+        }
+        if (detectorElements.yoloDelete) {
+            detectorElements.yoloDelete.addEventListener("click", () => {
+                deleteDetectorRun("yolo").catch((err) => console.warn("Detector YOLO delete failed", err));
+            });
+        }
+        if (detectorElements.rfdetrDelete) {
+            detectorElements.rfdetrDelete.addEventListener("click", () => {
+                deleteDetectorRun("rfdetr").catch((err) => console.warn("Detector RF-DETR delete failed", err));
+            });
+        }
+        await loadYoloRunList(false);
+        await loadRfDetrRunList(false);
     }
 
     function initHelpTooltips() {
@@ -1282,6 +1375,24 @@
         defaultRefresh: null,
         status: null,
         message: null,
+        yoloSelect: null,
+        yoloRefresh: null,
+        yoloActivate: null,
+        yoloDownload: null,
+        yoloDelete: null,
+        yoloSummary: null,
+        yoloMetrics: null,
+        yoloLabelmap: null,
+        yoloMessage: null,
+        rfdetrSelect: null,
+        rfdetrRefresh: null,
+        rfdetrActivate: null,
+        rfdetrDownload: null,
+        rfdetrDelete: null,
+        rfdetrSummary: null,
+        rfdetrMetrics: null,
+        rfdetrLabelmap: null,
+        rfdetrMessage: null,
     };
     const detectorState = {
         mode: "rfdetr",
@@ -1291,6 +1402,10 @@
             yolo: false,
             rfdetr: false,
         },
+    };
+    const detectorRunSummaryCache = {
+        yolo: new Map(),
+        rfdetr: new Map(),
     };
 
 
@@ -3078,6 +3193,118 @@ const sam3TrainState = {
         rfdetrTrainElements.runSummary.textContent = `${datasetLabel} • created ${created}${activeTag} • ${artifactText}`;
     }
 
+    async function fetchDetectorRunSummary(mode, runId) {
+        const cache = detectorRunSummaryCache[mode];
+        if (!runId || !cache) {
+            return null;
+        }
+        if (cache.has(runId)) {
+            return cache.get(runId);
+        }
+        const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        try {
+            const resp = await fetch(`${API_ROOT}/${endpoint}/runs/${encodeURIComponent(runId)}/summary`);
+            if (!resp.ok) throw new Error(await resp.text());
+            const data = await resp.json();
+            cache.set(runId, data);
+            return data;
+        } catch (err) {
+            console.warn("Detector summary fetch failed", err);
+            return null;
+        }
+    }
+
+    function formatMetricValue(value) {
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+            return "n/a";
+        }
+        return value.toFixed(3);
+    }
+
+    function formatLabelmapPreview(labelmap) {
+        if (!Array.isArray(labelmap) || !labelmap.length) {
+            return "Labelmap: missing";
+        }
+        const preview = labelmap.slice(0, 8).join(", ");
+        const extra = labelmap.length > 8 ? ` +${labelmap.length - 8} more` : "";
+        return `Labelmap (${labelmap.length}): ${preview}${extra}`;
+    }
+
+    async function updateDetectorRunSummary(mode) {
+        const isYolo = mode === "yolo";
+        const entry = isYolo ? getSelectedYoloRun() : getSelectedRfDetrRun();
+        const summaryEl = isYolo ? detectorElements.yoloSummary : detectorElements.rfdetrSummary;
+        const metricsEl = isYolo ? detectorElements.yoloMetrics : detectorElements.rfdetrMetrics;
+        const labelmapEl = isYolo ? detectorElements.yoloLabelmap : detectorElements.rfdetrLabelmap;
+        if (!summaryEl || !metricsEl || !labelmapEl) {
+            return;
+        }
+        if (!entry) {
+            summaryEl.textContent = "No runs available.";
+            metricsEl.textContent = "";
+            labelmapEl.textContent = "";
+            return;
+        }
+        const datasetLabel = entry.dataset_label ? `dataset: ${entry.dataset_label}` : "dataset: unknown";
+        const created = entry.created_at ? new Date(entry.created_at * 1000).toLocaleString() : "unknown";
+        const activeTag = entry.is_active ? " • active" : "";
+        summaryEl.textContent = `${datasetLabel} • created ${created}${activeTag}`;
+        metricsEl.textContent = "Metrics: loading…";
+        labelmapEl.textContent = "Labelmap: loading…";
+        const summary = await fetchDetectorRunSummary(mode, entry.run_id);
+        if (summary && summary.metrics && typeof summary.metrics === "object") {
+            const metrics = summary.metrics || {};
+            const parts = [];
+            if (metrics.map50_95 !== undefined) parts.push(`mAP50-95 ${formatMetricValue(metrics.map50_95)}`);
+            if (metrics.map50 !== undefined) parts.push(`mAP50 ${formatMetricValue(metrics.map50)}`);
+            if (metrics.map !== undefined) parts.push(`mAP ${formatMetricValue(metrics.map)}`);
+            if (metrics.map75 !== undefined) parts.push(`mAP75 ${formatMetricValue(metrics.map75)}`);
+            if (metrics.precision !== undefined) parts.push(`P ${formatMetricValue(metrics.precision)}`);
+            if (metrics.recall !== undefined) parts.push(`R ${formatMetricValue(metrics.recall)}`);
+            metricsEl.textContent = parts.length ? `Metrics: ${parts.join(" • ")}` : "Metrics: unavailable";
+        } else {
+            metricsEl.textContent = "Metrics: unavailable";
+        }
+        labelmapEl.textContent = formatLabelmapPreview(summary?.labelmap);
+    }
+
+    function populateDetectorRunSelect(mode) {
+        const isYolo = mode === "yolo";
+        const select = isYolo ? detectorElements.yoloSelect : detectorElements.rfdetrSelect;
+        const state = isYolo ? yoloRunState : rfdetrRunState;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!state.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No runs available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            state.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.run_id || "";
+                const label = entry.run_name || entry.run_id;
+                const datasetTag = entry.dataset_label ? ` • ${entry.dataset_label}` : "";
+                const activeTag = entry.is_active ? " (active)" : "";
+                option.textContent = `${label}${datasetTag}${activeTag}`;
+                select.appendChild(option);
+            });
+            const activeRun = state.items.find((entry) => entry.is_active);
+            if (activeRun) {
+                state.selectedId = activeRun.run_id;
+                state.activeId = activeRun.run_id;
+            } else if (!state.selectedId || !state.items.some((entry) => entry.run_id === state.selectedId)) {
+                state.selectedId = state.items[0].run_id;
+            }
+            select.disabled = false;
+            select.value = state.selectedId || "";
+        }
+        updateDetectorRunSummary(mode).catch((err) => console.warn("Detector summary update failed", err));
+    }
+
     function populateRfDetrRunSelect() {
         const select = rfdetrTrainElements.runSelect;
         if (!select) {
@@ -3116,7 +3343,11 @@ const sam3TrainState = {
     async function loadRfDetrRunList(force = false) {
         if (!force && rfdetrRunState.items.length) {
             populateRfDetrRunSelect();
+            populateDetectorRunSelect("rfdetr");
             return rfdetrRunState.items;
+        }
+        if (force) {
+            detectorRunSummaryCache.rfdetr.clear();
         }
         try {
             const resp = await fetch(`${API_ROOT}/rfdetr/runs`);
@@ -3126,6 +3357,7 @@ const sam3TrainState = {
             const data = await resp.json();
             rfdetrRunState.items = Array.isArray(data) ? data : [];
             populateRfDetrRunSelect();
+            populateDetectorRunSelect("rfdetr");
             return rfdetrRunState.items;
         } catch (error) {
             if (rfdetrTrainElements.runSummary) {
@@ -3138,7 +3370,11 @@ const sam3TrainState = {
     async function loadYoloRunList(force = false) {
         if (!force && yoloRunState.items.length) {
             populateYoloRunSelect();
+            populateDetectorRunSelect("yolo");
             return yoloRunState.items;
+        }
+        if (force) {
+            detectorRunSummaryCache.yolo.clear();
         }
         try {
             const resp = await fetch(`${API_ROOT}/yolo/runs`);
@@ -3148,6 +3384,7 @@ const sam3TrainState = {
             const data = await resp.json();
             yoloRunState.items = Array.isArray(data) ? data : [];
             populateYoloRunSelect();
+            populateDetectorRunSelect("yolo");
             return yoloRunState.items;
         } catch (error) {
             if (yoloTrainElements.runSummary) {
@@ -3304,6 +3541,103 @@ const sam3TrainState = {
         } catch (error) {
             console.error("RF-DETR run delete failed", error);
             setRfDetrTrainMessage(error.message || "Failed to delete run", "error");
+        }
+    }
+
+    function setDetectorRunMessage(mode, text, variant = null) {
+        const target = mode === "yolo" ? detectorElements.yoloMessage : detectorElements.rfdetrMessage;
+        if (!target) {
+            return;
+        }
+        target.textContent = text || "";
+        target.classList.remove("error", "warn", "success");
+        if (variant) {
+            target.classList.add(variant);
+        }
+    }
+
+    async function setActiveDetectorRun(mode) {
+        const entry = mode === "yolo" ? getSelectedYoloRun() : getSelectedRfDetrRun();
+        if (!entry) {
+            setDetectorRunMessage(mode, "Select a run to activate.", "warn");
+            return;
+        }
+        const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        try {
+            const resp = await fetch(`${API_ROOT}/${endpoint}/active`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ run_id: entry.run_id }),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            setDetectorRunMessage(mode, "Active run updated.", "success");
+            await refreshDetectorStatus();
+            await (mode === "yolo" ? loadYoloRunList(true) : loadRfDetrRunList(true));
+        } catch (error) {
+            console.error("Detector run activate failed", error);
+            setDetectorRunMessage(mode, error.message || "Failed to activate run", "error");
+        }
+    }
+
+    async function downloadDetectorRun(mode) {
+        const entry = mode === "yolo" ? getSelectedYoloRun() : getSelectedRfDetrRun();
+        if (!entry) {
+            setDetectorRunMessage(mode, "Select a run to download.", "warn");
+            return;
+        }
+        const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        try {
+            const resp = await fetch(`${API_ROOT}/${endpoint}/runs/${encodeURIComponent(entry.run_id)}/download`);
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${entry.run_name || entry.run_id}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error("Detector run download failed", error);
+            setDetectorRunMessage(mode, error.message || "Failed to download run", "error");
+        }
+    }
+
+    async function deleteDetectorRun(mode) {
+        const entry = mode === "yolo" ? getSelectedYoloRun() : getSelectedRfDetrRun();
+        if (!entry) {
+            setDetectorRunMessage(mode, "Select a run to delete.", "warn");
+            return;
+        }
+        const label = entry.run_name || entry.run_id;
+        if (!window.confirm(`Delete ${mode.toUpperCase()} run "${label}"? This cannot be undone.`)) {
+            return;
+        }
+        const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        try {
+            const resp = await fetch(`${API_ROOT}/${endpoint}/runs/${encodeURIComponent(entry.run_id)}`, { method: "DELETE" });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            setDetectorRunMessage(mode, "Run deleted.", "success");
+            if (mode === "yolo") {
+                yoloRunState.selectedId = null;
+                await loadYoloRunList(true);
+            } else {
+                rfdetrRunState.selectedId = null;
+                await loadRfDetrRunList(true);
+            }
+        } catch (error) {
+            console.error("Detector run delete failed", error);
+            setDetectorRunMessage(mode, error.message || "Failed to delete run", "error");
         }
     }
 
@@ -19923,6 +20257,17 @@ function initQwenTrainingTab() {
         yoloRegionConfInput = document.getElementById("yoloRegionConf");
         yoloRegionIouInput = document.getElementById("yoloRegionIou");
         yoloRegionMaxDetInput = document.getElementById("yoloRegionMaxDet");
+        detectorRunModeSelect = document.getElementById("detectorRunMode");
+        detectorSliceSizeInput = document.getElementById("detectorSliceSize");
+        detectorSliceOverlapInput = document.getElementById("detectorSliceOverlap");
+        detectorMergeIouInput = document.getElementById("detectorMergeIou");
+        detectorWindowOptions = document.getElementById("detectorWindowOptions");
+        detectorRunButton = document.getElementById("detectorRunButton");
+        detectorBatchCountInput = document.getElementById("detectorBatchCount");
+        detectorBatchIncludeCurrentToggle = document.getElementById("detectorBatchIncludeCurrent");
+        detectorBatchRunButton = document.getElementById("detectorBatchRunButton");
+        detectorBatchStopButton = document.getElementById("detectorBatchStopButton");
+        detectorBatchAllButton = document.getElementById("detectorBatchAllButton");
         polygonSimplifyInput = document.getElementById("polygonSimplifyEpsilon");
         polygonSimplifyField = document.getElementById("polygonSimplifyField");
         imagesSelectButton = document.getElementById("imagesSelect");
@@ -20010,6 +20355,23 @@ function initQwenTrainingTab() {
             regionDetectorSelect.addEventListener("change", syncRegionDetectorInputs);
             syncRegionDetectorInputs();
         }
+        if (detectorRunModeSelect) {
+            detectorRunModeSelect.addEventListener("change", syncDetectorRunModeInputs);
+            syncDetectorRunModeInputs();
+        }
+        if (detectorRunButton) {
+            detectorRunButton.addEventListener("click", () => handleDetectorRun());
+        }
+        if (detectorBatchRunButton) {
+            detectorBatchRunButton.addEventListener("click", () => startDetectorBatch({ all: false }));
+        }
+        if (detectorBatchStopButton) {
+            detectorBatchStopButton.addEventListener("click", () => stopDetectorBatch());
+        }
+        if (detectorBatchAllButton) {
+            detectorBatchAllButton.addEventListener("click", () => startDetectorBatch({ all: true }));
+        }
+        updateDetectorBatchButtons();
 
 
         if (samVariantSelect) {
@@ -20153,6 +20515,21 @@ function initQwenTrainingTab() {
                 case "full_size_missing":
                     messages.push(`${prefix}: full image size missing; results may be offset.`);
                     break;
+                case "slice_size_clamped":
+                    messages.push(`${prefix}: window size clamped.`);
+                    break;
+                case "overlap_clamped":
+                    messages.push(`${prefix}: window overlap clamped.`);
+                    break;
+                case "merge_iou_clamped":
+                    messages.push(`${prefix}: merge IoU clamped.`);
+                    break;
+                case "sahi_unavailable":
+                    messages.push(`${prefix}: SAHI not available on backend.`);
+                    break;
+                case "sahi_slice_failed":
+                    messages.push(`${prefix}: SAHI slicing failed.`);
+                    break;
                 default:
                     messages.push(`${prefix} warning: ${code}`);
                     break;
@@ -20228,6 +20605,7 @@ function initQwenTrainingTab() {
         if (droppedUnmapped > 0) {
             enqueueTaskNotice(`${labelPrefix}: skipped ${droppedUnmapped} unmapped detections.`, { durationMs: 5000 });
         }
+        return { added, droppedUnmapped };
     };
 
     const runYoloRegionDetect = async (region) => {
@@ -20410,6 +20788,253 @@ function initQwenTrainingTab() {
         shortcutToastState.lastShown[key] = now;
         enqueueTaskNotice(message, { durationMs });
     };
+
+    const getDetectorRunMode = () => {
+        return (detectorRunModeSelect?.value || "full").toLowerCase();
+    };
+
+    const getDetectorWindowConfig = () => {
+        const sliceSize = parseInt(detectorSliceSizeInput?.value, 10);
+        const overlap = parseFloat(detectorSliceOverlapInput?.value);
+        const mergeIou = parseFloat(detectorMergeIouInput?.value);
+        return {
+            slice_size: Number.isFinite(sliceSize) ? sliceSize : 640,
+            overlap: Number.isFinite(overlap) ? overlap : 0.2,
+            merge_iou: Number.isFinite(mergeIou) ? mergeIou : 0.5,
+        };
+    };
+
+    function getDetectorImageList() {
+        const imageList = document.getElementById("imageList");
+        if (!imageList) {
+            return [];
+        }
+        return Array.from(imageList.options || []).map((opt) => getOptionImageName(opt)).filter(Boolean);
+    }
+
+    function getDetectorBatchSelection({ all = false } = {}) {
+        const imageList = document.getElementById("imageList");
+        if (!imageList || !imageList.options.length) {
+            return null;
+        }
+        const includeCurrent = !!detectorBatchIncludeCurrentToggle?.checked;
+        if (all) {
+            const names = getDetectorImageList();
+            const filtered = includeCurrent
+                ? names
+                : names.filter((name) => !currentImage || name !== currentImage.name);
+            return filtered.length ? { names: filtered, includeCurrent } : null;
+        }
+        const countRaw = parseInt(detectorBatchCountInput?.value || "1", 10);
+        const count = Number.isFinite(countRaw) ? Math.max(1, Math.min(999, countRaw)) : 1;
+        const startIndex = Math.max(0, imageList.selectedIndex || 0);
+        const names = [];
+        for (let i = 0; i < count; i += 1) {
+            const idx = includeCurrent ? startIndex + i : startIndex + i + 1;
+            if (idx >= imageList.options.length) {
+                break;
+            }
+            const name = getOptionImageName(imageList.options[idx]);
+            if (name) {
+                names.push(name);
+            }
+        }
+        return names.length ? { names, includeCurrent } : null;
+    }
+
+    function updateDetectorBatchButtons() {
+        if (detectorRunButton) {
+            detectorRunButton.disabled = detectorBatchActive;
+        }
+        if (detectorBatchRunButton) {
+            detectorBatchRunButton.disabled = detectorBatchActive;
+        }
+        if (detectorBatchAllButton) {
+            detectorBatchAllButton.disabled = detectorBatchActive;
+        }
+        if (detectorBatchStopButton) {
+            detectorBatchStopButton.disabled = !detectorBatchActive;
+        }
+        if (detectorBatchCountInput) {
+            detectorBatchCountInput.disabled = detectorBatchActive;
+        }
+        if (detectorBatchIncludeCurrentToggle) {
+            detectorBatchIncludeCurrentToggle.disabled = detectorBatchActive;
+        }
+    }
+
+    async function runDetectorForCurrentImage({ modeOverride = null } = {}) {
+        if (!currentImage) {
+            setSamStatus("Load an image before running detection.", { variant: "warn", duration: 3000 });
+            enqueueTaskNotice("Detector: load an image first.");
+            return { added: 0 };
+        }
+        if (!Object.keys(classes).length) {
+            setSamStatus("Load classes before running detection.", { variant: "warn", duration: 3000 });
+            enqueueTaskNotice("Detector: load classes first.");
+            return { added: 0 };
+        }
+        if (datasetType === "seg") {
+            setSamStatus("Detector runs are only available in bbox mode.", { variant: "warn", duration: 3500 });
+            enqueueTaskNotice("Detector: bbox mode only.");
+            return { added: 0 };
+        }
+        const mode = (modeOverride || getDetectorRunMode()).toLowerCase();
+        const detectorMode = getRegionDetectorMode();
+        const base64 = await extractBase64Image();
+        const { conf, iou, max_det } = getRegionDetectConfig();
+        const windowConfig = getDetectorWindowConfig();
+        const expectedLabelmap = getExpectedLabelmap();
+        const detectorLabel = detectorMode === "rfdetr" ? "RF-DETR" : "YOLO";
+        const labelPrefix = mode === "windowed" ? `${detectorLabel} windowed` : `${detectorLabel} full`;
+        const statusToken = beginSamActionStatus(`Running ${labelPrefix} detect…`, { variant: "info" });
+        try {
+            let endpoint = "";
+            const payload = {
+                image_base64: base64,
+                conf,
+                max_det,
+                expected_labelmap: expectedLabelmap,
+            };
+            if (detectorMode === "yolo") {
+                payload.iou = iou;
+                endpoint = mode === "windowed" ? `${API_ROOT}/yolo/predict_windowed` : `${API_ROOT}/yolo/predict_full`;
+            } else {
+                endpoint = mode === "windowed" ? `${API_ROOT}/rfdetr/predict_windowed` : `${API_ROOT}/rfdetr/predict_full`;
+            }
+            if (mode === "windowed") {
+                Object.assign(payload, windowConfig);
+            }
+            const resp = await fetch(endpoint, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                const detail = err.detail || `${labelPrefix} detect failed (${resp.status})`;
+                throw new Error(detail);
+            }
+            const data = await resp.json();
+            const detections = Array.isArray(data?.detections) ? data.detections : [];
+            const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+            const { added } = applyRegionDetections(detections, labelPrefix);
+            if (warnings.length) {
+                summarizeRegionWarnings(warnings, labelPrefix).forEach((message) => {
+                    enqueueTaskNotice(message, { durationMs: 5000 });
+                });
+            }
+            return { added };
+        } catch (err) {
+            const message = String(err?.message || err || "");
+            if (message.includes("yolo_active_missing") || message.includes("rfdetr_active_missing")) {
+                enqueueTaskNotice(`${labelPrefix}: no active model selected.`);
+                setSamStatus(`Select an active ${detectorLabel} model before running detection.`, { variant: "warn", duration: 5000 });
+            } else if (message.includes("task_unknown")) {
+                enqueueTaskNotice(`${labelPrefix}: model task unknown.`);
+                setSamStatus(`Active ${detectorLabel} model task could not be determined.`, { variant: "error", duration: 5000 });
+            } else if (message.startsWith("yolo_unavailable") || message.startsWith("rfdetr_unavailable")) {
+                enqueueTaskNotice(`${labelPrefix}: backend not allowed.`);
+                setSamStatus(`${detectorLabel} backend unavailable.`, { variant: "error", duration: 6000 });
+            } else if (message.includes("requires_bbox")) {
+                enqueueTaskNotice(`${labelPrefix}: bbox-only model required.`);
+                setSamStatus(`${detectorLabel} segmentation models are not supported for bbox detect.`, { variant: "warn", duration: 5000 });
+            } else if (message.startsWith("sahi_unavailable")) {
+                enqueueTaskNotice(`${labelPrefix}: SAHI missing.`);
+                setSamStatus("SAHI is not available on the backend.", { variant: "error", duration: 5000 });
+            } else {
+                enqueueTaskNotice(`${labelPrefix}: failed.`);
+                setSamStatus(`${labelPrefix} detect error: ${message}`, { variant: "error", duration: 5000 });
+            }
+            return { added: 0 };
+        } finally {
+            endSamActionStatus(statusToken);
+        }
+    }
+
+    async function handleDetectorRun() {
+        if (detectorBatchActive) {
+            setSamStatus("Detector batch running; wait for it to finish.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        await runDetectorForCurrentImage();
+    }
+
+    async function startDetectorBatch({ all = false } = {}) {
+        if (detectorBatchActive) {
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSamStatus("Load an image before starting detector batch.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const batchConfig = getDetectorBatchSelection({ all });
+        if (!batchConfig) {
+            setSamStatus("No images found for detector batch.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (all) {
+            const ok = window.confirm(`Run detector on all ${batchConfig.names.length} images? This can take a while.`);
+            if (!ok) {
+                return;
+            }
+        }
+        if (sam3TextBatchActive || sam3TextCascadeActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
+            setSamStatus("SAM3 is busy; wait for it to finish.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        detectorBatchActive = true;
+        detectorBatchCancel = false;
+        updateDetectorBatchButtons();
+        const { names } = batchConfig;
+        const originalName = currentImage.name;
+        const batchTaskId = enqueueTask({ kind: "detector-batch", imageName: originalName, detail: { count: names.length } });
+        let totalAdded = 0;
+        try {
+            for (let idx = 0; idx < names.length; idx += 1) {
+                if (detectorBatchCancel) {
+                    break;
+                }
+                const name = names[idx];
+                setSamStatus(`Detector batch ${idx + 1}/${names.length}: ${name}`, { variant: "info", duration: 0 });
+                const record = images[name];
+                if (!record) {
+                    continue;
+                }
+                await ensureImageRecordReady(record);
+                if (!currentImage || currentImage.name !== name) {
+                    setCurrentImage(record);
+                }
+                const ready = await waitForCurrentImageReady(name);
+                if (!ready) {
+                    setSamStatus(`Detector batch ${idx + 1}/${names.length}: failed to load ${name}`, { variant: "warn", duration: 3000 });
+                    continue;
+                }
+                const result = await runDetectorForCurrentImage();
+                totalAdded += Number(result?.added || 0);
+            }
+        } finally {
+            detectorBatchActive = false;
+            updateDetectorBatchButtons();
+            completeTask(batchTaskId);
+            if (originalName && images[originalName] && (!currentImage || currentImage.name !== originalName)) {
+                setCurrentImage(images[originalName]);
+            }
+            const doneMessage = detectorBatchCancel
+                ? "Detector batch cancelled."
+                : `Detector batch complete: added ${totalAdded} box${totalAdded === 1 ? "" : "es"}.`;
+            setSamStatus(doneMessage, { variant: detectorBatchCancel ? "warn" : "success", duration: 3500 });
+            enqueueTaskNotice(doneMessage, { durationMs: 5000 });
+        }
+    }
+
+    function stopDetectorBatch() {
+        if (!detectorBatchActive) {
+            return;
+        }
+        detectorBatchCancel = true;
+        setSamStatus("Stopping detector batch after current image…", { variant: "warn", duration: 3000 });
+    }
 
     async function buildSamImagePayload({ forceBase64 = false, variantOverride = null, preferredToken = null } = {}) {
         const token = preferredToken ?? getCurrentSamToken(variantOverride);

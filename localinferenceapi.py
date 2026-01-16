@@ -4529,6 +4529,25 @@ class YoloRegionResponse(BaseModel):
     warnings: Optional[List[str]] = None
 
 
+class YoloFullRequest(BaseModel):
+    image_base64: str
+    conf: Optional[float] = 0.25
+    iou: Optional[float] = 0.45
+    max_det: Optional[int] = 300
+    expected_labelmap: Optional[List[str]] = None
+
+
+class YoloWindowedRequest(BaseModel):
+    image_base64: str
+    conf: Optional[float] = 0.25
+    iou: Optional[float] = 0.45
+    max_det: Optional[int] = 300
+    expected_labelmap: Optional[List[str]] = None
+    slice_size: Optional[int] = 640
+    overlap: Optional[float] = 0.2
+    merge_iou: Optional[float] = 0.5
+
+
 class RfDetrRegionRequest(BaseModel):
     image_base64: str
     region: List[float]
@@ -4560,6 +4579,160 @@ class RfDetrRegionResponse(BaseModel):
     labelmap: Optional[List[str]] = None
     warnings: Optional[List[str]] = None
 
+
+class RfDetrFullRequest(BaseModel):
+    image_base64: str
+    conf: Optional[float] = 0.25
+    max_det: Optional[int] = 300
+    expected_labelmap: Optional[List[str]] = None
+
+
+class RfDetrWindowedRequest(BaseModel):
+    image_base64: str
+    conf: Optional[float] = 0.25
+    max_det: Optional[int] = 300
+    expected_labelmap: Optional[List[str]] = None
+    slice_size: Optional[int] = 640
+    overlap: Optional[float] = 0.2
+    merge_iou: Optional[float] = 0.5
+
+
+def _apply_expected_labelmap_warnings(expected: Optional[List[str]], labelmap: List[str], warnings: List[str]) -> None:
+    if expected and not labelmap:
+        warnings.append("labelmap_missing")
+    elif expected and labelmap and expected != labelmap:
+        warnings.append("labelmap_mismatch")
+
+
+def _clamp_conf_value(conf: float, warnings: List[str]) -> float:
+    if conf < 0 or conf > 1:
+        warnings.append("conf_clamped")
+        return min(1.0, max(0.0, conf))
+    return conf
+
+
+def _clamp_iou_value(iou: float, warnings: List[str]) -> float:
+    if iou < 0 or iou > 1:
+        warnings.append("iou_clamped")
+        return min(1.0, max(0.0, iou))
+    return iou
+
+
+def _clamp_max_det_value(max_det: int, warnings: List[str]) -> int:
+    if max_det < 1:
+        warnings.append("max_det_clamped")
+        return 1
+    if max_det > 5000:
+        warnings.append("max_det_clamped")
+        return 5000
+    return max_det
+
+
+def _clamp_slice_params(
+    slice_size: int,
+    overlap: float,
+    merge_iou: float,
+    img_w: int,
+    img_h: int,
+    warnings: List[str],
+) -> Tuple[int, float, float]:
+    max_dim = max(img_w, img_h, 1)
+    if slice_size < 64:
+        slice_size = 64
+        warnings.append("slice_size_clamped")
+    if slice_size > max_dim:
+        slice_size = max_dim
+        warnings.append("slice_size_clamped")
+    if overlap < 0 or overlap >= 0.95:
+        overlap = min(0.9, max(0.0, overlap))
+        warnings.append("overlap_clamped")
+    if merge_iou < 0 or merge_iou > 1:
+        merge_iou = min(1.0, max(0.0, merge_iou))
+        warnings.append("merge_iou_clamped")
+    return slice_size, overlap, merge_iou
+
+
+def _iou_xywh(box_a: List[float], box_b: List[float]) -> float:
+    ax, ay, aw, ah = box_a
+    bx, by, bw, bh = box_b
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return 0.0
+    ax2 = ax + aw
+    ay2 = ay + ah
+    bx2 = bx + bw
+    by2 = by + bh
+    inter_x1 = max(ax, bx)
+    inter_y1 = max(ay, by)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    union = (aw * ah) + (bw * bh) - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _nms_indices(boxes: List[List[float]], scores: List[float], iou_thr: float) -> List[int]:
+    order = sorted(range(len(boxes)), key=lambda idx: scores[idx], reverse=True)
+    keep: List[int] = []
+    while order:
+        current = order.pop(0)
+        keep.append(current)
+        remaining = []
+        for idx in order:
+            if _iou_xywh(boxes[current], boxes[idx]) <= iou_thr:
+                remaining.append(idx)
+        order = remaining
+    return keep
+
+
+def _merge_detections_nms(
+    detections: List[Dict[str, Any]],
+    iou_thr: float,
+    max_det: Optional[int],
+) -> List[Dict[str, Any]]:
+    if not detections:
+        return []
+    if iou_thr <= 0:
+        merged = detections
+    else:
+        by_class: Dict[int, List[int]] = {}
+        for idx, det in enumerate(detections):
+            class_id = int(det.get("class_id", -1))
+            by_class.setdefault(class_id, []).append(idx)
+        keep_idx: List[int] = []
+        for idxs in by_class.values():
+            boxes = [detections[i]["bbox"] for i in idxs]
+            scores = [float(detections[i].get("score") or 0.0) for i in idxs]
+            for keep in _nms_indices(boxes, scores, iou_thr):
+                keep_idx.append(idxs[keep])
+        merged = [detections[i] for i in keep_idx]
+    merged.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
+    if max_det:
+        return merged[:max_det]
+    return merged
+
+
+def _slice_image_sahi(pil_img: Image.Image, slice_size: int, overlap: float) -> Tuple[List[np.ndarray], List[Tuple[int, int]]]:
+    try:
+        from sahi.slicing import slice_image  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"sahi_unavailable:{exc}") from exc
+    array = np.array(pil_img)
+    result = slice_image(
+        image=array,
+        slice_height=slice_size,
+        slice_width=slice_size,
+        overlap_height_ratio=overlap,
+        overlap_width_ratio=overlap,
+    )
+    slices = getattr(result, "images", None)
+    starts = getattr(result, "starting_pixels", None)
+    if slices is None or starts is None:
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="sahi_slice_failed")
+    return slices, starts
 
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None
@@ -5971,6 +6144,121 @@ def _collect_rfdetr_artifacts(run_dir: Path) -> Dict[str, bool]:
         "labelmap": (run_dir / "labelmap.txt").exists(),
         "run_meta": (run_dir / RFDETR_RUN_META_NAME).exists(),
     }
+
+
+def _read_labelmap_lines(path: Path) -> List[str]:
+    if not path.exists():
+        return []
+    try:
+        lines = [line.strip() for line in path.read_text().splitlines()]
+        return [line for line in lines if line]
+    except Exception:
+        return []
+
+
+def _flatten_metrics(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if out is None:
+        out = {}
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            next_prefix = f"{prefix}/{key}" if prefix else str(key)
+            _flatten_metrics(value, next_prefix, out)
+    else:
+        out[prefix] = obj
+    return out
+
+
+def _lookup_metric(flat: Dict[str, Any], keys: List[str]) -> Optional[float]:
+    if not flat:
+        return None
+    lowered = {str(k).lower(): v for k, v in flat.items()}
+    for key in keys:
+        if key in flat:
+            value = flat[key]
+        else:
+            value = lowered.get(key.lower())
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return None
+
+
+def _read_csv_last_row(path: Path) -> Optional[Dict[str, str]]:
+    if not path.exists():
+        return None
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            last_row = None
+            for row in reader:
+                last_row = row
+            return last_row
+    except Exception:
+        return None
+
+
+def _yolo_metrics_summary(run_dir: Path) -> Dict[str, float]:
+    summary: Dict[str, float] = {}
+    metrics_path = run_dir / "metrics.json"
+    if metrics_path.exists():
+        try:
+            data = json.loads(metrics_path.read_text())
+            flat = _flatten_metrics(data)
+            summary["map50_95"] = _lookup_metric(flat, ["metrics/mAP50-95(B)", "metrics/mAP50-95", "map50-95"])
+            summary["map50"] = _lookup_metric(flat, ["metrics/mAP50(B)", "metrics/mAP50", "map50"])
+            summary["precision"] = _lookup_metric(flat, ["metrics/precision(B)", "metrics/precision", "precision"])
+            summary["recall"] = _lookup_metric(flat, ["metrics/recall(B)", "metrics/recall", "recall"])
+        except Exception:
+            pass
+    if any(value is not None for value in summary.values()):
+        return {k: v for k, v in summary.items() if v is not None}
+    csv_path = run_dir / "results.csv"
+    last_row = _read_csv_last_row(csv_path)
+    if not last_row:
+        return {}
+    def _csv_value(name_variants: List[str]) -> Optional[float]:
+        for key in name_variants:
+            if key in last_row:
+                try:
+                    return float(last_row[key])
+                except Exception:
+                    return None
+            for col, val in last_row.items():
+                if col.strip().lower() == key.strip().lower():
+                    try:
+                        return float(val)
+                    except Exception:
+                        return None
+        return None
+    return {
+        "map50_95": _csv_value(["metrics/mAP50-95(B)", "metrics/mAP50-95"]),
+        "map50": _csv_value(["metrics/mAP50(B)", "metrics/mAP50"]),
+        "precision": _csv_value(["metrics/precision(B)", "metrics/precision"]),
+        "recall": _csv_value(["metrics/recall(B)", "metrics/recall"]),
+    }
+
+
+def _rfdetr_metrics_summary(run_dir: Path) -> Dict[str, float]:
+    metrics_path = run_dir / "results.json"
+    if not metrics_path.exists():
+        return {}
+    try:
+        data = json.loads(metrics_path.read_text())
+    except Exception:
+        return {}
+    flat = _flatten_metrics(data)
+    return {
+        "map": _lookup_metric(flat, ["coco/bbox_mAP", "bbox_mAP", "metrics/bbox_mAP", "map"]),
+        "map50": _lookup_metric(flat, ["coco/bbox_mAP50", "bbox_mAP50", "metrics/bbox_mAP50", "map50"]),
+        "map75": _lookup_metric(flat, ["coco/bbox_mAP75", "bbox_mAP75", "metrics/bbox_mAP75", "map75"]),
+    }
+
+
+def _clean_metric_summary(summary: Dict[str, Optional[float]]) -> Dict[str, float]:
+    return {key: float(value) for key, value in summary.items() if value is not None}
 
 
 def _list_yolo_runs() -> List[Dict[str, Any]]:
@@ -27338,6 +27626,51 @@ def download_rfdetr_run(run_id: str):
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
+@app.get("/yolo/runs/{run_id}/summary")
+def yolo_run_summary(run_id: str):
+    run_dir = _yolo_run_dir(run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    meta = _yolo_load_run_meta(run_dir)
+    config = meta.get("config") or {}
+    dataset = config.get("dataset") or {}
+    run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+    labelmap = _read_labelmap_lines(run_dir / "labelmap.txt")
+    metrics = _clean_metric_summary(_yolo_metrics_summary(run_dir))
+    return {
+        "run_id": run_id,
+        "run_name": run_name,
+        "dataset_label": dataset.get("label"),
+        "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+        "task": config.get("task"),
+        "variant": config.get("variant"),
+        "labelmap": labelmap,
+        "metrics": metrics,
+    }
+
+
+@app.get("/rfdetr/runs/{run_id}/summary")
+def rfdetr_run_summary(run_id: str):
+    run_dir = _rfdetr_run_dir(run_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    meta = _rfdetr_load_run_meta(run_dir)
+    config = meta.get("config") or {}
+    dataset = config.get("dataset") or {}
+    run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+    labelmap = _read_labelmap_lines(run_dir / "labelmap.txt")
+    metrics = _clean_metric_summary(_rfdetr_metrics_summary(run_dir))
+    return {
+        "run_id": run_id,
+        "run_name": run_name,
+        "dataset_label": dataset.get("label"),
+        "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+        "task": config.get("task"),
+        "variant": config.get("variant"),
+        "labelmap": labelmap,
+        "metrics": metrics,
+    }
+
 @app.delete("/rfdetr/runs/{run_id}")
 def delete_rfdetr_run(run_id: str):
     run_dir = _rfdetr_run_dir(run_id, create=False)
@@ -27563,6 +27896,199 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
                 detections = [entry for _, entry in raw_entries[:max_det]]
             if labelmap_shifted:
                 warnings.append("labelmap_shifted")
+    return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
+
+
+def _yolo_extract_detections(
+    results: Any,
+    labelmap: List[str],
+    offset_x: float,
+    offset_y: float,
+    full_w: int,
+    full_h: int,
+) -> List[Dict[str, Any]]:
+    detections: List[Dict[str, Any]] = []
+    if not results:
+        return detections
+    det_boxes = results[0].boxes if results else None
+    if det_boxes is None or det_boxes.xyxy is None:
+        return detections
+    xyxy = det_boxes.xyxy.cpu().numpy()
+    confs = det_boxes.conf.cpu().numpy() if det_boxes.conf is not None else None
+    classes = det_boxes.cls.cpu().numpy() if det_boxes.cls is not None else None
+    for idx, box in enumerate(xyxy):
+        x1, y1, x2, y2 = [float(v) for v in box[:4]]
+        abs_x = max(0.0, min(full_w, x1 + offset_x))
+        abs_y = max(0.0, min(full_h, y1 + offset_y))
+        abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+        abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+        class_id = int(classes[idx]) if classes is not None else -1
+        class_name = labelmap[class_id] if 0 <= class_id < len(labelmap) else None
+        score = float(confs[idx]) if confs is not None else None
+        detections.append(
+            {
+                "bbox": [abs_x, abs_y, abs_w, abs_h],
+                "class_id": class_id,
+                "class_name": class_name,
+                "score": score,
+            }
+        )
+    return detections
+
+
+def _rfdetr_extract_detections(
+    results: Any,
+    labelmap: List[str],
+    offset_x: float,
+    offset_y: float,
+    full_w: int,
+    full_h: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    detections: List[Dict[str, Any]] = []
+    labelmap_shifted = False
+    if results is None:
+        return detections, labelmap_shifted
+    xyxy = getattr(results, "xyxy", None)
+    scores = getattr(results, "confidence", None)
+    class_ids = getattr(results, "class_id", None)
+    if xyxy is None or not len(xyxy):
+        return detections, labelmap_shifted
+    for idx, box in enumerate(xyxy):
+        x1, y1, x2, y2 = [float(v) for v in box[:4]]
+        abs_x = max(0.0, min(full_w, x1 + offset_x))
+        abs_y = max(0.0, min(full_h, y1 + offset_y))
+        abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+        abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+        class_id = int(class_ids[idx]) if class_ids is not None else -1
+        if labelmap and class_id >= len(labelmap) and 0 <= class_id - 1 < len(labelmap):
+            class_id -= 1
+            labelmap_shifted = True
+        class_name = labelmap[class_id] if 0 <= class_id < len(labelmap) else None
+        score = float(scores[idx]) if scores is not None else None
+        detections.append(
+            {
+                "bbox": [abs_x, abs_y, abs_w, abs_h],
+                "class_id": class_id,
+                "class_name": class_name,
+                "score": score,
+            }
+        )
+    return detections, labelmap_shifted
+
+
+@app.post("/yolo/predict_full", response_model=YoloRegionResponse)
+def yolo_predict_full(payload: YoloFullRequest):
+    model, labelmap, task = _ensure_yolo_inference_runtime()
+    task_name = str(task).lower() if task else None
+    if not task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
+    if "segment" in task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_full_detect_requires_bbox")
+    pil_img, _ = _decode_image_base64(payload.image_base64)
+    img_w, img_h = pil_img.size
+    warnings: List[str] = []
+    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    iou = _clamp_iou_value(float(payload.iou) if payload.iou is not None else 0.45, warnings)
+    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
+    results = model.predict(pil_img, conf=conf, iou=iou, max_det=max_det, verbose=False)
+    raw = _yolo_extract_detections(results, labelmap, 0.0, 0.0, img_w, img_h)
+    detections = [YoloRegionDetection(**item) for item in raw]
+    return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
+
+
+@app.post("/yolo/predict_windowed", response_model=YoloRegionResponse)
+def yolo_predict_windowed(payload: YoloWindowedRequest):
+    model, labelmap, task = _ensure_yolo_inference_runtime()
+    task_name = str(task).lower() if task else None
+    if not task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
+    if "segment" in task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_windowed_detect_requires_bbox")
+    pil_img, _ = _decode_image_base64(payload.image_base64)
+    img_w, img_h = pil_img.size
+    warnings: List[str] = []
+    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    iou = _clamp_iou_value(float(payload.iou) if payload.iou is not None else 0.45, warnings)
+    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    slice_size = int(payload.slice_size) if payload.slice_size is not None else 640
+    overlap = float(payload.overlap) if payload.overlap is not None else 0.2
+    merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
+    slice_size, overlap, merge_iou = _clamp_slice_params(slice_size, overlap, merge_iou, img_w, img_h, warnings)
+    _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
+    slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
+    raw_detections: List[Dict[str, Any]] = []
+    for tile, start in zip(slices, starts):
+        offset_x, offset_y = float(start[0]), float(start[1])
+        crop = Image.fromarray(tile)
+        results = model.predict(crop, conf=conf, iou=iou, max_det=max_det, verbose=False)
+        raw_detections.extend(_yolo_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h))
+    merged = _merge_detections_nms(raw_detections, merge_iou, max_det)
+    detections = [YoloRegionDetection(**item) for item in merged]
+    return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
+
+
+@app.post("/rfdetr/predict_full", response_model=RfDetrRegionResponse)
+def rfdetr_predict_full(payload: RfDetrFullRequest):
+    model, labelmap, task = _ensure_rfdetr_inference_runtime()
+    task_name = str(task).lower() if task else None
+    if not task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
+    if "segment" in task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_full_detect_requires_bbox")
+    pil_img, _ = _decode_image_base64(payload.image_base64)
+    img_w, img_h = pil_img.size
+    warnings: List[str] = []
+    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
+    try:
+        results = model.predict(pil_img, threshold=conf)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
+    raw, labelmap_shifted = _rfdetr_extract_detections(results, labelmap, 0.0, 0.0, img_w, img_h)
+    raw.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
+    detections = [RfDetrRegionDetection(**item) for item in raw[:max_det]]
+    if labelmap_shifted:
+        warnings.append("labelmap_shifted")
+    return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
+
+
+@app.post("/rfdetr/predict_windowed", response_model=RfDetrRegionResponse)
+def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
+    model, labelmap, task = _ensure_rfdetr_inference_runtime()
+    task_name = str(task).lower() if task else None
+    if not task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
+    if "segment" in task_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_windowed_detect_requires_bbox")
+    pil_img, _ = _decode_image_base64(payload.image_base64)
+    img_w, img_h = pil_img.size
+    warnings: List[str] = []
+    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    slice_size = int(payload.slice_size) if payload.slice_size is not None else 640
+    overlap = float(payload.overlap) if payload.overlap is not None else 0.2
+    merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
+    slice_size, overlap, merge_iou = _clamp_slice_params(slice_size, overlap, merge_iou, img_w, img_h, warnings)
+    _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
+    slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
+    raw_detections: List[Dict[str, Any]] = []
+    labelmap_shifted = False
+    for tile, start in zip(slices, starts):
+        offset_x, offset_y = float(start[0]), float(start[1])
+        crop = Image.fromarray(tile)
+        try:
+            results = model.predict(crop, threshold=conf)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
+        extracted, shifted = _rfdetr_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
+        labelmap_shifted = labelmap_shifted or shifted
+        raw_detections.extend(extracted)
+    merged = _merge_detections_nms(raw_detections, merge_iou, max_det)
+    detections = [RfDetrRegionDetection(**item) for item in merged]
+    if labelmap_shifted:
+        warnings.append("labelmap_shifted")
     return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 

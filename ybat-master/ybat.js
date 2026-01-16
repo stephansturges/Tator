@@ -1345,12 +1345,20 @@
         captionIncludeCoords: null,
         captionFinalOnly: null,
         captionTwoStage: null,
+        captionHighVram: null,
         captionSaveText: null,
         captionRunButton: null,
         captionOutput: null,
         captionCopyButton: null,
         captionMeta: null,
         captionStatus: null,
+        captionBatchCount: null,
+        captionBatchIncludeCurrent: null,
+        captionBatchOverwrite: null,
+        captionBatchRun: null,
+        captionBatchRunAll: null,
+        captionBatchCancel: null,
+        captionDownloadJsonl: null,
         unloadOthers: null,
     };
     const sam3TextElements = {
@@ -1470,6 +1478,9 @@
     const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.2;
     let sam3TextUiInitialized = false;
     let textLabels = {};
+    let textLabelRecords = [];
+    let qwenCaptionBatchActive = false;
+    let qwenCaptionBatchCancel = false;
 
     let settingsUiInitialized = false;
     const backendFuzzerElements = {
@@ -12667,12 +12678,20 @@ function initQwenTrainingTab() {
         qwenElements.captionIncludeCoords = document.getElementById("qwenCaptionIncludeCoords");
         qwenElements.captionFinalOnly = document.getElementById("qwenCaptionFinalOnly");
         qwenElements.captionTwoStage = document.getElementById("qwenCaptionTwoStage");
+        qwenElements.captionHighVram = document.getElementById("qwenCaptionHighVram");
         qwenElements.captionSaveText = document.getElementById("qwenCaptionSaveText");
         qwenElements.captionRunButton = document.getElementById("qwenCaptionRunButton");
         qwenElements.captionOutput = document.getElementById("qwenCaptionOutput");
         qwenElements.captionCopyButton = document.getElementById("qwenCaptionCopy");
         qwenElements.captionMeta = document.getElementById("qwenCaptionMeta");
         qwenElements.captionStatus = document.getElementById("qwenCaptionStatus");
+        qwenElements.captionBatchCount = document.getElementById("qwenCaptionBatchCount");
+        qwenElements.captionBatchIncludeCurrent = document.getElementById("qwenCaptionBatchIncludeCurrent");
+        qwenElements.captionBatchOverwrite = document.getElementById("qwenCaptionBatchOverwrite");
+        qwenElements.captionBatchRun = document.getElementById("qwenCaptionBatchRun");
+        qwenElements.captionBatchRunAll = document.getElementById("qwenCaptionBatchRunAll");
+        qwenElements.captionBatchCancel = document.getElementById("qwenCaptionBatchCancel");
+        qwenElements.captionDownloadJsonl = document.getElementById("qwenCaptionDownloadJsonl");
         qwenElements.unloadOthers = document.getElementById("qwenUnloadOthers");
         if (qwenElements.captionModel) {
             qwenElements.captionModel.addEventListener("change", () => {
@@ -12747,6 +12766,51 @@ function initQwenTrainingTab() {
                 } catch (error) {
                     setSamStatus("Unable to copy caption.", { variant: "warn", duration: 2500 });
                 }
+            });
+        }
+        if (qwenElements.captionBatchRun) {
+            qwenElements.captionBatchRun.addEventListener("click", () => {
+                const count = parseInt(qwenElements.captionBatchCount?.value || "0", 10);
+                if (!count || count <= 0) {
+                    setSamStatus("Enter how many images to caption.", { variant: "warn", duration: 3000 });
+                    return;
+                }
+                const imageNames = getCaptionImageList();
+                const startIndex = imageListIndex >= 0 ? imageListIndex : 0;
+                const includeCurrent = !!qwenElements.captionBatchIncludeCurrent?.checked;
+                const sliceStart = includeCurrent ? startIndex : startIndex + 1;
+                const batch = imageNames.slice(sliceStart, sliceStart + count);
+                runQwenCaptionBatch(batch, {
+                    includeCurrent,
+                    overwrite: !!qwenElements.captionBatchOverwrite?.checked,
+                });
+            });
+        }
+        if (qwenElements.captionBatchRunAll) {
+            qwenElements.captionBatchRunAll.addEventListener("click", () => {
+                const imageNames = getCaptionImageList();
+                if (!imageNames.length) {
+                    setSamStatus("No images loaded.", { variant: "warn", duration: 3000 });
+                    return;
+                }
+                if (!confirm(`Caption all ${imageNames.length} images? This can take a while.`)) {
+                    return;
+                }
+                runQwenCaptionBatch(imageNames, {
+                    includeCurrent: true,
+                    overwrite: !!qwenElements.captionBatchOverwrite?.checked,
+                });
+            });
+        }
+        if (qwenElements.captionBatchCancel) {
+            qwenElements.captionBatchCancel.addEventListener("click", () => {
+                qwenCaptionBatchCancel = true;
+                setQwenCaptionStatus("Batch cancel requested");
+            });
+        }
+        if (qwenElements.captionDownloadJsonl) {
+            qwenElements.captionDownloadJsonl.addEventListener("click", () => {
+                downloadCaptionJsonl();
             });
         }
         if (qwenElements.classSelect) {
@@ -14399,8 +14463,18 @@ function initQwenTrainingTab() {
         if (!qwenElements.captionRunButton) {
             return;
         }
-        qwenElements.captionRunButton.disabled = !qwenAvailable || qwenCaptionActive;
+        const busy = qwenCaptionActive || qwenCaptionBatchActive;
+        qwenElements.captionRunButton.disabled = !qwenAvailable || busy;
         qwenElements.captionRunButton.textContent = qwenCaptionActive ? "Captioning…" : "Caption image";
+        if (qwenElements.captionBatchRun) {
+            qwenElements.captionBatchRun.disabled = !qwenAvailable || busy;
+        }
+        if (qwenElements.captionBatchRunAll) {
+            qwenElements.captionBatchRunAll.disabled = !qwenAvailable || busy;
+        }
+        if (qwenElements.captionBatchCancel) {
+            qwenElements.captionBatchCancel.disabled = !busy;
+        }
     }
 
     function getCaptionPresetText() {
@@ -14798,12 +14872,12 @@ function initQwenTrainingTab() {
         }
     }
 
-    function collectCaptionLabelHints() {
-        if (!currentImage || !bboxes[currentImage.name]) {
+    function collectCaptionLabelHintsForImage(imageName) {
+        if (!imageName || !bboxes[imageName]) {
             return [];
         }
         const hints = [];
-        const buckets = bboxes[currentImage.name];
+        const buckets = bboxes[imageName];
         Object.keys(buckets).forEach((className) => {
             (buckets[className] || []).forEach((bboxRecord) => {
                 if (!bboxRecord) {
@@ -14843,6 +14917,13 @@ function initQwenTrainingTab() {
         return hints;
     }
 
+    function collectCaptionLabelHints() {
+        if (!currentImage || !currentImage.name) {
+            return [];
+        }
+        return collectCaptionLabelHintsForImage(currentImage.name);
+    }
+
     async function invokeQwenCaption(requestFields) {
         if (!currentImage) {
             throw new Error("No active image");
@@ -14879,6 +14960,131 @@ function initQwenTrainingTab() {
         return resp.json();
     }
 
+    function buildQwenCaptionRequestFields(imageName) {
+        let maxTokens = parseInt(qwenElements.captionMaxTokens?.value || "256", 10);
+        if (Number.isNaN(maxTokens)) {
+            maxTokens = 256;
+        }
+        maxTokens = Math.min(Math.max(maxTokens, 32), 2000);
+        let maxBoxes = parseInt(qwenElements.captionMaxBoxes?.value || "25", 10);
+        if (Number.isNaN(maxBoxes)) {
+            maxBoxes = 25;
+        }
+        maxBoxes = Math.min(Math.max(maxBoxes, 0), 200);
+        const captionMode = qwenElements.captionMode?.value || "full";
+        let windowSize = parseInt(qwenElements.captionWindowSize?.value || `${DEFAULT_CAPTION_WINDOW_SIZE}`, 10);
+        if (Number.isNaN(windowSize)) {
+            windowSize = DEFAULT_CAPTION_WINDOW_SIZE;
+        }
+        let windowOverlap = parseFloat(qwenElements.captionWindowOverlap?.value || `${DEFAULT_CAPTION_WINDOW_OVERLAP}`);
+        if (Number.isNaN(windowOverlap)) {
+            windowOverlap = DEFAULT_CAPTION_WINDOW_OVERLAP;
+        }
+        const includeCounts = !!qwenElements.captionIncludeCounts?.checked;
+        const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
+        const variant = qwenElements.captionVariant?.value || "auto";
+        const finalOnly = !!qwenElements.captionFinalOnly?.checked;
+        const twoStage = !!qwenElements.captionTwoStage?.checked;
+        const highVram = !!qwenElements.captionHighVram?.checked;
+        const modelPick = qwenElements.captionModel?.value || "active";
+        const basePreset = getCaptionPresetText();
+        const customHint = (qwenElements.captionHint?.value || "").trim();
+        const stylePrompt = buildCaptionStylePrompt();
+        const openingPrompt = buildCaptionOpeningPrompt();
+        let combinedPrompt = "";
+        if (basePreset) {
+            combinedPrompt = basePreset;
+            if (customHint && basePreset !== customHint) {
+                combinedPrompt = `${basePreset} ${customHint}`;
+            }
+        } else {
+            combinedPrompt = customHint;
+        }
+        if (stylePrompt) {
+            combinedPrompt = combinedPrompt ? `${combinedPrompt} ${stylePrompt}` : stylePrompt;
+        }
+        if (openingPrompt) {
+            combinedPrompt = combinedPrompt ? `${combinedPrompt} ${openingPrompt}` : openingPrompt;
+        }
+        let modelOverride = null;
+        if (modelPick !== "active") {
+            if (modelPick.includes("/")) {
+                modelOverride = modelPick;
+            } else {
+                const variantSuffix = variant === "Thinking" ? "Thinking" : "Instruct";
+                modelOverride = `Qwen/Qwen3-VL-${modelPick}-${variantSuffix}`;
+            }
+            warnIfFp8Unsupported(modelOverride);
+        }
+        const hints = collectCaptionLabelHintsForImage(imageName);
+        if (variant === "Thinking") {
+            maxTokens = Math.max(maxTokens, 2000);
+        } else if (captionMode === "windowed") {
+            maxTokens = Math.max(maxTokens, 2000);
+        }
+        const requestFields = {
+            user_prompt: combinedPrompt,
+            label_hints: hints,
+            include_counts: includeCounts,
+            include_coords: includeCoords,
+            max_boxes: maxBoxes,
+            max_new_tokens: maxTokens,
+            model_variant: variant,
+            model_id: modelOverride,
+            final_answer_only: finalOnly,
+            two_stage_refine: twoStage,
+            multi_model_cache: highVram,
+            caption_mode: captionMode,
+            window_size: captionMode === "windowed" ? windowSize : null,
+            window_overlap: captionMode === "windowed" ? windowOverlap : null,
+        };
+        return {
+            requestFields,
+            meta: {
+                imageName,
+                model: modelOverride || modelPick,
+                variant,
+                captionMode,
+                windowSize,
+                windowOverlap,
+                includeCounts,
+                includeCoords,
+                maxBoxes,
+                maxTokens,
+            },
+            hints,
+        };
+    }
+
+    function storeCaptionRecord(imageName, caption, result, meta, runId) {
+        if (!textLabels) {
+            textLabels = {};
+        }
+        textLabels[imageName] = String(caption || "").trim();
+        const record = {
+            image: imageName,
+            caption: String(caption || "").trim(),
+            dataset_id: null,
+            model_id: meta?.model || null,
+            variant: meta?.variant || null,
+            caption_mode: meta?.captionMode || null,
+            window_size: meta?.windowSize || null,
+            window_overlap: meta?.windowOverlap || null,
+            include_counts: meta?.includeCounts ?? null,
+            include_coords: meta?.includeCoords ?? null,
+            max_boxes: meta?.maxBoxes ?? null,
+            max_new_tokens: meta?.maxTokens ?? null,
+            used_boxes: result?.used_boxes ?? null,
+            counts: result?.used_counts ?? null,
+            created_at: new Date().toISOString(),
+            run_id: runId || null,
+        };
+        if (!textLabelRecords) {
+            textLabelRecords = [];
+        }
+        textLabelRecords.push(record);
+    }
+
     async function handleQwenCaption() {
         if (qwenCaptionActive) {
             return;
@@ -14904,82 +15110,11 @@ function initQwenTrainingTab() {
                     console.warn("Failed to unload other runtimes", error);
                 }
             }
-            let maxTokens = parseInt(qwenElements.captionMaxTokens?.value || "128", 10);
-            if (Number.isNaN(maxTokens)) {
-                maxTokens = 128;
-            }
-            maxTokens = Math.min(Math.max(maxTokens, 32), 2000);
-            let maxBoxes = parseInt(qwenElements.captionMaxBoxes?.value || "25", 10);
-            if (Number.isNaN(maxBoxes)) {
-                maxBoxes = 25;
-            }
-            maxBoxes = Math.min(Math.max(maxBoxes, 0), 200);
-            const captionMode = qwenElements.captionMode?.value || "full";
-            let windowSize = parseInt(qwenElements.captionWindowSize?.value || `${DEFAULT_CAPTION_WINDOW_SIZE}`, 10);
-            if (Number.isNaN(windowSize)) {
-                windowSize = DEFAULT_CAPTION_WINDOW_SIZE;
-            }
-            let windowOverlap = parseFloat(qwenElements.captionWindowOverlap?.value || `${DEFAULT_CAPTION_WINDOW_OVERLAP}`);
-            if (Number.isNaN(windowOverlap)) {
-                windowOverlap = DEFAULT_CAPTION_WINDOW_OVERLAP;
-            }
-            const includeCounts = !!qwenElements.captionIncludeCounts?.checked;
-            const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
-            const variant = qwenElements.captionVariant?.value || "auto";
-            const finalOnly = !!qwenElements.captionFinalOnly?.checked;
-            const twoStage = !!qwenElements.captionTwoStage?.checked;
-            const modelPick = qwenElements.captionModel?.value || "active";
-            const basePreset = getCaptionPresetText();
-            const customHint = (qwenElements.captionHint?.value || "").trim();
-            const stylePrompt = buildCaptionStylePrompt();
-            const openingPrompt = buildCaptionOpeningPrompt();
-            let combinedPrompt = "";
-            if (basePreset) {
-                combinedPrompt = basePreset;
-                if (customHint && basePreset !== customHint) {
-                    combinedPrompt = `${basePreset} ${customHint}`;
-                }
-            } else {
-                combinedPrompt = customHint;
-            }
-            if (stylePrompt) {
-                combinedPrompt = combinedPrompt ? `${combinedPrompt} ${stylePrompt}` : stylePrompt;
-            }
-            if (openingPrompt) {
-                combinedPrompt = combinedPrompt ? `${combinedPrompt} ${openingPrompt}` : openingPrompt;
-            }
-            let modelOverride = null;
-            if (modelPick !== "active") {
-                if (modelPick.includes("/")) {
-                    modelOverride = modelPick;
-                } else {
-                    const variantSuffix = variant === "Thinking" ? "Thinking" : "Instruct";
-                    modelOverride = `Qwen/Qwen3-VL-${modelPick}-${variantSuffix}`;
-                }
-                warnIfFp8Unsupported(modelOverride);
-            }
-            const hints = collectCaptionLabelHints();
-            if (variant === "Thinking") {
-                maxTokens = Math.max(maxTokens, captionMode === "windowed" ? 1500 : 1000);
-            } else if (captionMode === "windowed") {
-                maxTokens = Math.max(maxTokens, 1200);
-            }
+            const { requestFields, meta, hints } = buildQwenCaptionRequestFields(currentImage.name);
             const result = await invokeQwenCaption({
-                user_prompt: combinedPrompt,
-                label_hints: hints,
+                ...requestFields,
                 image_width: currentImage.width,
                 image_height: currentImage.height,
-                include_counts: includeCounts,
-                include_coords: includeCoords,
-                max_boxes: maxBoxes,
-                max_new_tokens: maxTokens,
-                model_variant: variant,
-                model_id: modelOverride,
-                final_answer_only: finalOnly,
-                two_stage_refine: twoStage,
-                caption_mode: captionMode,
-                window_size: captionMode === "windowed" ? windowSize : null,
-                window_overlap: captionMode === "windowed" ? windowOverlap : null,
             });
             if (qwenElements.captionOutput) {
                 qwenElements.captionOutput.value = result?.caption || "";
@@ -14994,10 +15129,7 @@ function initQwenTrainingTab() {
                 qwenElements.captionMeta.textContent = `Hints: ${hints.length} • Used boxes: ${result?.used_boxes ?? 0}${truncBadge} • ${countSummary}${savedLabel}`;
             }
             if (qwenElements.captionSaveText?.checked && currentImage?.name) {
-                if (!textLabels) {
-                    textLabels = {};
-                }
-                textLabels[currentImage.name] = (result?.caption || "").trim();
+                storeCaptionRecord(currentImage.name, result?.caption || "", result, meta, `single_${Date.now()}`);
             }
             setQwenCaptionStatus("Ready");
             setSamStatus("Caption ready.", { variant: "success", duration: 3500 });
@@ -15010,6 +15142,120 @@ function initQwenTrainingTab() {
             qwenCaptionActive = false;
             updateQwenCaptionButton();
         }
+    }
+
+    function getCaptionImageList() {
+        const imageList = document.getElementById("imageList");
+        if (!imageList) {
+            return [];
+        }
+        return Array.from(imageList.options || []).map((opt) => getOptionImageName(opt)).filter(Boolean);
+    }
+
+    async function invokeQwenCaptionForImage(imageName, requestFields) {
+        const imageRecord = images[imageName];
+        if (!imageRecord) {
+            throw new Error(`Unknown image: ${imageName}`);
+        }
+        const ready = await ensureImageRecordReady(imageRecord);
+        if (!ready) {
+            throw new Error(`Unable to load image: ${imageName}`);
+        }
+        const base64 = await getBase64ForImageRecord(imageRecord);
+        if (!base64) {
+            throw new Error(`Failed to encode image: ${imageName}`);
+        }
+        const payload = {
+            ...requestFields,
+            image_base64: base64,
+            image_width: imageRecord.width,
+            image_height: imageRecord.height,
+        };
+        const resp = await fetch(`${API_ROOT}/qwen/caption`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    async function runQwenCaptionBatch(imageNames, options = {}) {
+        if (!Array.isArray(imageNames) || imageNames.length === 0) {
+            setSamStatus("No images selected for captioning.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (!qwenAvailable) {
+            setSamStatus("Qwen backend is unavailable", { variant: "warn", duration: 3500 });
+            return;
+        }
+        if (qwenCaptionBatchActive) {
+            return;
+        }
+        qwenCaptionBatchActive = true;
+        qwenCaptionBatchCancel = false;
+        updateQwenCaptionButton();
+        const runId = `batch_${Date.now()}`;
+        const overwrite = !!options.overwrite;
+        const includeCurrent = options.includeCurrent !== false;
+        const total = imageNames.length;
+        setQwenCaptionStatus(`Batch running (0/${total})…`);
+        setSamStatus("Running Qwen caption batch…", { variant: "info", duration: 0 });
+        try {
+            if (qwenElements.unloadOthers?.checked) {
+                setSamStatus("Unloading other models before Qwen batch…", { variant: "info", duration: 2000 });
+                try {
+                    await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                } catch (error) {
+                    console.warn("Failed to unload other runtimes", error);
+                }
+            }
+            let processed = 0;
+            for (const imageName of imageNames) {
+                if (qwenCaptionBatchCancel) {
+                    setSamStatus("Caption batch cancelled.", { variant: "warn", duration: 3000 });
+                    break;
+                }
+                if (!includeCurrent && currentImage?.name === imageName) {
+                    continue;
+                }
+                if (!overwrite && textLabels?.[imageName]) {
+                    processed += 1;
+                    setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
+                    continue;
+                }
+                const { requestFields, meta } = buildQwenCaptionRequestFields(imageName);
+                const result = await invokeQwenCaptionForImage(imageName, requestFields);
+                if (qwenElements.captionSaveText?.checked) {
+                    storeCaptionRecord(imageName, result?.caption || "", result, meta, runId);
+                }
+                processed += 1;
+                setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
+            }
+            setQwenCaptionStatus("Batch complete");
+            setSamStatus("Caption batch complete.", { variant: "success", duration: 3500 });
+        } catch (error) {
+            const message = error?.message || error;
+            setQwenCaptionStatus("Batch error");
+            setSamStatus(`Caption batch error: ${message}`, { variant: "error", duration: 5000 });
+            console.error("Qwen caption batch failed", error);
+        } finally {
+            qwenCaptionBatchActive = false;
+            updateQwenCaptionButton();
+        }
+    }
+
+    function downloadCaptionJsonl() {
+        if (!textLabelRecords || textLabelRecords.length === 0) {
+            setSamStatus("No captions to export yet.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const lines = textLabelRecords.map((record) => JSON.stringify(record));
+        const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
+        saveAs(blob, "captions.jsonl");
     }
 
     function buildSam3TextSnapshot() {
@@ -22681,6 +22927,9 @@ function initQwenTrainingTab() {
         images = {};
         bboxes = {};
         textLabels = {};
+        textLabelRecords = [];
+        qwenCaptionBatchActive = false;
+        qwenCaptionBatchCancel = false;
         currentImage = null;
         if (typeof refreshSam3CascadeControls === "function") {
             refreshSam3CascadeControls();
@@ -23019,6 +23268,7 @@ function initQwenTrainingTab() {
     const resetBboxes = () => {
         bboxes = {};
         textLabels = {};
+        textLabelRecords = [];
         setDatasetType("bbox");
     };
 
@@ -23278,6 +23528,10 @@ function initQwenTrainingTab() {
                     name[name.length - 1] = "txt";
                     textFolder.file(name.join("."), String(textLabels[imageName]).trim());
                 });
+            }
+            if (textFolder && Array.isArray(textLabelRecords) && textLabelRecords.length > 0) {
+                const jsonl = textLabelRecords.map((record) => JSON.stringify(record)).join("\n");
+                textFolder.file("captions.jsonl", jsonl);
             }
             zip.generateAsync({ type: "blob" })
                 .then((blob) => {

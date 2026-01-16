@@ -280,7 +280,7 @@
                                         </div>
                                         <div>
                                             <label for="qwenCaptionMaxTokens">Max tokens</label>
-                                            <input type="number" id="qwenCaptionMaxTokens" min="32" max="512" value="128" />
+                                            <input type="number" id="qwenCaptionMaxTokens" min="32" max="2000" value="256" />
                                         </div>
                                         <div>
                                             <label for="qwenCaptionMaxBoxes">Max boxes (0 = all)<span class="help-icon" title="How many labeled boxes to include in the prompt. Use 0 to include all hints (can be long).">?</span></label>
@@ -292,6 +292,7 @@
                                         <label><input type="checkbox" id="qwenCaptionIncludeCoords" checked /> Include box coords</label>
                                         <label><input type="checkbox" id="qwenCaptionFinalOnly" checked /> Final answer only (no reasoning)</label>
                                         <label><input type="checkbox" id="qwenCaptionTwoStage" /> Two-stage refine (Thinking)</label>
+                                        <label><input type="checkbox" id="qwenCaptionHighVram" /> High-VRAM mode (faster; keeps multiple models loaded)<span class="help-icon" title="Uses more GPU memory by keeping multiple Qwen models loaded during captioning. Turn on if you have plenty of VRAM.">?</span></label>
                                         <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Save to text labels</label>
                                     </div>
                                     <button type="button" id="qwenCaptionRunButton" class="training-button secondary">Caption image</button>
@@ -300,7 +301,21 @@
                                         <textarea id="qwenCaptionOutput" rows="3" readonly></textarea>
                                         <button type="button" id="qwenCaptionCopy" class="training-button secondary">Copy caption</button>
                                         <div id="qwenCaptionMeta" class="training-help"></div>
-                                        <div class="training-help">Saved captions are exported under <code>text_labels/</code> in the YOLO zip.</div>
+                                        <div class="training-help">Saved captions are exported under <code>text_labels/</code> (including <code>captions.jsonl</code>) in the YOLO zip.</div>
+                                    </div>
+                                    <div class="qwen-caption-options">
+                                        <label for="qwenCaptionBatchCount">Apply captions to next N images</label>
+                                        <div class="qwen-caption-row">
+                                            <input type="number" id="qwenCaptionBatchCount" min="1" value="5" />
+                                            <button type="button" id="qwenCaptionBatchRun" class="training-button secondary">Caption next N</button>
+                                        </div>
+                                        <label><input type="checkbox" id="qwenCaptionBatchIncludeCurrent" checked /> Include current image</label>
+                                        <label><input type="checkbox" id="qwenCaptionBatchOverwrite" /> Overwrite existing captions</label>
+                                        <div class="qwen-caption-row">
+                                            <button type="button" id="qwenCaptionBatchRunAll" class="training-button secondary">Caption all images</button>
+                                            <button type="button" id="qwenCaptionBatchCancel" class="training-button secondary">Cancel batch</button>
+                                            <button type="button" id="qwenCaptionDownloadJsonl" class="training-button secondary">Download captions JSONL</button>
+                                        </div>
                                     </div>
                                 </div>
                                 <section class="sam3-text-panel" id="sam3TextPanel" aria-labelledby="sam3TextTitle">

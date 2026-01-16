@@ -20134,6 +20134,7 @@ function initQwenTrainingTab() {
     const applyRegionDetections = (detections, labelPrefix) => {
         let added = 0;
         const perClassCounts = {};
+        let droppedUnmapped = 0;
         detections.forEach((det) => {
             const classId = typeof det.class_id === "number" ? det.class_id : -1;
             let className = det.class_name && typeof classes[det.class_name] !== "undefined"
@@ -20143,6 +20144,7 @@ function initQwenTrainingTab() {
                 className = getClassNameById(classId);
             }
             if (!className) {
+                droppedUnmapped += 1;
                 return;
             }
             const [x, y, width, height] = det.bbox || [];
@@ -20192,6 +20194,9 @@ function initQwenTrainingTab() {
             enqueueTaskNotice(`${labelPrefix}: added ${added} box${added === 1 ? "" : "es"} (${classSummary}${suffix}).`, { durationMs: 5000 });
         } else {
             enqueueTaskNotice(`${labelPrefix}: no detections.`, { durationMs: 3500 });
+        }
+        if (droppedUnmapped > 0) {
+            enqueueTaskNotice(`${labelPrefix}: skipped ${droppedUnmapped} unmapped detections.`, { durationMs: 5000 });
         }
     };
 

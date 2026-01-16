@@ -2202,16 +2202,19 @@ const sam3TrainState = {
                         : "Generate COCO annotations for SAM3 training, prompt helper, and recipe mining.";
 	                    convertBtn.addEventListener("click", () => handleDatasetConvert(entry));
 	                    actions.appendChild(convertBtn);
-	                    const qwenBtn = document.createElement("button");
-	                    qwenBtn.type = "button";
-	                    qwenBtn.className = "button button-outline";
-	                    qwenBtn.textContent = entry.qwen_ready ? "Qwen3 ready" : "Build Qwen3";
-	                    qwenBtn.disabled = !!entry.qwen_ready;
-	                    qwenBtn.title = entry.qwen_ready
-	                        ? "Qwen JSONL annotations are already present."
-	                        : "Generate Qwen JSONL annotations for Qwen training (uses your labelmap order + optional dataset context).";
-	                    qwenBtn.addEventListener("click", () => handleDatasetBuildQwen(entry));
-	                    actions.appendChild(qwenBtn);
+                    const qwenBtn = document.createElement("button");
+                    qwenBtn.type = "button";
+                    qwenBtn.className = "button button-outline";
+                    const qwenEligible = !!entry.yolo_ready;
+                    qwenBtn.textContent = entry.qwen_ready ? "Qwen3 ready" : "Build Qwen3";
+                    qwenBtn.disabled = !!entry.qwen_ready || !qwenEligible;
+                    qwenBtn.title = entry.qwen_ready
+                        ? "Qwen JSONL annotations are already present."
+                        : !qwenEligible
+                            ? "Requires a YOLO dataset (labelmap.txt + labels/)."
+                            : "Generate Qwen JSONL annotations for Qwen training (uses your labelmap order + optional dataset context).";
+                    qwenBtn.addEventListener("click", () => handleDatasetBuildQwen(entry));
+                    actions.appendChild(qwenBtn);
 	                    const delBtn = document.createElement("button");
 	                    delBtn.type = "button";
 	                    delBtn.className = "button button-outline";
@@ -7489,8 +7492,10 @@ function updateSegBuilderDatasetSummary(entry) {
     if (!segBuilderElements.datasetSummary) return;
     if (!entry) {
         segBuilderElements.datasetSummary.textContent = "Pick a dataset to convert (bbox required; others will fail at start).";
+        if (segBuilderElements.startButton) segBuilderElements.startButton.disabled = true;
         return;
     }
+    const isBbox = (entry.type || "bbox") === "bbox";
     const pieces = [];
     pieces.push(entry.type ? `${entry.type.toUpperCase()} dataset` : "bbox dataset");
     if (entry.source) pieces.push(entry.source);
@@ -7499,7 +7504,9 @@ function updateSegBuilderDatasetSummary(entry) {
     if (entry.train_count) counts.push(`train ${entry.train_count}`);
     if (entry.val_count) counts.push(`val ${entry.val_count}`);
     if (counts.length) pieces.push(counts.join(" / "));
+    if (!isBbox) pieces.unshift("Requires bbox dataset");
     segBuilderElements.datasetSummary.textContent = pieces.join(" • ");
+    if (segBuilderElements.startButton) segBuilderElements.startButton.disabled = !isBbox;
 }
 
 function renderSegBuilderDatasets(list) {
@@ -7509,18 +7516,19 @@ function renderSegBuilderDatasets(list) {
     segBuilderState.datasets.forEach((entry) => {
         const opt = document.createElement("option");
         opt.value = entry.id;
+        const isBbox = (entry.type || "bbox") === "bbox";
         const typeLabel = entry.type ? `[${entry.type}] ` : "";
         const cocoNote = entry.coco_ready ? "" : " (needs convert)";
         opt.textContent = `${typeLabel}${entry.label || entry.id}${cocoNote}`;
+        opt.disabled = !isBbox;
         if (entry.id === segBuilderState.selectedId) {
             opt.selected = true;
         }
         segBuilderElements.datasetSelect.appendChild(opt);
     });
     const selected =
-        segBuilderState.datasets.find((d) => d.id === segBuilderState.selectedId) ||
+        segBuilderState.datasets.find((d) => d.id === segBuilderState.selectedId && (d.type || "bbox") === "bbox") ||
         segBuilderState.datasets.find((d) => (d.type || "bbox") === "bbox") ||
-        segBuilderState.datasets[0] ||
         null;
     segBuilderState.selectedId = selected ? selected.id : null;
     if (segBuilderElements.datasetSelect && segBuilderState.selectedId) {
@@ -7630,6 +7638,11 @@ async function startSegmentationBuild() {
     const datasetId = segBuilderState.selectedId;
     if (!datasetId) {
         setSegBuilderMessage("Select a bbox dataset first.", "warn");
+        return;
+    }
+    const entry = segBuilderState.datasets.find((d) => d.id === datasetId);
+    if (!entry || (entry.type || "bbox") !== "bbox") {
+        setSegBuilderMessage("Segmentation build requires a bbox dataset.", "warn");
         return;
     }
     const payload = {

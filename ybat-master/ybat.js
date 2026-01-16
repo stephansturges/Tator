@@ -20097,14 +20097,17 @@ function initQwenTrainingTab() {
     const summarizeRegionWarnings = (warnings, labelPrefix) => {
         const prefix = labelPrefix || "Region";
         const messages = [];
-        warnings.forEach((code) => {
-            switch (code) {
-                case "labelmap_mismatch":
-                    messages.push(`${prefix}: labelmap mismatch (labels may be wrong).`);
-                    break;
-                case "labelmap_missing":
-                    messages.push(`${prefix}: labelmap missing on active model.`);
-                    break;
+            warnings.forEach((code) => {
+                switch (code) {
+                    case "labelmap_mismatch":
+                        messages.push(`${prefix}: labelmap mismatch (labels may be wrong).`);
+                        break;
+                    case "labelmap_shifted":
+                        messages.push(`${prefix}: class ids shifted to fit labelmap (verify labels).`);
+                        break;
+                    case "labelmap_missing":
+                        messages.push(`${prefix}: labelmap missing on active model.`);
+                        break;
                 case "conf_clamped":
                     messages.push(`${prefix}: conf clamped to [0,1].`);
                     break;

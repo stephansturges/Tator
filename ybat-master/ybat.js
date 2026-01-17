@@ -1452,6 +1452,9 @@
         captionStyleList: null,
         captionStyleInspiration: null,
         captionVaryOpening: null,
+        captionDatasetSelect: null,
+        captionDatasetRefresh: null,
+        captionDatasetSummary: null,
         captionModel: null,
         captionVariant: null,
         captionMaxTokens: null,
@@ -1565,6 +1568,10 @@
         activeId: "default",
         activeMetadata: DEFAULT_QWEN_METADATA,
     };
+    const qwenCaptionDatasetState = {
+        items: [],
+        selectedId: "",
+    };
     const CAPTION_PRESETS = [
         { id: "concise", label: "Concise scene caption", text: "Write a short caption (1-2 sentences) describing the scene and main objects." },
         { id: "context", label: "Context + setting", text: "Describe the scene, setting, and activity in one concise paragraph." },
@@ -1590,12 +1597,17 @@
         "A wide shot shows",
     ];
     const DEFAULT_CAPTION_WINDOW_SIZE = 672;
-    const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.2;
+    const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.1;
     let sam3TextUiInitialized = false;
     let textLabels = {};
     let textLabelRecords = [];
     let qwenCaptionBatchActive = false;
     let qwenCaptionBatchCancel = false;
+    const captionAutoSaveState = {
+        timerId: null,
+        pendingImage: null,
+        lastSaved: new Map(),
+    };
 
     let settingsUiInitialized = false;
     const backendFuzzerElements = {
@@ -13031,6 +13043,9 @@ function initQwenTrainingTab() {
         qwenElements.captionStyleInspiration = document.getElementById("qwenCaptionStyleInspiration");
         qwenElements.captionVaryOpening = document.getElementById("qwenCaptionVaryOpening");
         qwenElements.captionOpeningList = document.getElementById("qwenCaptionOpeningList");
+        qwenElements.captionDatasetSelect = document.getElementById("qwenCaptionDataset");
+        qwenElements.captionDatasetRefresh = document.getElementById("qwenCaptionDatasetRefresh");
+        qwenElements.captionDatasetSummary = document.getElementById("qwenCaptionDatasetSummary");
         qwenElements.captionMode = document.getElementById("qwenCaptionMode");
         qwenElements.captionWindowSize = document.getElementById("qwenCaptionWindowSize");
         qwenElements.captionWindowOverlap = document.getElementById("qwenCaptionWindowOverlap");
@@ -13103,6 +13118,23 @@ function initQwenTrainingTab() {
                 applyCaptionPreset({ randomize: true });
             });
         }
+        if (qwenElements.captionDatasetRefresh) {
+            qwenElements.captionDatasetRefresh.addEventListener("click", () => {
+                refreshQwenCaptionDatasets().catch((error) => {
+                    console.error("Failed to refresh caption datasets", error);
+                });
+            });
+        }
+        if (qwenElements.captionDatasetSelect) {
+            qwenElements.captionDatasetSelect.addEventListener("change", () => {
+                qwenCaptionDatasetState.selectedId = qwenElements.captionDatasetSelect.value || "";
+                updateCaptionDatasetSummary();
+                updateQwenCaptionButton();
+                loadCaptionForCurrentImage().catch((error) => {
+                    console.error("Failed to load caption for current image", error);
+                });
+            });
+        }
         if (qwenElements.runButton) {
             qwenElements.runButton.addEventListener("click", () => {
                 handleQwenRun().catch((error) => {
@@ -13129,6 +13161,32 @@ function initQwenTrainingTab() {
                     setSamStatus("Caption copied to clipboard.", { variant: "success", duration: 2500 });
                 } catch (error) {
                     setSamStatus("Unable to copy caption.", { variant: "warn", duration: 2500 });
+                }
+            });
+        }
+        if (qwenElements.captionOutput) {
+            qwenElements.captionOutput.addEventListener("input", () => {
+                if (!currentImage?.name) {
+                    return;
+                }
+                const value = qwenElements.captionOutput.value || "";
+                if (!textLabels) {
+                    textLabels = {};
+                }
+                textLabels[currentImage.name] = value;
+                scheduleCaptionAutosave(currentImage.name, value);
+            });
+            qwenElements.captionOutput.addEventListener("blur", () => {
+                if (!currentImage?.name) {
+                    return;
+                }
+                const value = qwenElements.captionOutput.value || "";
+                if (!textLabels) {
+                    textLabels = {};
+                }
+                textLabels[currentImage.name] = value;
+                if (qwenElements.captionSaveText?.checked) {
+                    saveCaptionImmediate(currentImage.name, value);
                 }
             });
         }
@@ -13191,6 +13249,9 @@ function initQwenTrainingTab() {
         updateQwenCaptionButton();
         setQwenCaptionStatus("Idle");
         updateQwenClassOptions({ resetOverride: true });
+        refreshQwenCaptionDatasets({ silent: true }).catch((error) => {
+            console.debug("Unable to load caption datasets", error);
+        });
         initSam3TextUi();
         updateSam3TextButtons();
         refreshQwenStatus({ silent: true }).catch((error) => {
@@ -15398,6 +15459,7 @@ function initQwenTrainingTab() {
             final_answer_only: finalOnly,
             two_stage_refine: twoStage,
             multi_model_cache: highVram,
+            fast_mode: highVram,
             caption_mode: captionMode,
             window_size: captionMode === "windowed" ? windowSize : null,
             window_overlap: captionMode === "windowed" ? windowOverlap : null,
@@ -15420,6 +15482,250 @@ function initQwenTrainingTab() {
         };
     }
 
+    function getCaptionDatasetId() {
+        const selected = qwenElements.captionDatasetSelect?.value || qwenCaptionDatasetState.selectedId || "";
+        return String(selected || "").trim();
+    }
+
+    function getCaptionDatasetEntry() {
+        const id = getCaptionDatasetId();
+        if (!id) {
+            return null;
+        }
+        return qwenCaptionDatasetState.items.find((entry) => entry?.id === id || entry?.signature === id) || null;
+    }
+
+    function updateCaptionDatasetSummary() {
+        if (!qwenElements.captionDatasetSummary) {
+            return;
+        }
+        const entry = getCaptionDatasetEntry();
+        if (!entry) {
+            qwenElements.captionDatasetSummary.textContent = "No caption dataset selected.";
+            return;
+        }
+        const label = entry.label || entry.id || "dataset";
+        const captionCount = typeof entry.caption_count === "number" ? entry.caption_count : null;
+        const captionTotal = typeof entry.caption_total === "number" ? entry.caption_total : null;
+        if (captionCount !== null && captionTotal !== null && captionTotal > 0) {
+            const percent = Math.round((captionCount / captionTotal) * 100);
+            qwenElements.captionDatasetSummary.textContent = `${label}: ${captionCount}/${captionTotal} captions (${percent}%).`;
+        } else if (captionCount !== null) {
+            qwenElements.captionDatasetSummary.textContent = `${label}: ${captionCount} captions.`;
+        } else {
+            qwenElements.captionDatasetSummary.textContent = `${label}: captions unknown.`;
+        }
+    }
+
+    async function refreshQwenCaptionDatasets(options = {}) {
+        if (!qwenElements.captionDatasetSelect) {
+            return;
+        }
+        if (!options.silent) {
+            qwenElements.captionDatasetSummary.textContent = "Refreshing datasets…";
+        }
+        qwenElements.captionDatasetSelect.disabled = true;
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets`);
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            qwenCaptionDatasetState.items = Array.isArray(data) ? data : [];
+            const previous = getCaptionDatasetId();
+            qwenElements.captionDatasetSelect.innerHTML = "";
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = qwenCaptionDatasetState.items.length ? "Select dataset" : "No datasets available";
+            qwenElements.captionDatasetSelect.appendChild(placeholder);
+            qwenCaptionDatasetState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.id || "";
+                const label = entry.label || entry.id || "dataset";
+                option.textContent = label;
+                qwenElements.captionDatasetSelect.appendChild(option);
+            });
+            if (previous && qwenCaptionDatasetState.items.some((entry) => entry.id === previous)) {
+                qwenElements.captionDatasetSelect.value = previous;
+                qwenCaptionDatasetState.selectedId = previous;
+            } else if (qwenCaptionDatasetState.items.length) {
+                qwenElements.captionDatasetSelect.value = qwenCaptionDatasetState.items[0].id || "";
+                qwenCaptionDatasetState.selectedId = qwenElements.captionDatasetSelect.value;
+            } else {
+                qwenCaptionDatasetState.selectedId = "";
+            }
+            updateCaptionDatasetSummary();
+            updateQwenCaptionButton();
+            if (!options.silent) {
+                setSamStatus("Caption datasets refreshed.", { variant: "success", duration: 2500 });
+            }
+        } catch (error) {
+            if (!options.silent) {
+                setSamStatus(`Failed to refresh datasets: ${error.message || error}`, { variant: "error", duration: 4000 });
+            }
+            console.error("Failed to refresh caption datasets", error);
+        } finally {
+            qwenElements.captionDatasetSelect.disabled = false;
+        }
+    }
+
+    async function loadCaptionForImage(imageName) {
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId || !imageName) {
+            return null;
+        }
+        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/text_labels/${encodeURIComponent(imageName)}`);
+        if (resp.status === 404) {
+            return "";
+        }
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        return String(data?.caption || "").trim();
+    }
+
+    async function ensureCaptionsForExport() {
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId) {
+            return;
+        }
+        const imageNames = Object.keys(images || {});
+        if (!imageNames.length) {
+            return;
+        }
+        if (!textLabels) {
+            textLabels = {};
+        }
+        let loaded = 0;
+        for (const imageName of imageNames) {
+            if (textLabels[imageName]) {
+                continue;
+            }
+            try {
+                const caption = await loadCaptionForImage(imageName);
+                if (caption) {
+                    textLabels[imageName] = caption;
+                }
+            } catch (error) {
+                console.warn(`Failed to load caption for export: ${imageName}`, error);
+            }
+            loaded += 1;
+            if (loaded % 50 === 0) {
+                setSamStatus(`Loading captions for export… (${loaded}/${imageNames.length})`, { variant: "info", duration: 0 });
+            }
+        }
+        setSamStatus("Captions ready for export.", { variant: "success", duration: 2000 });
+    }
+
+    async function loadCaptionForCurrentImage() {
+        if (!qwenElements.captionOutput || !currentImage?.name) {
+            return;
+        }
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId) {
+            const localCaption = textLabels?.[currentImage.name] || "";
+            qwenElements.captionOutput.value = localCaption;
+            return;
+        }
+        try {
+            let caption = await loadCaptionForImage(currentImage.name);
+            if (!caption && textLabels?.[currentImage.name]) {
+                caption = textLabels[currentImage.name];
+            }
+            qwenElements.captionOutput.value = caption || "";
+            if (caption && textLabels) {
+                textLabels[currentImage.name] = caption;
+            }
+            captionAutoSaveState.lastSaved.set(currentImage.name, caption || "");
+        } catch (error) {
+            console.warn("Failed to load caption label", error);
+        }
+    }
+
+    async function captionExistsForImage(imageName) {
+        if (textLabels?.[imageName]) {
+            return true;
+        }
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId || !imageName) {
+            return false;
+        }
+        try {
+            const caption = await loadCaptionForImage(imageName);
+            if (caption) {
+                textLabels[imageName] = caption;
+            }
+            return !!caption;
+        } catch (error) {
+            console.warn("Caption exists check failed", error);
+            return false;
+        }
+    }
+
+    async function persistCaptionLabel(imageName, caption) {
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId || !imageName) {
+            return { skipped: true };
+        }
+        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/text_labels/${encodeURIComponent(imageName)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ caption: String(caption || "") }),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    async function saveCaptionImmediate(imageName, caption) {
+        if (!imageName) {
+            return;
+        }
+        if (!getCaptionDatasetId()) {
+            return;
+        }
+        const trimmed = String(caption || "").trim();
+        try {
+            await persistCaptionLabel(imageName, trimmed);
+            captionAutoSaveState.lastSaved.set(imageName, trimmed);
+            storeCaptionRecord(imageName, trimmed, null, { model: null }, `autosave_${Date.now()}`);
+            setQwenCaptionStatus("Saved");
+        } catch (error) {
+            setQwenCaptionStatus("Save failed");
+            console.warn("Caption autosave failed", error);
+        }
+    }
+
+    function scheduleCaptionAutosave(imageName, caption) {
+        if (!qwenElements.captionSaveText?.checked) {
+            return;
+        }
+        if (!getCaptionDatasetId()) {
+            setQwenCaptionStatus("Select dataset to save");
+            return;
+        }
+        const trimmed = String(caption || "").trim();
+        const lastSaved = captionAutoSaveState.lastSaved.get(imageName);
+        if (lastSaved === trimmed) {
+            return;
+        }
+        if (captionAutoSaveState.timerId) {
+            clearTimeout(captionAutoSaveState.timerId);
+        }
+        captionAutoSaveState.pendingImage = imageName;
+        captionAutoSaveState.timerId = window.setTimeout(() => {
+            captionAutoSaveState.timerId = null;
+            captionAutoSaveState.pendingImage = null;
+            saveCaptionImmediate(imageName, trimmed);
+        }, 800);
+        setQwenCaptionStatus("Editing…");
+    }
+
     function storeCaptionRecord(imageName, caption, result, meta, runId) {
         if (!textLabels) {
             textLabels = {};
@@ -15428,7 +15734,7 @@ function initQwenTrainingTab() {
         const record = {
             image: imageName,
             caption: String(caption || "").trim(),
-            dataset_id: null,
+            dataset_id: getCaptionDatasetId() || null,
             model_id: meta?.model || null,
             variant: meta?.variant || null,
             caption_mode: meta?.captionMode || null,
@@ -15489,11 +15795,19 @@ function initQwenTrainingTab() {
                     ? Object.entries(countEntries).map(([label, count]) => `${label}: ${count}`).join(" • ")
                     : "No label hints";
                 const truncBadge = result?.truncated ? " • summarized" : "";
-                const savedLabel = qwenElements.captionSaveText?.checked ? " • saved to text labels" : "";
+                const savedLabel = qwenElements.captionSaveText?.checked
+                    ? (getCaptionDatasetId() ? " • saved to dataset text labels" : " • saved to text labels")
+                    : "";
                 qwenElements.captionMeta.textContent = `Hints: ${hints.length} • Used boxes: ${result?.used_boxes ?? 0}${truncBadge} • ${countSummary}${savedLabel}`;
             }
             if (qwenElements.captionSaveText?.checked && currentImage?.name) {
                 storeCaptionRecord(currentImage.name, result?.caption || "", result, meta, `single_${Date.now()}`);
+                try {
+                    await persistCaptionLabel(currentImage.name, result?.caption || "");
+                    captionAutoSaveState.lastSaved.set(currentImage.name, String(result?.caption || "").trim());
+                } catch (error) {
+                    console.warn("Caption save failed", error);
+                }
             }
             setQwenCaptionStatus("Ready");
             setSamStatus("Caption ready.", { variant: "success", duration: 3500 });
@@ -15586,15 +15900,24 @@ function initQwenTrainingTab() {
                 if (!includeCurrent && currentImage?.name === imageName) {
                     continue;
                 }
-                if (!overwrite && textLabels?.[imageName]) {
-                    processed += 1;
-                    setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
-                    continue;
+                if (!overwrite) {
+                    const exists = await captionExistsForImage(imageName);
+                    if (exists) {
+                        processed += 1;
+                        setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
+                        continue;
+                    }
                 }
                 const { requestFields, meta } = buildQwenCaptionRequestFields(imageName);
                 const result = await invokeQwenCaptionForImage(imageName, requestFields);
                 if (qwenElements.captionSaveText?.checked) {
                     storeCaptionRecord(imageName, result?.caption || "", result, meta, runId);
+                    try {
+                        await persistCaptionLabel(imageName, result?.caption || "");
+                        captionAutoSaveState.lastSaved.set(imageName, String(result?.caption || "").trim());
+                    } catch (error) {
+                        console.warn("Caption save failed", error);
+                    }
                 }
                 processed += 1;
                 setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
@@ -23716,6 +24039,9 @@ function initQwenTrainingTab() {
         }
         if (currentImage?.name) {
             syncImageSelectionToName(currentImage.name, { ensureVisible: true });
+            loadCaptionForCurrentImage().catch((error) => {
+                console.debug("Unable to load caption for current image", error);
+            });
         }
         if (!samPreloadEnabled && messagePrefix) {
             setSamStatus(messagePrefix, { variant: "warn", duration: 5000 });
@@ -24140,11 +24466,19 @@ function initQwenTrainingTab() {
     }
 
     const listenBboxSave = () => {
-        document.getElementById("saveBboxes").addEventListener("click", () => {
+        document.getElementById("saveBboxes").addEventListener("click", async () => {
             const validation = validateGeometryForSave();
             if (!validation.ok) {
                 alert(validation.message);
                 return;
+            }
+            if (getCaptionDatasetId()) {
+                try {
+                    setSamStatus("Loading captions for export…", { variant: "info", duration: 0 });
+                    await ensureCaptionsForExport();
+                } catch (error) {
+                    console.warn("Caption export preload failed", error);
+                }
             }
             const zip = new JSZip();
             const textFolder = zip.folder("text_labels");

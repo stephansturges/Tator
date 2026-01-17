@@ -333,6 +333,30 @@
                                             <label for="qwenCaptionMaxBoxes">Max boxes (0 = all)<span class="help-icon" title="How many labeled boxes to include in the prompt. Use 0 to include all hints (can be long).">?</span></label>
                                             <input type="number" id="qwenCaptionMaxBoxes" min="0" max="200" value="0" />
                                         </div>
+                                        <div>
+                                            <label for="qwenCaptionUseSampling">Sampling preset<span class="help-icon" title="Recommended uses Qwen’s suggested decoding for Instruct vs Thinking. Deterministic turns off sampling. Custom lets you set the knobs below.">?</span></label>
+                                            <select id="qwenCaptionUseSampling">
+                                                <option value="recommended" selected>Recommended (per variant)</option>
+                                                <option value="deterministic">Deterministic (no sampling)</option>
+                                                <option value="custom">Custom</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionTemperature">Temperature<span class="help-icon" title="Higher = more varied captions, lower = more deterministic.">?</span></label>
+                                            <input type="number" id="qwenCaptionTemperature" min="0" max="2" step="0.05" value="0.7" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionTopP">Top‑p<span class="help-icon" title="Nucleus sampling threshold; lower values reduce randomness.">?</span></label>
+                                            <input type="number" id="qwenCaptionTopP" min="0" max="1" step="0.01" value="0.8" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionTopK">Top‑k<span class="help-icon" title="Sampling from the top‑k tokens (0 disables top‑k).">?</span></label>
+                                            <input type="number" id="qwenCaptionTopK" min="0" max="100" step="1" value="20" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionPresencePenalty">Presence penalty<span class="help-icon" title="Penalizes repeating existing tokens. Higher reduces repetition.">?</span></label>
+                                            <input type="number" id="qwenCaptionPresencePenalty" min="0" max="2" step="0.1" value="1.5" />
+                                        </div>
                                     </div>
                                     <div class="qwen-caption-options">
                                         <label><input type="checkbox" id="qwenCaptionIncludeCounts" checked /> Include counts by class</label>
@@ -350,8 +374,8 @@
                                         <div id="qwenCaptionMeta" class="training-help"></div>
                                         <div class="training-help">Saved captions are written to <code>text_labels/&lt;image&gt;.txt</code> and included in dataset exports. JSONL is an optional download.</div>
                                     </div>
-                                    <div class="qwen-caption-options">
-                                        <label for="qwenCaptionBatchCount">Apply captions to next N images</label>
+                                <div class="qwen-caption-options">
+                                    <label for="qwenCaptionBatchCount">Apply captions to next N images</label>
                                         <div class="qwen-caption-row">
                                             <input type="number" id="qwenCaptionBatchCount" min="1" value="5" />
                                             <button type="button" id="qwenCaptionBatchRun" class="training-button secondary">Caption next N</button>
@@ -363,6 +387,114 @@
                                             <button type="button" id="qwenCaptionBatchCancel" class="training-button secondary">Cancel batch</button>
                                             <button type="button" id="qwenCaptionDownloadJsonl" class="training-button secondary">Download captions JSONL</button>
                                         </div>
+                                    </div>
+                                </div>
+                                <div class="qwen-agentic">
+                                    <div class="qwen-caption__header">
+                                        <strong>Agentic annotation (Qwen)</strong>
+                                        <span id="qwenAgentStatus" class="qwen-caption-status"></span>
+                                    </div>
+                                    <div class="training-help">Runs a tool-calling agent to annotate the full image. Uses the current labelmap or a selected dataset.</div>
+                                    <label for="qwenAgentDataset">Dataset (labelmap)</label>
+                                    <div class="qwen-caption-row">
+                                        <select id="qwenAgentDataset"></select>
+                                        <button type="button" id="qwenAgentDatasetRefresh" class="training-button secondary">Refresh</button>
+                                    </div>
+                                    <div id="qwenAgentDatasetSummary" class="training-help"></div>
+                                    <label for="qwenAgentGlossary">Labelmap glossary (optional)</label>
+                                    <textarea id="qwenAgentGlossary" rows="4" placeholder="light_vehicle: cars, sedans, SUVs, pickup trucks. truck: large commercial vehicle."></textarea>
+                                    <div class="qwen-caption-row">
+                                        <button type="button" id="qwenAgentGlossarySave" class="training-button secondary">Save glossary</button>
+                                        <button type="button" id="qwenAgentGlossaryReload" class="training-button training-button--ghost">Reload</button>
+                                    </div>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenAgentModel">Agent model</label>
+                                            <select id="qwenAgentModel">
+                                                <option value="active">Use active model</option>
+                                                <option value="2B">Qwen3-VL 2B</option>
+                                                <option value="4B">Qwen3-VL 4B</option>
+                                                <option value="8B">Qwen3-VL 8B</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Instruct">Qwen3-VL 30B-A3B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Thinking">Qwen3-VL 30B-A3B Thinking</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentVariant">Variant</label>
+                                            <select id="qwenAgentVariant">
+                                                <option value="auto" selected>Auto</option>
+                                                <option value="Instruct">Instruct</option>
+                                                <option value="Thinking">Thinking</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentDetectorMode">Detector</label>
+                                            <select id="qwenAgentDetectorMode">
+                                                <option value="yolo" selected>YOLO (active)</option>
+                                                <option value="rfdetr">RF-DETR (active)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentDetectorId">Detector run (optional)</label>
+                                            <div class="qwen-caption-row">
+                                                <select id="qwenAgentDetectorId"></select>
+                                                <button type="button" id="qwenAgentDetectorRefresh" class="training-button secondary">Refresh</button>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentClassifierId">Classifier (optional)</label>
+                                            <div class="qwen-caption-row">
+                                                <select id="qwenAgentClassifierId"></select>
+                                                <button type="button" id="qwenAgentClassifierRefresh" class="training-button secondary">Refresh</button>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSamVariant">SAM model</label>
+                                            <select id="qwenAgentSamVariant">
+                                                <option value="sam3" selected>SAM3</option>
+                                                <option value="sam1">SAM (v1)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentMaxSteps">Max steps</label>
+                                            <input type="number" id="qwenAgentMaxSteps" min="1" max="30" value="12" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentMaxToolCalls">Max tool calls</label>
+                                            <input type="number" id="qwenAgentMaxToolCalls" min="1" max="60" value="20" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentMaxDetections">Max detections</label>
+                                            <input type="number" id="qwenAgentMaxDetections" min="50" max="2000" value="800" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentIou">NMS IoU</label>
+                                            <input type="number" id="qwenAgentIou" min="0" max="1" step="0.05" value="0.5" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentCrossIou">Cross-class IoU</label>
+                                            <input type="number" id="qwenAgentCrossIou" min="0" max="1" step="0.05" placeholder="optional" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentMaxTokens">Max tokens</label>
+                                            <input type="number" id="qwenAgentMaxTokens" min="128" max="2000" value="1024" />
+                                        </div>
+                                    </div>
+                                    <div class="qwen-caption-options">
+                                        <label for="qwenAgentBatchCount">Apply agent to next N images</label>
+                                        <div class="qwen-caption-row">
+                                            <input type="number" id="qwenAgentBatchCount" min="1" value="3" />
+                                            <button type="button" id="qwenAgentBatchRun" class="training-button secondary">Run next N</button>
+                                        </div>
+                                        <label><input type="checkbox" id="qwenAgentBatchIncludeCurrent" checked /> Include current image</label>
+                                    </div>
+                                    <div class="training-actions">
+                                        <button type="button" id="qwenAgentRun" class="training-button secondary">Run agent on image</button>
+                                        <button type="button" id="qwenAgentStop" class="training-button secondary" disabled>Stop agent</button>
+                                    </div>
+                                    <div class="qwen-agent-trace">
+                                        <div class="training-help">Agent trace (latest steps)</div>
+                                        <div id="qwenAgentTraceList" class="qwen-agent-trace__list"></div>
                                     </div>
                                 </div>
                                 <section class="sam3-text-panel" id="sam3TextPanel" aria-labelledby="sam3TextTitle">

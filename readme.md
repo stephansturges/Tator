@@ -44,6 +44,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
 - **Qwen 3 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. The active model (selected on the Qwen Models tab) always supplies the system prompt and defaults so inference matches training.
 - **Qwen 3 captioning** – generate long-form captions with label hints and optional reasoning models, then save them into a `text_labels/` folder alongside YOLO exports (use the Label Images panel).
+- **Qwen 3 agentic annotation** – run a tool-calling loop that uses detectors, SAM3, and classifiers to auto-label an image end-to-end, with a live trace of what the agent is doing.
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **YOLOv8 training** – launch detect/segment runs from the UI, track progress, and keep only `best.pt` + metrics for easy sharing.
 - **RF-DETR training** – launch detect/segment runs from the UI, track progress, and keep best checkpoints + metrics for easy sharing.
@@ -91,6 +92,21 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Qwen agentic annotation (tool-calling loop)
+- Configure the active Qwen model in `Qwen Models`, then open the **Agentic Annotation** panel.
+- The agent pulls the labelmap (and optional glossary) from the dataset and is allowed to call:
+  - detectors (YOLO/RF‑DETR), SAM3 text + similarity, and classifiers,
+  - an image zoom tool to look closer at sub-windows.
+- The backend enforces canonical labelmap names during `submit_annotations`, performs QA/NMS merge, and returns a trace so the UI can display the full reasoning flow.
+- The dataset glossary can be edited from the agentic panel to map label names to human-friendly descriptions and aliases.
+
+### Agentic smoke test (10 images)
+Run a minimal smoke test locally:
+```bash
+bash tools/run_qwen_agentic_smoke.sh --count 10 --seed 42 --dataset qwen_dataset
+```
+This writes a JSONL log of detections + trace events for each image.
+
 ### Codebase map (where to look)
 ```text
 Tator/
@@ -107,6 +123,7 @@ Tator/
 - **SAM assists (Label Images tab)**: UI actions → SAM endpoints (SAM1/2/3 depending on `SAM_VARIANT`) → detections written into the current image session.
 - **SAM3 text prompt**: `SAM3 Text Prompt` panel → SAM3 processor runtime → returns boxes/polygons via the same `QwenDetection` response model used elsewhere.
 - **Qwen captioning**: `Label Images` panel → `/qwen/caption` → prompt uses scene hints + optional label hints → captions can be saved into `text_labels/` in YOLO exports.
+- **Qwen agentic annotation**: `Qwen Models` panel → `/qwen/agentic` → agent loop calls detectors/SAM3/classifiers with a labelmap glossary → traces + merged detections returned to UI.
 - **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → results include per-class recipes in either:
   - `sam3_greedy`: prompt bank + optional crop bank (positives/negatives) + optional embedded pretrained CLIP head
   - `sam3_steps` (`schema_version=2`): explicit multi-step prompt chain (step list), plus optional embedded pretrained CLIP head
@@ -202,7 +219,8 @@ Dataset Management displays readiness tags so you can see when a dataset is usab
 2. Pick a caption model (active run or a base Qwen3 size) plus a variant (Instruct/Thinking).
 3. Optionally add style prompts and opening phrases (JSON list or one per line).
 4. If you need extra detail, switch **Caption detail** to *Detailed (windowed)* and tune the window size + overlap.
-5. Click **Run caption** and optionally save the caption as a `text_labels` entry.
+5. Adjust **Sampling preset** (recommended defaults per variant: Instruct vs Thinking) if you want more creative diversity or deterministic outputs.
+6. Click **Run caption** and optionally save the caption as a `text_labels` entry.
 5. Export as YOLO ZIP: captions live under `text_labels/` next to label files.
 6. **Fast mode** keeps Qwen models loaded between caption requests (faster, higher VRAM). Leave it off for max stability.
 
@@ -223,7 +241,7 @@ Captioning quality guardrails:
 - 2026-01-13: Added Qwen3 captioning flow with editable style + opening lists, label-hint injection, and `text_labels/` export.
 - 2026-01-13: Added YOLOv8 + RF-DETR training UIs, run tracking, and saved-run management with best checkpoints only.
 - 2026-01-13: Expanded model catalog (Thinking/Instruct + FP8 options) and GPU capability warnings for large caption models.
-- 2026-01-16: Captioning guardrails (fixed counts, meta‑language removal, repetition/truncation cleanup) + fast‑mode toggle for speed/VRAM tradeoff.
+- 2026-01-16: Captioning guardrails (fixed counts, meta‑language removal, repetition/truncation cleanup) + fast‑mode toggle for speed/VRAM tradeoff + decode presets (temp/top‑p) per variant.
 
 ### Optional: Setting up SAM3
 SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):

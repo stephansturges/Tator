@@ -3271,6 +3271,31 @@ def _caption_needs_short_form(caption: str, max_words: int = 80, max_sentences: 
     return len(sentences) > max_sentences
 
 
+def _resolve_qwen_caption_decode(payload: QwenCaptionRequest, is_thinking: bool) -> Dict[str, Any]:
+    use_sampling = payload.use_sampling if payload.use_sampling is not None else True
+    if not use_sampling:
+        return {"do_sample": False}
+    defaults = {
+        "temperature": 1.0 if is_thinking else 0.7,
+        "top_p": 0.95 if is_thinking else 0.8,
+        "top_k": 20,
+        "presence_penalty": 0.0 if is_thinking else 1.5,
+    }
+    temperature = payload.temperature if payload.temperature is not None else defaults["temperature"]
+    top_p = payload.top_p if payload.top_p is not None else defaults["top_p"]
+    top_k = payload.top_k if payload.top_k is not None else defaults["top_k"]
+    presence_penalty = (
+        payload.presence_penalty if payload.presence_penalty is not None else defaults["presence_penalty"]
+    )
+    return {
+        "do_sample": True,
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "presence_penalty": presence_penalty,
+    }
+
+
 def _adjust_prompt_for_thinking(prompt_text: str) -> str:
     if not prompt_text:
         return prompt_text
@@ -3321,6 +3346,7 @@ def _run_qwen_caption_cleanup(
         system_prompt_override=cleanup_system,
         model_id_override=cleanup_model if use_caption_cache and runtime_override is None else None,
         runtime_override=runtime_override,
+        decode_override={"do_sample": False},
     )
     caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
     return _sanitize_qwen_caption(caption_text)
@@ -3476,6 +3502,7 @@ def _run_qwen_inference(
     system_prompt_override: Optional[str] = None,
     model_id_override: Optional[str] = None,
     runtime_override: Optional[Tuple[Any, Any]] = None,
+    decode_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, int, int]:
     """Execute a Qwen 3 VL inference following the reference recipe."""
     if runtime_override is not None:
@@ -3547,7 +3574,10 @@ def _run_qwen_inference(
     gen_kwargs: Dict[str, Any] = {
         "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
     }
-    if not QWEN_DO_SAMPLE:
+    use_sampling = QWEN_DO_SAMPLE
+    if decode_override is not None and "do_sample" in decode_override:
+        use_sampling = bool(decode_override.get("do_sample"))
+    if not use_sampling:
         gen_config = getattr(model, "generation_config", None)
         if gen_config is not None and hasattr(gen_config, "clone"):
             try:
@@ -3561,14 +3591,27 @@ def _run_qwen_inference(
             if hasattr(gen_config, "do_sample"):
                 gen_config.do_sample = False
             gen_kwargs["generation_config"] = gen_config
-    if QWEN_DO_SAMPLE:
+    if use_sampling:
+        temperature = QWEN_TEMPERATURE
+        top_p = QWEN_TOP_P
+        top_k = None
+        presence_penalty = None
+        if decode_override is not None:
+            temperature = decode_override.get("temperature", temperature)
+            top_p = decode_override.get("top_p", top_p)
+            top_k = decode_override.get("top_k", top_k)
+            presence_penalty = decode_override.get("presence_penalty", presence_penalty)
         gen_kwargs.update(
             {
                 "do_sample": True,
-                "temperature": QWEN_TEMPERATURE,
-                "top_p": QWEN_TOP_P,
+                "temperature": temperature,
+                "top_p": top_p,
             }
         )
+        if top_k is not None:
+            gen_kwargs["top_k"] = int(top_k)
+        if presence_penalty is not None:
+            gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False
     with torch.inference_mode():
@@ -3612,6 +3655,97 @@ def _run_qwen_inference(
         input_height = pil_img.height
         input_width = pil_img.width
     return output_text, input_width, input_height
+
+
+def _run_qwen_chat(
+    messages: List[Dict[str, Any]],
+    *,
+    max_new_tokens: Optional[int] = None,
+    model_id_override: Optional[str] = None,
+    runtime_override: Optional[Tuple[Any, Any]] = None,
+    decode_override: Optional[Dict[str, Any]] = None,
+) -> str:
+    if runtime_override is not None:
+        model, processor = runtime_override
+    elif model_id_override:
+        model, processor = _ensure_qwen_ready_for_caption(model_id_override)
+    else:
+        model, processor = _ensure_qwen_ready()
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(messages)
+    max_seq_len = _resolve_qwen_max_seq_len(model)
+    requested_max = int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
+    if max_seq_len:
+        if requested_max >= max_seq_len:
+            requested_max = max(1, max_seq_len - 1)
+    preview_inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        truncation=False,
+        return_tensors="pt",
+    )
+    input_len = int(preview_inputs.input_ids.shape[1])
+    max_input_len = None
+    if max_seq_len:
+        if input_len + requested_max > max_seq_len:
+            requested_max = max(1, max_seq_len - input_len)
+        if input_len > max_seq_len:
+            max_input_len = max(1, max_seq_len - requested_max)
+    max_new_tokens = requested_max
+    if max_input_len is None:
+        inputs = preview_inputs
+    else:
+        inputs = processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            truncation=True,
+            max_length=max_input_len,
+            return_tensors="pt",
+        )
+    device = qwen_device or _resolve_qwen_device()
+    inputs = inputs.to(device)
+    gen_kwargs: Dict[str, Any] = {
+        "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+    }
+    use_sampling = QWEN_DO_SAMPLE
+    if decode_override is not None and "do_sample" in decode_override:
+        use_sampling = bool(decode_override.get("do_sample"))
+    if use_sampling:
+        temperature = QWEN_TEMPERATURE
+        top_p = QWEN_TOP_P
+        top_k = None
+        presence_penalty = None
+        if decode_override is not None:
+            temperature = decode_override.get("temperature", temperature)
+            top_p = decode_override.get("top_p", top_p)
+            top_k = decode_override.get("top_k", top_k)
+            presence_penalty = decode_override.get("presence_penalty", presence_penalty)
+        gen_kwargs.update(
+            {
+                "do_sample": True,
+                "temperature": temperature,
+                "top_p": top_p,
+            }
+        )
+        if top_k is not None:
+            gen_kwargs["top_k"] = int(top_k)
+        if presence_penalty is not None:
+            gen_kwargs["presence_penalty"] = float(presence_penalty)
+    else:
+        gen_kwargs["do_sample"] = False
+    with torch.inference_mode():
+        output_ids = model.generate(**inputs, **gen_kwargs)
+    output_ids = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, output_ids)]
+    output_text = processor.batch_decode(
+        output_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    return output_text
 
 
 def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any], local_files_only: bool = False) -> Any:
@@ -4360,6 +4494,11 @@ class QwenCaptionRequest(BaseModel):
     force_unload: Optional[bool] = None
     multi_model_cache: Optional[bool] = False
     fast_mode: Optional[bool] = False
+    use_sampling: Optional[bool] = True
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    presence_penalty: Optional[float] = None
 
     @root_validator(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
@@ -4372,10 +4511,10 @@ class QwenCaptionRequest(BaseModel):
             try:
                 max_boxes_val = int(max_boxes)
             except (TypeError, ValueError):
-                max_boxes_val = 25
+                max_boxes_val = 0
             values["max_boxes"] = max(0, min(max_boxes_val, 200))
         else:
-            values["max_boxes"] = 25
+            values["max_boxes"] = 0
         max_tokens = values.get("max_new_tokens")
         if max_tokens is not None:
             try:
@@ -4385,6 +4524,30 @@ class QwenCaptionRequest(BaseModel):
             values["max_new_tokens"] = max(32, min(max_tokens_val, 2000))
         else:
             values["max_new_tokens"] = 256
+        temp = values.get("temperature")
+        if temp is not None:
+            try:
+                values["temperature"] = float(temp)
+            except (TypeError, ValueError):
+                values["temperature"] = None
+        top_p = values.get("top_p")
+        if top_p is not None:
+            try:
+                values["top_p"] = float(top_p)
+            except (TypeError, ValueError):
+                values["top_p"] = None
+        top_k = values.get("top_k")
+        if top_k is not None:
+            try:
+                values["top_k"] = int(top_k)
+            except (TypeError, ValueError):
+                values["top_k"] = None
+        presence = values.get("presence_penalty")
+        if presence is not None:
+            try:
+                values["presence_penalty"] = float(presence)
+            except (TypeError, ValueError):
+                values["presence_penalty"] = None
         for key in ("image_width", "image_height"):
             val = values.get(key)
             if val is None:
@@ -4423,6 +4586,1461 @@ class QwenCaptionResponse(BaseModel):
     used_counts: Dict[str, int] = Field(default_factory=dict)
     used_boxes: int
     truncated: bool
+
+
+class QwenAgenticRequest(BaseModel):
+    dataset_id: Optional[str] = None
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
+    model_id: Optional[str] = None
+    model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
+    labelmap_glossary: Optional[str] = None
+    detector_mode: Optional[Literal["yolo", "rfdetr"]] = "yolo"
+    detector_id: Optional[str] = None
+    classifier_id: Optional[str] = None
+    sam_variant: Optional[str] = "sam3"
+    max_steps: Optional[int] = 12
+    max_tool_calls: Optional[int] = 20
+    max_detections: Optional[int] = 800
+    iou: Optional[float] = 0.5
+    cross_iou: Optional[float] = None
+    max_new_tokens: Optional[int] = 1024
+    prompt_override: Optional[str] = None
+
+
+class QwenAgenticResponse(BaseModel):
+    detections: List[Dict[str, Any]]
+    trace: List[AgentTraceEvent]
+    warnings: Optional[List[str]] = None
+
+
+class AgentToolCall(BaseModel):
+    name: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentToolResult(BaseModel):
+    name: str
+    result: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
+class AgentTraceEvent(BaseModel):
+    step_id: int
+    phase: Literal["intent", "tool_call", "tool_result", "merge"] = "intent"
+    tool_name: Optional[str] = None
+    summary: Optional[str] = None
+    counts: Optional[Dict[str, int]] = None
+    windows: Optional[List[Dict[str, Any]]] = None
+    timestamp: Optional[float] = None
+
+
+AGENT_TOOL_REGISTRY: Dict[str, Any] = {}
+
+
+def _register_agent_tool(name: str):
+    def _wrap(func):
+        AGENT_TOOL_REGISTRY[name] = func
+        return func
+    return _wrap
+
+
+def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
+    handler = AGENT_TOOL_REGISTRY.get(call.name)
+    if handler is None:
+        return AgentToolResult(name=call.name, error="tool_not_found")
+    try:
+        result = handler(**(call.arguments or {}))
+    except Exception as exc:  # noqa: BLE001
+        return AgentToolResult(name=call.name, error=f"tool_failed:{exc}")
+    return AgentToolResult(name=call.name, result=result or {})
+
+
+def _agent_background_classes_from_head(head: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(head, dict):
+        return []
+    classes = [str(c) for c in list(head.get("classes") or [])]
+    indices = _clip_head_background_indices(classes)
+    return [classes[idx] for idx in indices if 0 <= idx < len(classes)]
+
+
+def _agent_load_labelmap(dataset_id: Optional[str]) -> List[str]:
+    labelmap, _ = _agent_load_labelmap_meta(dataset_id)
+    return labelmap
+
+
+def _normalize_labelmap_glossary(raw_glossary: Any) -> str:
+    if raw_glossary is None:
+        return ""
+    if isinstance(raw_glossary, str):
+        return raw_glossary.strip()
+    if isinstance(raw_glossary, list):
+        lines = [str(item).strip() for item in raw_glossary if str(item).strip()]
+        return "\n".join(lines)
+    if isinstance(raw_glossary, dict):
+        lines = []
+        for key, value in raw_glossary.items():
+            if value is None:
+                lines.append(f"{key}".strip())
+                continue
+            if isinstance(value, (list, tuple)):
+                joined = ", ".join([str(item) for item in value if str(item).strip()])
+                lines.append(f"{key}: {joined}".strip())
+            else:
+                lines.append(f"{key}: {value}".strip())
+        return "\n".join([line for line in lines if line.strip()])
+    return str(raw_glossary).strip()
+
+
+def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str]:
+    labelmap: List[str] = []
+    glossary = ""
+    if dataset_id:
+        dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+        yolo_labels = _discover_yolo_labelmap(dataset_root)
+        if yolo_labels:
+            labelmap = yolo_labels
+        else:
+            labelmap = _load_qwen_labelmap(dataset_root)
+        meta = _load_sam3_dataset_metadata(dataset_root) or _load_qwen_dataset_metadata(dataset_root) or {}
+        glossary = _normalize_labelmap_glossary(
+            meta.get("labelmap_glossary") or meta.get("glossary") or meta.get("labelmap_ontology")
+        )
+        return labelmap, glossary
+    if active_label_list:
+        labelmap = list(active_label_list)
+    return labelmap, glossary
+
+
+def _agent_compact_tool_result(result: Dict[str, Any], max_items: int = 30) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"summary": "tool_result_invalid"}
+    detections = result.get("detections")
+    if not isinstance(detections, list):
+        return result
+    total = len(detections)
+    if total <= max_items:
+        return result
+    classes = {}
+    for det in detections:
+        label = str(det.get("label") or det.get("class") or "unknown")
+        classes[label] = classes.get(label, 0) + 1
+    trimmed = detections[:max_items]
+    return {
+        **{k: v for k, v in result.items() if k != "detections"},
+        "detections": trimmed,
+        "detection_count": total,
+        "class_counts": classes,
+        "truncated": True,
+    }
+
+
+def _agent_compact_tool_response(tool_result: AgentToolResult) -> Dict[str, Any]:
+    compact = _agent_compact_tool_result(tool_result.result)
+    if tool_result.error:
+        return {"error": tool_result.error, "result": compact}
+    return compact
+
+
+def _agent_xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> List[float]:
+    return [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
+
+
+def _agent_merge_detections(
+    detections: List[Dict[str, Any]],
+    *,
+    iou_thr: float,
+    max_det: Optional[int],
+    cross_iou: Optional[float],
+) -> List[Dict[str, Any]]:
+    if not detections:
+        return []
+    by_class: Dict[int, List[int]] = {}
+    for idx, det in enumerate(detections):
+        class_id = int(det.get("class_id", -1))
+        by_class.setdefault(class_id, []).append(idx)
+    kept: List[int] = []
+    for idxs in by_class.values():
+        boxes = [detections[i]["bbox_xywh_px"] for i in idxs]
+        scores = [float(detections[i].get("score") or 0.0) for i in idxs]
+        if iou_thr <= 0:
+            keep = list(range(len(idxs)))
+        else:
+            keep = _nms_indices(boxes, scores, iou_thr)
+        kept.extend([idxs[k] for k in keep])
+    merged = [detections[i] for i in kept]
+    if cross_iou and cross_iou > 0:
+        boxes = [det["bbox_xywh_px"] for det in merged]
+        scores = [float(det.get("score") or 0.0) for det in merged]
+        keep = _nms_indices(boxes, scores, cross_iou)
+        merged = [merged[i] for i in keep]
+    merged.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
+    if max_det:
+        return merged[:max_det]
+    return merged
+
+
+def _agent_sanitize_detection_items(
+    items: List[Dict[str, Any]],
+    *,
+    img_w: int,
+    img_h: int,
+    labelmap: List[str],
+    background: Optional[Sequence[str]] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    background_set = set(background or [])
+    label_index = {label: idx for idx, label in enumerate(labelmap)}
+    cleaned: List[Dict[str, Any]] = []
+    rejected = 0
+    for ann in items:
+        label = str(ann.get("label") or ann.get("class_name") or "").strip()
+        if not label or label not in label_index or label in background_set:
+            rejected += 1
+            continue
+        window_bbox = ann.get("window_bbox_2d")
+        xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox)
+        if xyxy is None:
+            rejected += 1
+            continue
+        x1, y1, x2, y2 = xyxy
+        x1 = max(0.0, min(float(img_w), x1))
+        y1 = max(0.0, min(float(img_h), y1))
+        x2 = max(0.0, min(float(img_w), x2))
+        y2 = max(0.0, min(float(img_h), y2))
+        if x2 <= x1 or y2 <= y1:
+            rejected += 1
+            continue
+        cleaned.append(
+            {
+                "bbox_xyxy_px": [x1, y1, x2, y2],
+                "bbox_xywh_px": _agent_xyxy_to_xywh(x1, y1, x2, y2),
+                "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
+                "bbox_yolo": list(_xyxy_to_yolo_norm(img_w, img_h, x1, y1, x2, y2)),
+                "label": label,
+                "class_id": label_index[label],
+                "score": ann.get("score"),
+                "source": ann.get("source") or "agent",
+            }
+        )
+    return cleaned, rejected
+
+
+def _agent_resolve_image(
+    image_base64: Optional[str],
+    image_token: Optional[str],
+    sam_variant: Optional[str] = None,
+) -> Tuple[Image.Image, np.ndarray, str]:
+    if not image_base64 and not image_token:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="image_payload_missing")
+    if image_token:
+        variant = _default_variant(sam_variant)
+        cached = _fetch_preloaded_image(image_token, variant)
+        if cached is None:
+            fallback_variant = "sam3" if variant == "sam1" else "sam1"
+            cached = _fetch_preloaded_image(image_token, fallback_variant)
+            if cached is not None:
+                _store_preloaded_image(image_token, cached, variant)
+        if cached is not None:
+            pil_img = Image.fromarray(cached)
+            return pil_img, cached, image_token
+    return resolve_image_payload(image_base64, image_token, sam_variant)
+
+
+def _normalize_window_xyxy(window: Optional[Any], img_w: int, img_h: int) -> Optional[Tuple[float, float, float, float]]:
+    if not window:
+        return None
+    if isinstance(window, (list, tuple)) and len(window) >= 4:
+        x1, y1, x2, y2 = map(float, window[:4])
+        return max(0.0, x1), max(0.0, y1), min(float(img_w), x2), min(float(img_h), y2)
+    if isinstance(window, dict):
+        if "bbox_2d" in window:
+            x1, y1, x2, y2 = _qwen_bbox_to_xyxy(img_w, img_h, window.get("bbox_2d") or [])
+            return max(0.0, x1), max(0.0, y1), min(float(img_w), x2), min(float(img_h), y2)
+        if all(k in window for k in ("x1", "y1", "x2", "y2")):
+            x1 = float(window.get("x1"))
+            y1 = float(window.get("y1"))
+            x2 = float(window.get("x2"))
+            y2 = float(window.get("y2"))
+            return max(0.0, x1), max(0.0, y1), min(float(img_w), x2), min(float(img_h), y2)
+    return None
+
+
+def _window_bbox_2d_to_full_xyxy(
+    img_w: int,
+    img_h: int,
+    window_bbox_2d: Optional[Sequence[float]],
+) -> Optional[Tuple[float, float, float, float]]:
+    if not window_bbox_2d:
+        return None
+    x1, y1, x2, y2 = _qwen_bbox_to_xyxy(img_w, img_h, window_bbox_2d)
+    return x1, y1, x2, y2
+
+
+def _window_local_bbox_2d_to_full_xyxy(
+    img_w: int,
+    img_h: int,
+    window_bbox_2d: Optional[Sequence[float]],
+    local_bbox_2d: Optional[Sequence[float]],
+) -> Optional[Tuple[float, float, float, float]]:
+    if not window_bbox_2d or not local_bbox_2d:
+        return None
+    window_xyxy = _window_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d)
+    if not window_xyxy:
+        return None
+    wx1, wy1, wx2, wy2 = window_xyxy
+    win_w = max(1.0, wx2 - wx1)
+    win_h = max(1.0, wy2 - wy1)
+    lx1, ly1, lx2, ly2 = _qwen_bbox_to_xyxy(int(win_w), int(win_h), local_bbox_2d)
+    return lx1 + wx1, ly1 + wy1, lx2 + wx1, ly2 + wy1
+
+
+def _window_local_xyxy_to_full_xyxy(
+    window_xyxy: Optional[Tuple[float, float, float, float]],
+    local_xyxy: Optional[Sequence[float]],
+) -> Optional[Tuple[float, float, float, float]]:
+    if not window_xyxy or not local_xyxy:
+        return None
+    wx1, wy1, _, _ = window_xyxy
+    x1, y1, x2, y2 = map(float, local_xyxy[:4])
+    return x1 + wx1, y1 + wy1, x2 + wx1, y2 + wy1
+
+
+def _resolve_agent_bbox_xyxy(
+    ann: Dict[str, Any],
+    img_w: int,
+    img_h: int,
+    *,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+) -> Optional[Tuple[float, float, float, float]]:
+    bbox_space = str(ann.get("bbox_space") or "full").strip().lower()
+    if bbox_space == "window":
+        window_xyxy = _window_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d)
+        if window_xyxy is None:
+            return None
+        if "bbox_2d" in ann:
+            return _window_local_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d, ann.get("bbox_2d"))
+        if "bbox_xyxy_px" in ann:
+            return _window_local_xyxy_to_full_xyxy(window_xyxy, ann.get("bbox_xyxy_px"))
+        return None
+    if "bbox_xyxy_px" in ann:
+        try:
+            return tuple(map(float, ann.get("bbox_xyxy_px") or []))  # type: ignore[return-value]
+        except Exception:
+            return None
+    if "bbox_2d" in ann:
+        return _qwen_bbox_to_xyxy(img_w, img_h, ann.get("bbox_2d") or [])
+    return None
+
+
+def _agent_det_payload(
+    img_w: int,
+    img_h: int,
+    xyxy: Tuple[float, float, float, float],
+    *,
+    label: Optional[str],
+    class_id: Optional[int],
+    score: Optional[float],
+    source: str,
+    window: Optional[Tuple[float, float, float, float]] = None,
+) -> Dict[str, Any]:
+    x1, y1, x2, y2 = xyxy
+    bbox_xywh = _agent_xyxy_to_xywh(x1, y1, x2, y2)
+    bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)
+    payload = {
+        "bbox_2d": list(bbox_2d),
+        "bbox_xyxy_px": [float(x1), float(y1), float(x2), float(y2)],
+        "bbox_xywh_px": bbox_xywh,
+        "bbox_yolo": list(_xyxy_to_yolo_norm(img_w, img_h, x1, y1, x2, y2)),
+        "label": label,
+        "class_id": class_id,
+        "score": score,
+        "source": source,
+        "bbox_space": "full",
+    }
+    if window:
+        payload["window_xyxy_px"] = [float(v) for v in window]
+        payload["window_bbox_2d"] = list(_xyxy_to_qwen_bbox(img_w, img_h, *window))
+    return payload
+
+
+@_register_agent_tool("run_detector")
+def _agent_tool_run_detector(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    detector_id: Optional[str] = None,
+    mode: Optional[str] = "yolo",
+    conf: Optional[float] = None,
+    sahi: Optional[Dict[str, Any]] = None,
+    window: Optional[Any] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    max_det: Optional[int] = None,
+    iou: Optional[float] = None,
+    merge_iou: Optional[float] = None,
+) -> Dict[str, Any]:
+    pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
+    img_w, img_h = pil_img.size
+    mode_norm = (mode or "yolo").strip().lower()
+    if mode_norm not in {"yolo", "rfdetr"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_detector_mode_invalid")
+    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
+    if window_xyxy is None and window_bbox_2d is not None:
+        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+    crop_img = pil_img
+    offset_x = 0.0
+    offset_y = 0.0
+    if window_xyxy:
+        x1, y1, x2, y2 = window_xyxy
+        crop_img = pil_img.crop((x1, y1, x2, y2))
+        offset_x, offset_y = x1, y1
+    detections: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    if mode_norm == "yolo":
+        model, labelmap, task = _ensure_yolo_inference_runtime()
+        conf_val = _clamp_conf_value(float(conf) if conf is not None else 0.25, warnings)
+        iou_val = _clamp_iou_value(float(iou) if iou is not None else 0.45, warnings)
+        max_det_val = _clamp_max_det_value(int(max_det) if max_det is not None else 300, warnings)
+        if sahi and sahi.get("enabled"):
+            slice_size = int(sahi.get("slice_size") or 640)
+            overlap = float(sahi.get("overlap") or 0.2)
+            merge_iou_val = float(merge_iou or sahi.get("merge_iou") or 0.5)
+            slice_size, overlap, merge_iou_val = _clamp_slice_params(slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings)
+            slices, starts = _slice_image_sahi(crop_img, slice_size, overlap)
+            raw: List[Dict[str, Any]] = []
+            for tile, start in zip(slices, starts):
+                tile_offset_x = float(start[0]) + offset_x
+                tile_offset_y = float(start[1]) + offset_y
+                results = model.predict(Image.fromarray(tile), conf=conf_val, iou=iou_val, max_det=max_det_val, verbose=False)
+                raw.extend(_yolo_extract_detections(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h))
+            raw = _merge_detections_nms(raw, merge_iou_val, max_det_val)
+        else:
+            results = model.predict(crop_img, conf=conf_val, iou=iou_val, max_det=max_det_val, verbose=False)
+            raw = _yolo_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
+        for det in raw:
+            x1, y1, x2, y2 = _xywh_to_xyxy(det.get("bbox") or [])
+            detections.append(
+                _agent_det_payload(
+                    img_w,
+                    img_h,
+                    (x1, y1, x2, y2),
+                    label=det.get("class_name"),
+                    class_id=det.get("class_id"),
+                    score=det.get("score"),
+                    source="yolo",
+                    window=window_xyxy,
+                )
+            )
+    else:
+        model, labelmap, task = _ensure_rfdetr_inference_runtime()
+        conf_val = _clamp_conf_value(float(conf) if conf is not None else 0.25, warnings)
+        max_det_val = _clamp_max_det_value(int(max_det) if max_det is not None else 300, warnings)
+        if sahi and sahi.get("enabled"):
+            slice_size = int(sahi.get("slice_size") or 640)
+            overlap = float(sahi.get("overlap") or 0.2)
+            merge_iou_val = float(merge_iou or sahi.get("merge_iou") or 0.5)
+            slice_size, overlap, merge_iou_val = _clamp_slice_params(slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings)
+            slices, starts = _slice_image_sahi(crop_img, slice_size, overlap)
+            raw: List[Dict[str, Any]] = []
+            for tile, start in zip(slices, starts):
+                tile_offset_x = float(start[0]) + offset_x
+                tile_offset_y = float(start[1]) + offset_y
+                try:
+                    results = model.predict(Image.fromarray(tile), threshold=conf_val)
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
+                extracted, shifted = _rfdetr_extract_detections(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h)
+                if shifted:
+                    warnings.append("rfdetr_labelmap_shifted")
+                raw.extend(extracted)
+            raw = _merge_detections_nms(raw, merge_iou_val, max_det_val)
+        else:
+            try:
+                results = model.predict(crop_img, threshold=conf_val)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
+            raw, shifted = _rfdetr_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
+            if shifted:
+                warnings.append("rfdetr_labelmap_shifted")
+        raw.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
+        for det in raw[:max_det_val]:
+            x1, y1, x2, y2 = _xywh_to_xyxy(det.get("bbox") or [])
+            detections.append(
+                _agent_det_payload(
+                    img_w,
+                    img_h,
+                    (x1, y1, x2, y2),
+                    label=det.get("class_name"),
+                    class_id=det.get("class_id"),
+                    score=det.get("score"),
+                    source="rfdetr",
+                    window=window_xyxy,
+                )
+            )
+    return {"detections": detections, "warnings": warnings or None}
+
+
+@_register_agent_tool("sam3_text")
+def _agent_tool_sam3_text(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    prompt: Optional[str] = None,
+    score_thr: Optional[float] = None,
+    mask_threshold: Optional[float] = None,
+    max_results: Optional[int] = None,
+    window: Optional[Any] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+) -> Dict[str, Any]:
+    pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
+    img_w, img_h = pil_img.size
+    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
+    if window_xyxy is None and window_bbox_2d is not None:
+        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+    crop_img = pil_img
+    offset_x = 0.0
+    offset_y = 0.0
+    if window_xyxy:
+        x1, y1, x2, y2 = window_xyxy
+        crop_img = pil_img.crop((x1, y1, x2, y2))
+        offset_x, offset_y = x1, y1
+    threshold_val = float(score_thr) if score_thr is not None else 0.2
+    mask_val = float(mask_threshold) if mask_threshold is not None else 0.5
+    detections = _run_sam3_text_inference(
+        crop_img,
+        (prompt or "").strip(),
+        threshold_val,
+        mask_val,
+        max_results,
+    )
+    payloads: List[Dict[str, Any]] = []
+    for det in detections:
+        x1, y1, x2, y2 = _yolo_to_xyxy(crop_img.width, crop_img.height, det.bbox)
+        x1 += offset_x
+        y1 += offset_y
+        x2 += offset_x
+        y2 += offset_y
+        payloads.append(
+            _agent_det_payload(
+                img_w,
+                img_h,
+                (x1, y1, x2, y2),
+                label=det.qwen_label,
+                class_id=det.class_id,
+                score=det.score,
+                source="sam3_text",
+                window=window_xyxy,
+            )
+        )
+    return {"detections": payloads, "prompt": prompt, "window": window_xyxy}
+
+
+@_register_agent_tool("sam3_similarity")
+def _agent_tool_sam3_similarity(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    exemplar_boxes: Optional[List[Dict[str, Any]]] = None,
+    score_thr: Optional[float] = None,
+    mask_threshold: Optional[float] = None,
+    max_results: Optional[int] = None,
+    bbox_labels: Optional[List[bool]] = None,
+    window: Optional[Any] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    bbox_space: Optional[str] = None,
+) -> Dict[str, Any]:
+    pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
+    img_w, img_h = pil_img.size
+    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
+    if window_xyxy is None and window_bbox_2d is not None:
+        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+    crop_img = pil_img
+    offset_x = 0.0
+    offset_y = 0.0
+    if window_xyxy:
+        x1, y1, x2, y2 = window_xyxy
+        crop_img = pil_img.crop((x1, y1, x2, y2))
+        offset_x, offset_y = x1, y1
+    boxes_xywh: List[Tuple[float, float, float, float]] = []
+    for box in exemplar_boxes or []:
+        ann: Dict[str, Any] = {}
+        window_ref = window_bbox_2d
+        if isinstance(box, dict):
+            ann["bbox_space"] = box.get("bbox_space") or bbox_space or "full"
+            if "bbox_2d" in box:
+                ann["bbox_2d"] = box.get("bbox_2d")
+            if "bbox_xyxy_px" in box:
+                ann["bbox_xyxy_px"] = box.get("bbox_xyxy_px")
+            if box.get("window_bbox_2d") is not None:
+                window_ref = box.get("window_bbox_2d")
+        elif isinstance(box, (list, tuple)) and len(box) >= 4:
+            ann["bbox_xyxy_px"] = list(box[:4])
+            ann["bbox_space"] = bbox_space or "full"
+        xyxy_full = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_ref)
+        if xyxy_full is None:
+            continue
+        x1, y1, x2, y2 = xyxy_full
+        if window_xyxy:
+            x1 -= offset_x
+            y1 -= offset_y
+            x2 -= offset_x
+            y2 -= offset_y
+        w = max(0.0, x2 - x1)
+        h = max(0.0, y2 - y1)
+        if w <= 0 or h <= 0:
+            continue
+        boxes_xywh.append((x1, y1, w, h))
+    threshold_val = float(score_thr) if score_thr is not None else 0.2
+    mask_val = float(mask_threshold) if mask_threshold is not None else 0.5
+    detections = _run_sam3_visual_inference_multi(
+        crop_img,
+        boxes_xywh,
+        bbox_labels,
+        threshold_val,
+        mask_val,
+        max_results,
+    )
+    payloads: List[Dict[str, Any]] = []
+    for det in detections:
+        x1, y1, x2, y2 = _yolo_to_xyxy(crop_img.width, crop_img.height, det.bbox)
+        x1 += offset_x
+        y1 += offset_y
+        x2 += offset_x
+        y2 += offset_y
+        payloads.append(
+            _agent_det_payload(
+                img_w,
+                img_h,
+                (x1, y1, x2, y2),
+                label=det.qwen_label,
+                class_id=det.class_id,
+                score=det.score,
+                source="sam3_similarity",
+                window=window_xyxy,
+            )
+        )
+    return {"detections": payloads, "window": window_xyxy}
+
+
+@_register_agent_tool("classify_crop")
+def _agent_tool_classify_crop(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    bbox_2d: Optional[Sequence[float]] = None,
+    bbox_xyxy_px: Optional[Sequence[float]] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    bbox_space: Optional[str] = None,
+    classifier_id: Optional[str] = None,
+    topk: Optional[int] = None,
+) -> Dict[str, Any]:
+    pil_img, np_img, _ = _agent_resolve_image(image_base64, image_token)
+    img_w, img_h = pil_img.size
+    ann = {"bbox_space": bbox_space or "full"}
+    if bbox_xyxy_px is not None:
+        ann["bbox_xyxy_px"] = list(bbox_xyxy_px[:4])
+    if bbox_2d is not None:
+        ann["bbox_2d"] = list(bbox_2d[:4])
+    xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox_2d)
+    if xyxy is None:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="bbox_required")
+    x1, y1, x2, y2 = xyxy
+    x1 = max(0.0, min(float(img_w), x1))
+    y1 = max(0.0, min(float(img_h), y1))
+    x2 = max(0.0, min(float(img_w), x2))
+    y2 = max(0.0, min(float(img_h), y2))
+    if x2 <= x1 or y2 <= y1:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_bbox")
+    crop = pil_img.crop((x1, y1, x2, y2))
+    head: Optional[Dict[str, Any]] = None
+    if classifier_id:
+        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        if classifier_path is not None:
+            head = _load_clip_head_from_classifier(classifier_path)
+    elif isinstance(active_classifier_head, dict):
+        head = active_classifier_head
+    if not isinstance(head, dict):
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_unavailable")
+    feats = _encode_pil_batch_for_head([crop], head=head)
+    if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_encode_failed")
+    proba_arr = _clip_head_predict_proba(feats, head)
+    classes = [str(c) for c in list(head.get("classes") or [])]
+    if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] < 1 or proba_arr.shape[1] != len(classes):
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_predict_failed")
+    row = proba_arr[0]
+    k = max(1, min(int(topk) if topk is not None else 5, len(classes)))
+    order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
+    bg_indices = _clip_head_background_indices(classes)
+    topk_items = [
+        {"label": classes[idx], "prob": float(row[idx])}
+        for idx in order[:k]
+    ]
+    background_topk = [
+        {"label": classes[idx], "prob": float(row[idx])}
+        for idx in order
+        if idx in bg_indices
+    ][:k]
+    best = topk_items[0] if topk_items else {"label": "unknown", "prob": None}
+    return {
+        "topk": topk_items,
+        "background_topk": background_topk,
+        "best": best,
+    }
+
+
+@_register_agent_tool("image_zoom_in_tool")
+def _agent_tool_image_zoom_in(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    bbox_2d: Optional[Sequence[float]] = None,
+    bbox_xyxy_px: Optional[Sequence[float]] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    bbox_space: Optional[str] = None,
+    label: Optional[str] = None,
+) -> Dict[str, Any]:
+    pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
+    img_w, img_h = pil_img.size
+    ann = {"bbox_space": bbox_space or "full"}
+    if bbox_xyxy_px is not None:
+        ann["bbox_xyxy_px"] = list(bbox_xyxy_px[:4])
+    if bbox_2d is not None:
+        ann["bbox_2d"] = list(bbox_2d[:4])
+    xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox_2d)
+    if xyxy is None:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="bbox_required")
+    x1, y1, x2, y2 = xyxy
+    x1 = max(0.0, min(float(img_w), x1))
+    y1 = max(0.0, min(float(img_h), y1))
+    x2 = max(0.0, min(float(img_w), x2))
+    y2 = max(0.0, min(float(img_h), y2))
+    if x2 <= x1 or y2 <= y1:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_bbox")
+    crop = pil_img.crop((x1, y1, x2, y2))
+    crop_np = np.asarray(crop)
+    token = hashlib.md5(crop_np.tobytes()).hexdigest()
+    _store_preloaded_image(token, crop_np, _default_variant(None))
+    window_bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)
+    return {
+        "image_token": token,
+        "window_xyxy_px": [float(x1), float(y1), float(x2), float(y2)],
+        "window_bbox_2d": list(window_bbox_2d),
+        "label": (label or "").strip(),
+        "width": int(crop.width),
+        "height": int(crop.height),
+    }
+
+
+@_register_agent_tool("get_labelmap")
+def _agent_tool_get_labelmap(
+    dataset_id: Optional[str] = None,
+    classifier_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    classes, glossary = _agent_load_labelmap_meta(dataset_id)
+    head: Optional[Dict[str, Any]] = None
+    if classifier_id:
+        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        if classifier_path is not None:
+            head = _load_clip_head_from_classifier(classifier_path)
+    elif isinstance(active_classifier_head, dict):
+        head = active_classifier_head
+    background = _agent_background_classes_from_head(head)
+    return {
+        "classes": classes,
+        "background_classes": background,
+        "glossary": glossary,
+        "rules": {
+            "reject_background": True,
+            "require_labelmap": True,
+        },
+    }
+
+
+@_register_agent_tool("submit_annotations")
+def _agent_tool_submit_annotations(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    annotations: Optional[List[Dict[str, Any]]] = None,
+    dataset_id: Optional[str] = None,
+    classifier_id: Optional[str] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    iou: Optional[float] = None,
+    cross_iou: Optional[float] = None,
+    max_det: Optional[int] = None,
+) -> Dict[str, Any]:
+    pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
+    img_w, img_h = pil_img.size
+    labelmap = _agent_load_labelmap(dataset_id)
+    head: Optional[Dict[str, Any]] = None
+    if classifier_id:
+        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        if classifier_path is not None:
+            head = _load_clip_head_from_classifier(classifier_path)
+    elif isinstance(active_classifier_head, dict):
+        head = active_classifier_head
+    background = _agent_background_classes_from_head(head)
+    normalized_annotations = []
+    for ann in annotations or []:
+        if window_bbox_2d is not None and isinstance(ann, dict) and ann.get("window_bbox_2d") is None:
+            ann = {**ann, "window_bbox_2d": list(window_bbox_2d)}
+        normalized_annotations.append(ann)
+    cleaned, rejected = _agent_sanitize_detection_items(
+        normalized_annotations,
+        img_w=img_w,
+        img_h=img_h,
+        labelmap=labelmap,
+        background=background,
+    )
+    merged = _agent_merge_detections(
+        cleaned,
+        iou_thr=float(iou or 0.5),
+        max_det=max_det,
+        cross_iou=float(cross_iou) if cross_iou is not None else None,
+    )
+    return {
+        "detections": merged,
+        "rejected": rejected,
+        "count": len(merged),
+    }
+
+
+def _agent_tool_specs_text() -> str:
+    bbox_2d = {
+        "type": "array",
+        "description": "bbox_2d in 0–1000 coords relative to FULL image unless bbox_space='window'.",
+        "items": {"type": "number"},
+        "minItems": 4,
+        "maxItems": 4,
+    }
+    bbox_space = {
+        "type": "string",
+        "description": "Coordinate space for bbox_2d/bbox_xyxy_px: 'full' (default) or 'window'.",
+        "enum": ["full", "window"],
+    }
+    window_bbox_2d = {
+        "type": "array",
+        "description": "Full-image window bbox_2d in 0–1000 coords (required when bbox_space='window').",
+        "items": {"type": "number"},
+        "minItems": 4,
+        "maxItems": 4,
+    }
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_labelmap",
+                "description": "Return labelmap classes, glossary, and background classes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {"type": "string"},
+                        "classifier_id": {"type": "string"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_detector",
+                "description": "Run YOLO or RF-DETR. Returns detections in full-image coords.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_token": {"type": "string"},
+                        "detector_id": {"type": "string"},
+                        "mode": {"type": "string", "enum": ["yolo", "rfdetr"]},
+                        "conf": {"type": "number"},
+                        "sahi": {"type": "object"},
+                        "window": {"type": "object"},
+                        "window_bbox_2d": window_bbox_2d,
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "sam3_text",
+                "description": "Run SAM3 text prompt; returns detections.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_token": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "score_thr": {"type": "number"},
+                        "mask_threshold": {"type": "number"},
+                        "max_results": {"type": "number"},
+                        "window": {"type": "object"},
+                        "window_bbox_2d": window_bbox_2d,
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "sam3_similarity",
+                "description": "Run SAM3 similarity with exemplars; returns detections.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_token": {"type": "string"},
+                        "exemplar_boxes": {"type": "array"},
+                        "bbox_labels": {"type": "array"},
+                        "bbox_space": bbox_space,
+                        "score_thr": {"type": "number"},
+                        "mask_threshold": {"type": "number"},
+                        "max_results": {"type": "number"},
+                        "window": {"type": "object"},
+                        "window_bbox_2d": window_bbox_2d,
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "classify_crop",
+                "description": "Classify a crop; returns top-k classes and background classes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_token": {"type": "string"},
+                        "bbox_2d": bbox_2d,
+                        "bbox_xyxy_px": {"type": "array"},
+                        "bbox_space": bbox_space,
+                        "window_bbox_2d": window_bbox_2d,
+                        "classifier_id": {"type": "string"},
+                        "topk": {"type": "number"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                        "name": "image_zoom_in_tool",
+                        "description": "Return a zoomed image for a window. bbox_2d is 0–1000 full image unless bbox_space='window'.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "image_token": {"type": "string"},
+                                "bbox_2d": bbox_2d,
+                                "bbox_xyxy_px": {"type": "array"},
+                                "bbox_space": bbox_space,
+                                "window_bbox_2d": window_bbox_2d,
+                                "label": {"type": "string"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_annotations",
+                "description": "Submit final annotations (labelmap only).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_token": {"type": "string"},
+                        "dataset_id": {"type": "string"},
+                        "annotations": {"type": "array"},
+                        "window_bbox_2d": window_bbox_2d,
+                        "iou": {"type": "number"},
+                        "cross_iou": {"type": "number"},
+                        "max_det": {"type": "number"},
+                    },
+                },
+            },
+        },
+    ]
+    return json.dumps(tools, ensure_ascii=False, indent=2)
+
+
+def _agent_build_system_prompt(
+    *,
+    labelmap: List[str],
+    background: List[str],
+    glossary_text: str,
+    image_token: str,
+    detector_mode: str,
+    detector_id: Optional[str],
+    classifier_id: Optional[str],
+    sam_variant: Optional[str],
+) -> str:
+    tool_specs = _agent_tool_specs_text()
+    label_text = ", ".join(labelmap) if labelmap else "none"
+    bg_text = ", ".join(background) if background else "none"
+    glossary_text = (glossary_text or "").strip()
+    detector_text = detector_id or "default"
+    classifier_text = classifier_id or "default"
+    sam_text = sam_variant or "sam3"
+    return (
+        "You are an annotation agent. Use tools to label ALL objects in the image. "
+        "Only use labels from the labelmap. Do not mention labels, hints, or coordinates in prose. "
+        "Every response must be a tool call until you submit annotations.\n\n"
+        f"Labelmap: {label_text}\n"
+        f"Labelmap glossary:\n{glossary_text or 'none'}\n"
+        f"Background classes (reject): {bg_text}\n"
+        "Coordinate rules:\n"
+        "- bbox_2d is ALWAYS 0–1000 relative to the FULL image unless bbox_space='window'.\n"
+        "- If operating on a zoomed window, include window_bbox_2d (full image) and set bbox_space='window'.\n"
+        f"Image token: {image_token}\n"
+        f"Detector mode: {detector_mode} ({detector_text})\n"
+        f"Classifier: {classifier_text}\n"
+        f"SAM variant: {sam_text}\n\n"
+        "<tools>\n"
+        f"{tool_specs}\n"
+        "</tools>\n\n"
+        "Response format (every step):\n"
+        "Thought: <one concise sentence>\n"
+        "Action: <one short imperative>\n"
+        "<tool_call>\n"
+        "{\"name\": \"run_detector\", \"arguments\": {\"image_token\": \"...\", \"mode\": \"yolo\"}}\n"
+        "</tool_call>\n\n"
+        "Submit final results with submit_annotations exactly once."
+    )
+
+
+def _agent_build_user_prompt(prompt_override: Optional[str]) -> str:
+    if prompt_override:
+        return prompt_override
+    return (
+        "Annotate the image exhaustively. "
+        "Start with a detector pass, then refine with SAM3 and classifier as needed. "
+        "Use the labelmap glossary for class synonyms and semantics. "
+        "If you need more detail, call image_zoom_in_tool and then use windowed tools on that region. "
+        "When using a zoomed window, include window_bbox_2d and set bbox_space='window' for any bbox_2d you provide. "
+        "Finish by calling submit_annotations with all final boxes."
+    )
+def _parse_tool_call_json(raw_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not raw_text:
+        return None, "empty"
+    text = raw_text.strip()
+    if "<tool_call>" in text and "</tool_call>" in text:
+        try:
+            start = text.index("<tool_call>") + len("<tool_call>")
+            end = text.index("</tool_call>", start)
+            payload = text[start:end].strip()
+            if payload.startswith("```"):
+                payload = payload.split("```", 1)[-1]
+                payload = payload.split("```", 1)[0]
+            return json.loads(payload), None
+        except Exception as exc:  # noqa: BLE001
+            return None, f"tag_parse_failed:{exc}"
+    # Try JSON block in text.
+    try:
+        return json.loads(text), None
+    except Exception:
+        pass
+    # Fallback: attempt to parse first {...} block.
+    try:
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        return json.loads(text[start:end]), None
+    except Exception as exc:  # noqa: BLE001
+        return None, f"json_parse_failed:{exc}"
+
+
+def _normalize_tool_call_payload(payload: Dict[str, Any]) -> Tuple[Optional[AgentToolCall], Optional[str]]:
+    if not payload:
+        return None, "empty_payload"
+    if "function_call" in payload:
+        payload = payload.get("function_call") or {}
+    if "name" not in payload:
+        return None, "missing_name"
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return None, "missing_name"
+    args = payload.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except Exception:
+            return None, "arguments_json_failed"
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return None, "arguments_not_object"
+    return AgentToolCall(name=name, arguments=args), None
+
+
+def _agent_extract_thought_action(raw_text: str) -> Tuple[Optional[str], Optional[str]]:
+    thought = None
+    action = None
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if lower.startswith("thought:"):
+            thought = stripped.split(":", 1)[1].strip()
+        elif lower.startswith("action:"):
+            action = stripped.split(":", 1)[1].strip()
+    return thought or None, action or None
+
+
+def _repair_tool_call_payload(
+    raw_text: str,
+    pil_img: Image.Image,
+    *,
+    model_id_override: Optional[str] = None,
+    attempts: int = 2,
+) -> Tuple[Optional[AgentToolCall], Optional[str]]:
+    last_error = "parse_failed"
+    for _ in range(max(1, attempts)):
+        repair_prompt = (
+            "Extract ONE valid JSON tool call from the text below. "
+            "Return only JSON with fields {\"name\":..., \"arguments\": {...}} and nothing else.\n\n"
+            f"TEXT:\n{raw_text}"
+        )
+        try:
+            repaired_text, _, _ = _run_qwen_inference(
+                repair_prompt,
+                pil_img,
+                max_new_tokens=256,
+                model_id_override=model_id_override,
+                decode_override={"do_sample": False},
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"repair_failed:{exc}"
+            continue
+        payload, err = _parse_tool_call_json(repaired_text)
+        if payload:
+            call, norm_err = _normalize_tool_call_payload(payload)
+            if call:
+                return call, None
+            last_error = norm_err or "normalize_failed"
+        else:
+            last_error = err or "parse_failed"
+    return None, last_error
+
+
+def _run_agentic_annotation(
+    payload: QwenAgenticRequest,
+    *,
+    trace_sink: Optional[Any] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> QwenAgenticResponse:
+    pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, None)
+    img_w, img_h = pil_img.size
+    labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
+    if payload.labelmap_glossary is not None:
+        glossary = _normalize_labelmap_glossary(payload.labelmap_glossary)
+    warnings: List[str] = []
+    if not labelmap:
+        warnings.append("labelmap_missing")
+    head: Optional[Dict[str, Any]] = None
+    if payload.classifier_id:
+        classifier_path = _resolve_agent_clip_classifier_path(payload.classifier_id)
+        if classifier_path is not None:
+            head = _load_clip_head_from_classifier(classifier_path)
+    elif isinstance(active_classifier_head, dict):
+        head = active_classifier_head
+    background = _agent_background_classes_from_head(head)
+    system_prompt = _agent_build_system_prompt(
+        labelmap=labelmap,
+        background=background,
+        glossary_text=glossary,
+        image_token=token,
+        detector_mode=payload.detector_mode or "yolo",
+        detector_id=payload.detector_id,
+        classifier_id=payload.classifier_id,
+        sam_variant=payload.sam_variant,
+    )
+    base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    desired_variant = (payload.model_variant or "auto").strip()
+    if payload.model_id:
+        model_id_override = payload.model_id
+    elif desired_variant in {"Instruct", "Thinking"}:
+        model_id_override = _resolve_qwen_variant_model_id(base_model_id, desired_variant)
+    else:
+        model_id_override = base_model_id
+    user_prompt = _agent_build_user_prompt(payload.prompt_override)
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": pil_img},
+                {"type": "text", "text": user_prompt},
+            ],
+        },
+    ]
+    detections: List[Dict[str, Any]] = []
+    trace: List[AgentTraceEvent] = []
+    max_steps = max(1, int(payload.max_steps or 12))
+    max_tool_calls = max(1, int(payload.max_tool_calls or 20))
+    max_detections = max(1, int(payload.max_detections or 800))
+    iou_thr = float(payload.iou or 0.5)
+    cross_iou = float(payload.cross_iou) if payload.cross_iou is not None else None
+    step_id = 0
+    tool_calls = 0
+    no_progress = 0
+    error_count = 0
+    final_detections: Optional[List[Dict[str, Any]]] = None
+    decode_override = {"do_sample": True, "temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
+    max_new_tokens = int(payload.max_new_tokens or 1024)
+    active_window_bbox_2d: Optional[Sequence[float]] = None
+    active_window_token: Optional[str] = None
+    last_call_key: Optional[str] = None
+    repeat_calls = 0
+    while step_id < max_steps and tool_calls < max_tool_calls:
+        if cancel_event is not None and cancel_event.is_set():
+            warnings.append("cancelled")
+            break
+        qwen_text = _run_qwen_chat(
+            messages,
+            max_new_tokens=max_new_tokens,
+            decode_override=decode_override,
+            model_id_override=model_id_override,
+        )
+        thought, action = _agent_extract_thought_action(qwen_text)
+        if thought:
+            trace.append(
+                AgentTraceEvent(
+                    step_id=step_id,
+                    phase="intent",
+                    summary=thought,
+                    timestamp=time.time(),
+                )
+            )
+            if trace_sink:
+                trace_sink(trace[-1])
+        payload_json, err = _parse_tool_call_json(qwen_text)
+        call: Optional[AgentToolCall] = None
+        if payload_json:
+            call, err = _normalize_tool_call_payload(payload_json)
+        if call is None:
+            call, err = _repair_tool_call_payload(qwen_text, pil_img, model_id_override=model_id_override)
+        if call is None:
+            warnings.append(f"tool_call_parse_failed:{err or 'unknown'}")
+            no_progress += 1
+            if no_progress >= 2:
+                break
+            step_id += 1
+            continue
+        try:
+            call_key = json.dumps({"name": call.name, "arguments": call.arguments}, sort_keys=True)
+        except Exception:
+            call_key = f"{call.name}:{hash(str(call.arguments))}"
+        if call_key == last_call_key:
+            repeat_calls += 1
+        else:
+            repeat_calls = 0
+        last_call_key = call_key
+        if repeat_calls >= 2:
+            warnings.append("repeated_tool_call")
+            break
+        tool_calls += 1
+        trace.append(
+            AgentTraceEvent(
+                step_id=step_id,
+                phase="tool_call",
+                tool_name=call.name,
+                summary=action or f"call {call.name}",
+                timestamp=time.time(),
+            )
+        )
+        if trace_sink:
+            trace_sink(trace[-1])
+        if "image_token" not in call.arguments and "image_base64" not in call.arguments:
+            window_tools = {"sam3_text", "sam3_similarity", "classify_crop"}
+            if active_window_token and call.name in window_tools:
+                call.arguments["image_token"] = active_window_token
+            else:
+                call.arguments["image_token"] = token
+        if call.name == "image_zoom_in_tool":
+            call.arguments["image_token"] = token
+        if payload.dataset_id and "dataset_id" not in call.arguments:
+            call.arguments["dataset_id"] = payload.dataset_id
+        if payload.classifier_id and "classifier_id" not in call.arguments:
+            call.arguments["classifier_id"] = payload.classifier_id
+        if call.name == "run_detector" and payload.detector_mode:
+            call.arguments.setdefault("mode", payload.detector_mode)
+            if payload.detector_id:
+                call.arguments.setdefault("detector_id", payload.detector_id)
+        if active_window_bbox_2d is not None:
+            call.arguments.setdefault("window_bbox_2d", list(active_window_bbox_2d))
+        result = _dispatch_agent_tool(call)
+        compact = _agent_compact_tool_response(result)
+        if result.error:
+            error_count += 1
+        trace.append(
+            AgentTraceEvent(
+                step_id=step_id,
+                phase="tool_result",
+                tool_name=call.name,
+                summary="tool_error" if result.error else "tool_result",
+                counts={"rejected": compact.get("rejected") if isinstance(compact, dict) else None},
+                windows=(
+                    [{"window_bbox_2d": compact.get("window_bbox_2d"), "window_xyxy_px": compact.get("window_xyxy_px")}]
+                    if call.name == "image_zoom_in_tool" and isinstance(compact, dict)
+                    else None
+                ),
+                timestamp=time.time(),
+            )
+        )
+        if trace_sink:
+            trace_sink(trace[-1])
+        detection_tools = {"run_detector", "sam3_text", "sam3_similarity"}
+        if isinstance(compact, dict) and isinstance(compact.get("detections"), list):
+            cleaned, rejected = _agent_sanitize_detection_items(
+                compact.get("detections") or [],
+                img_w=img_w,
+                img_h=img_h,
+                labelmap=labelmap,
+                background=background,
+            )
+            if isinstance(compact, dict):
+                compact["accepted"] = len(cleaned)
+                compact["rejected"] = rejected
+            before = len(detections)
+            detections.extend(cleaned)
+            if len(detections) > max_detections:
+                detections = _agent_merge_detections(
+                    detections,
+                    iou_thr=iou_thr,
+                    max_det=max_detections,
+                    cross_iou=cross_iou,
+                )
+            after = len(detections)
+            if call.name in detection_tools and after <= before:
+                no_progress += 1
+            elif call.name in detection_tools:
+                no_progress = 0
+            trace[-1].counts = {"accepted": len(cleaned), "rejected": rejected, "total": after}
+        tool_response = json.dumps(compact, ensure_ascii=False)
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": f"<tool_call>{call.json()}</tool_call>"}],
+            }
+        )
+        messages.append(
+            {
+                "role": "function",
+                "name": call.name,
+                "content": [{"type": "text", "text": f"<tool_response>{tool_response}</tool_response>"}],
+            }
+        )
+        if call.name == "submit_annotations":
+            final_detections = compact.get("detections") if isinstance(compact, dict) else None
+            break
+        if call.name == "image_zoom_in_tool" and isinstance(compact, dict):
+            zoom_token = compact.get("image_token")
+            active_window_bbox_2d = compact.get("window_bbox_2d") or active_window_bbox_2d
+            active_window_token = zoom_token or active_window_token
+            if zoom_token:
+                zoom_np = _fetch_preloaded_image(zoom_token, _default_variant(None))
+                if zoom_np is None:
+                    zoom_np = _fetch_preloaded_image(zoom_token, "sam3")
+                if zoom_np is not None:
+                    zoom_pil = Image.fromarray(zoom_np)
+                    zoom_label = compact.get("label") or "window"
+                    window_bbox = compact.get("window_bbox_2d") or compact.get("bbox_2d")
+                    zoom_hint = f"Zoomed view ({zoom_label}). Window bbox_2d={window_bbox}."
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "image": zoom_pil},
+                                {"type": "text", "text": zoom_hint},
+                            ],
+                        }
+                    )
+        if call.name in detection_tools and no_progress >= 2:
+            break
+        if error_count >= 3:
+            warnings.append("tool_error_limit")
+            break
+        step_id += 1
+    if final_detections is None:
+        cleaned, rejected = _agent_sanitize_detection_items(
+            detections,
+            img_w=img_w,
+            img_h=img_h,
+            labelmap=labelmap,
+            background=background,
+        )
+        final_detections = _agent_merge_detections(
+            cleaned,
+            iou_thr=iou_thr,
+            max_det=max_detections,
+            cross_iou=cross_iou,
+        )
+    if not final_detections:
+        warnings.append("fallback_detector")
+        try:
+            fallback = _agent_tool_run_detector(
+                image_token=token,
+                detector_id=payload.detector_id,
+                mode=payload.detector_mode or "yolo",
+                conf=0.25,
+            )
+            cleaned, rejected = _agent_sanitize_detection_items(
+                fallback.get("detections") or [],
+                img_w=img_w,
+                img_h=img_h,
+                labelmap=labelmap,
+                background=background,
+            )
+            final_detections = _agent_merge_detections(
+                cleaned,
+                iou_thr=iou_thr,
+                max_det=max_detections,
+                cross_iou=cross_iou,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"fallback_detector_failed:{exc}")
+    if not final_detections and labelmap:
+        warnings.append("fallback_sam3_text")
+        collected: List[Dict[str, Any]] = []
+        for label in labelmap:
+            try:
+                result = _agent_tool_sam3_text(
+                    image_token=token,
+                    prompt=label,
+                    score_thr=0.2,
+                    mask_threshold=0.5,
+                    max_results=50,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            collected.extend(result.get("detections") or [])
+        cleaned, rejected = _agent_sanitize_detection_items(
+            collected,
+            img_w=img_w,
+            img_h=img_h,
+            labelmap=labelmap,
+            background=background,
+        )
+        final_detections = _agent_merge_detections(
+            cleaned,
+            iou_thr=iou_thr,
+            max_det=max_detections,
+            cross_iou=cross_iou,
+        )
+    if final_detections is not None:
+        trace.append(
+            AgentTraceEvent(
+                step_id=step_id,
+                phase="merge",
+                summary="merge",
+                counts={"total": len(final_detections)},
+                timestamp=time.time(),
+            )
+        )
+    trace.append(
+        AgentTraceEvent(
+            step_id=step_id + 1,
+            phase="merge",
+            summary="final_merge",
+            counts={"total": len(final_detections or [])},
+            timestamp=time.time(),
+        )
+    )
+    if trace_sink:
+        trace_sink(trace[-1])
+    return QwenAgenticResponse(
+        detections=final_detections or [],
+        trace=trace,
+        warnings=warnings or None,
+    )
 
 
 class Sam3TextPromptResponse(BaseModel):
@@ -5176,6 +6794,20 @@ class AgentMiningJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class QwenAgenticJob:
+    job_id: str
+    status: str = "queued"
+    message: str = "Queued"
+    request: Dict[str, Any] = field(default_factory=dict)
+    result: Optional[Dict[str, Any]] = None
+    trace: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -5190,6 +6822,8 @@ PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
 PROMPT_HELPER_JOBS_LOCK = threading.Lock()
 AGENT_MINING_JOBS: Dict[str, AgentMiningJob] = {}
 AGENT_MINING_JOBS_LOCK = threading.Lock()
+QWEN_AGENTIC_JOBS: Dict[str, QwenAgenticJob] = {}
+QWEN_AGENTIC_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
@@ -19552,6 +21186,10 @@ class QwenDatasetBuildRequest(BaseModel):
     context: Optional[str] = None
 
 
+class DatasetGlossaryPayload(BaseModel):
+    glossary: Optional[str] = None
+
+
 def _build_qwen_instruction(context_text: str, class_names: List[str]) -> str:
     parts: List[str] = []
     context_text = (context_text or "").strip()
@@ -19986,6 +21624,50 @@ def list_datasets():
     return _list_sam3_datasets()
 
 
+def _load_dataset_glossary(dataset_root: Path) -> str:
+    sam_meta = _load_sam3_dataset_metadata(dataset_root) or {}
+    qwen_meta = _load_qwen_dataset_metadata(dataset_root) or {}
+    raw = sam_meta.get("labelmap_glossary") or qwen_meta.get("labelmap_glossary")
+    return _normalize_labelmap_glossary(raw)
+
+
+def _persist_dataset_glossary(dataset_root: Path, glossary_text: str) -> None:
+    updated = False
+    sam_meta = _load_sam3_dataset_metadata(dataset_root)
+    if sam_meta is not None:
+        sam_meta["labelmap_glossary"] = glossary_text
+        _persist_sam3_dataset_metadata(dataset_root, sam_meta)
+        updated = True
+    qwen_meta = _load_qwen_dataset_metadata(dataset_root)
+    if qwen_meta is not None:
+        qwen_meta["labelmap_glossary"] = glossary_text
+        _persist_qwen_dataset_metadata(dataset_root, qwen_meta)
+        updated = True
+    if not updated:
+        fallback = {
+            "id": dataset_root.name,
+            "label": dataset_root.name,
+            "created_at": time.time(),
+            "labelmap_glossary": glossary_text,
+        }
+        _persist_sam3_dataset_metadata(dataset_root, fallback)
+
+
+@app.get("/datasets/{dataset_id}/glossary")
+def get_dataset_glossary(dataset_id: str):
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    glossary = _load_dataset_glossary(dataset_root)
+    return {"dataset_id": dataset_id, "glossary": glossary}
+
+
+@app.post("/datasets/{dataset_id}/glossary")
+def update_dataset_glossary(dataset_id: str, payload: DatasetGlossaryPayload = Body(default_factory=DatasetGlossaryPayload)):
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    glossary_text = _normalize_labelmap_glossary(payload.glossary)
+    _persist_dataset_glossary(dataset_root, glossary_text)
+    return {"dataset_id": dataset_id, "glossary": glossary_text, "saved": True}
+
+
 @app.delete("/datasets/{dataset_id}")
 def delete_dataset(dataset_id: str):
     target_entry = None
@@ -20239,6 +21921,73 @@ def _yolo_to_xyxy(width: int, height: int, bbox: Sequence[float]) -> Tuple[float
 def _xywh_to_xyxy(bbox: Sequence[float]) -> Tuple[float, float, float, float]:
     x, y, w, h = map(float, bbox[:4])
     return x, y, x + w, y + h
+
+
+def _xyxy_to_yolo_norm(width: int, height: int, x1: float, y1: float, x2: float, y2: float) -> Tuple[float, float, float, float]:
+    w = max(0.0, x2 - x1)
+    h = max(0.0, y2 - y1)
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    if width <= 0 or height <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    return cx / float(width), cy / float(height), w / float(width), h / float(height)
+
+
+def _xyxy_to_qwen_bbox(width: int, height: int, x1: float, y1: float, x2: float, y2: float) -> Tuple[float, float, float, float]:
+    if width <= 0 or height <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    qx1 = max(0.0, min(1000.0, x1 / float(width) * 1000.0))
+    qy1 = max(0.0, min(1000.0, y1 / float(height) * 1000.0))
+    qx2 = max(0.0, min(1000.0, x2 / float(width) * 1000.0))
+    qy2 = max(0.0, min(1000.0, y2 / float(height) * 1000.0))
+    if qx1 > qx2:
+        qx1, qx2 = qx2, qx1
+    if qy1 > qy2:
+        qy1, qy2 = qy2, qy1
+    return qx1, qy1, qx2, qy2
+
+
+def _qwen_bbox_to_xyxy(width: int, height: int, bbox_2d: Sequence[float]) -> Tuple[float, float, float, float]:
+    if len(bbox_2d) < 4 or width <= 0 or height <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    qx1, qy1, qx2, qy2 = map(float, bbox_2d[:4])
+    qx1 = max(0.0, min(1000.0, qx1))
+    qy1 = max(0.0, min(1000.0, qy1))
+    qx2 = max(0.0, min(1000.0, qx2))
+    qy2 = max(0.0, min(1000.0, qy2))
+    if qx1 > qx2:
+        qx1, qx2 = qx2, qx1
+    if qy1 > qy2:
+        qy1, qy2 = qy2, qy1
+    x1 = qx1 / 1000.0 * float(width)
+    y1 = qy1 / 1000.0 * float(height)
+    x2 = qx2 / 1000.0 * float(width)
+    y2 = qy2 / 1000.0 * float(height)
+    return x1, y1, x2, y2
+
+
+def _remap_window_xyxy_to_full(xyxy: Sequence[float], window_xyxy: Sequence[float]) -> Tuple[float, float, float, float]:
+    x1, y1, x2, y2 = map(float, xyxy[:4])
+    wx1, wy1, wx2, wy2 = map(float, window_xyxy[:4])
+    return x1 + wx1, y1 + wy1, x2 + wx1, y2 + wy1
+
+
+def _coord_roundtrip_smoke() -> None:
+    samples = [
+        (1024, 768, (100.0, 50.0, 300.0, 170.0)),
+        (1920, 1080, (10.0, 20.0, 190.0, 260.0)),
+        (800, 800, (0.0, 0.0, 799.0, 799.0)),
+    ]
+    tol = 0.5
+    for width, height, xyxy in samples:
+        qwen = _xyxy_to_qwen_bbox(width, height, *xyxy)
+        xyxy_rt = _qwen_bbox_to_xyxy(width, height, qwen)
+        err_qwen = max(abs(a - b) for a, b in zip(xyxy, xyxy_rt))
+        yolo = _xyxy_to_yolo_norm(width, height, *xyxy)
+        xyxy_yolo = _yolo_to_xyxy(width, height, yolo)
+        err_yolo = max(abs(a - b) for a, b in zip(xyxy, xyxy_yolo))
+        if err_qwen > tol or err_yolo > tol:
+            logger.warning("coord_roundtrip_mismatch width=%s height=%s err_qwen=%.3f err_yolo=%.3f", width, height, err_qwen, err_yolo)
 
 
 def _iou(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
@@ -21621,6 +23370,20 @@ def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
     }
 
 
+def _serialize_qwen_agentic_job(job: QwenAgenticJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "message": job.message,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "request": job.request,
+        "result": job.result,
+        "trace": job.trace,
+        "error": job.error,
+    }
+
+
 def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -22949,6 +24712,63 @@ def _cancel_agent_mining_job(job_id: str) -> AgentMiningJob:
         job = AGENT_MINING_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_job_not_found")
+    if job.status in {"completed", "failed", "cancelled"}:
+        return job
+    job.cancel_event.set()
+    job.status = "cancelled"
+    job.message = "Cancelled"
+    job.updated_at = time.time()
+    return job
+
+
+def _run_qwen_agentic_job(job: QwenAgenticJob, payload: QwenAgenticRequest) -> None:
+    with QWEN_AGENTIC_JOBS_LOCK:
+        QWEN_AGENTIC_JOBS[job.job_id] = job
+    job.status = "running"
+    job.message = "Running agent"
+    job.request = payload.dict()
+    job.updated_at = time.time()
+    try:
+        def _trace_sink(event: AgentTraceEvent) -> None:
+            job.trace.append(event.dict())
+            job.updated_at = time.time()
+
+        result = _run_agentic_annotation(
+            payload,
+            trace_sink=_trace_sink,
+            cancel_event=job.cancel_event,
+        )
+        job.result = result.dict()
+        if job.cancel_event.is_set():
+            job.status = "cancelled"
+            job.message = "Cancelled"
+        else:
+            job.status = "completed"
+            job.message = "Done"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Qwen agentic job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Failed"
+    finally:
+        job.updated_at = time.time()
+
+
+def _start_qwen_agentic_job(payload: QwenAgenticRequest) -> QwenAgenticJob:
+    job_id = f"qa_{uuid.uuid4().hex[:8]}"
+    job = QwenAgenticJob(job_id=job_id)
+    with QWEN_AGENTIC_JOBS_LOCK:
+        QWEN_AGENTIC_JOBS[job.job_id] = job
+    thread = threading.Thread(target=_run_qwen_agentic_job, args=(job, payload), daemon=True)
+    thread.start()
+    return job
+
+
+def _cancel_qwen_agentic_job(job_id: str) -> QwenAgenticJob:
+    with QWEN_AGENTIC_JOBS_LOCK:
+        job = QWEN_AGENTIC_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_agentic_job_not_found")
     if job.status in {"completed", "failed", "cancelled"}:
         return job
     job.cancel_event.set()
@@ -29089,11 +30909,9 @@ def qwen_caption(payload: QwenCaptionRequest):
         user_prompt = (payload.user_prompt or "").strip()
         include_counts = bool(payload.include_counts)
         include_coords = bool(payload.include_coords)
-        max_boxes = payload.max_boxes if payload.max_boxes is not None else 25
+        max_boxes = payload.max_boxes if payload.max_boxes is not None else 0
         max_new_tokens = payload.max_new_tokens if payload.max_new_tokens is not None else 128
         label_hints = payload.label_hints or []
-        if len(label_hints) > 500:
-            label_hints = label_hints[:500]
         allowed_labels = _allowed_caption_labels(label_hints)
         image_width = payload.image_width or pil_img.width
         image_height = payload.image_height or pil_img.height
@@ -29126,6 +30944,8 @@ def qwen_caption(payload: QwenCaptionRequest):
         final_only = bool(payload.final_answer_only)
         two_stage = bool(payload.two_stage_refine)
         is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
+        decode_params = _resolve_qwen_caption_decode(payload, is_thinking)
+        deterministic_decode = {"do_sample": False}
         if is_thinking:
             prompt_text = _adjust_prompt_for_thinking(prompt_text)
         # Keep caption max_new_tokens consistent across full/windowed/refine paths; cap at 2000.
@@ -29207,6 +31027,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         max_new_tokens=window_max_tokens,
                         system_prompt_override=system_prompt,
                         runtime_override=get_runtime(window_model_id),
+                        decode_override=decode_params,
                     )
                     window_caption, _ = _extract_caption_from_text(qwen_text, marker=None)
                     window_caption = _sanitize_qwen_caption(window_caption)
@@ -29288,6 +31109,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             max_new_tokens=refine_max_tokens,
                             system_prompt_override=refine_system,
                             runtime_override=get_runtime(refine_model),
+                            decode_override=deterministic_decode,
                         )
                         window_caption, _ = _extract_caption_from_text(refine_text, marker=None)
                         window_caption = _sanitize_qwen_caption(window_caption)
@@ -29327,6 +31149,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 max_new_tokens=max_new_tokens,
                 system_prompt_override=draft_system,
                 runtime_override=resolve_main_runtime(),
+                decode_override=decode_params,
             )
             draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
             draft_caption = _sanitize_qwen_caption(draft_caption)
@@ -29352,6 +31175,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
                 runtime_override=get_runtime(refine_model),
+                decode_override=deterministic_decode,
             )
             caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
             if final_only or is_thinking:
@@ -29363,6 +31187,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 max_new_tokens=max_new_tokens,
                 system_prompt_override=system_prompt,
                 runtime_override=resolve_main_runtime(),
+                decode_override=decode_params,
             )
             caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
             if final_only or is_thinking:
@@ -29460,6 +31285,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
                 runtime_override=get_runtime(refine_model),
+                decode_override=deterministic_decode,
             )
             caption_text, _ = _extract_caption_from_text(refine_text, marker=None)
             caption_text = _sanitize_qwen_caption(caption_text)
@@ -29477,6 +31303,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=rewrite_system,
                 runtime_override=get_runtime(rewrite_model),
+                decode_override=deterministic_decode,
             )
             caption_text, _ = _extract_caption_from_text(rewrite_text, marker=None)
             if final_only or is_thinking:
@@ -29523,6 +31350,46 @@ def qwen_caption(payload: QwenCaptionRequest):
         active_runtime = None
         active_model_id = None
     return response
+
+
+@app.post("/qwen/agentic", response_model=QwenAgenticResponse)
+def qwen_agentic(payload: QwenAgenticRequest):
+    try:
+        return _run_agentic_annotation(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_agentic_failed:{exc}") from exc
+
+
+@app.post("/qwen/agentic/jobs")
+def start_qwen_agentic_job(payload: QwenAgenticRequest):
+    job = _start_qwen_agentic_job(payload)
+    return _serialize_qwen_agentic_job(job)
+
+
+@app.get("/qwen/agentic/jobs")
+def list_qwen_agentic_jobs():
+    _prune_job_registry(QWEN_AGENTIC_JOBS, QWEN_AGENTIC_JOBS_LOCK)
+    with QWEN_AGENTIC_JOBS_LOCK:
+        jobs = list(QWEN_AGENTIC_JOBS.values())
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return [_serialize_qwen_agentic_job(job) for job in jobs]
+
+
+@app.get("/qwen/agentic/jobs/{job_id}")
+def get_qwen_agentic_job(job_id: str):
+    with QWEN_AGENTIC_JOBS_LOCK:
+        job = QWEN_AGENTIC_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_agentic_job_not_found")
+    return _serialize_qwen_agentic_job(job)
+
+
+@app.post("/qwen/agentic/jobs/{job_id}/cancel")
+def cancel_qwen_agentic_job(job_id: str):
+    job = _cancel_qwen_agentic_job(job_id)
+    return _serialize_qwen_agentic_job(job)
 
 @app.post("/sam3/text_prompt", response_model=Sam3TextPromptResponse)
 def sam3_text_prompt(payload: Sam3TextPrompt):
@@ -30112,3 +31979,7 @@ def crop_zip_finalize(jobId: str):
         media_type="application/x-zip-compressed",
         headers={"Content-Disposition": "attachment; filename=crops.zip"}
     )
+
+
+if os.environ.get("COORD_ROUNDTRIP_TEST") == "1":
+    _coord_roundtrip_smoke()

@@ -262,6 +262,12 @@
                                         <strong>Caption current image</strong>
                                         <span id="qwenCaptionStatus" class="qwen-caption-status"></span>
                                     </div>
+                                    <label for="qwenCaptionDataset">Caption dataset</label>
+                                    <div class="qwen-caption-row">
+                                        <select id="qwenCaptionDataset"></select>
+                                        <button type="button" id="qwenCaptionDatasetRefresh" class="training-button secondary">Refresh</button>
+                                    </div>
+                                    <div id="qwenCaptionDatasetSummary" class="training-help"></div>
                                     <label for="qwenCaptionPreset">Caption style</label>
                                     <div class="qwen-caption-row">
                                         <select id="qwenCaptionPreset"></select>
@@ -285,14 +291,15 @@
                                                 <option value="full">Full image</option>
                                                 <option value="windowed">Detailed (windowed)</option>
                                             </select>
+                                            <div class="training-help">Windowed splits the image into overlapping tiles for more detail.</div>
                                         </div>
                                         <div>
                                             <label for="qwenCaptionWindowSize" title="Windowed mode splits the image into overlapping tiles. This is the tile size in pixels.">Window size (px)</label>
                                             <input id="qwenCaptionWindowSize" type="number" min="128" max="4096" placeholder="672">
                                         </div>
                                         <div>
-                                            <label for="qwenCaptionWindowOverlap" title="Overlap between window tiles in windowed mode (0.0–0.9).">Window overlap</label>
-                                            <input id="qwenCaptionWindowOverlap" type="number" min="0" max="0.9" step="0.05" placeholder="0.2">
+                                            <label for="qwenCaptionWindowOverlap" title="Overlap between window tiles in windowed mode (0.0–0.1). Higher overlap increases redundancy at tile edges.">Window overlap</label>
+                                            <input id="qwenCaptionWindowOverlap" type="number" min="0" max="0.1" step="0.01" placeholder="0.1">
                                         </div>
                                         <div>
                                             <label for="qwenCaptionModel">Caption model</label>
@@ -330,18 +337,18 @@
                                     <div class="qwen-caption-options">
                                         <label><input type="checkbox" id="qwenCaptionIncludeCounts" checked /> Include counts by class</label>
                                         <label><input type="checkbox" id="qwenCaptionIncludeCoords" checked /> Include box coords</label>
-                                        <label><input type="checkbox" id="qwenCaptionFinalOnly" checked /> Final answer only (no reasoning)</label>
-                                        <label><input type="checkbox" id="qwenCaptionTwoStage" /> Two-stage refine (Thinking)</label>
-                                        <label><input type="checkbox" id="qwenCaptionHighVram" /> High-VRAM mode (faster; keeps multiple models loaded)<span class="help-icon" title="Uses more GPU memory by keeping multiple Qwen models loaded during captioning. Turn on if you have plenty of VRAM.">?</span></label>
-                                        <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Save to text labels</label>
+                                        <label><input type="checkbox" id="qwenCaptionFinalOnly" checked /> Final answer only (no reasoning)<span class="help-icon" title="For thinking models, trims internal reasoning and keeps only the final caption.">?</span></label>
+                                        <label><input type="checkbox" id="qwenCaptionTwoStage" /> Two-stage refine (Thinking)<span class="help-icon" title="Step 1 drafts a caption (thinking model). Step 2 refines it with the Instruct model to ensure all labeled classes are mentioned and the output is clean.">?</span></label>
+                                        <label><input type="checkbox" id="qwenCaptionHighVram" /> Fast mode (keep Qwen loaded)<span class="help-icon" title="Keeps Qwen models loaded between caption requests to avoid reload thrash. Faster, but uses more VRAM.">?</span></label>
+                                        <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Auto-save to text labels</label>
                                     </div>
                                     <button type="button" id="qwenCaptionRunButton" class="training-button secondary">Caption image</button>
                                     <div class="qwen-caption-output">
                                         <label for="qwenCaptionOutput">Caption</label>
-                                        <textarea id="qwenCaptionOutput" rows="3" readonly></textarea>
+                                        <textarea id="qwenCaptionOutput" rows="3"></textarea>
                                         <button type="button" id="qwenCaptionCopy" class="training-button secondary">Copy caption</button>
                                         <div id="qwenCaptionMeta" class="training-help"></div>
-                                        <div class="training-help">Saved captions are exported under <code>text_labels/</code> (including <code>captions.jsonl</code>) in the YOLO zip.</div>
+                                        <div class="training-help">Saved captions are written to <code>text_labels/&lt;image&gt;.txt</code> and included in dataset exports. JSONL is an optional download.</div>
                                     </div>
                                     <div class="qwen-caption-options">
                                         <label for="qwenCaptionBatchCount">Apply captions to next N images</label>
@@ -429,7 +436,7 @@
                             <label for="bboxes" id="bboxesSelect" class="training-button button-disabled" aria-disabled="true" role="button" tabindex="-1">Import Bboxes…</label>
                             <input type="file" id="bboxesFolder" name="bboxesFolder[]" accept="text/plain" disabled multiple webkitdirectory directory class="file-input-hidden" />
                             <label for="bboxesFolder" id="bboxesSelectFolder" class="training-button button-disabled" aria-disabled="true" role="button" tabindex="-1">Import Bboxes Folder…</label>
-                            <button type="button" name="saveBboxes" id="saveBboxes" class="training-button">Save YOLO</button>
+                            <button type="button" name="saveBboxes" id="saveBboxes" class="training-button">Save YOLO + captions</button>
                             <hr />
                             <div id="description">
                                 SHORTCUTS:

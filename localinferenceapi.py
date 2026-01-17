@@ -206,7 +206,7 @@ QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
 QWEN_TRUST_REMOTE_CODE = _env_bool("QWEN_TRUST_REMOTE_CODE", False)
 QWEN_CAPTION_CACHE_LIMIT = _env_int("QWEN_CAPTION_CACHE_LIMIT", 0)
 QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
-QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
+QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.1)
 
 # Rough VRAM estimates (GB) for Qwen3 training defaults (batch=1, default pixel budget).
 # These are approximate and should be treated as guidance, not a hard guarantee.
@@ -3068,10 +3068,18 @@ def _build_qwen_caption_prompt(
     lines.append(f"Image size: {safe_width}x{safe_height} pixels.")
     if include_counts and counts:
         counts_text = ", ".join(f"{label}: {count}" for label, count in counts.items())
-        lines.append(f"Object counts (all hints): {counts_text}.")
-        lines.append("Use the counts to mention key objects explicitly (e.g., \"three cars\").")
+        lines.append(f"COUNTS (use exactly): {counts_text}.")
+        lines.append(
+            "State these counts without qualifiers (avoid words like 'visible', 'roughly', or 'approximately')."
+        )
     elif counts:
         lines.append("Use the label hints to mention the main objects you see.")
+    if counts:
+        allowed = ", ".join(sorted(counts.keys()))
+        if allowed:
+            lines.append(
+                f"Only mention these classes if they appear: {allowed}. Do not invent other entity types."
+            )
     if selected:
         if include_coords:
             lines.append(
@@ -3084,9 +3092,7 @@ def _build_qwen_caption_prompt(
             ]
             if compact:
                 lines.append(json.dumps(compact, separators=(",", ":")))
-            lines.append(
-                "Use relative positions from the boxes (e.g., top-left, center) when describing layout."
-            )
+            lines.append("Use relative positions (e.g., top-left, center) when describing layout.")
         else:
             labels_only = ", ".join(entry["label"] for entry in selected)
             lines.append(f"Labeled objects (one per box): {labels_only}.")
@@ -3222,6 +3228,10 @@ _QWEN_THINKING_REASONING_RE = re.compile(
     r"(?:\bgot it\b|\blet'?s\b|\bfirst\b|\bsecond\b|\bthird\b|\bstep\b|\bi need\b|\bnow\b|\bthe task\b)",
     re.IGNORECASE,
 )
+_QWEN_CAPTION_META_RE = re.compile(
+    r"(authoritative|as indicated|label hint|bounding box|bbox|coordinates|hinted|counts are provided)",
+    re.IGNORECASE,
+)
 
 
 def _thinking_caption_needs_cleanup(cleaned: str, raw: Optional[str]) -> bool:
@@ -3234,6 +3244,31 @@ def _thinking_caption_needs_cleanup(cleaned: str, raw: Optional[str]) -> bool:
     if _QWEN_THINKING_REASONING_RE.search(cleaned):
         return True
     return False
+
+
+def _caption_needs_completion(caption: str) -> bool:
+    if not caption:
+        return True
+    trimmed = caption.strip()
+    if not trimmed:
+        return True
+    return trimmed[-1] not in ".!?"
+
+
+def _caption_has_meta(caption: str) -> bool:
+    if not caption:
+        return False
+    return _QWEN_CAPTION_META_RE.search(caption) is not None
+
+
+def _caption_needs_short_form(caption: str, max_words: int = 80, max_sentences: int = 2) -> bool:
+    if not caption:
+        return False
+    words = caption.split()
+    if len(words) > max_words:
+        return True
+    sentences = [s.strip() for s in re.split(r"[.!?]+", caption) if s.strip()]
+    return len(sentences) > max_sentences
 
 
 def _adjust_prompt_for_thinking(prompt_text: str) -> str:
@@ -3252,14 +3287,35 @@ def _run_qwen_caption_cleanup(
     use_caption_cache: bool,
     model_id_override: Optional[str] = None,
     runtime_override: Optional[Tuple[Any, Any]] = None,
+    allowed_labels: Optional[List[str]] = None,
+    strict: bool = False,
+    minimal_edit: bool = False,
 ) -> str:
+    allowed_note = ""
+    if allowed_labels:
+        allowed_note = (
+            f"Only mention these classes if they appear: {', '.join(sorted(set(allowed_labels)))}. "
+            "Do not introduce any other entity types. "
+        )
+    strict_note = "Return exactly one complete sentence. " if strict else ""
+    minimal_note = (
+        "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+        if minimal_edit
+        else ""
+    )
     cleanup_system = (
         "You are a captioning assistant. Respond in English only. "
         "Return only <final>...</final> and nothing else."
     )
+    cleanup_prompt = (
+        f"{strict_note}{allowed_note}{minimal_note}"
+        "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
+        "Keep the caption grounded in the image.\n"
+        f"Draft caption: {prompt}"
+    )
     cleanup_model = model_id_override or _resolve_qwen_variant_model_id(base_model_id, "Instruct")
     qwen_text, _, _ = _run_qwen_inference(
-        prompt,
+        cleanup_prompt,
         pil_img,
         max_new_tokens=max_new_tokens,
         system_prompt_override=cleanup_system,
@@ -3285,7 +3341,7 @@ def _resolve_qwen_window_overlap(requested: Optional[float]) -> float:
         overlap = float(requested) if requested is not None else QWEN_WINDOW_DEFAULT_OVERLAP
     except (TypeError, ValueError):
         overlap = QWEN_WINDOW_DEFAULT_OVERLAP
-    return max(0.0, min(overlap, 0.9))
+    return max(0.0, min(overlap, 0.1))
 
 
 def _window_positions(total: int, window: int, overlap: float) -> List[int]:
@@ -3299,6 +3355,81 @@ def _window_positions(total: int, window: int, overlap: float) -> List[int]:
     return sorted(set(positions))
 
 
+def _allowed_caption_labels(label_hints: Sequence[QwenCaptionHint]) -> List[str]:
+    labels = [hint.label for hint in label_hints if hint.label]
+    return sorted(set(str(label) for label in labels if str(label).strip()))
+
+
+def _caption_is_degenerate(caption: str) -> bool:
+    if not caption:
+        return True
+    words = caption.split()
+    if len(words) < 10:
+        return False
+    sentences = [s.strip().lower() for s in re.split(r"[.!?]+", caption) if s.strip()]
+    if sentences:
+        counts = Counter(sentences)
+        most_common = counts.most_common(1)[0][1]
+        if most_common >= 3:
+            return True
+        if most_common / max(1, len(sentences)) > 0.45:
+            return True
+    if len(words) > 40:
+        tokens = [w.lower() for w in words]
+        bigrams = list(zip(tokens, tokens[1:]))
+        if bigrams:
+            unique_ratio = len(set(bigrams)) / len(bigrams)
+            if unique_ratio < 0.55:
+                return True
+    return False
+
+
+def _group_hints_by_window(
+    label_hints: Sequence[QwenCaptionHint],
+    x_positions: Sequence[int],
+    y_positions: Sequence[int],
+    window: int,
+) -> Dict[Tuple[int, int], List[QwenCaptionHint]]:
+    grouped: Dict[Tuple[int, int], List[QwenCaptionHint]] = {(x0, y0): [] for y0 in y_positions for x0 in x_positions}
+    for hint in label_hints:
+        if not hint.bbox or len(hint.bbox) != 4:
+            continue
+        bx1, by1, bx2, by2 = hint.bbox
+        try:
+            cx = (float(bx1) + float(bx2)) * 0.5
+            cy = (float(by1) + float(by2)) * 0.5
+        except (TypeError, ValueError):
+            continue
+        x0_match = None
+        for x0 in x_positions:
+            if x0 <= cx <= x0 + window:
+                x0_match = x0
+                break
+        if x0_match is None:
+            continue
+        y0_match = None
+        for y0 in y_positions:
+            if y0 <= cy <= y0 + window:
+                y0_match = y0
+                break
+        if y0_match is None:
+            continue
+        nx1 = max(0.0, min(float(bx1) - x0_match, window))
+        ny1 = max(0.0, min(float(by1) - y0_match, window))
+        nx2 = max(0.0, min(float(bx2) - x0_match, window))
+        ny2 = max(0.0, min(float(by2) - y0_match, window))
+        if nx2 <= nx1 or ny2 <= ny1:
+            continue
+        grouped[(x0_match, y0_match)].append(
+            QwenCaptionHint(
+                label=hint.label,
+                bbox=[nx1, ny1, nx2, ny2],
+                confidence=hint.confidence,
+            )
+        )
+    return grouped
+
+
 def _filter_hints_for_window(
     label_hints: Sequence[QwenCaptionHint],
     x0: int,
@@ -3307,6 +3438,7 @@ def _filter_hints_for_window(
     image_width: int,
     image_height: int,
 ) -> List[QwenCaptionHint]:
+    # Deprecated: use _group_hints_by_window to avoid duplicates.
     window_hints: List[QwenCaptionHint] = []
     x1 = x0 + window
     y1 = y0 + window
@@ -4227,6 +4359,7 @@ class QwenCaptionRequest(BaseModel):
     unload_others: Optional[bool] = False
     force_unload: Optional[bool] = None
     multi_model_cache: Optional[bool] = False
+    fast_mode: Optional[bool] = False
 
     @root_validator(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
@@ -4261,6 +4394,8 @@ class QwenCaptionRequest(BaseModel):
             except (TypeError, ValueError):
                 values[key] = None
         caption_mode = (values.get("caption_mode") or "full").strip().lower()
+        if caption_mode == "hybrid":
+            caption_mode = "windowed"
         if caption_mode not in {"full", "windowed"}:
             caption_mode = "full"
         values["caption_mode"] = caption_mode
@@ -19365,6 +19500,38 @@ def _count_caption_labels(dataset_root: Path) -> Tuple[int, bool]:
     return len(stems), True
 
 
+def _caption_image_stem(image_name: str) -> str:
+    cleaned = Path(str(image_name or "").strip()).name
+    stem = Path(cleaned).stem
+    if not stem:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="caption_image_invalid")
+    return stem
+
+
+def _resolve_caption_dataset_root(dataset_id: str) -> Path:
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root: Optional[Path] = None
+    if entry and entry.get("dataset_root"):
+        dataset_root = Path(entry["dataset_root"]).resolve()
+    if not dataset_root:
+        dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    if not dataset_root or not dataset_root.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
+    return dataset_root
+
+
+def _caption_file_path(dataset_root: Path, image_name: str, *, create_dir: bool) -> Path:
+    captions_dir = dataset_root / "text_labels"
+    if create_dir:
+        captions_dir.mkdir(parents=True, exist_ok=True)
+    stem = _caption_image_stem(image_name)
+    return captions_dir / f"{stem}.txt"
+
+
+class CaptionLabelRequest(BaseModel):
+    caption: str = ""
+
+
 def _infer_yolo_dataset_type(labels_dir: Path, fallback: str = "bbox") -> str:
     if not labels_dir.exists():
         return fallback
@@ -19894,6 +20061,40 @@ def download_dataset(dataset_id: str):
         headers=headers,
         background=BackgroundTask(_cleanup_stream_and_dir, stream, staging_dir),
     )
+
+
+@app.get("/datasets/{dataset_id}/text_labels/{image_name}")
+def get_caption_label(dataset_id: str, image_name: str):
+    dataset_root = _resolve_caption_dataset_root(dataset_id)
+    caption_path = _caption_file_path(dataset_root, image_name, create_dir=False)
+    if not caption_path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="caption_not_found")
+    try:
+        caption = caption_path.read_text(encoding="utf-8").strip()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    return {"image": Path(image_name).name, "caption": caption}
+
+
+@app.post("/datasets/{dataset_id}/text_labels/{image_name}")
+def save_caption_label(dataset_id: str, image_name: str, payload: CaptionLabelRequest):
+    dataset_root = _resolve_caption_dataset_root(dataset_id)
+    caption_path = _caption_file_path(dataset_root, image_name, create_dir=True)
+    caption = (payload.caption or "").strip()
+    if not caption:
+        deleted = False
+        if caption_path.exists():
+            try:
+                caption_path.unlink()
+                deleted = True
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        return {"image": Path(image_name).name, "caption": "", "saved": False, "deleted": deleted}
+    try:
+        caption_path.write_text(f"{caption}\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    return {"image": Path(image_name).name, "caption": caption, "saved": True}
 
 
 @app.get("/sam3/datasets")
@@ -28839,10 +29040,13 @@ def qwen_infer(payload: QwenInferenceRequest):
 
 @app.post("/qwen/caption", response_model=QwenCaptionResponse)
 def qwen_caption(payload: QwenCaptionRequest):
+    fast_mode = bool(payload.fast_mode)
     force_unload = payload.force_unload
     if force_unload is None:
         force_unload = QWEN_CAPTION_CACHE_LIMIT == 0
-    multi_model_cache = bool(payload.multi_model_cache)
+    if fast_mode:
+        force_unload = False
+    multi_model_cache = bool(payload.multi_model_cache or fast_mode)
     active_model_id: Optional[str] = None
     active_runtime: Optional[Tuple[Any, Any]] = None
     request_model_cache: Dict[str, Tuple[Any, Any]] = {}
@@ -28879,7 +29083,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         return active_runtime
 
     try:
-        if payload.unload_others:
+        if payload.unload_others and not fast_mode:
             _unload_non_qwen_runtimes()
         pil_img, _, _ = resolve_image_payload(payload.image_base64, payload.image_token, None)
         user_prompt = (payload.user_prompt or "").strip()
@@ -28890,6 +29094,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         label_hints = payload.label_hints or []
         if len(label_hints) > 500:
             label_hints = label_hints[:500]
+        allowed_labels = _allowed_caption_labels(label_hints)
         image_width = payload.image_width or pil_img.width
         image_height = payload.image_height or pil_img.height
         caption_mode = payload.caption_mode or "full"
@@ -28917,18 +29122,22 @@ def qwen_caption(payload: QwenCaptionRequest):
                 desired_model_id,
                 active_qwen_model_id,
             )
+        caption_base_model_id = desired_model_id if model_id_override else base_model_id
         final_only = bool(payload.final_answer_only)
         two_stage = bool(payload.two_stage_refine)
         is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
         if is_thinking:
             prompt_text = _adjust_prompt_for_thinking(prompt_text)
+        # Keep caption max_new_tokens consistent across full/windowed/refine paths; cap at 2000.
+        # Avoid per-path caps here (we previously caused repeated CUDA asserts by diverging).
         if is_thinking:
             max_new_tokens = max(max_new_tokens, 2000)
-        if caption_mode == "windowed":
-            max_new_tokens = max(max_new_tokens, 2000)
+        max_new_tokens = min(max_new_tokens, 2000)
+        refine_max_tokens = max_new_tokens
         system_prompt = (
-            "You are a concise captioning assistant. Use the image as truth. The label hints are suggestions; "
-            "if they conflict with the image, mention the uncertainty briefly."
+            "You are a concise captioning assistant. Use the image as truth. "
+            "Do not mention labels, hints, bounding boxes, coordinates, or that counts were provided. "
+            "If the hints conflict with the image, mention the uncertainty briefly."
         )
         system_prompt = f"{system_prompt} Respond in English only."
         if final_only:
@@ -28956,18 +29165,16 @@ def qwen_caption(payload: QwenCaptionRequest):
             overlap = _resolve_qwen_window_overlap(payload.window_overlap)
             x_positions = _window_positions(image_width, window_size, overlap)
             y_positions = _window_positions(image_height, window_size, overlap)
+            grouped_hints = _group_hints_by_window(label_hints, x_positions, y_positions, window_size)
+            window_model_id = desired_model_id
+            window_base_model_id = window_model_id
+            window_is_thinking = "Thinking" in window_model_id
             for y0 in y_positions:
                 for x0 in x_positions:
-                    window_hints = _filter_hints_for_window(
-                        label_hints,
-                        x0,
-                        y0,
-                        window_size,
-                        image_width,
-                        image_height,
-                    )
+                    window_hints = grouped_hints.get((x0, y0), [])
                     if not window_hints:
                         continue
+                    window_allowed = _allowed_caption_labels(window_hints)
                     window_prompt, window_counts, _, _ = _build_qwen_caption_prompt(
                         user_prompt,
                         window_hints,
@@ -28980,32 +29187,72 @@ def qwen_caption(payload: QwenCaptionRequest):
                     )
                     window_prompt = (
                         f"Window region in full image: [{x0}, {y0}] to [{x0 + window_size}, {y0 + window_size}].\n"
-                        f"Focus only on this region.\n"
-                        "Write one complete sentence about this region only. No reasoning or preamble.\n"
+                        "Focus only on this region.\n"
+                        "Write one complete sentence about this region only. No reasoning or preamble. "
+                        "Do not mention labels, hints, counts, or coordinates.\n"
                         f"{window_prompt}"
                     )
-                    if is_thinking:
+                    if window_allowed:
+                        window_prompt = (
+                            f"{window_prompt}\nAllowed classes: {', '.join(window_allowed)}. "
+                            "Do not introduce any other entity types."
+                        )
+                    if window_is_thinking:
                         window_prompt = _adjust_prompt_for_thinking(window_prompt)
                     window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
+                    window_max_tokens = max_new_tokens
                     qwen_text, _, _ = _run_qwen_inference(
                         window_prompt,
                         window_img,
-                        max_new_tokens=max_new_tokens,
+                        max_new_tokens=window_max_tokens,
                         system_prompt_override=system_prompt,
-                        runtime_override=resolve_main_runtime(),
+                        runtime_override=get_runtime(window_model_id),
                     )
                     window_caption, _ = _extract_caption_from_text(qwen_text, marker=None)
                     window_caption = _sanitize_qwen_caption(window_caption)
-                    if is_thinking and _thinking_caption_needs_cleanup(window_caption, qwen_text):
-                        cleanup_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+                    if window_is_thinking and _thinking_caption_needs_cleanup(window_caption, qwen_text):
+                        cleanup_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
                         window_caption = _run_qwen_caption_cleanup(
-                            window_prompt,
+                            window_caption,
                             window_img,
-                            max_new_tokens,
-                            base_model_id,
+                            window_max_tokens,
+                            window_base_model_id,
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
+                            allowed_labels=window_allowed,
+                            strict=True,
+                            minimal_edit=True,
+                        )
+                        cleanup_count += 1
+                    if _caption_is_degenerate(window_caption):
+                        cleanup_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
+                        window_caption = _run_qwen_caption_cleanup(
+                            window_caption,
+                            window_img,
+                            window_max_tokens,
+                            window_base_model_id,
+                            use_caption_cache,
+                            model_id_override=cleanup_model,
+                            runtime_override=get_runtime(cleanup_model),
+                            allowed_labels=window_allowed,
+                            strict=True,
+                            minimal_edit=True,
+                        )
+                        cleanup_count += 1
+                    if _caption_needs_completion(window_caption) or _caption_has_meta(window_caption):
+                        cleanup_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
+                        window_caption = _run_qwen_caption_cleanup(
+                            window_caption,
+                            window_img,
+                            window_max_tokens,
+                            window_base_model_id,
+                            use_caption_cache,
+                            model_id_override=cleanup_model,
+                            runtime_override=get_runtime(cleanup_model),
+                            allowed_labels=window_allowed,
+                            strict=True,
+                            minimal_edit=True,
                         )
                         cleanup_count += 1
                     needs_refine, missing = _caption_needs_refine(
@@ -29015,7 +29262,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                         include_counts=include_counts,
                     )
                     if needs_refine:
-                        refine_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+                        refine_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
+                        allowed_note = (
+                            f"Allowed classes: {', '.join(window_allowed)}. Do not introduce any other entity types."
+                            if window_allowed
+                            else "Do not introduce any new entity types."
+                        )
                         missing_note = (
                             f"Ensure the caption mentions: {', '.join(missing)}."
                             if missing
@@ -29023,7 +29275,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                         )
                         refine_prompt = (
                             f"{window_prompt}\nDraft caption: {window_caption}\n"
-                            f"{missing_note}\nReturn only a single-sentence caption."
+                            f"{missing_note}\n{allowed_note}\n"
+                            "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                            "Return only a single-sentence caption with no coordinates."
                         )
                         refine_system = (
                             "You are a concise captioning assistant. Return only the final caption in English."
@@ -29031,7 +29285,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         refine_text, _, _ = _run_qwen_inference(
                             refine_prompt,
                             window_img,
-                            max_new_tokens=max_new_tokens,
+                            max_new_tokens=refine_max_tokens,
                             system_prompt_override=refine_system,
                             runtime_override=get_runtime(refine_model),
                         )
@@ -29054,7 +29308,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                 window_lines.append(
                     "Now describe the full image in detail. Use all labeled object counts and the close-up observations. "
                     "Mention every class that appears in the hints, and summarize repetitive objects (e.g., many cars as a parking lot) "
-                    "unless only a few are present or a specific action stands out."
+                    "unless only a few are present or a specific action stands out. "
+                    "Do not mention labels, hints, counts, or coordinates."
+                )
+                window_lines.append(
+                    "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
                 )
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
@@ -29072,19 +29330,26 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
             draft_caption = _sanitize_qwen_caption(draft_caption)
+            allowed_note = (
+                f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
+                if allowed_labels
+                else "Do not introduce any new entity types."
+            )
             refine_prompt = (
                 f"{prompt_text}\nDraft caption: {draft_caption}\n"
-                "Step 2: Refine the caption using the label hints. Return only the final caption."
+                f"{allowed_note}\n"
+                "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                "Return only the final caption."
             )
             refine_system = (
                 "You are a concise captioning assistant. Use the image as truth. "
                 "Return only the final caption. Respond in English only."
             )
-            refine_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+            refine_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
             qwen_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
                 runtime_override=get_runtime(refine_model),
             )
@@ -29103,17 +29368,65 @@ def qwen_caption(payload: QwenCaptionRequest):
             if final_only or is_thinking:
                 caption_text = _sanitize_qwen_caption(caption_text)
             if is_thinking and _thinking_caption_needs_cleanup(caption_text, qwen_text):
-                cleanup_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+                cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
                 caption_text = _run_qwen_caption_cleanup(
-                    prompt_text,
+                    caption_text,
                     pil_img,
-                    max_new_tokens,
-                    base_model_id,
+                    refine_max_tokens,
+                    caption_base_model_id,
                     use_caption_cache,
                     model_id_override=cleanup_model,
                     runtime_override=get_runtime(cleanup_model),
+                    allowed_labels=allowed_labels,
+                    strict=True,
+                    minimal_edit=True,
                 )
                 cleanup_count += 1
+        if _caption_is_degenerate(caption_text):
+            cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
+            caption_text = _run_qwen_caption_cleanup(
+                caption_text,
+                pil_img,
+                refine_max_tokens,
+                caption_base_model_id,
+                use_caption_cache,
+                model_id_override=cleanup_model,
+                runtime_override=get_runtime(cleanup_model),
+                allowed_labels=allowed_labels,
+                strict=True,
+                minimal_edit=True,
+            )
+            cleanup_count += 1
+        if _caption_needs_completion(caption_text) or _caption_has_meta(caption_text):
+            cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
+            caption_text = _run_qwen_caption_cleanup(
+                caption_text,
+                pil_img,
+                refine_max_tokens,
+                caption_base_model_id,
+                use_caption_cache,
+                model_id_override=cleanup_model,
+                runtime_override=get_runtime(cleanup_model),
+                allowed_labels=allowed_labels,
+                strict=True,
+                minimal_edit=True,
+            )
+            cleanup_count += 1
+        if caption_mode == "windowed" and "4B" in desired_model_id and _caption_needs_short_form(caption_text):
+            cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
+            caption_text = _run_qwen_caption_cleanup(
+                caption_text,
+                pil_img,
+                refine_max_tokens,
+                caption_base_model_id,
+                use_caption_cache,
+                model_id_override=cleanup_model,
+                runtime_override=get_runtime(cleanup_model),
+                allowed_labels=allowed_labels,
+                strict=True,
+                minimal_edit=True,
+            )
+            cleanup_count += 1
         needs_refine, missing = _caption_needs_refine(
             caption_text,
             counts,
@@ -29121,7 +29434,12 @@ def qwen_caption(payload: QwenCaptionRequest):
             include_counts=include_counts,
         )
         if needs_refine:
-            refine_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+            refine_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
+            allowed_note = (
+                f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
+                if allowed_labels
+                else "Do not introduce any new entity types."
+            )
             missing_note = (
                 f"Ensure the caption mentions: {', '.join(missing)}."
                 if missing
@@ -29129,7 +29447,9 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             refine_prompt = (
                 f"{prompt_text}\nDraft caption: {caption_text}\n"
-                f"{missing_note}\nReturn only the final caption."
+                f"{missing_note}\n{allowed_note}\n"
+                "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                "Return only the final caption with no coordinates."
             )
             refine_system = (
                 "You are a captioning assistant. Return only the final caption in English."
@@ -29137,7 +29457,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             refine_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
                 runtime_override=get_runtime(refine_model),
             )
@@ -29154,7 +29474,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             rewrite_text, _, _ = _run_qwen_inference(
                 rewrite_prompt,
                 pil_img,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=refine_max_tokens,
                 system_prompt_override=rewrite_system,
                 runtime_override=get_runtime(rewrite_model),
             )

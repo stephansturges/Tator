@@ -204,6 +204,13 @@ Dataset Management displays readiness tags so you can see when a dataset is usab
 4. If you need extra detail, switch **Caption detail** to *Detailed (windowed)* and tune the window size + overlap.
 5. Click **Run caption** and optionally save the caption as a `text_labels` entry.
 5. Export as YOLO ZIP: captions live under `text_labels/` next to label files.
+6. **Fast mode** keeps Qwen models loaded between caption requests (faster, higher VRAM). Leave it off for max stability.
+
+Captioning quality guardrails:
+- Counts are injected as immutable facts (the model should not say “visible” vs “authoritative” counts).
+- Meta language is banned (“labels,” “hints,” “bounding boxes,” etc.). If it leaks in, a cleanup pass rewrites the caption.
+- Repetition/loops and truncation are detected; a minimal‑diff cleanup rewrites into a single clean sentence when needed.
+- Refine mode (Thinking → Instruct) is constrained to minimal edits so it doesn’t invent new objects or actions.
 
 ### Training detectors (YOLOv8 + RF-DETR)
 1. Open **Train YOLO** or **Train RF-DETR**.
@@ -216,6 +223,7 @@ Dataset Management displays readiness tags so you can see when a dataset is usab
 - 2026-01-13: Added Qwen3 captioning flow with editable style + opening lists, label-hint injection, and `text_labels/` export.
 - 2026-01-13: Added YOLOv8 + RF-DETR training UIs, run tracking, and saved-run management with best checkpoints only.
 - 2026-01-13: Expanded model catalog (Thinking/Instruct + FP8 options) and GPU capability warnings for large caption models.
+- 2026-01-16: Captioning guardrails (fixed counts, meta‑language removal, repetition/truncation cleanup) + fast‑mode toggle for speed/VRAM tradeoff.
 
 ### Optional: Setting up SAM3
 SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):

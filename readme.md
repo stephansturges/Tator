@@ -97,8 +97,10 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - The agent pulls the labelmap (and optional glossary) from the dataset and is allowed to call:
   - detectors (YOLO/RF‑DETR), SAM3 text + similarity, and classifiers,
   - an image zoom tool to look closer at sub-windows.
+- The agent runs through **Qwen‑Agent** (default) with function‑calling tools; legacy tool parsing has been removed.
 - The backend enforces canonical labelmap names during `submit_annotations`, performs QA/NMS merge, and returns a trace so the UI can display the full reasoning flow.
 - The dataset glossary can be edited from the agentic panel to map label names to human-friendly descriptions and aliases.
+- Each agentic run stores a JSONL trace in `uploads/qwen_agentic_traces/` and can be fetched via `GET /qwen/agentic/jobs/{job_id}/trace`.
 
 ### Agentic smoke test (10 images)
 Run a minimal smoke test locally:
@@ -106,6 +108,13 @@ Run a minimal smoke test locally:
 bash tools/run_qwen_agentic_smoke.sh --count 10 --seed 42 --dataset qwen_dataset
 ```
 This writes a JSONL log of detections + trace events for each image.
+
+### Agentic benchmark (TP/FP/FN vs COCO)
+Run the benchmark harness to compare detections against COCO GT:
+```bash
+bash tools/run_qwen_agentic_benchmark.sh --count 10 --seed 42 --dataset qwen_dataset
+```
+The script writes a JSONL log plus a summary JSON with per‑class TP/FP/FN.
 
 ### Codebase map (where to look)
 ```text

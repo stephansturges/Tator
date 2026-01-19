@@ -5978,7 +5978,14 @@ def _run_agentic_annotation_qwen_agent(
     cancel_event: Optional[threading.Event] = None,
 ) -> QwenAgenticResponse:
     if QWEN_AGENT_IMPORT_ERROR is not None or QwenAgentAssistant is None or LocalQwenVLChatModel is None:
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="qwen_agent_unavailable")
+        detail = "qwen_agent_unavailable"
+        if QWEN_AGENT_IMPORT_ERROR is not None:
+            detail = f"{detail}:{QWEN_AGENT_IMPORT_ERROR}"
+        elif QwenAgentAssistant is None:
+            detail = f"{detail}:assistant_missing"
+        elif LocalQwenVLChatModel is None:
+            detail = f"{detail}:llm_missing"
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
     pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, None)
     img_w, img_h = pil_img.size
     labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)

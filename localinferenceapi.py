@@ -5143,6 +5143,42 @@ def _agent_det_payload(
     return payload
 
 
+def _agent_quadrant_windows_qwen(overlap_ratio: float = 0.1) -> List[Dict[str, Any]]:
+    overlap_ratio = max(0.0, min(float(overlap_ratio), 0.4))
+    base = 1000.0
+    if overlap_ratio <= 0.0:
+        win = 500.0
+    else:
+        win = base / (2.0 - overlap_ratio)
+    start = base - win
+    x0 = 0.0
+    y0 = 0.0
+    x1 = max(0.0, min(base, start))
+    y1 = max(0.0, min(base, start))
+    win = max(1.0, min(base, win))
+    windows = [
+        {"name": "top_left", "bbox_2d": [x0, y0, x0 + win, y0 + win]},
+        {"name": "top_right", "bbox_2d": [x1, y0, x1 + win, y0 + win]},
+        {"name": "bottom_left", "bbox_2d": [x0, y1, x0 + win, y1 + win]},
+        {"name": "bottom_right", "bbox_2d": [x1, y1, x1 + win, y1 + win]},
+    ]
+    clipped = []
+    for window in windows:
+        x1w, y1w, x2w, y2w = window["bbox_2d"]
+        clipped.append(
+            {
+                "name": window["name"],
+                "bbox_2d": [
+                    max(0.0, min(base, x1w)),
+                    max(0.0, min(base, y1w)),
+                    max(0.0, min(base, x2w)),
+                    max(0.0, min(base, y2w)),
+                ],
+            }
+        )
+    return clipped
+
+
 @_register_agent_tool("run_detector")
 def _agent_tool_run_detector(
     image_base64: Optional[str] = None,
@@ -6093,6 +6129,23 @@ def _run_agentic_annotation_qwen_agent(
             ],
         )
     ]
+    if payload.prepass_inspect_quadrants is not False:
+        quadrants = _agent_quadrant_windows_qwen(0.1)
+        quadrant_text = json.dumps(quadrants, ensure_ascii=False)
+        messages.append(
+            QwenAgentMessage(
+                role="user",
+                content=[
+                    QwenAgentContentItem(
+                        text=(
+                            "Inspect these windows (bbox_2d in 0–1000 full-image coords). "
+                            "Call look_and_inspect for EACH window before final submission:\n"
+                            f"{quadrant_text}"
+                        )
+                    )
+                ],
+            )
+        )
     detections: List[Dict[str, Any]] = []
     trace: List[AgentTraceEvent] = []
     tool_calls = 0
@@ -6563,16 +6616,14 @@ def _run_agentic_annotation(
                         cross_iou=cross_iou,
                     )
                 _trace_prepass(sim_call, sim_compact, f"prepass_sam3_similarity_{class_id}", len(sim_cleaned), int(sim_rejected))
-        if prepass_mode.endswith("_inspect") or prepass_mode == "inspect_quadrants":
+        if (payload.prepass_inspect_quadrants is not False) and (
+            prepass_mode.endswith("_inspect") or prepass_mode == "inspect_quadrants"
+        ):
             inspect_score = float(payload.prepass_inspect_score or 0.4)
             inspect_topk = int(payload.prepass_inspect_topk or 5)
-            quadrants = [
-                [0.0, 0.0, 500.0, 500.0],
-                [500.0, 0.0, 1000.0, 500.0],
-                [0.0, 500.0, 500.0, 1000.0],
-                [500.0, 500.0, 1000.0, 1000.0],
-            ]
-            for window_bbox in quadrants:
+            quadrants = _agent_quadrant_windows_qwen(0.1)
+            for window in quadrants:
+                window_bbox = window.get("bbox_2d") or []
                 inspect_call = AgentToolCall(
                     name="look_and_inspect",
                     arguments={

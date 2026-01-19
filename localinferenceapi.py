@@ -96,20 +96,28 @@ except Exception as exc:  # noqa: BLE001
 else:
     QWEN_IMPORT_ERROR = None
 
-try:
-    from qwen_agent.agents import Assistant as QwenAgentAssistant
-    from qwen_agent.llm.schema import Message as QwenAgentMessage, ContentItem as QwenAgentContentItem
-    from app.qwen_agent_llm import LocalQwenVLChatModel
-    from app.qwen_agent_tools import build_local_agent_tools
-except Exception as exc:  # noqa: BLE001
-    QWEN_AGENT_IMPORT_ERROR = exc
-    QwenAgentAssistant = None  # type: ignore[assignment]
-    QwenAgentMessage = None  # type: ignore[assignment]
-    QwenAgentContentItem = None  # type: ignore[assignment]
+def _try_import_qwen_agent() -> Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], Optional[Exception]]:
+    try:
+        from qwen_agent.agents import Assistant as QwenAgentAssistant  # type: ignore
+        from qwen_agent.llm.schema import Message as QwenAgentMessage, ContentItem as QwenAgentContentItem  # type: ignore
+        from app.qwen_agent_llm import LocalQwenVLChatModel  # type: ignore
+        from app.qwen_agent_tools import build_local_agent_tools  # type: ignore
+        return QwenAgentAssistant, QwenAgentMessage, QwenAgentContentItem, (LocalQwenVLChatModel, build_local_agent_tools), None
+    except Exception as exc:  # noqa: BLE001
+        return None, None, None, None, exc
+
+
+QwenAgentAssistant, QwenAgentMessage, QwenAgentContentItem, _agent_payload, QWEN_AGENT_IMPORT_ERROR = _try_import_qwen_agent()
+if QWEN_AGENT_IMPORT_ERROR is not None:
+    local_repo = (Path(__file__).resolve().parent / "Qwen-Agent").resolve()
+    if local_repo.exists():
+        sys.path.insert(0, str(local_repo))
+        QwenAgentAssistant, QwenAgentMessage, QwenAgentContentItem, _agent_payload, QWEN_AGENT_IMPORT_ERROR = _try_import_qwen_agent()
+if _agent_payload is not None:
+    LocalQwenVLChatModel, build_local_agent_tools = _agent_payload
+else:
     LocalQwenVLChatModel = None  # type: ignore[assignment]
     build_local_agent_tools = None  # type: ignore[assignment]
-else:
-    QWEN_AGENT_IMPORT_ERROR = None
 
 # Optional text-only LLM for prompt expansion (preferred over Qwen when available).
 GPT_OSS_MODEL_ID = os.environ.get("PROMPT_LLM_MODEL_ID", "openai/gpt-oss-20b")

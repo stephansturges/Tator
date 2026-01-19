@@ -255,6 +255,18 @@ def _resolve_qwen_max_seq_len(model: Any) -> Optional[int]:
     return None
 
 
+def _qwen_supports_presence_penalty(model: Any) -> bool:
+    gen_config = getattr(model, "generation_config", None)
+    if gen_config is None:
+        return False
+    if hasattr(gen_config, "to_dict"):
+        try:
+            return "presence_penalty" in gen_config.to_dict()
+        except Exception:
+            pass
+    return hasattr(gen_config, "presence_penalty")
+
+
 def _is_qwen_moe_model_id(model_id: str) -> bool:
     lowered = model_id.lower()
     return "a3b" in lowered or "moe" in lowered
@@ -3610,7 +3622,7 @@ def _run_qwen_inference(
         )
         if top_k is not None:
             gen_kwargs["top_k"] = int(top_k)
-        if presence_penalty is not None:
+        if presence_penalty is not None and _qwen_supports_presence_penalty(model):
             gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False
@@ -3733,7 +3745,7 @@ def _run_qwen_chat(
         )
         if top_k is not None:
             gen_kwargs["top_k"] = int(top_k)
-        if presence_penalty is not None:
+        if presence_penalty is not None and _qwen_supports_presence_penalty(model):
             gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False

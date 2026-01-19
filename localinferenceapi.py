@@ -6965,6 +6965,7 @@ class QwenAgenticJob:
     request: Dict[str, Any] = field(default_factory=dict)
     result: Optional[Dict[str, Any]] = None
     trace: List[Dict[str, Any]] = field(default_factory=list)
+    trace_path: Optional[str] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -6997,6 +6998,8 @@ DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
 DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_NEGATIVE_REPLAY_ROOT = UPLOAD_ROOT / "clip_negative_replay"
 CLIP_NEGATIVE_REPLAY_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_AGENTIC_TRACE_ROOT = UPLOAD_ROOT / "qwen_agentic_traces"
+QWEN_AGENTIC_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _prune_job_registry(registry: Dict[str, Any], lock: threading.Lock, ttl_hours: Optional[int] = None) -> None:
@@ -23549,6 +23552,7 @@ def _serialize_qwen_agentic_job(job: QwenAgenticJob) -> Dict[str, Any]:
         "request": job.request,
         "result": job.result,
         "trace": job.trace,
+        "trace_path": job.trace_path,
         "error": job.error,
     }
 
@@ -24897,10 +24901,34 @@ def _run_qwen_agentic_job(job: QwenAgenticJob, payload: QwenAgenticRequest) -> N
     job.message = "Running agent"
     job.request = payload.dict()
     job.updated_at = time.time()
+    trace_path = QWEN_AGENTIC_TRACE_ROOT / f"{job.job_id}.jsonl"
+    job.trace_path = str(trace_path)
+    try:
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "job_start",
+                "job_id": job.job_id,
+                "timestamp": time.time(),
+                "request": job.request,
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        # Best-effort; still run without persistence if filesystem is unavailable.
+        job.trace_path = None
     try:
         def _trace_sink(event: AgentTraceEvent) -> None:
             job.trace.append(event.dict())
             job.updated_at = time.time()
+            if job.trace_path:
+                try:
+                    with open(job.trace_path, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({
+                            "type": "trace",
+                            "timestamp": time.time(),
+                            "event": event.dict(),
+                        }, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
 
         result = _run_agentic_annotation(
             payload,
@@ -24921,6 +24949,18 @@ def _run_qwen_agentic_job(job: QwenAgenticJob, payload: QwenAgenticRequest) -> N
         job.message = "Failed"
     finally:
         job.updated_at = time.time()
+        if job.trace_path:
+            try:
+                with open(job.trace_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "type": "job_end",
+                        "timestamp": time.time(),
+                        "status": job.status,
+                        "error": job.error,
+                        "result": job.result,
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
 
 
 def _start_qwen_agentic_job(payload: QwenAgenticRequest) -> QwenAgenticJob:
@@ -31553,6 +31593,36 @@ def get_qwen_agentic_job(job_id: str):
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_agentic_job_not_found")
     return _serialize_qwen_agentic_job(job)
+
+
+@app.get("/qwen/agentic/jobs/{job_id}/trace")
+def get_qwen_agentic_trace(job_id: str):
+    with QWEN_AGENTIC_JOBS_LOCK:
+        job = QWEN_AGENTIC_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_agentic_job_not_found")
+    records: List[Dict[str, Any]] = []
+    trace_path = Path(job.trace_path) if job.trace_path else None
+    if trace_path and trace_path.exists():
+        try:
+            with trace_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        continue
+        except Exception:
+            records = []
+    if not records:
+        records = [{"type": "trace", "event": entry} for entry in (job.trace or [])]
+    return {
+        "job_id": job.job_id,
+        "trace_path": job.trace_path,
+        "records": records,
+    }
 
 
 @app.post("/qwen/agentic/jobs/{job_id}/cancel")

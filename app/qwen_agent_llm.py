@@ -49,6 +49,11 @@ def _messages_to_qwen(messages: Sequence[Message]) -> List[Dict[str, Any]]:
 
 
 class LocalQwenVLChatModel(BaseFnCallModel):
+    def __init__(self, cfg: Optional[Dict[str, Any]] = None):
+        super().__init__(cfg=cfg)
+        cfg = cfg or {}
+        self._model_id_override = cfg.get("model_id_override")
+
     @property
     def support_multimodal_input(self) -> bool:
         return True
@@ -84,6 +89,7 @@ class LocalQwenVLChatModel(BaseFnCallModel):
             qwen_messages,
             max_new_tokens=max_new_tokens,
             decode_override=decode_override,
+            model_id_override=self._model_id_override,
             tools=None,
             chat_template_kwargs=chat_template_kwargs,
         )

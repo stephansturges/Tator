@@ -13141,6 +13141,7 @@ function initQwenTrainingTab() {
         qwenElements.agentBatchCount = document.getElementById("qwenAgentBatchCount");
         qwenElements.agentBatchIncludeCurrent = document.getElementById("qwenAgentBatchIncludeCurrent");
         qwenElements.agentBatchRun = document.getElementById("qwenAgentBatchRun");
+        qwenElements.agentUseQwenAgent = document.getElementById("qwenAgentUseQwenAgent");
         qwenElements.unloadOthers = document.getElementById("qwenUnloadOthers");
         if (qwenElements.captionModel) {
             qwenElements.captionModel.addEventListener("change", () => {
@@ -16401,6 +16402,7 @@ function initQwenTrainingTab() {
         const maxTokens = parseInt(qwenElements.agentMaxTokens?.value || "1024", 10);
         const datasetId = getQwenAgentDatasetId();
         const glossaryText = qwenElements.agentGlossary?.value || "";
+        const useQwenAgent = !!qwenElements.agentUseQwenAgent?.checked;
         return {
             dataset_id: datasetId || null,
             image_base64: base64,
@@ -16417,6 +16419,7 @@ function initQwenTrainingTab() {
             cross_iou: crossIouRaw ? parseFloat(crossIouRaw) : null,
             max_new_tokens: Number.isFinite(maxTokens) ? maxTokens : 1024,
             labelmap_glossary: glossaryText || null,
+            use_qwen_agent: useQwenAgent,
         };
     }
 

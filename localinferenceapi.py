@@ -4960,6 +4960,34 @@ def _agent_merge_detections(
     return merged
 
 
+def _agent_finalize_detections(
+    detections: List[Dict[str, Any]],
+    *,
+    img_w: int,
+    img_h: int,
+    labelmap: List[str],
+    background: Optional[Sequence[str]],
+    iou_thr: float,
+    cross_iou: Optional[float],
+    max_det: Optional[int],
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    cleaned, rejected = _agent_sanitize_detection_items(
+        detections,
+        img_w=img_w,
+        img_h=img_h,
+        labelmap=labelmap,
+        background=background,
+    )
+    merged = _agent_merge_detections(
+        cleaned,
+        iou_thr=iou_thr,
+        max_det=max_det,
+        cross_iou=cross_iou,
+    )
+    counts = {"input": len(detections), "accepted": len(merged), "rejected": int(rejected)}
+    return merged, counts
+
+
 def _agent_sanitize_detection_items(
     items: List[Dict[str, Any]],
     *,
@@ -6067,6 +6095,8 @@ def _run_agentic_annotation_qwen_agent(
     img_w, img_h = pil_img.size
     labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
     labelmap = labelmap or []
+    if not labelmap:
+        warnings.append("labelmap_missing")
     if payload.labelmap_glossary is not None:
         glossary = _normalize_labelmap_glossary(payload.labelmap_glossary)
     warnings: List[str] = []
@@ -6260,18 +6290,24 @@ def _run_agentic_annotation_qwen_agent(
         if tool_calls >= max_tool_calls:
             break
     if final_detections is None:
-        cleaned, rejected = _agent_sanitize_detection_items(
+        final_detections, qa_counts = _agent_finalize_detections(
             detections,
             img_w=img_w,
             img_h=img_h,
             labelmap=labelmap,
             background=background,
-        )
-        final_detections = _agent_merge_detections(
-            cleaned,
             iou_thr=iou_thr,
-            max_det=max_detections,
             cross_iou=cross_iou,
+            max_det=max_detections,
+        )
+        trace.append(
+            AgentTraceEvent(
+                step_id=step_id + 1,
+                phase="merge",
+                summary="final_merge",
+                counts=qa_counts,
+                timestamp=time.time(),
+            )
         )
     return QwenAgenticResponse(
         detections=final_detections or [],
@@ -6923,18 +6959,24 @@ def _run_agentic_annotation(
             break
         step_id += 1
     if final_detections is None:
-        cleaned, rejected = _agent_sanitize_detection_items(
+        final_detections, qa_counts = _agent_finalize_detections(
             detections,
             img_w=img_w,
             img_h=img_h,
             labelmap=labelmap,
             background=background,
-        )
-        final_detections = _agent_merge_detections(
-            cleaned,
             iou_thr=iou_thr,
-            max_det=max_detections,
             cross_iou=cross_iou,
+            max_det=max_detections,
+        )
+        trace.append(
+            AgentTraceEvent(
+                step_id=step_id + 1,
+                phase="merge",
+                summary="final_merge",
+                counts=qa_counts,
+                timestamp=time.time(),
+            )
         )
     if not final_detections:
         warnings.append("fallback_detector")
@@ -6999,17 +7041,8 @@ def _run_agentic_annotation(
                 timestamp=time.time(),
             )
         )
-    trace.append(
-        AgentTraceEvent(
-            step_id=step_id + 1,
-            phase="merge",
-            summary="final_merge",
-            counts={"total": len(final_detections or [])},
-            timestamp=time.time(),
-        )
-    )
-    if trace_sink:
-        trace_sink(trace[-1])
+        if trace_sink:
+            trace_sink(trace[-1])
     if payload.dataset_id and payload.image_name and final_detections:
         try:
             caption_text = _run_agentic_final_caption(

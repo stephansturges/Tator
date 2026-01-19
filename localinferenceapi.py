@@ -100,8 +100,8 @@ def _try_import_qwen_agent() -> Tuple[Optional[Any], Optional[Any], Optional[Any
     try:
         from qwen_agent.agents import Assistant as QwenAgentAssistant  # type: ignore
         from qwen_agent.llm.schema import Message as QwenAgentMessage, ContentItem as QwenAgentContentItem  # type: ignore
-        from app.qwen_agent_llm import LocalQwenVLChatModel  # type: ignore
-        from app.qwen_agent_tools import build_local_agent_tools  # type: ignore
+        from qwen_agent_llm import LocalQwenVLChatModel  # type: ignore
+        from qwen_agent_tools import build_local_agent_tools  # type: ignore
         return QwenAgentAssistant, QwenAgentMessage, QwenAgentContentItem, (LocalQwenVLChatModel, build_local_agent_tools), None
     except Exception as exc:  # noqa: BLE001
         return None, None, None, None, exc

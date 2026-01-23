@@ -12197,6 +12197,42 @@ def _agent_deep_prepass_cleanup(
     }
 
 
+def _agent_select_similarity_exemplars(
+    payload: QwenAgenticRequest,
+    *,
+    detections: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    min_score = float(payload.similarity_min_exemplar_score or 0.6)
+    mid_low = float(payload.similarity_mid_conf_low or 0.45)
+    mid_high = float(payload.similarity_mid_conf_high or min_score)
+    mid_class_count = int(payload.similarity_mid_conf_class_count or 2)
+    by_label: Dict[str, List[Dict[str, Any]]] = {}
+    for det in detections:
+        if not isinstance(det, dict):
+            continue
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        if not label:
+            continue
+        by_label.setdefault(label, []).append(det)
+    selections: Dict[str, List[Dict[str, Any]]] = {}
+    for label, dets in by_label.items():
+        dets_sorted = sorted(dets, key=lambda d: float(d.get("score") or 0.0), reverse=True)
+        high = [d for d in dets_sorted if float(d.get("score") or 0.0) >= min_score]
+        mid = [
+            d
+            for d in dets_sorted
+            if mid_low <= float(d.get("score") or 0.0) < mid_high
+        ]
+        chosen: List[Dict[str, Any]] = []
+        if high:
+            chosen.extend(high[:3])
+        if len(dets_sorted) <= mid_class_count and mid:
+            chosen.extend(mid[:2])
+        if chosen:
+            selections[label] = chosen
+    return selections
+
+
 def _run_agentic_annotation_qwen_agent(
     payload: QwenAgenticRequest,
     *,

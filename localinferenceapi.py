@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket, gc
+import base64, colorsys, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket, gc, queue
 from array import array
-from copy import deepcopy
+from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
 import yaml
-from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable
+from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable, Set
 from collections import deque, Counter
 import torch, clip, joblib, tiktoken
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +21,12 @@ try:
     from packaging import version as packaging_version
 except Exception:  # noqa: BLE001
     packaging_version = None
+try:
+    from transformers import LogitsProcessor, LogitsProcessorList
+except Exception:  # noqa: BLE001
+    LogitsProcessor = None
+    LogitsProcessorList = None
+_BASE_LOGITS_PROCESSOR = LogitsProcessor if LogitsProcessor is not None else object
 from starlette.background import BackgroundTask
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
@@ -41,6 +47,105 @@ try:
 except Exception:  # noqa: BLE001
     ConvexHull = None
 from segment_anything import sam_model_registry, SamPredictor
+
+
+def _message_text_for_tool_parse(message: Any) -> str:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            try:
+                item_type, item_value = item.get_type_and_value()
+            except Exception:
+                continue
+            if item_type == "text" and item_value:
+                parts.append(str(item_value))
+        return "\n".join(parts)
+    return ""
+
+
+def _extract_balanced_json(text: str, start_char: str, end_char: str) -> Optional[str]:
+    start = text.find(start_char)
+    if start < 0:
+        return None
+    depth = 0
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == start_char:
+            depth += 1
+        elif ch == end_char:
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return None
+
+
+def _parse_tool_call_payload(payload: str) -> Optional[Dict[str, Any]]:
+    candidate = (payload or "").strip()
+    if not candidate:
+        return None
+    for parser in ("json", "json5"):
+        try:
+            if parser == "json":
+                return json.loads(candidate)
+            import json5  # type: ignore
+            return json5.loads(candidate)
+        except Exception:
+            continue
+    for start_char, end_char in (("{", "}"), ("[", "]")):
+        snippet = _extract_balanced_json(candidate, start_char, end_char)
+        if not snippet:
+            continue
+        for parser in ("json", "json5"):
+            try:
+                if parser == "json":
+                    return json.loads(snippet)
+                import json5  # type: ignore
+                return json5.loads(snippet)
+            except Exception:
+                continue
+    return None
+
+
+def _extract_tool_call_from_text(text: str) -> Optional[Tuple[str, Any]]:
+    if not text:
+        return None
+    lower_text = text.lower()
+    if "<tool_call>" in lower_text:
+        start = lower_text.find("<tool_call>")
+        end = lower_text.find("</tool_call>", start + 11)
+        if end > start:
+            payload = text[start + len("<tool_call>") : end].strip()
+            parsed = _parse_tool_call_payload(payload)
+            if isinstance(parsed, dict):
+                name = str(parsed.get("name") or "").strip()
+                args = parsed.get("arguments", {})
+                if name:
+                    return name, args
+    if "✿function✿" in lower_text and "✿args✿" in lower_text:
+        fn_idx = text.find("✿FUNCTION✿")
+        args_idx = text.find("✿ARGS✿", fn_idx + 1)
+        if fn_idx >= 0 and args_idx > fn_idx:
+            name_chunk = text[fn_idx + len("✿FUNCTION✿") : args_idx]
+            if ":" in name_chunk:
+                name_chunk = name_chunk.split(":", 1)[1]
+            name = name_chunk.strip().splitlines()[0].strip()
+            args_chunk = text[args_idx + len("✿ARGS✿") :]
+            stop_tokens = ["✿RESULT✿", "✿RETURN✿"]
+            stop_pos = [args_chunk.find(tok) for tok in stop_tokens if tok in args_chunk]
+            if stop_pos:
+                args_chunk = args_chunk[: min(stop_pos)]
+            parsed = _parse_tool_call_payload(args_chunk)
+            if name:
+                return name, parsed if parsed is not None else args_chunk.strip()
+    parsed = _parse_tool_call_payload(text)
+    if isinstance(parsed, dict):
+        name = str(parsed.get("name") or "").strip()
+        if name:
+            return name, parsed.get("arguments", {})
+    return None
 import threading
 import queue
 import itertools
@@ -98,11 +203,12 @@ else:
 
 def _try_import_qwen_agent() -> Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], Optional[Exception]]:
     try:
-        from qwen_agent.agents import Assistant as QwenAgentAssistant  # type: ignore
+        from qwen_agent.agents import FnCallAgent as _QwenFnCallAgent  # type: ignore
         from qwen_agent.llm.schema import Message as QwenAgentMessage, ContentItem as QwenAgentContentItem  # type: ignore
+        import qwen_agent.settings as qwen_settings  # type: ignore
         from qwen_agent_llm import LocalQwenVLChatModel  # type: ignore
         from qwen_agent_tools import build_local_agent_tools  # type: ignore
-        return QwenAgentAssistant, QwenAgentMessage, QwenAgentContentItem, (LocalQwenVLChatModel, build_local_agent_tools), None
+        return _QwenFnCallAgent, QwenAgentMessage, QwenAgentContentItem, (LocalQwenVLChatModel, build_local_agent_tools), None
     except Exception as exc:  # noqa: BLE001
         return None, None, None, None, exc
 
@@ -278,6 +384,37 @@ def _resolve_qwen_max_seq_len(model: Any) -> Optional[int]:
     return None
 
 
+def _qwen_estimate_vision_tokens(preview_inputs: Any) -> Optional[int]:
+    grid = None
+    if isinstance(preview_inputs, dict):
+        grid = preview_inputs.get("image_grid_thw")
+    else:
+        grid = getattr(preview_inputs, "image_grid_thw", None)
+    if grid is None:
+        return None
+    try:
+        grid_vals = grid if isinstance(grid, torch.Tensor) else torch.as_tensor(grid)
+        if grid_vals.ndim == 3:
+            grid_vals = grid_vals[0]
+        if grid_vals.ndim == 2 and grid_vals.shape[-1] == 3:
+            tokens = (grid_vals[:, 0] * grid_vals[:, 1] * grid_vals[:, 2]).sum()
+            return int(tokens.item())
+        if grid_vals.ndim == 1 and grid_vals.numel() == 3:
+            tokens = grid_vals[0] * grid_vals[1] * grid_vals[2]
+            return int(tokens.item())
+    except Exception:
+        return None
+    return None
+
+
+def _qwen_effective_input_len(preview_inputs: Any, input_len: int, num_images: int) -> Tuple[int, Optional[int]]:
+    vision_tokens = _qwen_estimate_vision_tokens(preview_inputs)
+    if vision_tokens is None or num_images <= 0:
+        return input_len, vision_tokens
+    effective_len = max(1, input_len - num_images + vision_tokens)
+    return effective_len, vision_tokens
+
+
 def _qwen_supports_presence_penalty(model: Any) -> bool:
     gen_config = getattr(model, "generation_config", None)
     if gen_config is None:
@@ -289,6 +426,197 @@ def _qwen_supports_presence_penalty(model: Any) -> bool:
             pass
     return hasattr(gen_config, "presence_penalty")
 
+
+class ThinkingEffortProcessor(_BASE_LOGITS_PROCESSOR):
+    """Scale the </think> token logit to reduce or increase chain-of-thought length."""
+
+    def __init__(self, end_thinking_token_id: int, thinking_effort: float = 1.0, scale_factor: float = 2.0):
+        super().__init__()
+        self.end_thinking_token_id = int(end_thinking_token_id)
+        self.thinking_effort = float(thinking_effort)
+        self.scale_factor = float(scale_factor)
+        self.finished_sequences: Set[int] = set()
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if self.end_thinking_token_id >= scores.size(1):
+            return scores
+        scale = self.scale_factor ** (1.0 - self.thinking_effort)
+        batch_size = input_ids.size(0)
+        for i in range(batch_size):
+            if i in self.finished_sequences:
+                continue
+            if (input_ids[i] == self.end_thinking_token_id).any():
+                self.finished_sequences.add(i)
+                continue
+            scores[i, self.end_thinking_token_id] *= scale
+        return scores
+
+
+class ImmediateActionBiasProcessor(_BASE_LOGITS_PROCESSOR):
+    """Boost </think> when 'wait' appears inside a think block after a minimum threshold."""
+
+    def __init__(
+        self,
+        tokenizer: Any,
+        end_thinking_token_id: int,
+        *,
+        min_think_chars: int = 200,
+        min_think_seconds: float = 2.0,
+        logit_bias: float = 6.0,
+    ):
+        super().__init__()
+        self._tokenizer = tokenizer
+        self.end_thinking_token_id = int(end_thinking_token_id)
+        self.min_think_chars = max(1, int(min_think_chars))
+        self.min_think_seconds = max(0.0, float(min_think_seconds))
+        self.logit_bias = float(logit_bias)
+        self._think_started_at: Dict[int, float] = {}
+        self._wait_seen: Set[int] = set()
+
+    @staticmethod
+    def _extract_open_think_text(text: str) -> Optional[str]:
+        if not text:
+            return None
+        #start = text.rfind("<think>")
+        #if start < 0:
+        #    return None
+        #end = text.rfind("</think>")
+        #if end > start:
+        #    return None
+        return text #[start + len("<think>") :]
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        if self.logit_bias <= 0:
+            return scores
+        if self.end_thinking_token_id >= scores.size(1):
+            return scores
+        now = time.time()
+        batch_size = input_ids.size(0)
+        for i in range(batch_size):
+            if i in self._wait_seen:
+                scores[i, self.end_thinking_token_id] += self.logit_bias
+                continue
+            try:
+                text = self._tokenizer.decode(input_ids[i].tolist(), skip_special_tokens=False)
+            except Exception:
+                continue
+            think_text = self._extract_open_think_text(text)
+            if think_text is None:
+                if i in self._think_started_at:
+                    del self._think_started_at[i]
+                continue
+            if i not in self._think_started_at:
+                self._think_started_at[i] = now
+            if len(think_text) < self.min_think_chars:
+                continue
+            if (now - self._think_started_at.get(i, now)) < self.min_think_seconds:
+                continue
+            if re.search(r"\bwait\b", think_text, flags=re.IGNORECASE):
+                self._wait_seen.add(i)
+                scores[i, self.end_thinking_token_id] += self.logit_bias
+        return scores
+
+
+def _qwen_find_end_think_token_id(tokenizer: Any) -> Optional[int]:
+    if tokenizer is None:
+        return None
+    vocab_size = getattr(tokenizer, "vocab_size", None)
+    vocab_size = int(vocab_size) if isinstance(vocab_size, int) and vocab_size > 0 else None
+    candidates = [
+        "</think>",
+        "<|endofthink|>",
+        "<|end_of_thought|>",
+        "<|end_of_thinking|>",
+    ]
+    unk_id = getattr(tokenizer, "unk_token_id", None)
+    for token in candidates:
+        try:
+            tok_id = tokenizer.convert_tokens_to_ids(token)
+        except Exception:
+            tok_id = None
+        if tok_id is not None and tok_id != unk_id:
+            if vocab_size is not None and int(tok_id) >= vocab_size:
+                tok_id = None
+            else:
+                return int(tok_id)
+        try:
+            ids = tokenizer.encode(token, add_special_tokens=False)
+        except Exception:
+            ids = []
+        if isinstance(ids, list) and len(ids) == 1:
+            tok_id = int(ids[0])
+            if vocab_size is None or tok_id < vocab_size:
+                return tok_id
+    return None
+
+
+def _qwen_build_thinking_effort_processor(
+    tokenizer: Any,
+    thinking_effort: Optional[float],
+    scale_factor: Optional[float],
+) -> Optional[ThinkingEffortProcessor]:
+    if LogitsProcessorList is None or LogitsProcessor is None:
+        return None
+    if thinking_effort is None:
+        return None
+    try:
+        effort_val = float(thinking_effort)
+    except (TypeError, ValueError):
+        return None
+    end_token_id = _qwen_find_end_think_token_id(tokenizer)
+    if end_token_id is None:
+        return None
+    scale_val = 2.0
+    if scale_factor is not None:
+        try:
+            scale_val = float(scale_factor)
+        except (TypeError, ValueError):
+            scale_val = 2.0
+    return ThinkingEffortProcessor(end_token_id, thinking_effort=effort_val, scale_factor=scale_val)
+
+
+def _qwen_build_immediate_action_processor(
+    tokenizer: Any,
+    immediate_action_bias: Optional[bool],
+    min_think_chars: Optional[int],
+    min_think_seconds: Optional[float],
+    logit_bias: Optional[float],
+) -> Optional[ImmediateActionBiasProcessor]:
+    if LogitsProcessorList is None or LogitsProcessor is None:
+        return None
+    if not immediate_action_bias:
+        return None
+    end_token_id = _qwen_find_end_think_token_id(tokenizer)
+    if end_token_id is None:
+        return None
+    chars_val = 200 if min_think_chars is None else int(min_think_chars)
+    secs_val = 2.0 if min_think_seconds is None else float(min_think_seconds)
+    bias_val = 6.0 if logit_bias is None else float(logit_bias)
+    return ImmediateActionBiasProcessor(
+        tokenizer,
+        end_token_id,
+        min_think_chars=chars_val,
+        min_think_seconds=secs_val,
+        logit_bias=bias_val,
+    )
+
+
+def _qwen_append_logits_processor(
+    gen_kwargs: Dict[str, Any],
+    processor: Optional[_BASE_LOGITS_PROCESSOR],
+) -> None:
+    if processor is None:
+        return
+    processors = gen_kwargs.get("logits_processor")
+    if processors is None:
+        gen_kwargs["logits_processor"] = LogitsProcessorList([processor])
+    elif isinstance(processors, LogitsProcessorList):
+        processors.append(processor)
+    else:
+        try:
+            gen_kwargs["logits_processor"] = LogitsProcessorList(list(processors) + [processor])
+        except Exception:
+            gen_kwargs["logits_processor"] = LogitsProcessorList([processor])
 
 def _is_qwen_moe_model_id(model_id: str) -> bool:
     lowered = model_id.lower()
@@ -345,6 +673,10 @@ qwen_config_lock = threading.RLock()
 qwen_caption_cache: Dict[str, Tuple[Any, Any]] = {}
 qwen_caption_order: deque[str] = deque()
 _HF_OFFLINE_AUTO_ENABLED = False
+_CAPTION_WINDOW_HOOK: ContextVar[Optional[Callable[[int, int, int, str], None]]] = ContextVar(
+    "caption_window_hook",
+    default=None,
+)
 
 QWEN_METADATA_FILENAME = "metadata.json"
 
@@ -378,6 +710,16 @@ def _enable_hf_offline_defaults() -> None:
 
 def _hf_offline_enabled() -> bool:
     return os.environ.get("HF_HUB_OFFLINE") == "1" or os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+
+
+def _emit_caption_window(x0: int, y0: int, size: int, caption: str) -> None:
+    hook = _CAPTION_WINDOW_HOOK.get()
+    if hook is None:
+        return
+    try:
+        hook(int(x0), int(y0), int(size), str(caption))
+    except Exception:
+        return
 
 
 def _set_hf_offline(enabled: bool) -> None:
@@ -428,7 +770,7 @@ def _unload_sam3_text_runtime() -> None:
 
 def _unload_dinov3_backbone() -> None:
     """Release DINOv3 encoder + per-device caches."""
-    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized
+    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
     with dinov3_lock:
         try:
             del dinov3_model
@@ -441,6 +783,7 @@ def _unload_dinov3_backbone() -> None:
         dinov3_model = None
         dinov3_processor = None
         dinov3_model_name = None
+        dinov3_model_device = None
         dinov3_initialized = False
     try:
         with _agent_dinov3_backbones_lock:
@@ -720,11 +1063,20 @@ _agent_clip_backbones_lock = threading.Lock()
 dinov3_model: Optional[Any] = None
 dinov3_processor: Optional[Any] = None
 dinov3_model_name: Optional[str] = None
+dinov3_model_device: Optional[str] = None
 dinov3_initialized = False
+dinov3_cuda_disabled = False
 dinov3_lock = threading.Lock()
 _agent_dinov3_backbones: Dict[Tuple[str, str], Tuple[Any, Any]] = {}
 _agent_dinov3_locks: Dict[Tuple[str, str], threading.Lock] = {}
 _agent_dinov3_backbones_lock = threading.Lock()
+
+
+def _dinov3_resolve_device(requested: str) -> str:
+    normalized = str(requested or "").strip() or "cpu"
+    if dinov3_cuda_disabled and normalized.startswith("cuda"):
+        return "cpu"
+    return normalized
 
 
 def _suspend_clip_backbone() -> None:
@@ -774,7 +1126,7 @@ def _resume_clip_backbone() -> None:
 
 def _resume_classifier_backbone() -> None:
     """Reload the active encoder backbone after training, based on user-selected classifier."""
-    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized
+    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
     global clip_model_name, _clip_reload_needed
     encoder_type = str(active_encoder_type or "clip").strip().lower()
     if encoder_type == "dinov3":
@@ -782,20 +1134,28 @@ def _resume_classifier_backbone() -> None:
         if not model_name:
             dinov3_initialized = False
             return
+        target_device = _dinov3_resolve_device(device)
         with dinov3_lock:
             if dinov3_model is not None and dinov3_processor is not None and dinov3_model_name == model_name:
-                dinov3_initialized = True
-                return
-            model, processor = _load_dinov3_backbone(model_name, device)
+                if dinov3_cuda_disabled and not dinov3_model_device:
+                    pass
+                elif dinov3_model_device and dinov3_model_device != target_device:
+                    pass
+                else:
+                    dinov3_initialized = True
+                    return
+            model, processor = _load_dinov3_backbone(model_name, target_device)
             if model is None or processor is None:
                 dinov3_model = None
                 dinov3_processor = None
                 dinov3_model_name = None
+                dinov3_model_device = None
                 dinov3_initialized = False
                 return
             dinov3_model = model
             dinov3_processor = processor
             dinov3_model_name = model_name
+            dinov3_model_device = target_device
             dinov3_initialized = True
         return
     if encoder_type != "clip":
@@ -1442,8 +1802,7 @@ def _fetch_preloaded_image(token: str, variant: str) -> Optional[np.ndarray]:
         if not item:
             return None
         arr, stored_variant = item
-        if stored_variant != variant:
-            return None
+        # Allow reuse across variants; cache holds raw image arrays only.
         sam_preload_cache.move_to_end(token)
         return arr
 
@@ -3035,6 +3394,7 @@ def _build_qwen_caption_prompt(
     include_coords: bool,
     max_boxes: int,
     detailed_mode: bool,
+    restrict_to_labels: bool = True,
 ) -> Tuple[str, Dict[str, int], int, bool]:
     safe_width = max(1, int(image_width))
     safe_height = max(1, int(image_height))
@@ -3103,18 +3463,23 @@ def _build_qwen_caption_prompt(
     lines.append(f"Image size: {safe_width}x{safe_height} pixels.")
     if include_counts and counts:
         counts_text = ", ".join(f"{label}: {count}" for label, count in counts.items())
-        lines.append(f"COUNTS (use exactly): {counts_text}.")
-        lines.append(
-            "State these counts without qualifiers (avoid words like 'visible', 'roughly', or 'approximately')."
-        )
+        if restrict_to_labels:
+            lines.append(f"COUNTS (use exactly): {counts_text}.")
+            lines.append(
+                "State these counts without qualifiers (avoid words like 'visible', 'roughly', or 'approximately')."
+            )
+        else:
+            lines.append(f"COUNTS (use as hints; may be incomplete): {counts_text}.")
     elif counts:
         lines.append("Use the label hints to mention the main objects you see.")
-    if counts:
+    if counts and restrict_to_labels:
         allowed = ", ".join(sorted(counts.keys()))
         if allowed:
             lines.append(
                 f"Only mention these classes if they appear: {allowed}. Do not invent other entity types."
             )
+    elif counts and not restrict_to_labels:
+        lines.append("Label hints are suggestions; you may mention other visible objects too.")
     if selected:
         if include_coords:
             lines.append(
@@ -3424,9 +3789,27 @@ def _allowed_caption_labels(label_hints: Sequence[QwenCaptionHint]) -> List[str]
 def _caption_is_degenerate(caption: str) -> bool:
     if not caption:
         return True
+    trimmed = caption.strip()
+    if not trimmed:
+        return True
+    if _QWEN_THINKING_REASONING_RE.search(trimmed):
+        return True
+    compact = re.sub(r"\\s+", "", trimmed)
+    if compact:
+        alnum = re.findall(r"[A-Za-z0-9]", compact)
+        if not alnum and len(compact) > 10:
+            return True
+        if len(compact) >= 20:
+            ratio = len(alnum) / max(1, len(compact))
+            if ratio < 0.2:
+                return True
+        if re.fullmatch(r"[^A-Za-z0-9]+", compact):
+            return True
+        if re.search(r"([!?.<>\\-_=])\\1{20,}", compact):
+            return True
     words = caption.split()
-    if len(words) < 10:
-        return False
+    if len(words) < 8:
+        return True
     sentences = [s.strip().lower() for s in re.split(r"[.!?]+", caption) if s.strip()]
     if sentences:
         counts = Counter(sentences)
@@ -3565,6 +3948,17 @@ def _run_qwen_inference(
         }
     )
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    _agent_full_trace_write(
+        {
+            "type": "llm_input",
+            "source": "qwen_inference",
+            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "messages": messages,
+            "prompt_text": text,
+            "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
+            "decode_override": decode_override,
+        }
+    )
     image_inputs, video_inputs = process_vision_info(messages)
     max_seq_len = _resolve_qwen_max_seq_len(model)
     max_input_len = None
@@ -3581,16 +3975,21 @@ def _run_qwen_inference(
         return_tensors="pt",
     )
     input_len = int(preview_inputs.input_ids.shape[1])
+    num_images = len(image_inputs) if image_inputs is not None else 0
+    effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
     if max_seq_len:
-        if input_len + requested_max > max_seq_len:
-            requested_max = max(1, max_seq_len - input_len)
-        if input_len > max_seq_len:
+        if effective_len + requested_max > max_seq_len:
+            requested_max = max(1, max_seq_len - effective_len)
+        if effective_len > max_seq_len:
             logger.warning(
-                "[qwen] input length %s exceeds max_seq_len %s; truncating prompt.",
-                input_len,
+                "[qwen] effective input length %s exceeds max_seq_len %s; truncating prompt.",
+                effective_len,
                 max_seq_len,
             )
-            max_input_len = max(1, max_seq_len - requested_max)
+            if vision_tokens is not None:
+                max_input_len = max(1, max_seq_len - requested_max - vision_tokens + num_images)
+            else:
+                max_input_len = max(1, max_seq_len - requested_max)
     max_new_tokens = requested_max
     if max_input_len is None:
         inputs = preview_inputs
@@ -3669,6 +4068,14 @@ def _run_qwen_inference(
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0]
+    _agent_full_trace_write(
+        {
+            "type": "llm_output",
+            "source": "qwen_inference",
+            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "output_text": output_text,
+        }
+    )
     grid = inputs.get("image_grid_thw")
     patch_size = 14
     try:
@@ -3701,6 +4108,14 @@ def _run_qwen_chat(
     decode_override: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    add_generation_prompt: bool = True,
+    assistant_prefix: Optional[str] = None,
+    thinking_effort: Optional[float] = None,
+    thinking_scale_factor: Optional[float] = None,
+    immediate_action_bias: Optional[bool] = None,
+    immediate_action_min_chars: Optional[int] = None,
+    immediate_action_min_seconds: Optional[float] = None,
+    immediate_action_logit_bias: Optional[float] = None,
 ) -> str:
     if runtime_override is not None:
         model, processor = runtime_override
@@ -3708,13 +4123,37 @@ def _run_qwen_chat(
         model, processor = _ensure_qwen_ready_for_caption(model_id_override)
     else:
         model, processor = _ensure_qwen_ready()
+    if assistant_prefix:
+        add_generation_prompt = True
     text = processor.apply_chat_template(
         messages,
         tokenize=False,
-        add_generation_prompt=True,
+        add_generation_prompt=bool(add_generation_prompt),
         tools=tools,
         chat_template_kwargs=chat_template_kwargs,
     )
+    if assistant_prefix:
+        text = f"{text}{assistant_prefix}"
+    _agent_full_trace_write(
+        {
+            "type": "llm_input",
+            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "messages": messages,
+            "prompt_text": text,
+            "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
+            "decode_override": decode_override,
+            "thinking_effort": thinking_effort,
+            "thinking_scale_factor": thinking_scale_factor,
+            "immediate_action_bias": immediate_action_bias,
+            "immediate_action_min_chars": immediate_action_min_chars,
+            "immediate_action_min_seconds": immediate_action_min_seconds,
+            "immediate_action_logit_bias": immediate_action_logit_bias,
+            "tools": tools,
+            "chat_template_kwargs": chat_template_kwargs,
+            "assistant_prefix": assistant_prefix,
+        }
+    )
+    tokenizer = getattr(processor, "tokenizer", None)
     image_inputs, video_inputs = process_vision_info(messages)
     max_seq_len = _resolve_qwen_max_seq_len(model)
     requested_max = int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
@@ -3730,11 +4169,208 @@ def _run_qwen_chat(
         return_tensors="pt",
     )
     input_len = int(preview_inputs.input_ids.shape[1])
+    num_images = len(image_inputs) if image_inputs is not None else 0
+    effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
     max_input_len = None
     if max_seq_len:
-        if input_len + requested_max > max_seq_len:
-            requested_max = max(1, max_seq_len - input_len)
-        if input_len > max_seq_len:
+        if effective_len + requested_max > max_seq_len:
+            requested_max = max(1, max_seq_len - effective_len)
+        if effective_len > max_seq_len:
+            if vision_tokens is not None:
+                max_input_len = max(1, max_seq_len - requested_max - vision_tokens + num_images)
+            else:
+                max_input_len = max(1, max_seq_len - requested_max)
+    max_new_tokens = requested_max
+    if max_input_len is None:
+        inputs = preview_inputs
+    else:
+        inputs = processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            truncation=True,
+            max_length=max_input_len,
+            return_tensors="pt",
+        )
+    device = qwen_device or _resolve_qwen_device()
+    inputs = inputs.to(device)
+    gen_kwargs: Dict[str, Any] = {
+        "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+    }
+    use_sampling = QWEN_DO_SAMPLE
+    if decode_override is not None and "do_sample" in decode_override:
+        use_sampling = bool(decode_override.get("do_sample"))
+    if use_sampling:
+        temperature = QWEN_TEMPERATURE
+        top_p = QWEN_TOP_P
+        top_k = None
+        presence_penalty = None
+        if decode_override is not None:
+            temperature = decode_override.get("temperature", temperature)
+            top_p = decode_override.get("top_p", top_p)
+            top_k = decode_override.get("top_k", top_k)
+            presence_penalty = decode_override.get("presence_penalty", presence_penalty)
+        gen_kwargs.update(
+            {
+                "do_sample": True,
+                "temperature": temperature,
+                "top_p": top_p,
+            }
+        )
+        if top_k is not None:
+            gen_kwargs["top_k"] = int(top_k)
+        if presence_penalty is not None and _qwen_supports_presence_penalty(model):
+            gen_kwargs["presence_penalty"] = float(presence_penalty)
+    else:
+        gen_kwargs["do_sample"] = False
+    thinking_processor = _qwen_build_thinking_effort_processor(tokenizer, thinking_effort, thinking_scale_factor)
+    immediate_processor = _qwen_build_immediate_action_processor(
+        tokenizer,
+        immediate_action_bias,
+        immediate_action_min_chars,
+        immediate_action_min_seconds,
+        immediate_action_logit_bias,
+    )
+    _qwen_append_logits_processor(gen_kwargs, thinking_processor)
+    _qwen_append_logits_processor(gen_kwargs, immediate_processor)
+    with torch.inference_mode():
+        output_ids = model.generate(**inputs, **gen_kwargs)
+    output_ids = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, output_ids)]
+    output_text = processor.batch_decode(
+        output_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    _agent_full_trace_write(
+        {
+            "type": "llm_output",
+            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "output_text": output_text,
+        }
+    )
+    return output_text
+
+
+def _run_qwen_chat_stream(
+    messages: List[Dict[str, Any]],
+    *,
+    max_new_tokens: Optional[int] = None,
+    model_id_override: Optional[str] = None,
+    runtime_override: Optional[Tuple[Any, Any]] = None,
+    decode_override: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    add_generation_prompt: bool = True,
+    assistant_prefix: Optional[str] = None,
+    thinking_effort: Optional[float] = None,
+    thinking_scale_factor: Optional[float] = None,
+    immediate_action_bias: Optional[bool] = None,
+    immediate_action_min_chars: Optional[int] = None,
+    immediate_action_min_seconds: Optional[float] = None,
+    immediate_action_logit_bias: Optional[float] = None,
+) -> Iterator[str]:
+    if runtime_override is not None:
+        model, processor = runtime_override
+    elif model_id_override:
+        model, processor = _ensure_qwen_ready_for_caption(model_id_override)
+    else:
+        model, processor = _ensure_qwen_ready()
+    if assistant_prefix:
+        add_generation_prompt = True
+    text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=bool(add_generation_prompt),
+        tools=tools,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    if assistant_prefix:
+        text = f"{text}{assistant_prefix}"
+    _agent_full_trace_write(
+        {
+            "type": "llm_input",
+            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "messages": messages,
+            "prompt_text": text,
+            "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
+            "decode_override": decode_override,
+            "thinking_effort": thinking_effort,
+            "thinking_scale_factor": thinking_scale_factor,
+            "tools": tools,
+            "chat_template_kwargs": chat_template_kwargs,
+            "assistant_prefix": assistant_prefix,
+        }
+    )
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        output_text = _run_qwen_chat(
+            messages,
+            max_new_tokens=max_new_tokens,
+            model_id_override=model_id_override,
+            runtime_override=(model, processor),
+            decode_override=decode_override,
+            tools=tools,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            assistant_prefix=assistant_prefix,
+            thinking_effort=thinking_effort,
+            thinking_scale_factor=thinking_scale_factor,
+            immediate_action_bias=immediate_action_bias,
+            immediate_action_min_chars=immediate_action_min_chars,
+            immediate_action_min_seconds=immediate_action_min_seconds,
+            immediate_action_logit_bias=immediate_action_logit_bias,
+        )
+        yield output_text
+        return
+    try:
+        from transformers import TextIteratorStreamer
+    except Exception:
+        output_text = _run_qwen_chat(
+            messages,
+            max_new_tokens=max_new_tokens,
+            model_id_override=model_id_override,
+            runtime_override=(model, processor),
+            decode_override=decode_override,
+            tools=tools,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            assistant_prefix=assistant_prefix,
+            thinking_effort=thinking_effort,
+            thinking_scale_factor=thinking_scale_factor,
+            immediate_action_bias=immediate_action_bias,
+            immediate_action_min_chars=immediate_action_min_chars,
+            immediate_action_min_seconds=immediate_action_min_seconds,
+            immediate_action_logit_bias=immediate_action_logit_bias,
+        )
+        yield output_text
+        return
+    image_inputs, video_inputs = process_vision_info(messages)
+    max_seq_len = _resolve_qwen_max_seq_len(model)
+    requested_max = int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
+    if max_seq_len:
+        if requested_max >= max_seq_len:
+            requested_max = max(1, max_seq_len - 1)
+    preview_inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        truncation=False,
+        return_tensors="pt",
+    )
+    input_len = int(preview_inputs.input_ids.shape[1])
+    num_images = len(image_inputs) if image_inputs is not None else 0
+    effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
+    max_input_len = None
+    if max_seq_len:
+        if effective_len + requested_max > max_seq_len:
+            requested_max = max(1, max_seq_len - effective_len)
+        if effective_len > max_seq_len:
+            if vision_tokens is not None:
+                max_input_len = max(1, max_seq_len - requested_max - vision_tokens + num_images)
+            else:
+                max_input_len = max(1, max_seq_len - requested_max)
             max_input_len = max(1, max_seq_len - requested_max)
     max_new_tokens = requested_max
     if max_input_len is None:
@@ -3780,15 +4416,52 @@ def _run_qwen_chat(
             gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False
-    with torch.inference_mode():
-        output_ids = model.generate(**inputs, **gen_kwargs)
-    output_ids = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, output_ids)]
-    output_text = processor.batch_decode(
-        output_ids,
+    thinking_processor = _qwen_build_thinking_effort_processor(tokenizer, thinking_effort, thinking_scale_factor)
+    immediate_processor = _qwen_build_immediate_action_processor(
+        tokenizer,
+        immediate_action_bias,
+        immediate_action_min_chars,
+        immediate_action_min_seconds,
+        immediate_action_logit_bias,
+    )
+    _qwen_append_logits_processor(gen_kwargs, thinking_processor)
+    _qwen_append_logits_processor(gen_kwargs, immediate_processor)
+    streamer = TextIteratorStreamer(
+        tokenizer,
+        skip_prompt=True,
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
-    )[0]
-    return output_text
+        timeout=600.0,
+    )
+    gen_kwargs["streamer"] = streamer
+    generated_text = ""
+
+    def _generate() -> None:
+        with torch.inference_mode():
+            model.generate(**inputs, **gen_kwargs)
+
+    thread = threading.Thread(target=_generate, name="qwen-chat-streamer", daemon=True)
+    thread.start()
+    try:
+        for new_text in streamer:
+            generated_text += new_text
+            yield generated_text
+    except queue.Empty:
+        _agent_full_trace_write(
+            {
+                "type": "llm_stream_timeout",
+                "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+                "generated_chars": len(generated_text),
+            }
+        )
+    thread.join()
+    _agent_full_trace_write(
+        {
+            "type": "llm_output",
+            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "output_text": generated_text,
+        }
+    )
 
 
 def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any], local_files_only: bool = False) -> Any:
@@ -4533,6 +5206,8 @@ class QwenCaptionRequest(BaseModel):
     caption_mode: Optional[Literal["full", "windowed"]] = "full"
     window_size: Optional[int] = None
     window_overlap: Optional[float] = None
+    restrict_to_labels: Optional[bool] = True
+    caption_all_windows: Optional[bool] = False
     unload_others: Optional[bool] = False
     force_unload: Optional[bool] = None
     multi_model_cache: Optional[bool] = False
@@ -4641,9 +5316,27 @@ class QwenAgenticRequest(BaseModel):
     labelmap_glossary: Optional[str] = None
     detector_mode: Optional[Literal["yolo", "rfdetr"]] = "yolo"
     detector_id: Optional[str] = None
+    enable_yolo: Optional[bool] = True
+    enable_rfdetr: Optional[bool] = True
+    yolo_id: Optional[str] = None
+    rfdetr_id: Optional[str] = None
+    sahi_window_size: Optional[int] = None
+    sahi_overlap_ratio: Optional[float] = None
     classifier_id: Optional[str] = None
     sam_variant: Optional[str] = "sam3"
-    prepass_mode: Optional[str] = "ensemble_sahi_sam3_similarity_inspect"
+    enable_sam3_text: Optional[bool] = True
+    sam3_text_synonym_budget: Optional[int] = None
+    enable_sam3_similarity: Optional[bool] = True
+    similarity_min_exemplar_score: Optional[float] = None
+    similarity_mid_conf_low: Optional[float] = None
+    similarity_mid_conf_high: Optional[float] = None
+    similarity_mid_conf_class_count: Optional[int] = None
+    similarity_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
+    similarity_window_size: Optional[int] = None
+    similarity_window_overlap: Optional[float] = None
+    prepass_mode: Optional[str] = "ensemble_sahi_sam3_text_similarity"
+    prepass_only: Optional[bool] = False
+    prepass_finalize: Optional[bool] = False
     prepass_sam3_text_thr: Optional[float] = None
     prepass_similarity_score: Optional[float] = None
     prepass_similarity_per_class: Optional[int] = None
@@ -4651,18 +5344,41 @@ class QwenAgenticRequest(BaseModel):
     prepass_inspect_score: Optional[float] = None
     prepass_inspect_quadrants: Optional[bool] = None
     prepass_caption: Optional[bool] = True
-    prepass_plan: Optional[bool] = True
-    min_tool_calls: Optional[int] = None
-    min_inspect_calls: Optional[int] = None
-    min_zoom_calls: Optional[int] = None
-    max_steps: Optional[int] = 100
-    max_tool_calls: Optional[int] = 50
-    max_detections: Optional[int] = 800
+    prepass_caption_profile: Optional[str] = "light"
+    prepass_caption_model_id: Optional[str] = None
+    prepass_caption_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = None
+    prepass_caption_max_tokens: Optional[int] = None
+    use_detection_overlay: Optional[bool] = True
+    grid_cols: Optional[int] = None
+    grid_rows: Optional[int] = None
+    grid_overlap_ratio: Optional[float] = None
+    overlay_dot_radius: Optional[int] = None
+    tighten_fp: Optional[bool] = True
+    detector_conf: Optional[float] = 0.45
+    sam3_score_thr: Optional[float] = 0.5
+    sam3_mask_threshold: Optional[float] = 0.5
+    classifier_min_prob: Optional[float] = 0.35
+    classifier_margin: Optional[float] = 0.05
+    classifier_bg_margin: Optional[float] = 0.05
+    scoreless_iou: Optional[float] = 0.3
+    max_detections: Optional[int] = 2000
     iou: Optional[float] = 0.5
     cross_iou: Optional[float] = None
-    max_new_tokens: Optional[int] = 1024
-    prompt_override: Optional[str] = None
+    max_new_tokens: Optional[int] = 4096
+    tile_max_passes: Optional[int] = 2
+    thinking_effort: Optional[float] = None
+    thinking_scale_factor: Optional[float] = None
+    immediate_action_bias: Optional[bool] = True
+    immediate_action_min_chars: Optional[int] = 200
+    immediate_action_min_seconds: Optional[float] = 2.0
+    immediate_action_logit_bias: Optional[float] = 6.0
     trace_verbose: Optional[bool] = False
+    review_enabled: Optional[bool] = True
+    review_model_id: Optional[str] = None
+    review_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = None
+    review_max_tokens: Optional[int] = None
+    review_classes: Optional[List[str]] = None
+    review_passes_per_tile: Optional[int] = None
 
 
 class QwenAgenticResponse(BaseModel):
@@ -4670,6 +5386,8 @@ class QwenAgenticResponse(BaseModel):
     trace: List[AgentTraceEvent]
     warnings: Optional[List[str]] = None
     caption: Optional[str] = None
+    trace_path: Optional[str] = None
+    trace_full_path: Optional[str] = None
 
 
 class AgentToolCall(BaseModel):
@@ -4698,6 +5416,70 @@ class AgentTraceEvent(BaseModel):
 
 
 AGENT_TOOL_REGISTRY: Dict[str, Any] = {}
+_AGENT_ACTIVE_IMAGE_TOKEN: Optional[str] = None
+_AGENT_ACTIVE_IMAGE_BASE64: Optional[str] = None
+_AGENT_ACTIVE_DATASET_ID: Optional[str] = None
+_AGENT_ACTIVE_LABELMAP: Optional[List[str]] = None
+_AGENT_ACTIVE_GLOSSARY: Optional[str] = None
+_AGENT_ACTIVE_OVERALL_CAPTION: Optional[str] = None
+_AGENT_ACTIVE_WINDOWED_CAPTIONS: Optional[List[Dict[str, Any]]] = None
+_AGENT_ACTIVE_INSPECTED_WINDOWS: Optional[Set[Tuple[int, int, int, int]]] = None
+_AGENT_ACTIVE_CLASSIFIER_ID: Optional[str] = None
+_AGENT_ACTIVE_TIGHTEN_FP: bool = False
+_AGENT_ACTIVE_DETECTOR_CONF: Optional[float] = None
+_AGENT_ACTIVE_SAM3_SCORE_THR: Optional[float] = None
+_AGENT_ACTIVE_SAM3_MASK_THR: Optional[float] = None
+_AGENT_ACTIVE_CLASSIFIER_MIN_PROB: Optional[float] = None
+_AGENT_ACTIVE_CLASSIFIER_MARGIN: Optional[float] = None
+_AGENT_ACTIVE_CLASSIFIER_BG_MARGIN: Optional[float] = None
+_AGENT_ACTIVE_SCORELESS_IOU: Optional[float] = None
+_AGENT_ACTIVE_DETECTIONS: Optional[List[Dict[str, Any]]] = None
+_AGENT_ACTIVE_CANDIDATES: Optional[List[Dict[str, Any]]] = None
+_AGENT_ACTIVE_CANDIDATE_INDEX: Dict[int, Dict[str, Any]] = {}
+_AGENT_ACTIVE_CLUSTERS: Optional[List[Dict[str, Any]]] = None
+_AGENT_ACTIVE_CLUSTER_INDEX: Dict[int, Dict[str, Any]] = {}
+_AGENT_ACTIVE_GRID: Optional[Dict[str, Any]] = None
+_AGENT_ACTIVE_GRID_IMAGE: Optional[Image.Image] = None
+_AGENT_ACTIVE_OVERLAY_IMAGE: Optional[Image.Image] = None
+_AGENT_ACTIVE_LABEL_COLORS: Optional[Dict[str, str]] = None
+_AGENT_ACTIVE_LABEL_PREFIXES: Optional[Dict[str, str]] = None
+_AGENT_ACTIVE_OVERLAY_DOT_RADIUS: Optional[int] = None
+_AGENT_GRID_TOOL_USAGE: Dict[str, Dict[str, int]] = {}
+_AGENT_GRID_TOOL_LAST: Dict[str, Dict[str, Any]] = {}
+_AGENT_HANDLE_INDEX: Dict[str, int] = {}
+_AGENT_NEXT_CANDIDATE_ID = 1
+_AGENT_NEXT_CLUSTER_ID = 1
+_AGENT_LAST_SUBMIT_DETECTIONS: Optional[List[Dict[str, Any]]] = None
+_AGENT_PENDING_CLASSIFY_IDS: List[int] = []
+_AGENT_CLASSIFIER_CLASS_CACHE: Dict[str, List[str]] = {}
+_AGENT_TRACE_FULL_WRITER: Optional[Callable[[Dict[str, Any]], None]] = None
+_AGENT_TRACE_READABLE_WRITER: Optional[Callable[[str], None]] = None
+_AGENT_TILE_CONTEXT_STORE: Dict[str, Dict[str, Any]] = {}
+_AGENT_GLOBAL_CONTEXT_STORE: Dict[str, Dict[str, Any]] = {}
+_AGENT_TILE_SUMMARIES: List[Dict[str, Any]] = []
+_AGENT_PREPASS_COMPLETE: bool = False
+
+AGENTIC_TIGHT_DEFAULT_DETECTOR_CONF = 0.45
+AGENTIC_TIGHT_DEFAULT_SAM3_SCORE = 0.5
+AGENTIC_TIGHT_DEFAULT_SAM3_MASK = 0.5
+AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB = 0.35
+AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MARGIN = 0.05
+AGENTIC_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN = 0.05
+AGENTIC_TIGHT_DEFAULT_SCORELESS_IOU = 0.3
+AGENTIC_CLASSIFIER_STRICT_MIN_PROB = 0.65
+AGENTIC_CLASSIFIER_STRICT_MARGIN = 0.15
+AGENTIC_CLASSIFIER_STRICT_BG_MARGIN = 0.15
+AGENTIC_STRICT_SAM3_MIN_SCORE = 0.7
+AGENTIC_CLASSIFIER_AGENTIC_ONLY_MIN_PROB = 0.8
+AGENTIC_CLASSIFIER_AGENTIC_ONLY_MARGIN = 0.2
+AGENTIC_CLASSIFIER_AGENTIC_ONLY_BG_MARGIN = 0.2
+AGENTIC_LLM_HEARTBEAT_SECS = 0
+AGENTIC_GRID_OVERLAP_RATIO = 0.2
+AGENTIC_CONTEXT_CHUNK_BYTES = 5 * 1024 * 1024
+AGENTIC_MIN_ZOOM_WINDOW_PX = 200
+AGENTIC_READABLE_TO_CONSOLE = True
+AGENTIC_CLUSTER_IOU = 0.7
+AGENTIC_INSPECT_MAX_OBJECTS = 0
 
 
 def _register_agent_tool(name: str):
@@ -4707,14 +5489,483 @@ def _register_agent_tool(name: str):
     return _wrap
 
 
+def _agent_set_active_detections(detections: Optional[Sequence[Dict[str, Any]]]) -> None:
+    global _AGENT_ACTIVE_DETECTIONS
+    if not detections:
+        _AGENT_ACTIVE_DETECTIONS = []
+        return
+    _AGENT_ACTIVE_DETECTIONS = [dict(det) for det in detections if isinstance(det, dict)]
+
+
+def _agent_set_active_clusters(clusters: Optional[Sequence[Dict[str, Any]]]) -> None:
+    global _AGENT_ACTIVE_CLUSTERS, _AGENT_ACTIVE_DETECTIONS, _AGENT_ACTIVE_CLUSTER_INDEX
+    if not clusters:
+        _AGENT_ACTIVE_CLUSTERS = []
+        _AGENT_ACTIVE_DETECTIONS = []
+        _AGENT_ACTIVE_CLUSTER_INDEX = {}
+        _agent_refresh_handle_index()
+        return
+    cluster_list = [dict(item) for item in clusters if isinstance(item, dict)]
+    _AGENT_ACTIVE_CLUSTERS = cluster_list
+    _AGENT_ACTIVE_DETECTIONS = cluster_list
+    _AGENT_ACTIVE_CLUSTER_INDEX = {
+        int(item.get("cluster_id")): item for item in cluster_list if item.get("cluster_id") is not None
+    }
+    _agent_refresh_handle_index()
+
+
+def _agent_reset_registries() -> None:
+    global _AGENT_ACTIVE_CANDIDATES, _AGENT_ACTIVE_CANDIDATE_INDEX
+    global _AGENT_ACTIVE_CLUSTERS, _AGENT_ACTIVE_CLUSTER_INDEX
+    global _AGENT_NEXT_CANDIDATE_ID, _AGENT_NEXT_CLUSTER_ID
+    global _AGENT_LAST_SUBMIT_DETECTIONS
+    global _AGENT_PENDING_CLASSIFY_IDS
+    global _AGENT_ACTIVE_LABEL_COLORS, _AGENT_ACTIVE_LABEL_PREFIXES, _AGENT_ACTIVE_OVERLAY_DOT_RADIUS
+    global _AGENT_GRID_TOOL_USAGE, _AGENT_GRID_TOOL_LAST
+    global _AGENT_TILE_CONTEXT_STORE, _AGENT_GLOBAL_CONTEXT_STORE
+    global _AGENT_ACTIVE_OVERALL_CAPTION, _AGENT_ACTIVE_WINDOWED_CAPTIONS
+    global _AGENT_TILE_SUMMARIES, _AGENT_HANDLE_INDEX, _AGENT_PREPASS_COMPLETE
+    _AGENT_ACTIVE_CANDIDATES = []
+    _AGENT_ACTIVE_CANDIDATE_INDEX = {}
+    _AGENT_ACTIVE_CLUSTERS = []
+    _AGENT_ACTIVE_CLUSTER_INDEX = {}
+    _AGENT_NEXT_CANDIDATE_ID = 1
+    _AGENT_NEXT_CLUSTER_ID = 1
+    _AGENT_LAST_SUBMIT_DETECTIONS = None
+    _AGENT_PENDING_CLASSIFY_IDS = []
+    _AGENT_ACTIVE_LABEL_COLORS = None
+    _AGENT_ACTIVE_LABEL_PREFIXES = None
+    _AGENT_ACTIVE_OVERLAY_DOT_RADIUS = None
+    _AGENT_GRID_TOOL_USAGE = {}
+    _AGENT_GRID_TOOL_LAST = {}
+    _AGENT_HANDLE_INDEX = {}
+    _AGENT_TILE_CONTEXT_STORE = {}
+    _AGENT_GLOBAL_CONTEXT_STORE = {}
+    _AGENT_ACTIVE_OVERALL_CAPTION = None
+    _AGENT_ACTIVE_WINDOWED_CAPTIONS = None
+    _AGENT_TILE_SUMMARIES = []
+    _AGENT_PREPASS_COMPLETE = False
+
+
+def _agent_default_classifier_for_dataset(dataset_id: Optional[str]) -> Optional[str]:
+    if not dataset_id:
+        return None
+    labelmap = _agent_load_labelmap(dataset_id)
+    if not labelmap:
+        return None
+    root = UPLOAD_ROOT / "classifiers"
+    candidates = [
+        "DinoV3_best_model_large.pkl",
+        f"{dataset_id}_clip_vitl14_bg5.pkl",
+        f"{dataset_id}_clip_vitb16_bg5.pkl",
+        f"{dataset_id}_clip_vitb32_bg5.pkl",
+    ]
+    for name in candidates:
+        path = root / name
+        if path.exists() and _agent_classifier_matches_labelmap(path, labelmap):
+            return str(path)
+    return None
+
+
+def _agent_classifier_classes_for_path(path: Path) -> List[str]:
+    key = str(path.resolve())
+    cached = _AGENT_CLASSIFIER_CLASS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    classes: List[str] = []
+    try:
+        obj = joblib.load(str(path))
+        if isinstance(obj, dict):
+            raw = obj.get("classes")
+        else:
+            raw = getattr(obj, "classes_", None)
+        if raw is not None:
+            try:
+                classes = [str(c) for c in list(raw)]
+            except Exception:
+                classes = [str(raw)]
+    except Exception:
+        classes = []
+    _AGENT_CLASSIFIER_CLASS_CACHE[key] = classes
+    return classes
+
+
+def _agent_classifier_matches_labelmap(path: Path, labelmap: Sequence[str]) -> bool:
+    if not labelmap:
+        return False
+    classes = _agent_classifier_classes_for_path(path)
+    if not classes:
+        return False
+    bg_indices = _clip_head_background_indices(classes)
+    filtered = [cls for idx, cls in enumerate(classes) if idx not in bg_indices]
+    label_norm = {_normalize_class_name_for_match(n) for n in labelmap if n}
+    clf_norm = {_normalize_class_name_for_match(n) for n in filtered if n}
+    return bool(label_norm) and label_norm == clf_norm
+
+
+if QwenAgentAssistant is not None and QwenAgentContentItem is not None:
+    class _AgentToolRunner(QwenAgentAssistant):  # type: ignore[misc]
+        def _serialize_tool_result(self, tool_result: Any) -> str:
+            if isinstance(tool_result, str):
+                return tool_result
+            if isinstance(tool_result, dict) and "__agent_view__" in tool_result:
+                tool_result = tool_result.get("__agent_view__")
+            try:
+                return json.dumps(tool_result, ensure_ascii=False, indent=2)
+            except Exception:
+                return json.dumps({"error": "tool_result_unserializable"}, ensure_ascii=True)
+
+        def _tool_result_content(  # type: ignore[override]
+            self,
+            tool_name: str,
+            tool_args: Mapping[str, Any],
+            tool_result: Any,
+        ) -> List[QwenAgentContentItem]:
+            serialized = self._serialize_tool_result(tool_result)
+            content = [QwenAgentContentItem(text=serialized)]
+            overlay_ref = _agent_tool_overlay_image_ref(tool_name, tool_args, tool_result)
+            if overlay_ref:
+                content.append(QwenAgentContentItem(image=overlay_ref))
+                _agent_full_trace_write(
+                    {"type": "tool_result_image", "tool": tool_name, "chars": len(overlay_ref), "ts": time.time()}
+                )
+            return content
+else:
+    _AgentToolRunner = None  # type: ignore[assignment]
+
+
+def _agent_error_payload(code: str, message: Optional[str] = None, fix_hint: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "error": {
+            "code": str(code),
+            "message": str(message or code),
+            "fix_hint": str(fix_hint) if fix_hint else None,
+        }
+    }
+
+
+def _agent_error_from_detail(detail: str, tool_name: Optional[str] = None) -> Tuple[str, str, Optional[str]]:
+    text = str(detail or "").strip()
+    lower = text.lower()
+    if "grid_cell_required" in lower or "grid_cell_invalid" in lower:
+        return "missing_grid_cell", text, "Provide a valid grid_cell (e.g., C2)."
+    if "grid_unavailable" in lower:
+        return "missing_grid_cell", text, "Enable grid overlay or provide window_bbox_2d."
+    if "sam3_similarity_label_required" in lower or "missing_label" in lower:
+        return "missing_label", text, "Provide a canonical labelmap class."
+    if "sam3_similarity_exemplar_required" in lower or "invalid_exemplar" in lower:
+        return "invalid_exemplar", text, "Provide exemplar handles from list_candidates/get_tile_context."
+    if "classifier_unavailable" in lower:
+        return "classifier_unavailable", text, "Classifier unavailable; skip verification."
+    if "prompt_type_invalid" in lower or "items_required" in lower or "agent_detector_mode_invalid" in lower:
+        return "invalid_prompt", text, "Provide a valid prompt or items list."
+    if "bbox_required" in lower or "invalid_bbox" in lower or "window_bbox_required" in lower:
+        return "invalid_prompt", text, "Provide a valid bbox or grid_cell."
+    if "context_handle_required" in lower or "context_chunk_index_required" in lower:
+        return "invalid_prompt", text, "Provide context_handle and chunk_index."
+    if "context_handle_missing" in lower or "context_chunk_index_invalid" in lower:
+        return "invalid_prompt", text, "Use a valid context_handle and chunk_index."
+    if "cluster_not_found" in lower:
+        return "invalid_prompt", text, "Provide a valid cluster_id from list_candidates."
+    if "tool_not_found" in lower:
+        return "tool_failed", text, "Use a supported tool name."
+    return "tool_failed", text, "Check tool arguments and retry once."
+
+
 def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
     handler = AGENT_TOOL_REGISTRY.get(call.name)
     if handler is None:
-        return AgentToolResult(name=call.name, error="tool_not_found")
+        _agent_full_trace_write(
+            {
+                "type": "tool_dispatch_error",
+                "tool": call.name,
+                "error": "tool_not_found",
+                "ts": time.time(),
+            }
+        )
+        return AgentToolResult(
+            name=call.name,
+            result=_agent_error_payload("tool_failed", "tool_not_found", "Use a supported tool name."),
+        )
     try:
-        result = handler(**(call.arguments or {}))
+        args = dict(call.arguments or {})
+        try:
+            import inspect
+            handler_params = inspect.signature(handler).parameters
+        except Exception:
+            handler_params = {}
+        if ("image_token" in handler_params or "image_base64" in handler_params) and not args.get("image_token") and not args.get("image_base64"):
+            if _AGENT_ACTIVE_IMAGE_TOKEN:
+                args["image_token"] = _AGENT_ACTIVE_IMAGE_TOKEN
+            elif _AGENT_ACTIVE_IMAGE_BASE64:
+                args["image_base64"] = _AGENT_ACTIVE_IMAGE_BASE64
+        grid_cell = args.get("grid_cell")
+        if grid_cell is not None:
+            grid_cell = str(grid_cell).strip().upper()
+            if grid_cell:
+                args["grid_cell"] = grid_cell
+        grid_tools = {
+            "look_and_inspect",
+            "image_zoom_in_tool",
+            "zoom_and_detect",
+            "run_detector",
+            "sam3_text",
+            "sam3_similarity",
+            "qwen_infer",
+            "view_cell_raw",
+            "view_cell_overlay",
+        }
+        inspect_window_key: Optional[Tuple[int, int, int, int]] = None
+        if grid_cell and call.name in grid_tools:
+            if not _AGENT_ACTIVE_GRID:
+                return AgentToolResult(
+                    name=call.name,
+                    result=_agent_error_payload(
+                        "missing_grid_cell",
+                        "grid_unavailable",
+                        "Enable grid overlay or provide window_bbox_2d.",
+                    ),
+                )
+            cell_xyxy = _agent_grid_cell_xyxy(
+                _AGENT_ACTIVE_GRID,
+                str(grid_cell),
+                overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+            )
+            if not cell_xyxy:
+                cols = int(_AGENT_ACTIVE_GRID.get("cols") or 0)
+                rows = int(_AGENT_ACTIVE_GRID.get("rows") or 0)
+                labels = _AGENT_ACTIVE_GRID.get("col_labels") or []
+                if labels:
+                    col_range = f"{labels[0]}-{labels[-1]}"
+                else:
+                    col_range = "unknown"
+                return AgentToolResult(
+                    name=call.name,
+                    result=_agent_error_payload(
+                        "missing_grid_cell",
+                        f"grid_cell_invalid:valid_cols={col_range},rows=1-{rows or 0}",
+                        "Provide a valid grid_cell (e.g., C2).",
+                    ),
+                )
+            img_w = int(_AGENT_ACTIVE_GRID.get("img_w") or 0)
+            img_h = int(_AGENT_ACTIVE_GRID.get("img_h") or 0)
+            if img_w <= 0 or img_h <= 0:
+                return AgentToolResult(
+                    name=call.name,
+                    result=_agent_error_payload(
+                        "missing_grid_cell",
+                        "grid_unavailable",
+                        "Enable grid overlay or provide window_bbox_2d.",
+                    ),
+                )
+            cell_bbox_2d = list(_xyxy_to_qwen_bbox(img_w, img_h, *cell_xyxy))
+            if call.name in {"view_cell_raw", "view_cell_overlay"}:
+                pass
+            elif call.name == "image_zoom_in_tool":
+                if not args.get("bbox_2d") and not args.get("bbox_xyxy_px") and not args.get("window_bbox_2d"):
+                    args["bbox_2d"] = cell_bbox_2d
+            else:
+                if not args.get("window_bbox_2d"):
+                    args["window_bbox_2d"] = cell_bbox_2d
+                if call.name == "look_and_inspect" and not args.get("bbox_space"):
+                    args["bbox_space"] = "window"
+        if call.name == "run_detector":
+            if args.get("conf") is None and _AGENT_ACTIVE_DETECTOR_CONF is not None:
+                args["conf"] = _AGENT_ACTIVE_DETECTOR_CONF
+        bbox_2d = args.get("bbox_2d")
+        if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) < 4:
+            args.pop("bbox_2d", None)
+        bbox_xyxy_px = args.get("bbox_xyxy_px")
+        if isinstance(bbox_xyxy_px, (list, tuple)) and len(bbox_xyxy_px) < 4:
+            args.pop("bbox_xyxy_px", None)
+        window_bbox_2d = args.get("window_bbox_2d")
+        if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) < 4:
+            args.pop("window_bbox_2d", None)
+        if call.name == "look_and_inspect":
+            if _AGENT_ACTIVE_IMAGE_TOKEN and not args.get("image_base64"):
+                args["image_token"] = _AGENT_ACTIVE_IMAGE_TOKEN
+            if _AGENT_ACTIVE_LABELMAP:
+                args["labelmap"] = list(_AGENT_ACTIVE_LABELMAP)
+            if _AGENT_PREPASS_COMPLETE and "register" not in args:
+                args["register"] = False
+            if _AGENT_ACTIVE_GLOSSARY:
+                args["labelmap_glossary"] = str(_AGENT_ACTIVE_GLOSSARY)
+                model_id = str(args.get("model_id") or "").strip().lower()
+                if model_id in {"qwen", "default", "auto"}:
+                    args.pop("model_id", None)
+                window_vals = args.get("window_bbox_2d") or args.get("bbox_2d")
+                if isinstance(window_vals, (list, tuple)) and len(window_vals) >= 4:
+                    try:
+                        window_key = tuple(int(round(float(v))) for v in window_vals[:4])
+                    except Exception:
+                        window_key = None
+                    if window_key and _AGENT_ACTIVE_INSPECTED_WINDOWS is not None:
+                        if window_key in _AGENT_ACTIVE_INSPECTED_WINDOWS:
+                            already_result = {
+                                "candidates": [],
+                                "window_bbox_2d": list(window_vals[:4]),
+                                "already_inspected": True,
+                            }
+                            _agent_full_trace_write(
+                                {
+                                    "type": "tool_dispatch",
+                                    "tool": call.name,
+                                    "args": args,
+                                    "ts": time.time(),
+                                }
+                            )
+                            _agent_full_trace_write(
+                                {
+                                    "type": "tool_dispatch_result",
+                                    "tool": call.name,
+                                    "result": already_result,
+                                    "ts": time.time(),
+                                }
+                            )
+                            return AgentToolResult(
+                                name=call.name,
+                                result=already_result,
+                            )
+                        inspect_window_key = window_key
+        if call.name == "qwen_infer":
+            if not args.get("items") and _AGENT_ACTIVE_LABELMAP:
+                args["items"] = list(_AGENT_ACTIVE_LABELMAP)
+            if not args.get("extra_context") and _AGENT_ACTIVE_GLOSSARY:
+                args["extra_context"] = str(_AGENT_ACTIVE_GLOSSARY)
+        if call.name == "sam3_text":
+            label = str(args.get("label") or "").strip()
+            prompt = str(args.get("prompt") or "").strip()
+            if not label and prompt and _AGENT_ACTIVE_LABELMAP:
+                aligned = _agent_fuzzy_align_label(prompt, _AGENT_ACTIVE_LABELMAP)
+                if aligned:
+                    label = aligned
+                    args["label"] = aligned
+            if not label and not prompt and _AGENT_ACTIVE_LABELMAP:
+                label = str(_AGENT_ACTIVE_LABELMAP[0]).strip()
+                if label:
+                    args["label"] = label
+            if not prompt and label:
+                synonym_map = _agent_generate_sam3_synonyms(_AGENT_ACTIVE_LABELMAP or [], _AGENT_ACTIVE_GLOSSARY or "")
+                prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=1)
+                if prompts:
+                    args["prompt"] = prompts[0]
+                else:
+                    args["prompt"] = label
+            if args.get("score_thr") is None and _AGENT_ACTIVE_SAM3_SCORE_THR is not None:
+                args["score_thr"] = _AGENT_ACTIVE_SAM3_SCORE_THR
+            if args.get("mask_threshold") is None and _AGENT_ACTIVE_SAM3_MASK_THR is not None:
+                args["mask_threshold"] = _AGENT_ACTIVE_SAM3_MASK_THR
+        if call.name == "sam3_similarity":
+            if args.get("score_thr") is None and _AGENT_ACTIVE_SAM3_SCORE_THR is not None:
+                args["score_thr"] = _AGENT_ACTIVE_SAM3_SCORE_THR
+        if call.name == "classify_crop":
+            classifier_id = args.get("classifier_id")
+            if isinstance(classifier_id, str):
+                classifier_norm = classifier_id.strip().lower()
+                if classifier_norm in {"default", "auto", "best"}:
+                    classifier_id = None
+                    args.pop("classifier_id", None)
+                    if _AGENT_ACTIVE_CLASSIFIER_ID and not isinstance(active_classifier_head, dict):
+                        args["classifier_id"] = _AGENT_ACTIVE_CLASSIFIER_ID
+                elif Path(classifier_id).suffix.lower() not in CLASSIFIER_ALLOWED_EXTS:
+                    args.pop("classifier_id", None)
+            if not args.get("classifier_id") and not isinstance(active_classifier_head, dict):
+                if _AGENT_ACTIVE_CLASSIFIER_ID:
+                    args["classifier_id"] = _AGENT_ACTIVE_CLASSIFIER_ID
+                else:
+                    dataset_id = args.get("dataset_id") or _AGENT_ACTIVE_DATASET_ID
+                    fallback = _agent_default_classifier_for_dataset(dataset_id)
+                    if fallback:
+                        args["classifier_id"] = fallback
+                    else:
+                        skipped = _agent_error_payload(
+                            "classifier_unavailable",
+                            "classifier_unavailable",
+                            "Classifier unavailable; skip verification.",
+                        )
+                        _agent_full_trace_write(
+                            {
+                                "type": "tool_dispatch",
+                                "tool": call.name,
+                                "args": args,
+                                "ts": time.time(),
+                            }
+                        )
+                        _agent_full_trace_write(
+                            {
+                                "type": "tool_dispatch_result",
+                                "tool": call.name,
+                                "result": skipped,
+                                "ts": time.time(),
+                            }
+                        )
+                        return AgentToolResult(
+                            name=call.name,
+                            result=skipped,
+                        )
+        if not args.get("dataset_id") and _AGENT_ACTIVE_DATASET_ID:
+            try:
+                import inspect
+                sig = inspect.signature(handler)
+                if "dataset_id" in sig.parameters:
+                    args["dataset_id"] = _AGENT_ACTIVE_DATASET_ID
+            except Exception:
+                # Best-effort: only inject when we can confirm the signature accepts it.
+                pass
+        _agent_full_trace_write(
+            {
+                "type": "tool_dispatch",
+                "tool": call.name,
+                "args": args,
+                "ts": time.time(),
+            }
+        )
+        result = handler(**args)
+        if call.name == "look_and_inspect" and inspect_window_key and _AGENT_ACTIVE_INSPECTED_WINDOWS is not None:
+            if not (isinstance(result, dict) and result.get("error")):
+                _AGENT_ACTIVE_INSPECTED_WINDOWS.add(inspect_window_key)
+        _agent_record_grid_tool_usage(call.name, args, result)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        code, message, fix_hint = _agent_error_from_detail(detail, call.name)
+        _agent_full_trace_write(
+            {
+                "type": "tool_dispatch_error",
+                "tool": call.name,
+                "error": message,
+                "ts": time.time(),
+            }
+        )
+        return AgentToolResult(
+            name=call.name,
+            result=_agent_error_payload(code, message, fix_hint),
+        )
     except Exception as exc:  # noqa: BLE001
-        return AgentToolResult(name=call.name, error=f"tool_failed:{exc}")
+        if call.name == "look_and_inspect":
+            return AgentToolResult(
+                name=call.name,
+                result={"skipped": True, "reason": f"inspect_failed:{exc}"},
+            )
+        _agent_full_trace_write(
+            {
+                "type": "tool_dispatch_error",
+                "tool": call.name,
+                "error": str(exc),
+                "ts": time.time(),
+            }
+        )
+        return AgentToolResult(
+            name=call.name,
+            result=_agent_error_payload("tool_failed", f"tool_failed:{exc}", "Check tool arguments and retry once."),
+        )
+    _agent_full_trace_write(
+        {
+            "type": "tool_dispatch_result",
+            "tool": call.name,
+            "result": result,
+            "ts": time.time(),
+        }
+    )
     return AgentToolResult(name=call.name, result=result or {})
 
 
@@ -4769,6 +6020,259 @@ def _normalize_labelmap_glossary(raw_glossary: Any) -> str:
     return str(raw_glossary).strip()
 
 
+_DEFAULT_SAM3_SYNONYMS: Dict[str, List[str]] = {
+    "light_vehicle": ["car", "vehicle", "van", "pickup", "suv", "sedan", "4x4", "jeep"],
+    "person": ["person", "people", "human", "man", "woman"],
+    "building": ["building", "house", "shed", "structure"],
+    "utility_pole": ["utility pole", "power pole", "telephone pole", "pole"],
+    "boat": ["boat", "ship", "vessel", "canoe", "kayak"],
+    "bike": ["bike", "bicycle", "motorbike", "moped"],
+    "container": ["container", "shipping container", "cargo container"],
+    "truck": ["truck", "lorry", "pickup truck"],
+    "gastank": ["gas tank", "fuel tank", "storage tank"],
+    "digger": ["digger", "excavator", "backhoe", "bulldozer"],
+    "solarpanels": ["solar panel", "solar panels", "solar array"],
+    "bus": ["bus", "coach"],
+}
+_SAM3_SYNONYM_CACHE: Dict[str, Dict[str, List[str]]] = {}
+_SAM3_SYNONYM_CACHE_ORDER: deque[str] = deque()
+_SAM3_SYNONYM_CACHE_LIMIT = 8
+
+
+def _glossary_label_key(label: str) -> str:
+    return _normalize_class_name_for_match(label)
+
+
+def _extract_glossary_synonyms(text: str) -> List[str]:
+    if not text:
+        return []
+    cleaned = re.sub(r"[()]", " ", str(text))
+    parts = re.split(r"[;,/]|\\band\\b|\\bor\\b", cleaned, flags=re.IGNORECASE)
+    synonyms: List[str] = []
+    for part in parts:
+        term = part.strip()
+        if not term:
+            continue
+        term = re.sub(
+            r"^(all kinds of|all kind of|all|including|include|including the|including those|such as|other)\\s+",
+            "",
+            term,
+            flags=re.IGNORECASE,
+        ).strip()
+        term = term.strip(" .")
+        if term:
+            synonyms.append(term)
+    return synonyms
+
+
+def _parse_glossary_synonyms(glossary: str, labelmap: Sequence[str]) -> Dict[str, List[str]]:
+    if not glossary:
+        return {}
+    norm_to_label = {_glossary_label_key(lbl): lbl for lbl in labelmap if str(lbl).strip()}
+    mapping: Dict[str, List[str]] = {}
+    for line in str(glossary).splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        key = None
+        rest = None
+        if "->" in raw:
+            key, rest = raw.split("->", 1)
+        elif ":" in raw:
+            key, rest = raw.split(":", 1)
+        elif "=" in raw:
+            key, rest = raw.split("=", 1)
+        elif " - " in raw:
+            key, rest = raw.split(" - ", 1)
+        else:
+            match = re.match(r"^(\\w+)\\s*\\((.+)\\)$", raw)
+            if match:
+                key, rest = match.group(1), match.group(2)
+        if not key or rest is None:
+            continue
+        label = norm_to_label.get(_glossary_label_key(key))
+        if not label:
+            continue
+        synonyms = _extract_glossary_synonyms(rest)
+        if synonyms:
+            mapping.setdefault(label, []).extend(synonyms)
+    return mapping
+
+
+def _sam3_synonym_cache_key(labelmap: Sequence[str], glossary: str) -> str:
+    joined = ",".join([str(lbl).strip() for lbl in labelmap if str(lbl).strip()])
+    payload = f"{joined}\n{glossary or ''}".encode("utf-8", errors="ignore")
+    return hashlib.md5(payload).hexdigest()
+
+
+def _get_cached_sam3_synonyms(cache_key: str) -> Optional[Dict[str, List[str]]]:
+    cached = _SAM3_SYNONYM_CACHE.get(cache_key)
+    if cached is None:
+        return None
+    try:
+        _SAM3_SYNONYM_CACHE_ORDER.remove(cache_key)
+    except ValueError:
+        pass
+    _SAM3_SYNONYM_CACHE_ORDER.append(cache_key)
+    return cached
+
+
+def _set_cached_sam3_synonyms(cache_key: str, mapping: Dict[str, List[str]]) -> None:
+    _SAM3_SYNONYM_CACHE[cache_key] = mapping
+    try:
+        _SAM3_SYNONYM_CACHE_ORDER.remove(cache_key)
+    except ValueError:
+        pass
+    _SAM3_SYNONYM_CACHE_ORDER.append(cache_key)
+    while len(_SAM3_SYNONYM_CACHE_ORDER) > _SAM3_SYNONYM_CACHE_LIMIT:
+        evict = _SAM3_SYNONYM_CACHE_ORDER.popleft()
+        _SAM3_SYNONYM_CACHE.pop(evict, None)
+
+
+def _split_synonym_terms(text: str) -> List[str]:
+    if not text:
+        return []
+    parts = re.split(r"[;,/]|\\band\\b|\\bor\\b", str(text), flags=re.IGNORECASE)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _clean_sam3_synonym(term: str) -> str:
+    if not term:
+        return ""
+    cleaned = str(term).strip()
+    cleaned = re.sub(r"[\"']", "", cleaned).strip()
+    cleaned = re.sub(
+        r"^(all kinds of|all kind of|all|including|include|including the|including those|such as|other|and|or)\\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = cleaned.strip(" .")
+    if not cleaned:
+        return ""
+    if len(cleaned) > 40:
+        return ""
+    if "->" in cleaned or ":" in cleaned:
+        return ""
+    return cleaned
+
+
+def _normalize_synonym_list(terms: Sequence[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for term in terms:
+        for part in _split_synonym_terms(term):
+            cleaned = _clean_sam3_synonym(part)
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(cleaned)
+    return normalized
+
+
+def _agent_generate_sam3_synonyms(
+    labelmap: Sequence[str],
+    glossary: str,
+    *,
+    max_synonyms: int = 6,
+) -> Dict[str, List[str]]:
+    labels = [str(lbl).strip() for lbl in labelmap if str(lbl).strip()]
+    if not labels:
+        return {}
+    cache_key = _sam3_synonym_cache_key(labels, glossary or "")
+    cached = _get_cached_sam3_synonyms(cache_key)
+    if cached is not None:
+        return cached
+    prompt = (
+        "You are generating text prompts for an image segmentation model. "
+        "Return ONLY a JSON object mapping each label to a list of 3-6 short noun phrases (1-3 words). "
+        "Use lowercase. Avoid filler phrases like 'including' or 'all kinds of'. "
+        "Do not include commas inside a phrase. If unsure, return an empty list for that label.\n"
+        f"Labelmap: {', '.join(labels)}\n"
+        f"Glossary (hints only):\n{glossary or 'none'}\n"
+        "Example:\n"
+        "{\"light_vehicle\": [\"car\", \"van\", \"pickup truck\", \"suv\", \"sedan\"]}"
+    )
+    raw = ""
+    try:
+        raw = _generate_qwen_text(prompt, max_new_tokens=512)
+    except Exception:
+        raw = ""
+    data: Dict[str, Any] = {}
+    json_text = _extract_balanced_json(raw, "{", "}")
+    if json_text:
+        try:
+            data = json.loads(json_text)
+        except Exception:
+            data = {}
+    if not data and raw:
+        for line in raw.splitlines():
+            if ":" not in line:
+                continue
+            key, rest = line.split(":", 1)
+            data[key.strip()] = [item.strip() for item in rest.split(",") if item.strip()]
+    norm_to_label = {_normalize_class_name_for_match(lbl): lbl for lbl in labels}
+    mapping: Dict[str, List[str]] = {}
+    for key, value in (data or {}).items():
+        label = norm_to_label.get(_normalize_class_name_for_match(key))
+        if not label:
+            continue
+        terms: List[str] = []
+        if isinstance(value, (list, tuple)):
+            terms = [str(item) for item in value]
+        elif isinstance(value, str):
+            terms = [value]
+        else:
+            terms = []
+        cleaned = _normalize_synonym_list(terms)
+        if cleaned:
+            mapping[label] = cleaned[:max_synonyms]
+    for label in labels:
+        if label not in mapping or not mapping[label]:
+            fallback = _DEFAULT_SAM3_SYNONYMS.get(_glossary_label_key(label), [])
+            mapping[label] = _normalize_synonym_list(fallback)
+    _set_cached_sam3_synonyms(cache_key, mapping)
+    return mapping
+
+
+def _sam3_prompt_variants(
+    label: str,
+    synonym_map: Mapping[str, List[str]],
+    *,
+    max_prompts: int = 6,
+) -> List[str]:
+    if not label:
+        return []
+    canonical = str(label).strip()
+    label_norm = _glossary_label_key(canonical)
+    prompts: List[str] = []
+    seen: Set[str] = set()
+
+    def add(term: str) -> None:
+        text = str(term).strip()
+        if not text:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        prompts.append(text)
+
+    if "_" in canonical:
+        add(canonical.replace("_", " "))
+    add(canonical)
+    for term in synonym_map.get(canonical, []):
+        add(term)
+    for term in _DEFAULT_SAM3_SYNONYMS.get(label_norm, []):
+        add(term)
+    if max_prompts > 0:
+        prompts = prompts[:max_prompts]
+    return prompts
+
+
 @_register_agent_tool("look_and_inspect")
 def _agent_tool_look_and_inspect(
     image_base64: Optional[str] = None,
@@ -4777,72 +6281,189 @@ def _agent_tool_look_and_inspect(
     bbox_xyxy_px: Optional[Sequence[float]] = None,
     bbox_space: Optional[str] = None,
     window_bbox_2d: Optional[Sequence[float]] = None,
+    grid_cell: Optional[str] = None,
+    intent: Optional[str] = None,
     labelmap: Optional[List[str]] = None,
     labelmap_glossary: Optional[str] = None,
     max_objects: Optional[int] = None,
     model_id: Optional[str] = None,
+    register: Optional[bool] = True,
+    include_caption: Optional[bool] = True,
 ) -> Dict[str, Any]:
-    pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
-    img_w, img_h = pil_img.size
-    ann: Dict[str, Any] = {"bbox_space": bbox_space or "full"}
-    if bbox_2d is not None:
-        ann["bbox_2d"] = list(bbox_2d)
-    if bbox_xyxy_px is not None:
-        ann["bbox_xyxy_px"] = list(bbox_xyxy_px)
-    window_xyxy = None
-    if ann.get("bbox_2d") is not None or ann.get("bbox_xyxy_px") is not None:
-        window_xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox_2d)
-    if window_xyxy is None and window_bbox_2d is not None:
-        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
-    if window_xyxy is None:
-        window_xyxy = (0.0, 0.0, float(img_w), float(img_h))
-    x1, y1, x2, y2 = window_xyxy
-    crop = pil_img.crop((x1, y1, x2, y2))
-    labels = [str(x) for x in (labelmap or [])]
-    glossary = _normalize_labelmap_glossary(labelmap_glossary)
-    max_items = int(max_objects) if max_objects is not None else 20
-    prompt_lines = [
-        "Inspect this window and list ALL visible objects from the labelmap.",
-        "Return ONLY a JSON array. Each item: {\"label\": <labelmap label>, \"bbox_2d\": [x1,y1,x2,y2]}",
-        "bbox_2d uses 0-1000 coordinates RELATIVE TO THIS WINDOW (not the full image).",
-        "Only include labels from the labelmap. If none, return [].",
-    ]
-    if labels:
-        prompt_lines.append("Labelmap: " + ", ".join(labels))
-    if glossary:
-        prompt_lines.append("Glossary:\n" + glossary)
-    prompt_lines.append(f"Max objects: {max_items}.")
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": "You are a vision inspector. Output JSON only."}]},
-        {"role": "user", "content": [{"type": "image", "image": crop}, {"type": "text", "text": "\n".join(prompt_lines)}]},
-    ]
     try:
-        response = _run_qwen_chat(messages, max_new_tokens=512, decode_override={"temperature": 0.2, "top_p": 0.9}, model_id_override=model_id)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"look_and_inspect_failed:{exc}") from exc
-    items = _agent_extract_json_array(response) or []
-    results = []
-    label_set = set(labels)
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        label = str(item.get("label") or "").strip()
-        if label and label_set and label not in label_set:
-            continue
-        bbox = item.get("bbox_2d")
-        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-            continue
-        results.append(
-            {
-                "label": label,
-                "bbox_2d": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
-                "bbox_space": "window",
-                "window_bbox_2d": [float(v) for v in _xyxy_to_bbox_2d(*window_xyxy, img_w, img_h)],
-            }
+        if not model_id or str(model_id).strip().lower() in {"default", "auto"}:
+            model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+        pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
+        img_w, img_h = pil_img.size
+        ann: Dict[str, Any] = {"bbox_space": bbox_space or "full"}
+        if intent:
+            ann["intent"] = str(intent)
+        if bbox_2d is not None:
+            ann["bbox_2d"] = list(bbox_2d)
+        if bbox_xyxy_px is not None:
+            ann["bbox_xyxy_px"] = list(bbox_xyxy_px)
+        window_xyxy = None
+        if ann.get("bbox_2d") is not None or ann.get("bbox_xyxy_px") is not None:
+            window_xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox_2d)
+        if window_xyxy is None and window_bbox_2d is not None:
+            window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+        if window_xyxy is None:
+            window_xyxy = (0.0, 0.0, float(img_w), float(img_h))
+        x1, y1, x2, y2 = window_xyxy
+        crop = pil_img.crop((x1, y1, x2, y2))
+        labels = [str(x) for x in (labelmap or [])]
+        if not labels and _AGENT_ACTIVE_LABELMAP:
+            labels = [str(x) for x in _AGENT_ACTIVE_LABELMAP]
+        glossary = _normalize_labelmap_glossary(labelmap_glossary)
+        if not glossary and _AGENT_ACTIVE_GLOSSARY:
+            glossary = _normalize_labelmap_glossary(_AGENT_ACTIVE_GLOSSARY)
+        max_items = AGENTIC_INSPECT_MAX_OBJECTS
+        prompt_lines = [
+            "Inspect this window and list ALL visible objects from the labelmap.",
+            "Return ONLY a JSON array. Each item: {\"label\": <labelmap label>, \"bbox_2d\": [x1,y1,x2,y2]}",
+            "bbox_2d uses 0-1000 coordinates RELATIVE TO THIS WINDOW (not the full image).",
+            "Only include labels from the labelmap. If none, return [].",
+        ]
+        if labels:
+            prompt_lines.append("Labelmap: " + ", ".join(labels))
+        if glossary:
+            prompt_lines.append("Glossary:\n" + glossary)
+        if max_items > 0:
+            prompt_lines.append(f"Max objects: {max_items}.")
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": "You are a vision inspector. Output JSON only."}]},
+            {"role": "user", "content": [{"type": "image", "image": crop}, {"type": "text", "text": "\n".join(prompt_lines)}]},
+        ]
+        response = _run_qwen_chat(
+            messages,
+            max_new_tokens=512,
+            decode_override={"temperature": 0.2, "top_p": 0.9},
+            model_id_override=model_id,
         )
-        if len(results) >= max_items:
-            break
-    return {"candidates": results, "window_xyxy_px": list(window_xyxy)}
+        items = _agent_extract_json_array(response) or []
+        results = []
+        label_set = set(labels)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            if label and label_set and label not in label_set:
+                continue
+            bbox = item.get("bbox_2d")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            results.append(
+                {
+                    "label": label,
+                    "bbox_2d": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                    "bbox_space": "window",
+                    "window_bbox_2d": [float(v) for v in _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)],
+                    "score": None,
+                    "score_source": "qwen_inspect",
+                }
+            )
+            if max_items > 0 and len(results) >= max_items:
+                break
+        candidate_counts: Dict[str, int] = {}
+        for item in results:
+            label = str(item.get("label") or "").strip()
+            if not label:
+                continue
+            candidate_counts[label] = candidate_counts.get(label, 0) + 1
+        caption_text = ""
+        if include_caption:
+            try:
+                caption_prompt = (
+                    "Describe this window in 1 short sentence. "
+                    "Mention visible objects using common terms, no coordinates."
+                )
+                caption_messages = [
+                    {"role": "system", "content": [{"type": "text", "text": "You are a visual captioner."}]},
+                    {"role": "user", "content": [{"type": "image", "image": crop}, {"type": "text", "text": caption_prompt}]},
+                ]
+                caption_raw = _run_qwen_chat(
+                    caption_messages,
+                    max_new_tokens=120,
+                    decode_override={"temperature": 0.3, "top_p": 0.9},
+                    model_id_override=model_id,
+                )
+                caption_text = _sanitize_qwen_caption(caption_raw)
+            except Exception:
+                caption_text = ""
+        register_summary: Optional[Dict[str, Any]] = None
+        if register:
+            owner_cell = grid_cell or _agent_grid_cell_for_window_bbox(
+                _AGENT_ACTIVE_GRID or {},
+                _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy),
+            )
+            register_summary = _agent_register_detections(
+                results,
+                img_w=img_w,
+                img_h=img_h,
+                grid=_AGENT_ACTIVE_GRID,
+                labelmap=labelmap,
+                background=None,
+                source_override="qwen_inspect",
+                owner_cell=owner_cell,
+            )
+        new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+        updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+        new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
+        new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
+        updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
+        agent_view = {
+            "grid_cell": grid_cell or _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID or {}, _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)),
+            "caption": caption_text or None,
+            "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+            "new_handles": new_handles,
+            "updated_clusters": len(updated_cluster_ids or []),
+            "updated_handles": updated_handles,
+            "new_items": new_summary.get("items"),
+            "new_items_total": new_summary.get("total"),
+            "new_items_truncated": new_summary.get("truncated"),
+            "label_counts": _agent_cluster_label_counts(new_cluster_ids or []),
+            "candidate_count": len(results),
+            "candidate_label_counts": candidate_counts,
+        }
+        return {
+            "candidates": results,
+            "window_xyxy_px": list(window_xyxy),
+            "caption": caption_text or None,
+            "register_summary": register_summary,
+            "__agent_view__": agent_view,
+        }
+    except Exception as exc:  # noqa: BLE001
+        reason = f"inspect_failed:{exc}"
+        grid_text = None
+        try:
+            grid_text = grid_cell or _agent_grid_cell_for_window_bbox(
+                _AGENT_ACTIVE_GRID or {}, _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)  # type: ignore[arg-type]
+            )
+        except Exception:
+            grid_text = grid_cell
+        agent_view = {
+            "grid_cell": grid_text,
+            "caption": None,
+            "new_clusters": 0,
+            "new_handles": [],
+            "updated_clusters": 0,
+            "updated_handles": [],
+            "new_items": [],
+            "new_items_total": 0,
+            "new_items_truncated": False,
+            "label_counts": {},
+            "candidate_count": 0,
+            "skipped": True,
+            "reason": reason,
+        }
+        return {
+            "candidates": [],
+            "window_xyxy_px": list(window_xyxy) if "window_xyxy" in locals() else None,
+            "caption": None,
+            "skipped": True,
+            "reason": reason,
+            "__agent_view__": agent_view,
+        }
 
 
 def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str]:
@@ -4899,12 +6520,26 @@ def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
     return "\n".join(lines).strip()
 
 
-def _agent_compact_tool_result(result: Dict[str, Any], max_items: int = 30) -> Dict[str, Any]:
+def _agent_compact_tool_result(result: Dict[str, Any], max_items: int = 0) -> Dict[str, Any]:
     if not isinstance(result, dict):
         return {"summary": "tool_result_invalid"}
+    if max_items <= 0:
+        return result
     detections = result.get("detections")
     if not isinstance(detections, list):
-        return result
+        candidates = result.get("candidates")
+        if not isinstance(candidates, list):
+            return result
+        total = len(candidates)
+        if total <= max_items:
+            return result
+        trimmed = candidates[:max_items]
+        return {
+            **{k: v for k, v in result.items() if k != "candidates"},
+            "candidates": trimmed,
+            "candidate_count": total,
+            "truncated": True,
+        }
     total = len(detections)
     if total <= max_items:
         return result
@@ -4927,6 +6562,1164 @@ def _agent_compact_tool_response(tool_result: AgentToolResult) -> Dict[str, Any]
     if tool_result.error:
         return {"error": tool_result.error, "result": compact}
     return compact
+
+
+def _agent_label_color_map(labelmap: Sequence[str]) -> Dict[str, str]:
+    colors: Dict[str, str] = {}
+    if not labelmap:
+        return colors
+    golden = 0.61803398875
+    for idx, label in enumerate(labelmap):
+        name = str(label).strip()
+        if not name:
+            continue
+        hue = (idx * golden) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.9)
+        colors[name] = f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
+    return colors
+
+
+def _agent_grid_col_label(index: int) -> str:
+    label = ""
+    idx = int(index) + 1
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        label = chr(ord("A") + rem) + label
+    return label
+
+
+def _agent_grid_col_index(label: str) -> Optional[int]:
+    if not label:
+        return None
+    label = "".join(ch for ch in label.strip().upper() if "A" <= ch <= "Z")
+    if not label:
+        return None
+    idx = 0
+    for ch in label:
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
+def _agent_grid_spec(
+    img_w: int,
+    img_h: int,
+    *,
+    target: int = 200,
+    min_cell: int = 160,
+    max_cell: int = 260,
+) -> Dict[str, Any]:
+    def _fit(count: int, length: int) -> Tuple[int, float]:
+        count = max(1, int(count))
+        while count > 1 and length / count < min_cell:
+            count -= 1
+        while length / count > max_cell:
+            count += 1
+        return count, length / count
+
+    cols_guess = max(1, int(round(img_w / float(target))))
+    rows_guess = max(1, int(round(img_h / float(target))))
+    cols, cell_w = _fit(cols_guess, img_w)
+    rows, cell_h = _fit(rows_guess, img_h)
+    col_labels = [_agent_grid_col_label(idx) for idx in range(cols)]
+    return {
+        "cols": cols,
+        "rows": rows,
+        "cell_w": float(cell_w),
+        "cell_h": float(cell_h),
+        "col_labels": col_labels,
+        "img_w": int(img_w),
+        "img_h": int(img_h),
+    }
+
+
+def _agent_grid_cell_xyxy(
+    grid: Mapping[str, Any],
+    cell_label: str,
+    *,
+    overlap_ratio: float = 0.0,
+) -> Optional[Tuple[float, float, float, float]]:
+    if not grid or not cell_label:
+        return None
+    text = str(cell_label).strip()
+    match = re.search(r"([A-Za-z]+)\s*(\d+)", text)
+    col_label = None
+    row_text = None
+    if match:
+        col_label, row_text = match.groups()
+    else:
+        match = re.search(r"(\d+)\s*([A-Za-z]+)", text)
+        if match:
+            row_text, col_label = match.groups()
+    if not col_label or not row_text:
+        return None
+    col_idx = _agent_grid_col_index(col_label)
+    try:
+        row_idx = int(row_text) - 1
+    except ValueError:
+        return None
+    cols = int(grid.get("cols") or 0)
+    rows = int(grid.get("rows") or 0)
+    if col_idx is None or col_idx < 0 or col_idx >= cols or row_idx < 0 or row_idx >= rows:
+        return None
+    cell_w = float(grid.get("cell_w") or 0.0)
+    cell_h = float(grid.get("cell_h") or 0.0)
+    img_w = int(grid.get("img_w") or 0)
+    img_h = int(grid.get("img_h") or 0)
+    x1 = col_idx * cell_w
+    y1 = row_idx * cell_h
+    x2 = img_w if col_idx == cols - 1 else (col_idx + 1) * cell_w
+    y2 = img_h if row_idx == rows - 1 else (row_idx + 1) * cell_h
+    ratio = max(0.0, float(overlap_ratio or 0.0))
+    if ratio > 0.0:
+        expand_x = (x2 - x1) * ratio * 0.5
+        expand_y = (y2 - y1) * ratio * 0.5
+        x1 = max(0.0, x1 - expand_x)
+        y1 = max(0.0, y1 - expand_y)
+        x2 = min(float(img_w), x2 + expand_x)
+        y2 = min(float(img_h), y2 + expand_y)
+    return (x1, y1, x2, y2)
+
+
+def _agent_grid_cell_for_window_bbox(
+    grid: Mapping[str, Any],
+    window_bbox_2d: Sequence[float],
+) -> Optional[str]:
+    if not grid or not window_bbox_2d or len(window_bbox_2d) < 4:
+        return None
+    img_w = int(grid.get("img_w") or 0)
+    img_h = int(grid.get("img_h") or 0)
+    if img_w <= 0 or img_h <= 0:
+        return None
+    x1, y1, x2, y2 = _qwen_bbox_to_xyxy(img_w, img_h, window_bbox_2d)
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    cell_w = float(grid.get("cell_w") or 0.0)
+    cell_h = float(grid.get("cell_h") or 0.0)
+    cols = int(grid.get("cols") or 0)
+    rows = int(grid.get("rows") or 0)
+    if cell_w <= 0 or cell_h <= 0 or cols <= 0 or rows <= 0:
+        return None
+    col_idx = min(cols - 1, max(0, int(cx / cell_w)))
+    row_idx = min(rows - 1, max(0, int(cy / cell_h)))
+    col_labels = grid.get("col_labels") or []
+    if col_idx >= len(col_labels):
+        return None
+    return f"{col_labels[col_idx]}{row_idx + 1}"
+
+
+def _agent_grid_prompt_text(grid: Optional[Mapping[str, Any]]) -> str:
+    if not grid:
+        return ""
+    cols = int(grid.get("cols") or 0)
+    rows = int(grid.get("rows") or 0)
+    labels = grid.get("col_labels") or []
+    if not cols or not rows or not labels:
+        return ""
+    first = str(labels[0])
+    last = str(labels[-1])
+    cell_w = float(grid.get("cell_w") or 0.0)
+    cell_h = float(grid.get("cell_h") or 0.0)
+    return (
+        f"Grid: columns {first}-{last}, rows 1-{rows}. "
+        f"Cell size ~{cell_w:.0f}x{cell_h:.0f} px. "
+        "Use grid_cell like C2 (column C, row 2, top-left origin) for windowed tools; "
+        "do not use numeric coordinates when the grid is enabled."
+    )
+
+
+def _agent_label_prefix_candidates(label: str) -> List[str]:
+    if not label:
+        return []
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", str(label)).strip()
+    tokens = [tok for tok in cleaned.split() if tok]
+    candidates: List[str] = []
+    if tokens:
+        if len(tokens) >= 2:
+            candidates.append(tokens[0][0] + tokens[1][0])
+            if len(tokens[1]) >= 2:
+                candidates.append(tokens[0][0] + tokens[1][:2])
+        if len(tokens[0]) >= 2:
+            candidates.append(tokens[0][:2])
+        if len(tokens[0]) >= 3:
+            candidates.append(tokens[0][:3])
+    else:
+        flat = re.sub(r"[^A-Za-z0-9]+", "", str(label))
+        if len(flat) >= 2:
+            candidates.append(flat[:2])
+        if len(flat) >= 3:
+            candidates.append(flat[:3])
+    seen: Set[str] = set()
+    uniq: List[str] = []
+    for cand in candidates:
+        cand = re.sub(r"[^A-Za-z0-9]+", "", cand).upper()
+        if len(cand) < 2 or cand in seen:
+            continue
+        uniq.append(cand)
+        seen.add(cand)
+    return uniq
+
+
+def _agent_label_prefix_map(labels: Sequence[str]) -> Dict[str, str]:
+    prefixes: Dict[str, str] = {}
+    used: Set[str] = set()
+    for label in labels:
+        label_str = str(label or "").strip()
+        if not label_str:
+            continue
+        candidates = _agent_label_prefix_candidates(label_str)
+        chosen = None
+        for cand in candidates:
+            if cand not in used:
+                chosen = cand
+                break
+        if chosen is None:
+            base = candidates[0] if candidates else "X"
+            base = re.sub(r"[^A-Za-z0-9]+", "", base).upper() or "X"
+            idx = 1
+            chosen = f"{base}{idx}"
+            while chosen in used:
+                idx += 1
+                chosen = f"{base}{idx}"
+        prefixes[label_str] = chosen
+        used.add(chosen)
+    return prefixes
+
+
+def _agent_current_label_colors(labels: Sequence[str]) -> Dict[str, str]:
+    global _AGENT_ACTIVE_LABEL_COLORS
+    if _AGENT_ACTIVE_LABEL_COLORS:
+        if all(lbl in _AGENT_ACTIVE_LABEL_COLORS for lbl in labels):
+            return _AGENT_ACTIVE_LABEL_COLORS
+    label_colors = _agent_label_color_map(labels)
+    _AGENT_ACTIVE_LABEL_COLORS = label_colors
+    return label_colors
+
+
+def _agent_current_label_prefixes(labels: Sequence[str]) -> Dict[str, str]:
+    global _AGENT_ACTIVE_LABEL_PREFIXES
+    if _AGENT_ACTIVE_LABEL_PREFIXES:
+        if all(lbl in _AGENT_ACTIVE_LABEL_PREFIXES for lbl in labels):
+            return _AGENT_ACTIVE_LABEL_PREFIXES
+    label_prefixes = _agent_label_prefix_map(labels)
+    _AGENT_ACTIVE_LABEL_PREFIXES = label_prefixes
+    return label_prefixes
+
+
+def _agent_refresh_handle_index() -> None:
+    global _AGENT_HANDLE_INDEX
+    handle_index: Dict[str, int] = {}
+    for cluster in list(_AGENT_ACTIVE_CLUSTERS or []):
+        if not isinstance(cluster, dict):
+            continue
+        handle = _agent_cluster_handle(cluster)
+        cid = cluster.get("cluster_id")
+        if handle and cid is not None:
+            handle_index[str(handle)] = int(cid)
+    _AGENT_HANDLE_INDEX = handle_index
+
+
+def _agent_cluster_handle(cluster: Mapping[str, Any]) -> Optional[str]:
+    cluster_id = cluster.get("cluster_id") or cluster.get("candidate_id")
+    if cluster_id is None:
+        return None
+    label = str(cluster.get("label") or "").strip()
+    prefix = None
+    if label:
+        prefix = (_AGENT_ACTIVE_LABEL_PREFIXES or {}).get(label)
+        if prefix is None:
+            labels = list(_AGENT_ACTIVE_LABELMAP or [])
+            if not labels:
+                labels = [label]
+            prefix_map = _agent_current_label_prefixes(labels)
+            prefix = prefix_map.get(label)
+    if prefix:
+        return f"{prefix}{int(cluster_id)}"
+    return str(cluster_id)
+
+
+def _agent_cluster_id_from_handle(handle: Optional[str]) -> Optional[int]:
+    if not handle:
+        return None
+    text = str(handle).strip()
+    if not text:
+        return None
+    if text in _AGENT_HANDLE_INDEX:
+        return int(_AGENT_HANDLE_INDEX[text])
+    if text.isdigit():
+        cid = int(text)
+        if cid in _AGENT_ACTIVE_CLUSTER_INDEX:
+            return cid
+    match = re.search(r"(\\d+)$", text)
+    if match:
+        cid = int(match.group(1))
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(cid)
+        if cluster and _agent_cluster_handle(cluster) == text:
+            return cid
+    return None
+
+
+def _agent_handles_from_cluster_ids(cluster_ids: Sequence[int]) -> List[str]:
+    handles: List[str] = []
+    for cid in cluster_ids:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
+        if not cluster:
+            continue
+        handle = _agent_cluster_handle(cluster)
+        if handle:
+            handles.append(handle)
+    return handles
+
+
+def _agent_cluster_ids_from_handles(handles: Sequence[str]) -> List[int]:
+    ids: List[int] = []
+    for handle in handles:
+        cid = _agent_cluster_id_from_handle(handle)
+        if cid is not None:
+            ids.append(int(cid))
+    return ids
+
+
+def _agent_overlay_key_text(
+    label_colors: Mapping[str, str],
+    label_prefixes: Optional[Mapping[str, str]] = None,
+) -> str:
+    if not label_colors:
+        return ""
+    lines: List[str] = []
+    for label, color in label_colors.items():
+        prefix = label_prefixes.get(label) if label_prefixes else None
+        if prefix:
+            lines.append(f"{label} ({prefix}) -> {color}")
+        else:
+            lines.append(f"{label} -> {color}")
+    return "\n".join(lines)
+
+
+def _agent_detection_center_px(det: Dict[str, Any], img_w: int, img_h: int) -> Optional[Tuple[float, float]]:
+    bbox = det.get("bbox_xyxy_px")
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    bbox_2d = det.get("bbox_2d")
+    if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) >= 4:
+        x1, y1, x2, y2 = _qwen_bbox_to_xyxy(img_w, img_h, bbox_2d)
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    bbox_yolo = det.get("bbox_yolo")
+    if isinstance(bbox_yolo, (list, tuple)) and len(bbox_yolo) >= 4:
+        x1, y1, x2, y2 = _yolo_to_xyxy(img_w, img_h, bbox_yolo)
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    return None
+
+
+def _agent_cluster_match(
+    det: Dict[str, Any],
+    clusters: Sequence[Dict[str, Any]],
+    *,
+    iou_thr: float,
+) -> Optional[Dict[str, Any]]:
+    label = str(det.get("label") or "").strip()
+    bbox = det.get("bbox_xyxy_px")
+    if not label or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        cluster_label = str(cluster.get("label") or "").strip()
+        if cluster_label and cluster_label != label:
+            continue
+        cluster_bbox = cluster.get("bbox_xyxy_px")
+        if not isinstance(cluster_bbox, (list, tuple)) or len(cluster_bbox) < 4:
+            continue
+        if _agent_iou_xyxy(bbox, cluster_bbox) >= iou_thr:
+            return cluster
+    return None
+
+
+def _agent_det_score(det: Dict[str, Any]) -> Optional[float]:
+    raw = det.get("score")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_register_detections(
+    detections: Sequence[Dict[str, Any]],
+    *,
+    img_w: int,
+    img_h: int,
+    grid: Optional[Mapping[str, Any]] = None,
+    labelmap: Optional[Sequence[str]] = None,
+    background: Optional[Sequence[str]] = None,
+    source_override: Optional[str] = None,
+    owner_cell: Optional[str] = None,
+    iou_thr: Optional[float] = None,
+) -> Dict[str, Any]:
+    global _AGENT_ACTIVE_CANDIDATES, _AGENT_ACTIVE_CANDIDATE_INDEX
+    global _AGENT_ACTIVE_CLUSTERS, _AGENT_ACTIVE_CLUSTER_INDEX
+    global _AGENT_NEXT_CANDIDATE_ID, _AGENT_NEXT_CLUSTER_ID
+
+    if not detections:
+        return {"candidate_ids": [], "cluster_ids": [], "new_clusters": 0, "updated_clusters": 0, "rejected": 0}
+    labelmap = list(labelmap or _AGENT_ACTIVE_LABELMAP or [])
+    cleaned, rejected = _agent_sanitize_detection_items(
+        list(detections),
+        pil_img=None,
+        classifier_head=None,
+        img_w=img_w,
+        img_h=img_h,
+        labelmap=labelmap,
+        background=background,
+    )
+    if _AGENT_ACTIVE_CANDIDATES is None:
+        _AGENT_ACTIVE_CANDIDATES = []
+    if _AGENT_ACTIVE_CLUSTERS is None:
+        _AGENT_ACTIVE_CLUSTERS = []
+    if iou_thr is None:
+        iou_thr = AGENTIC_CLUSTER_IOU
+    new_cluster_ids: List[int] = []
+    updated_cluster_ids: List[int] = []
+    candidate_ids: List[int] = []
+    for det in cleaned:
+        candidate_id = _AGENT_NEXT_CANDIDATE_ID
+        _AGENT_NEXT_CANDIDATE_ID += 1
+        candidate_ids.append(candidate_id)
+        source = source_override or det.get("source") or det.get("score_source") or "agent"
+        source_list = set(det.get("source_list") or [])
+        if source:
+            source_list.add(str(source))
+        cell = _agent_grid_cell_for_detection(det, img_w, img_h, grid)
+        owner = owner_cell or cell
+        candidate = {
+            "candidate_id": candidate_id,
+            "label": det.get("label"),
+            "class_id": det.get("class_id"),
+            "bbox_xyxy_px": det.get("bbox_xyxy_px"),
+            "bbox_2d": det.get("bbox_2d"),
+            "bbox_yolo": det.get("bbox_yolo"),
+            "score": det.get("score"),
+            "score_source": det.get("score_source") or det.get("source"),
+            "source": source,
+            "source_list": sorted(source_list) if source_list else None,
+            "grid_cell": cell,
+            "owner_cell": owner,
+            "window_bbox_2d": det.get("window_bbox_2d"),
+        }
+        _AGENT_ACTIVE_CANDIDATES.append(candidate)
+        _AGENT_ACTIVE_CANDIDATE_INDEX[candidate_id] = candidate
+        cluster = _agent_cluster_match(det, _AGENT_ACTIVE_CLUSTERS, iou_thr=iou_thr)
+        if cluster is None:
+            cluster_id = _AGENT_NEXT_CLUSTER_ID
+            _AGENT_NEXT_CLUSTER_ID += 1
+            origin_tag = "agentic" if _AGENT_PREPASS_COMPLETE else "prepass"
+            cluster_entry = {
+                "cluster_id": cluster_id,
+                "label": det.get("label"),
+                "class_id": det.get("class_id"),
+                "bbox_xyxy_px": det.get("bbox_xyxy_px"),
+                "bbox_2d": det.get("bbox_2d"),
+                "bbox_yolo": det.get("bbox_yolo"),
+                "score": det.get("score"),
+                "score_source": det.get("score_source") or det.get("source"),
+                "source": source,
+                "source_list": sorted(source_list) if source_list else None,
+                "origin": origin_tag,
+                "candidate_ids": [candidate_id],
+                "grid_cell": cell,
+                "owner_cell": owner,
+                "classifier_best": det.get("classifier_best"),
+                "classifier_prob": det.get("classifier_prob"),
+                "classifier_accept": det.get("classifier_accept"),
+            }
+            _AGENT_ACTIVE_CLUSTERS.append(cluster_entry)
+            _AGENT_ACTIVE_CLUSTER_INDEX[cluster_id] = cluster_entry
+            new_cluster_ids.append(cluster_id)
+            candidate["cluster_id"] = cluster_id
+            continue
+        cluster_id = int(cluster.get("cluster_id"))
+        candidate["cluster_id"] = cluster_id
+        if owner and not cluster.get("owner_cell"):
+            cluster["owner_cell"] = owner
+        cluster.setdefault("candidate_ids", [])
+        cluster["candidate_ids"] = list(cluster.get("candidate_ids") or []) + [candidate_id]
+        cluster_sources = set(cluster.get("source_list") or [])
+        if cluster.get("source"):
+            cluster_sources.add(str(cluster.get("source")))
+        cluster_sources.update(source_list)
+        if cluster_sources:
+            cluster["source_list"] = sorted(cluster_sources)
+        cluster_score = _agent_det_score(cluster)
+        det_score = _agent_det_score(det)
+        replace = False
+        if det_score is not None and (cluster_score is None or det_score > cluster_score):
+            replace = True
+        elif det_score is None and cluster_score is None and not cluster.get("bbox_xyxy_px"):
+            replace = True
+        if replace:
+            keep_ids = list(cluster.get("candidate_ids") or [])
+            keep_sources = list(cluster.get("source_list") or [])
+            keep_classifier = {
+                "classifier_best": cluster.get("classifier_best"),
+                "classifier_prob": cluster.get("classifier_prob"),
+                "classifier_accept": cluster.get("classifier_accept"),
+            }
+            cluster.update(
+                {
+                    "label": det.get("label"),
+                    "class_id": det.get("class_id"),
+                    "bbox_xyxy_px": det.get("bbox_xyxy_px"),
+                    "bbox_2d": det.get("bbox_2d"),
+                    "bbox_yolo": det.get("bbox_yolo"),
+                    "score": det.get("score"),
+                    "score_source": det.get("score_source") or det.get("source"),
+                    "source": source,
+                    "grid_cell": cell,
+                }
+            )
+            cluster["candidate_ids"] = keep_ids
+            if keep_sources:
+                cluster["source_list"] = keep_sources
+            for key, value in keep_classifier.items():
+                if value is not None and cluster.get(key) is None:
+                    cluster[key] = value
+        updated_cluster_ids.append(cluster_id)
+    _agent_set_active_clusters(_AGENT_ACTIVE_CLUSTERS)
+    return {
+        "candidate_ids": candidate_ids,
+        "cluster_ids": new_cluster_ids + [cid for cid in updated_cluster_ids if cid not in new_cluster_ids],
+        "new_cluster_ids": new_cluster_ids,
+        "updated_cluster_ids": updated_cluster_ids,
+        "new_clusters": len(new_cluster_ids),
+        "updated_clusters": len(updated_cluster_ids),
+        "rejected": int(rejected),
+    }
+
+
+def _agent_cluster_label_counts(cluster_ids: Sequence[int]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for cid in cluster_ids:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
+        if not cluster:
+            continue
+        label = str(cluster.get("label") or "").strip()
+        if not label:
+            continue
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _agent_round_bbox_2d(bbox: Any) -> Optional[List[float]]:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        return [round(float(v), 1) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_cluster_summaries(
+    cluster_ids: Sequence[int],
+    *,
+    max_items: int = 0,
+    include_ids: bool = True,
+) -> Dict[str, Any]:
+    items: List[Dict[str, Any]] = []
+    for cid in cluster_ids:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
+        if not cluster:
+            continue
+        item = {
+            "handle": _agent_cluster_handle(cluster),
+            "label": cluster.get("label"),
+            "grid_cell": cluster.get("grid_cell"),
+            "score": cluster.get("score"),
+            "score_source": cluster.get("score_source") or cluster.get("source"),
+            "bbox_2d": _agent_round_bbox_2d(cluster.get("bbox_2d")),
+        }
+        if include_ids:
+            item["cluster_id"] = int(cluster.get("cluster_id"))
+        items.append(item)
+    total = len(items)
+    if max_items <= 0:
+        return {"items": items, "total": total, "truncated": False}
+    truncated = total > max_items
+    return {"items": items[:max_items], "total": total, "truncated": truncated}
+
+
+def _agent_grid_label_counts(
+    *,
+    grid: Optional[Mapping[str, Any]],
+    clusters: Sequence[Dict[str, Any]],
+    label: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    if not grid:
+        return []
+    label_filter = _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) if label else None
+    counts: Dict[str, Dict[str, Any]] = {}
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        cluster_label = str(cluster.get("label") or "").strip()
+        if label_filter and cluster_label != label_filter:
+            continue
+        cell = cluster.get("owner_cell") or cluster.get("grid_cell")
+        if not cell:
+            bbox_2d = cluster.get("bbox_2d")
+            if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) >= 4:
+                cell = _agent_grid_cell_for_window_bbox(grid, bbox_2d)
+        if not cell:
+            continue
+        entry = counts.setdefault(str(cell), {"grid_cell": str(cell), "counts": {}, "cluster_ids": []})
+        entry["cluster_ids"].append(int(cluster.get("cluster_id")))
+        entry["counts"][cluster_label] = entry["counts"].get(cluster_label, 0) + 1
+    summary: List[Dict[str, Any]] = []
+    for cell, entry in sorted(counts.items()):
+        counts_map = entry.get("counts") or {}
+        total = sum(int(v) for v in counts_map.values())
+        summary.append(
+            {
+                "grid_cell": cell,
+                "total": total,
+                "counts": counts_map,
+                "cluster_ids": entry.get("cluster_ids") or [],
+            }
+        )
+    return summary
+
+
+def _agent_render_detection_overlay(
+    pil_img: Image.Image,
+    detections: Sequence[Dict[str, Any]],
+    label_colors: Mapping[str, str],
+    *,
+    dot_radius: Optional[int] = None,
+    label_prefixes: Optional[Mapping[str, str]] = None,
+) -> Image.Image:
+    if not detections:
+        return pil_img
+    overlay = pil_img.convert("RGB").copy()
+    draw = ImageDraw.Draw(overlay)
+    img_w, img_h = overlay.size
+    if dot_radius is None or dot_radius <= 0:
+        dot_radius = max(2, int(round(min(img_w, img_h) * 0.004)))
+    try:
+        id_font = ImageFont.load_default()
+    except Exception:
+        id_font = None
+    for det in detections:
+        if not isinstance(det, dict):
+            continue
+        center = _agent_detection_center_px(det, img_w, img_h)
+        if not center:
+            continue
+        cx, cy = center
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        color = label_colors.get(label, "#FFFFFF")
+        try:
+            r = int(color[1:3], 16)
+            g = int(color[3:5], 16)
+            b = int(color[5:7], 16)
+            luminance = 0.299 * r + 0.587 * g + 0.114 * b
+            outline = "#000000" if luminance > 140 else "#FFFFFF"
+        except Exception:
+            outline = "#000000"
+        draw.ellipse(
+            (cx - dot_radius, cy - dot_radius, cx + dot_radius, cy + dot_radius),
+            fill=color,
+            outline=outline,
+            width=1,
+        )
+        cluster_id = det.get("cluster_id") or det.get("candidate_id")
+        if cluster_id is not None:
+            text = str(cluster_id)
+            if label_prefixes is not None and label:
+                prefix = label_prefixes.get(label)
+                if prefix:
+                    text = f"{prefix}{cluster_id}"
+            tx = min(max(0, int(cx + dot_radius + 2)), img_w - 1)
+            ty = min(max(0, int(cy - dot_radius - 2)), img_h - 1)
+            draw.text((tx + 1, ty + 1), text, fill="#000000", font=id_font)
+            draw.text((tx, ty), text, fill=outline, font=id_font)
+    return overlay
+
+
+def _agent_render_grid_overlay(
+    pil_img: Image.Image,
+    grid: Mapping[str, Any],
+    *,
+    line_color: Tuple[int, int, int, int] = (255, 255, 255, 200),
+    text_color: Tuple[int, int, int, int] = (255, 255, 255, 90),
+) -> Image.Image:
+    if not grid:
+        return pil_img
+    cols = int(grid.get("cols") or 0)
+    rows = int(grid.get("rows") or 0)
+    if cols <= 0 or rows <= 0:
+        return pil_img
+    cell_w = float(grid.get("cell_w") or 0.0)
+    cell_h = float(grid.get("cell_h") or 0.0)
+    labels = grid.get("col_labels") or []
+    base = pil_img.convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    img_w, img_h = base.size
+    for col in range(1, cols):
+        x = int(round(col * cell_w))
+        draw.line([(x, 0), (x, img_h)], fill=line_color, width=1)
+    for row in range(1, rows):
+        y = int(round(row * cell_h))
+        draw.line([(0, y), (img_w, y)], fill=line_color, width=1)
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+    if labels:
+        for col_idx, label in enumerate(labels):
+            x = int(round(col_idx * cell_w + 4))
+            draw.text((x, 2), str(label), fill=text_color, font=font)
+    for row_idx in range(rows):
+        y = int(round(row_idx * cell_h + 2))
+        draw.text((2, y), str(row_idx + 1), fill=text_color, font=font)
+    combined = Image.alpha_composite(base, overlay)
+    return combined.convert("RGB")
+
+
+def _agent_image_to_data_uri(pil_img: Image.Image) -> str:
+    buf = BytesIO()
+    pil_img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _agent_overlay_labels(clusters: Sequence[Dict[str, Any]]) -> List[str]:
+    labels = list(_AGENT_ACTIVE_LABELMAP or [])
+    if labels:
+        return labels
+    label_set = {
+        str(cluster.get("label") or "").strip()
+        for cluster in clusters
+        if isinstance(cluster, dict) and cluster.get("label")
+    }
+    return sorted(label for label in label_set if label)
+
+
+def _agent_overlay_base_image() -> Optional[Image.Image]:
+    if _AGENT_ACTIVE_GRID_IMAGE is not None:
+        return _AGENT_ACTIVE_GRID_IMAGE
+    if _AGENT_ACTIVE_IMAGE_BASE64 or _AGENT_ACTIVE_IMAGE_TOKEN:
+        base_img, _, _ = _agent_resolve_image(_AGENT_ACTIVE_IMAGE_BASE64, _AGENT_ACTIVE_IMAGE_TOKEN)
+        return base_img
+    return None
+
+
+def _agent_grid_cells(grid: Optional[Mapping[str, Any]]) -> List[str]:
+    if not grid:
+        return []
+    labels = list(grid.get("col_labels") or [])
+    rows = int(grid.get("rows") or 0)
+    if not labels or rows <= 0:
+        return []
+    cells: List[str] = []
+    for row in range(1, rows + 1):
+        for col in labels:
+            cells.append(f"{col}{row}")
+    return cells
+
+
+def _agent_tool_grid_cell_from_args(
+    tool_args: Mapping[str, Any],
+    tool_result: Any,
+) -> Optional[str]:
+    if not _AGENT_ACTIVE_GRID:
+        return None
+    grid_cell = tool_args.get("grid_cell")
+    if grid_cell:
+        return str(grid_cell)
+    cluster_id = tool_args.get("cluster_id")
+    if cluster_id is not None:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cluster_id))
+        if cluster and cluster.get("grid_cell"):
+            return str(cluster.get("grid_cell"))
+    if isinstance(tool_result, dict):
+        agent_view = tool_result.get("__agent_view__")
+        if isinstance(agent_view, dict) and agent_view.get("grid_cell"):
+            return str(agent_view.get("grid_cell"))
+    window_bbox_2d = tool_args.get("window_bbox_2d")
+    if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
+        cell = _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID, window_bbox_2d)
+        if cell:
+            return str(cell)
+    window_arg = tool_args.get("window")
+    if isinstance(window_arg, dict):
+        window_bbox_2d = window_arg.get("bbox_2d")
+        if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
+            cell = _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID, window_bbox_2d)
+            if cell:
+                return str(cell)
+    return None
+
+
+def _agent_record_grid_tool_usage(
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    tool_result: Any,
+) -> None:
+    if not _AGENT_ACTIVE_GRID:
+        return
+    track_tools = {
+        "look_and_inspect",
+        "image_zoom_in_tool",
+        "zoom_and_detect",
+        "run_detector",
+        "sam3_text",
+        "sam3_similarity",
+        "qwen_infer",
+        "classify_crop",
+        "view_cell_raw",
+        "view_cell_overlay",
+    }
+    if tool_name not in track_tools:
+        return
+    cell = _agent_tool_grid_cell_from_args(tool_args, tool_result)
+    if not cell:
+        return
+    usage = _AGENT_GRID_TOOL_USAGE.setdefault(cell, {})
+    usage[tool_name] = int(usage.get(tool_name, 0)) + 1
+    _AGENT_GRID_TOOL_LAST[cell] = {"tool": tool_name, "ts": time.time()}
+
+
+def _agent_grid_usage_rows(grid: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    cells = _agent_grid_cells(grid)
+    rows: List[Dict[str, Any]] = []
+    for cell in cells:
+        tool_counts = dict(_AGENT_GRID_TOOL_USAGE.get(cell, {}))
+        total = sum(int(v) for v in tool_counts.values())
+        last = _AGENT_GRID_TOOL_LAST.get(cell, {})
+        rows.append(
+            {
+                "grid_cell": cell,
+                "total_calls": total,
+                "tools": tool_counts,
+                "last_tool": last.get("tool"),
+                "last_ts": last.get("ts"),
+            }
+        )
+    return rows
+
+
+def _agent_grid_usage_text(rows: Sequence[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    tool_short = {
+        "look_and_inspect": "inspect",
+        "image_zoom_in_tool": "zoom",
+        "zoom_and_detect": "zoom_detect",
+        "run_detector": "detector",
+        "sam3_text": "sam3_text",
+        "sam3_similarity": "sam3_sim",
+        "qwen_infer": "qwen_infer",
+        "classify_crop": "classify",
+        "view_cell_raw": "view_raw",
+        "view_cell_overlay": "view_overlay",
+    }
+    parts: List[str] = []
+    for row in rows:
+        cell = row.get("grid_cell")
+        tools = row.get("tools") or {}
+        last_tool = row.get("last_tool")
+        if not tools:
+            suffix = f" last={last_tool}" if last_tool else ""
+            parts.append(f"{cell}: none{suffix}")
+            continue
+        tool_bits = []
+        for tool_name, count in sorted(tools.items()):
+            short = tool_short.get(tool_name, tool_name)
+            tool_bits.append(f"{short}={int(count)}")
+        if last_tool:
+            tool_bits.append(f"last={last_tool}")
+        parts.append(f"{cell}: " + ",".join(tool_bits))
+    return "; ".join(parts)
+
+
+def _agent_cluster_owner_cell(cluster: Mapping[str, Any]) -> Optional[str]:
+    owner = cluster.get("owner_cell")
+    if owner:
+        return str(owner)
+    cell = cluster.get("grid_cell")
+    if cell:
+        return str(cell)
+    return None
+
+
+def _agent_tile_clusters(grid_cell: str) -> List[Dict[str, Any]]:
+    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
+    if not grid_cell:
+        return clusters
+    tile = str(grid_cell)
+    return [
+        cluster
+        for cluster in clusters
+        if isinstance(cluster, dict) and _agent_cluster_owner_cell(cluster) == tile
+    ]
+
+
+def _agent_tile_cluster_payload(grid_cell: str) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for cluster in _agent_tile_clusters(grid_cell):
+        items.append(
+            {
+                "cluster_id": int(cluster.get("cluster_id")),
+                "handle": _agent_cluster_handle(cluster),
+                "label": cluster.get("label"),
+                "score": cluster.get("score"),
+                "sources": cluster.get("source_list") or [cluster.get("source")],
+                "grid_cell": cluster.get("grid_cell"),
+                "owner_cell": cluster.get("owner_cell"),
+                "verified": bool(cluster.get("classifier_accept")),
+            }
+        )
+    return items
+
+
+def _agent_tile_caption_hint(grid_cell: str) -> Optional[str]:
+    if not _AGENT_ACTIVE_WINDOWED_CAPTIONS or not _AGENT_ACTIVE_GRID:
+        return None
+    hints: List[str] = []
+    for entry in _AGENT_ACTIVE_WINDOWED_CAPTIONS:
+        if not isinstance(entry, dict):
+            continue
+        bbox = entry.get("bbox_2d")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        cell = _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID, bbox)
+        if cell and str(cell) == str(grid_cell):
+            text = str(entry.get("caption") or "").strip()
+            if text:
+                hints.append(text)
+    if not hints:
+        return None
+    return " ".join(hints)
+
+
+def _agent_context_store(
+    payload: Dict[str, Any],
+    *,
+    kind: str,
+    max_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    raw = json.dumps(payload, ensure_ascii=True)
+    raw_bytes = raw.encode("utf-8", errors="ignore")
+    byte_size = len(raw_bytes)
+    limit = int(max_bytes or AGENTIC_CONTEXT_CHUNK_BYTES)
+    if limit <= 0 or byte_size <= limit:
+        return {"payload": payload, "byte_size": byte_size, "chunked": False}
+    chunk_size = max(1, limit)
+    chunks: List[str] = []
+    for idx in range(0, byte_size, chunk_size):
+        chunk = raw_bytes[idx : idx + chunk_size].decode("utf-8", errors="ignore")
+        chunks.append(chunk)
+    handle = f"{kind}_{uuid.uuid4().hex[:10]}"
+    store = {"chunks": chunks, "byte_size": byte_size}
+    if kind == "tile":
+        _AGENT_TILE_CONTEXT_STORE[handle] = store
+    else:
+        _AGENT_GLOBAL_CONTEXT_STORE[handle] = store
+    return {
+        "chunked": True,
+        "context_handle": handle,
+        "chunk_total": len(chunks),
+        "byte_size": byte_size,
+    }
+
+
+def _agent_context_chunk(
+    handle: str,
+    *,
+    chunk_index: int,
+    kind: str,
+) -> Dict[str, Any]:
+    store = _AGENT_TILE_CONTEXT_STORE if kind == "tile" else _AGENT_GLOBAL_CONTEXT_STORE
+    entry = store.get(handle)
+    if not entry:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="context_handle_missing")
+    chunks = entry.get("chunks") or []
+    total = len(chunks)
+    idx = int(chunk_index)
+    if idx < 0 or idx >= total:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_invalid")
+    return {
+        "context_handle": handle,
+        "chunk_index": idx,
+        "chunk_total": total,
+        "payload_chunk": chunks[idx],
+        "byte_size": entry.get("byte_size"),
+    }
+
+
+def _agent_clip_xyxy(
+    xyxy: Optional[Tuple[float, float, float, float]],
+    img_w: int,
+    img_h: int,
+) -> Optional[Tuple[float, float, float, float]]:
+    if not xyxy:
+        return None
+    x1, y1, x2, y2 = xyxy
+    x1 = max(0.0, min(float(img_w), float(x1)))
+    y1 = max(0.0, min(float(img_h), float(y1)))
+    x2 = max(0.0, min(float(img_w), float(x2)))
+    y2 = max(0.0, min(float(img_h), float(y2)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _agent_overlay_crop_xyxy(
+    tool_args: Mapping[str, Any],
+    tool_result: Any,
+    img_w: int,
+    img_h: int,
+) -> Optional[Tuple[float, float, float, float]]:
+    agent_view = tool_result.get("__agent_view__") if isinstance(tool_result, dict) else None
+    grid_cell = tool_args.get("grid_cell") or (
+        agent_view.get("grid_cell") if isinstance(agent_view, dict) else None
+    )
+    if grid_cell and _AGENT_ACTIVE_GRID:
+        cell_xyxy = _agent_grid_cell_xyxy(
+            _AGENT_ACTIVE_GRID,
+            str(grid_cell),
+            overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+        )
+        return _agent_clip_xyxy(cell_xyxy, img_w, img_h)
+
+    window_xyxy = None
+    for source in (tool_result, tool_args):
+        if isinstance(source, dict):
+            win = source.get("window_xyxy_px")
+            if isinstance(win, (list, tuple)) and len(win) >= 4:
+                window_xyxy = tuple(float(v) for v in win[:4])
+                break
+    if window_xyxy:
+        return _agent_clip_xyxy(window_xyxy, img_w, img_h)
+
+    window_bbox_2d = None
+    if isinstance(tool_result, dict):
+        window_bbox_2d = tool_result.get("window_bbox_2d")
+    if window_bbox_2d is None:
+        window_bbox_2d = tool_args.get("window_bbox_2d")
+    if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
+        return _agent_clip_xyxy(_qwen_bbox_to_xyxy(img_w, img_h, window_bbox_2d), img_w, img_h)
+
+    window_arg = tool_args.get("window")
+    if isinstance(window_arg, dict):
+        if isinstance(window_arg.get("bbox_xyxy_px"), (list, tuple)) and len(window_arg.get("bbox_xyxy_px")) >= 4:
+            xyxy = tuple(float(v) for v in window_arg.get("bbox_xyxy_px")[:4])
+            return _agent_clip_xyxy(xyxy, img_w, img_h)
+        if isinstance(window_arg.get("bbox_2d"), (list, tuple)) and len(window_arg.get("bbox_2d")) >= 4:
+            return _agent_clip_xyxy(_qwen_bbox_to_xyxy(img_w, img_h, window_arg.get("bbox_2d")), img_w, img_h)
+
+    cluster_id = tool_args.get("cluster_id")
+    if cluster_id is not None:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cluster_id))
+        if cluster:
+            bbox_xyxy = cluster.get("bbox_xyxy_px")
+            if isinstance(bbox_xyxy, (list, tuple)) and len(bbox_xyxy) >= 4:
+                xyxy = tuple(float(v) for v in bbox_xyxy[:4])
+                return _agent_clip_xyxy(xyxy, img_w, img_h)
+
+    bbox_2d = tool_args.get("bbox_2d")
+    bbox_space = str(tool_args.get("bbox_space") or "full").strip().lower()
+    if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) >= 4:
+        if bbox_space == "window":
+            window_bbox_2d = tool_args.get("window_bbox_2d")
+            if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
+                xyxy = _window_local_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d, bbox_2d)
+                return _agent_clip_xyxy(xyxy, img_w, img_h) if xyxy else None
+        return _agent_clip_xyxy(_qwen_bbox_to_xyxy(img_w, img_h, bbox_2d), img_w, img_h)
+
+    bbox_xyxy_px = tool_args.get("bbox_xyxy_px")
+    if isinstance(bbox_xyxy_px, (list, tuple)) and len(bbox_xyxy_px) >= 4:
+        xyxy = tuple(float(v) for v in bbox_xyxy_px[:4])
+        return _agent_clip_xyxy(xyxy, img_w, img_h)
+
+    return None
+
+
+def _agent_tool_overlay_image_ref(
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    tool_result: Any,
+) -> Optional[str]:
+    base_img = _agent_overlay_base_image()
+    if base_img is None:
+        return None
+    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
+    labels = _agent_overlay_labels(clusters)
+    label_colors = _agent_current_label_colors(labels) if labels else {}
+    label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
+    overlay_img = base_img
+    if clusters:
+        overlay_img = _agent_render_detection_overlay(
+            base_img,
+            clusters,
+            label_colors,
+            dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
+            label_prefixes=label_prefixes,
+        )
+        _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_img
+    img_w, img_h = overlay_img.size
+    crop_xyxy = _agent_overlay_crop_xyxy(tool_args, tool_result, img_w, img_h)
+    if crop_xyxy:
+        overlay_img = overlay_img.crop(crop_xyxy)
+    try:
+        return _agent_image_to_data_uri(overlay_img)
+    except Exception:
+        return None
+
+
+def _agent_expand_window_xyxy(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    img_w: int,
+    img_h: int,
+    min_size: int,
+) -> Tuple[Tuple[float, float, float, float], bool]:
+    width = max(0.0, x2 - x1)
+    height = max(0.0, y2 - y1)
+    target_w = max(width, float(min_size))
+    target_h = max(height, float(min_size))
+    if target_w > img_w:
+        target_w = float(img_w)
+    if target_h > img_h:
+        target_h = float(img_h)
+    expanded = target_w > width or target_h > height
+    if not expanded:
+        return (x1, y1, x2, y2), False
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    nx1 = cx - target_w / 2.0
+    nx2 = cx + target_w / 2.0
+    ny1 = cy - target_h / 2.0
+    ny2 = cy + target_h / 2.0
+    if nx1 < 0.0:
+        nx2 -= nx1
+        nx1 = 0.0
+    if nx2 > img_w:
+        nx1 -= nx2 - img_w
+        nx2 = float(img_w)
+    if ny1 < 0.0:
+        ny2 -= ny1
+        ny1 = 0.0
+    if ny2 > img_h:
+        ny1 -= ny2 - img_h
+        ny2 = float(img_h)
+    nx1 = max(0.0, min(float(img_w), nx1))
+    nx2 = max(0.0, min(float(img_w), nx2))
+    ny1 = max(0.0, min(float(img_h), ny1))
+    ny2 = max(0.0, min(float(img_h), ny2))
+    return (nx1, ny1, nx2, ny2), True
 
 
 def _agent_xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> List[float]:
@@ -4967,9 +7760,236 @@ def _agent_merge_detections(
     return merged
 
 
+def _agent_iou_xyxy(box_a: Sequence[float], box_b: Sequence[float]) -> float:
+    try:
+        ax1, ay1, ax2, ay2 = [float(v) for v in box_a[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in box_b[:4]]
+    except Exception:
+        return 0.0
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0 else 0.0
+
+
+def _agent_source_counts(detections: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for det in detections:
+        sources = det.get("source_list")
+        if isinstance(sources, (list, tuple)) and sources:
+            for src in sources:
+                source = str(src or "unknown")
+                counts[source] = counts.get(source, 0) + 1
+            continue
+        source = str(det.get("source") or det.get("score_source") or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _agent_format_source_counts(counts: Mapping[str, int]) -> str:
+    if not counts:
+        return "none"
+    parts = [f"{key}={counts[key]}" for key in sorted(counts.keys())]
+    return ", ".join(parts)
+
+
+def _agent_detection_has_source(det: Dict[str, Any], sources: Set[str]) -> bool:
+    if not det or not sources:
+        return False
+    source = str(det.get("source") or det.get("score_source") or "")
+    if source and source in sources:
+        return True
+    source_list = det.get("source_list")
+    if isinstance(source_list, (list, tuple)):
+        for item in source_list:
+            if str(item) in sources:
+                return True
+    return False
+
+
+def _agent_merge_prepass_detections(
+    detections: List[Dict[str, Any]],
+    *,
+    iou_thr: float = 0.85,
+) -> Tuple[List[Dict[str, Any]], int]:
+    if not detections or iou_thr <= 0:
+        return detections, 0
+    def det_score(det: Dict[str, Any]) -> float:
+        try:
+            return float(det.get("score") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    merged: List[Dict[str, Any]] = []
+    removed = 0
+    ordered = sorted(detections, key=det_score, reverse=True)
+    for det in ordered:
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        box = det.get("bbox_xyxy_px")
+        if not isinstance(box, (list, tuple)) or len(box) < 4:
+            merged.append(det)
+            continue
+        matched_idx = None
+        for idx, kept in enumerate(merged):
+            kept_label = str(kept.get("label") or kept.get("class_name") or "").strip()
+            if label and kept_label and label != kept_label:
+                continue
+            kept_box = kept.get("bbox_xyxy_px")
+            if not isinstance(kept_box, (list, tuple)) or len(kept_box) < 4:
+                continue
+            if _agent_iou_xyxy(box, kept_box) >= iou_thr:
+                matched_idx = idx
+                break
+        if matched_idx is None:
+            entry = dict(det)
+            source_list = set(entry.get("source_list") or [])
+            if entry.get("source"):
+                source_list.add(entry.get("source"))
+            if source_list:
+                entry["source_list"] = sorted(source_list)
+            merged.append(entry)
+        else:
+            kept = merged[matched_idx]
+            source_list = set(kept.get("source_list") or [])
+            if kept.get("source"):
+                source_list.add(kept.get("source"))
+            if det.get("source"):
+                source_list.add(det.get("source"))
+            keep_det = kept
+            if det_score(det) > det_score(kept):
+                keep_det = dict(det)
+            keep_det["source_list"] = sorted(source_list) if source_list else keep_det.get("source_list")
+            merged[matched_idx] = keep_det
+            removed += 1
+    return merged, removed
+
+
+def _agent_filter_scoreless_detections(
+    detections: List[Dict[str, Any]],
+    *,
+    iou_thr: float,
+) -> Tuple[List[Dict[str, Any]], int]:
+    if not detections or iou_thr <= 0:
+        return detections, 0
+    anchors = [
+        det
+        for det in detections
+        if det.get("score") is not None and (det.get("score_source") or det.get("source")) != "unknown"
+    ]
+    if not anchors:
+        return detections, 0
+    filtered: List[Dict[str, Any]] = []
+    removed = 0
+    for det in detections:
+        score = det.get("score")
+        score_source = det.get("score_source") or det.get("source") or "unknown"
+        if score is None or score_source == "unknown":
+            bbox = det.get("bbox_xyxy_px") or []
+            has_overlap = False
+            for anchor in anchors:
+                anchor_bbox = anchor.get("bbox_xyxy_px") or []
+                if _agent_iou_xyxy(bbox, anchor_bbox) >= iou_thr:
+                    has_overlap = True
+                    break
+            if not has_overlap:
+                removed += 1
+                continue
+        filtered.append(det)
+    return filtered, removed
+
+
+def _agent_classifier_review(
+    detections: List[Dict[str, Any]],
+    *,
+    pil_img: Optional[Image.Image],
+    classifier_head: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    counts = {
+        "classifier_checked": 0,
+        "classifier_rejected": 0,
+        "classifier_errors": 0,
+        "classifier_unavailable": 0,
+    }
+    if not detections:
+        return detections, counts
+    if pil_img is None or not isinstance(classifier_head, dict):
+        counts["classifier_unavailable"] = len(detections)
+        for det in detections:
+            det["classifier_accept"] = None
+            det["classifier_error"] = "unavailable"
+        return detections, counts
+    classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+    bg_indices = _clip_head_background_indices(classes)
+    min_prob = float(classifier_head.get("min_prob") or 0.5)
+    margin = float(classifier_head.get("margin") or 0.0)
+    background_margin = float(classifier_head.get("background_margin") or 0.0)
+    accepted: List[Dict[str, Any]] = []
+    for det in detections:
+        bbox = det.get("bbox_xyxy_px")
+        label = str(det.get("label") or "").strip()
+        if not bbox or len(bbox) < 4:
+            counts["classifier_errors"] += 1
+            det["classifier_accept"] = False
+            det["classifier_error"] = "missing_bbox"
+            continue
+        target_idx = _find_clip_head_target_index(classes, label)
+        if target_idx is None:
+            counts["classifier_errors"] += 1
+            det["classifier_accept"] = False
+            det["classifier_error"] = "label_not_in_classifier"
+            continue
+        x1, y1, x2, y2 = bbox[:4]
+        crop = pil_img.crop((x1, y1, x2, y2))
+        feats = _encode_pil_batch_for_head([crop], head=classifier_head)
+        proba_arr = _clip_head_predict_proba(feats, classifier_head)
+        if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] < 1:
+            counts["classifier_errors"] += 1
+            det["classifier_accept"] = False
+            det["classifier_error"] = "predict_failed"
+            continue
+        row = proba_arr[0]
+        order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
+        best_idx = order[0] if order else None
+        best_label = classes[best_idx] if best_idx is not None else "unknown"
+        best_prob = float(row[best_idx]) if best_idx is not None else None
+        det["classifier_best"] = best_label
+        det["classifier_prob"] = best_prob
+        keep_mask = _clip_head_keep_mask(
+            proba_arr,
+            target_index=target_idx,
+            min_prob=min_prob,
+            margin=margin,
+            background_indices=bg_indices,
+            background_guard=True,
+            background_margin=background_margin,
+        )
+        accept = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
+        det["classifier_accept"] = accept
+        counts["classifier_checked"] += 1
+        summary_bbox = _agent_readable_format_bbox(bbox)
+        prob_text = f"{best_prob:.3f}" if isinstance(best_prob, float) else "n/a"
+        _agent_readable_write(
+            f"classifier check label={label} bbox={summary_bbox} "
+            f"best={best_label} prob={prob_text} accept={'yes' if accept else 'no'}"
+        )
+        if accept:
+            accepted.append(det)
+        else:
+            counts["classifier_rejected"] += 1
+    return accepted, counts
+
+
 def _agent_finalize_detections(
     detections: List[Dict[str, Any]],
     *,
+    pil_img: Optional[Image.Image] = None,
+    classifier_head: Optional[Dict[str, Any]] = None,
     img_w: int,
     img_h: int,
     labelmap: List[str],
@@ -4980,24 +8000,81 @@ def _agent_finalize_detections(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     cleaned, rejected = _agent_sanitize_detection_items(
         detections,
+        pil_img=pil_img,
+        classifier_head=None,
         img_w=img_w,
         img_h=img_h,
         labelmap=labelmap,
         background=background,
     )
-    merged = _agent_merge_detections(
+    filtered_scoreless = 0
+    scoreless_iou = _AGENT_ACTIVE_SCORELESS_IOU or 0.0
+    if scoreless_iou > 0:
+        cleaned, filtered_scoreless = _agent_filter_scoreless_detections(
+            cleaned,
+            iou_thr=scoreless_iou,
+        )
+        if filtered_scoreless:
+            _agent_readable_write(
+                f"scoreless_filter: removed={filtered_scoreless} "
+                f"iou>={scoreless_iou:.2f}"
+            )
+    reviewed, classifier_counts = _agent_classifier_review(
         cleaned,
+        pil_img=pil_img,
+        classifier_head=classifier_head,
+    )
+    merged = _agent_merge_detections(
+        reviewed,
         iou_thr=iou_thr,
         max_det=max_det,
         cross_iou=cross_iou,
     )
-    counts = {"input": len(detections), "accepted": len(merged), "rejected": int(rejected)}
+    if classifier_counts.get("classifier_checked") or classifier_counts.get("classifier_unavailable"):
+        _agent_readable_write(
+            "final_review: "
+            f"accepted={len(merged)} "
+            f"rejected_classifier={classifier_counts.get('classifier_rejected', 0)} "
+            f"classifier_unavailable={classifier_counts.get('classifier_unavailable', 0)}"
+        )
+    counts = {
+        "input": len(detections),
+        "accepted": len(merged),
+        "rejected": int(rejected),
+        "filtered_scoreless": int(filtered_scoreless),
+        **classifier_counts,
+    }
     return merged, counts
+
+
+def _agent_fuzzy_align_label(label: Optional[str], labelmap: Sequence[str]) -> Optional[str]:
+    if not label:
+        return None
+    label_norm = _normalize_class_name_for_match(label)
+    if not label_norm:
+        return None
+    norm_map: Dict[str, str] = {}
+    for lbl in labelmap:
+        norm = _normalize_class_name_for_match(lbl)
+        if norm:
+            norm_map.setdefault(norm, lbl)
+    if label_norm in norm_map:
+        return norm_map[label_norm]
+    try:
+        import difflib
+    except Exception:
+        return None
+    matches = difflib.get_close_matches(label_norm, list(norm_map.keys()), n=1, cutoff=0.7)
+    if matches:
+        return norm_map.get(matches[0])
+    return None
 
 
 def _agent_sanitize_detection_items(
     items: List[Dict[str, Any]],
     *,
+    pil_img: Optional[Image.Image] = None,
+    classifier_head: Optional[Dict[str, Any]] = None,
     img_w: int,
     img_h: int,
     labelmap: List[str],
@@ -5009,9 +8086,22 @@ def _agent_sanitize_detection_items(
     rejected = 0
     for ann in items:
         label = str(ann.get("label") or ann.get("class_name") or "").strip()
-        if not label or label not in label_index or label in background_set:
+        aligned = _agent_fuzzy_align_label(label, labelmap)
+        if not aligned or aligned not in label_index or aligned in background_set:
             rejected += 1
             continue
+        raw_score = ann.get("score")
+        score: Optional[float]
+        if raw_score is None:
+            score = None
+        else:
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                score = None
+        score_source = ann.get("score_source")
+        if not score_source:
+            score_source = ann.get("source") or ("unknown" if score is None else None)
         window_bbox = ann.get("window_bbox_2d")
         xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox)
         if xyxy is None:
@@ -5025,18 +8115,95 @@ def _agent_sanitize_detection_items(
         if x2 <= x1 or y2 <= y1:
             rejected += 1
             continue
+        if pil_img is not None and isinstance(classifier_head, dict):
+            classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+            target_idx = _find_clip_head_target_index(classes, aligned)
+            if target_idx is None:
+                rejected += 1
+                continue
+            crop = pil_img.crop((x1, y1, x2, y2))
+            feats = _encode_pil_batch_for_head([crop], head=classifier_head)
+            proba_arr = _clip_head_predict_proba(feats, classifier_head)
+            if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] < 1:
+                rejected += 1
+                continue
+            min_prob = float(classifier_head.get("min_prob") or 0.5)
+            margin = float(classifier_head.get("margin") or 0.0)
+            background_margin = float(classifier_head.get("background_margin") or 0.0)
+            source = str(score_source or ann.get("source") or "").strip().lower()
+            strict_sources = {
+                "sam3_similarity",
+                "qwen_inspect",
+                "qwen_infer",
+                "yolo_zoom",
+                "rfdetr_zoom",
+                "sam3_text_agentic",
+            }
+            strict = source in strict_sources
+            if not strict and source == "sam3_text":
+                if score is None or score < AGENTIC_STRICT_SAM3_MIN_SCORE:
+                    strict = True
+            if strict:
+                min_prob = max(min_prob, AGENTIC_CLASSIFIER_STRICT_MIN_PROB)
+                margin = max(margin, AGENTIC_CLASSIFIER_STRICT_MARGIN)
+                background_margin = max(background_margin, AGENTIC_CLASSIFIER_STRICT_BG_MARGIN)
+            source_list = set()
+            raw_sources = ann.get("source_list")
+            if isinstance(raw_sources, (list, tuple)):
+                source_list.update(str(item) for item in raw_sources if item)
+            if source:
+                source_list.add(source)
+            detector_sources = {"yolo", "rfdetr", "sam3_text"}
+            agentic_sources = {
+                "qwen_infer",
+                "qwen_inspect",
+                "sam3_similarity",
+                "yolo_zoom",
+                "rfdetr_zoom",
+                "sam3_text_agentic",
+            }
+            has_detector = bool(source_list.intersection(detector_sources))
+            has_agentic = bool(source_list.intersection(agentic_sources))
+            if has_agentic and not has_detector:
+                min_prob = max(min_prob, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MIN_PROB)
+                margin = max(margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MARGIN)
+                background_margin = max(background_margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_BG_MARGIN)
+            origin = str(ann.get("origin") or "").strip().lower()
+            if origin == "agentic":
+                min_prob = max(min_prob, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MIN_PROB)
+                margin = max(margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MARGIN)
+                background_margin = max(background_margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_BG_MARGIN)
+            keep_mask = _clip_head_keep_mask(
+                proba_arr,
+                target_index=target_idx,
+                min_prob=min_prob,
+                margin=margin,
+                background_indices=_clip_head_background_indices(classes),
+                background_guard=True,
+                background_margin=background_margin,
+            )
+            if keep_mask is None or not bool(keep_mask[0]):
+                rejected += 1
+                continue
         cleaned.append(
             {
                 "bbox_xyxy_px": [x1, y1, x2, y2],
                 "bbox_xywh_px": _agent_xyxy_to_xywh(x1, y1, x2, y2),
                 "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
                 "bbox_yolo": list(_xyxy_to_yolo_norm(img_w, img_h, x1, y1, x2, y2)),
-                "label": label,
-                "class_id": label_index[label],
-                "score": ann.get("score"),
+                "label": aligned,
+                "class_id": label_index[aligned],
+                "score": score,
+                "score_source": score_source,
+                "classifier_best": ann.get("classifier_best"),
+                "classifier_prob": ann.get("classifier_prob"),
+                "classifier_accept": ann.get("classifier_accept"),
                 "source": ann.get("source") or "agent",
             }
         )
+        source_list = ann.get("source_list")
+        if isinstance(source_list, (list, tuple)) and cleaned:
+            cleaned[-1]["source_list"] = [str(item) for item in source_list if item]
     return cleaned, rejected
 
 
@@ -5135,11 +8302,17 @@ def _resolve_agent_bbox_xyxy(
         if "bbox_2d" in ann:
             return _window_local_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d, ann.get("bbox_2d"))
         if "bbox_xyxy_px" in ann:
-            return _window_local_xyxy_to_full_xyxy(window_xyxy, ann.get("bbox_xyxy_px"))
+            coords = ann.get("bbox_xyxy_px")
+            if isinstance(coords, (list, tuple)) and len(coords) >= 4:
+                return _window_local_xyxy_to_full_xyxy(window_xyxy, coords)
+            return None
         return None
     if "bbox_xyxy_px" in ann:
         try:
-            return tuple(map(float, ann.get("bbox_xyxy_px") or []))  # type: ignore[return-value]
+            coords = ann.get("bbox_xyxy_px")
+            if isinstance(coords, (list, tuple)) and len(coords) >= 4:
+                return tuple(map(float, coords[:4]))  # type: ignore[return-value]
+            return None
         except Exception:
             return None
     if "bbox_2d" in ann:
@@ -5169,6 +8342,7 @@ def _agent_det_payload(
         "label": label,
         "class_id": class_id,
         "score": score,
+        "score_source": source if score is not None else "unknown",
         "source": source,
         "bbox_space": "full",
     }
@@ -5224,9 +8398,11 @@ def _agent_tool_run_detector(
     sahi: Optional[Dict[str, Any]] = None,
     window: Optional[Any] = None,
     window_bbox_2d: Optional[Sequence[float]] = None,
+    grid_cell: Optional[str] = None,
     max_det: Optional[int] = None,
     iou: Optional[float] = None,
     merge_iou: Optional[float] = None,
+    register: Optional[bool] = True,
 ) -> Dict[str, Any]:
     pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
     img_w, img_h = pil_img.size
@@ -5344,7 +8520,161 @@ def _agent_tool_run_detector(
                     window=window_xyxy,
                 )
             )
-    return {"detections": detections, "warnings": warnings or None}
+    register_summary: Optional[Dict[str, Any]] = None
+    if register:
+        register_summary = _agent_register_detections(
+            detections,
+            img_w=img_w,
+            img_h=img_h,
+            grid=_AGENT_ACTIVE_GRID,
+            labelmap=_AGENT_ACTIVE_LABELMAP or [],
+            background=None,
+            source_override=None,
+            owner_cell=grid_cell,
+        )
+    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
+    new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
+    updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
+    agent_view = {
+        "mode": mode_norm,
+        "grid_cell": grid_cell,
+        "warnings": warnings or None,
+        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_handles": new_handles,
+        "updated_clusters": len(updated_cluster_ids or []),
+        "updated_handles": updated_handles,
+        "new_items": new_summary.get("items"),
+        "new_items_total": new_summary.get("total"),
+        "new_items_truncated": new_summary.get("truncated"),
+        "label_counts": _agent_cluster_label_counts(new_cluster_ids or []),
+    }
+    return {
+        "detections": detections,
+        "warnings": warnings or None,
+        "register_summary": register_summary,
+        "__agent_view__": agent_view,
+    }
+
+
+@_register_agent_tool("zoom_and_detect")
+def _agent_tool_zoom_and_detect(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    detector_id: Optional[str] = None,
+    mode: Optional[str] = "yolo",
+    conf: Optional[float] = None,
+    intent: Optional[str] = None,
+    bbox_2d: Optional[Sequence[float]] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    bbox_space: Optional[str] = None,
+    grid_cell: Optional[str] = None,
+    confirm_label: Optional[str] = None,
+    confirm_topk: Optional[int] = None,
+    max_det: Optional[int] = None,
+    iou: Optional[float] = None,
+    merge_iou: Optional[float] = None,
+) -> Dict[str, Any]:
+    if window_bbox_2d is None and bbox_2d is not None:
+        if bbox_space and str(bbox_space).lower() == "window":
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="window_bbox_required")
+        window_bbox_2d = bbox_2d
+    if window_bbox_2d is None:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="window_bbox_required")
+    if conf is None and _AGENT_ACTIVE_DETECTOR_CONF is not None:
+        conf = _AGENT_ACTIVE_DETECTOR_CONF
+    mode_norm = (mode or "yolo").strip().lower()
+    pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
+    img_w, img_h = pil_img.size
+    window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+    sahi_cfg = {"enabled": True}
+    result = _agent_tool_run_detector(
+        image_base64=image_base64,
+        image_token=image_token,
+        detector_id=detector_id,
+        mode=mode_norm,
+        conf=conf,
+        sahi=sahi_cfg,
+        window_bbox_2d=window_bbox_2d,
+        max_det=max_det,
+        iou=iou,
+        merge_iou=merge_iou,
+        register=False,
+    )
+    detections = result.get("detections") if isinstance(result, dict) else None
+    if isinstance(detections, list):
+        for det in detections:
+            if not isinstance(det, dict):
+                continue
+            if det.get("source") and not det.get("source_list"):
+                det["source_list"] = [det.get("source")]
+    register_summary = None
+    if register and isinstance(detections, list):
+        register_summary = _agent_register_detections(
+            detections,
+            img_w=img_w,
+            img_h=img_h,
+            grid=_AGENT_ACTIVE_GRID,
+            labelmap=_AGENT_ACTIVE_LABELMAP or [],
+            background=None,
+            source_override=f"{mode_norm}_zoom",
+            owner_cell=grid_cell,
+        )
+        result["register_summary"] = register_summary
+    confirmation = None
+    if confirm_label or confirm_topk:
+        if window_xyxy is None:
+            confirmation = {"label": confirm_label, "error": "window_bbox_invalid"}
+        else:
+            try:
+                classify = _agent_tool_classify_crop(
+                    image_base64=image_base64,
+                    image_token=image_token,
+                    bbox_xyxy_px=list(window_xyxy),
+                    bbox_space="full",
+                    topk=confirm_topk,
+                )
+                best = classify.get("best") if isinstance(classify, dict) else None
+                best_label = best.get("label") if isinstance(best, dict) else None
+                confirmation = {
+                    "label": confirm_label,
+                    "window_xyxy_px": list(window_xyxy),
+                    "window_bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)),
+                    "best": best,
+                    "topk": classify.get("topk") if isinstance(classify, dict) else None,
+                    "background_topk": classify.get("background_topk") if isinstance(classify, dict) else None,
+                    "label_match": bool(best_label == confirm_label) if confirm_label and best_label else None,
+                }
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                confirmation = {"label": confirm_label, "error": detail}
+    if window_xyxy is not None:
+        result["window_xyxy_px"] = list(window_xyxy)
+        result["window_bbox_2d"] = list(window_bbox_2d or [])
+    if confirmation is not None:
+        result["confirmation"] = confirmation
+    register_summary = result.get("register_summary") if isinstance(result, dict) else register_summary
+    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
+    new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
+    updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
+    agent_view = {
+        "mode": mode_norm,
+        "grid_cell": grid_cell,
+        "intent": (intent or "").strip() or None,
+        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_handles": new_handles,
+        "updated_clusters": len(updated_cluster_ids or []),
+        "updated_handles": updated_handles,
+        "new_items": new_summary.get("items"),
+        "new_items_total": new_summary.get("total"),
+        "new_items_truncated": new_summary.get("truncated"),
+        "label_counts": _agent_cluster_label_counts(new_cluster_ids or []),
+    }
+    result["__agent_view__"] = agent_view
+    return result
 
 
 @_register_agent_tool("sam3_text")
@@ -5352,11 +8682,14 @@ def _agent_tool_sam3_text(
     image_base64: Optional[str] = None,
     image_token: Optional[str] = None,
     prompt: Optional[str] = None,
+    label: Optional[str] = None,
     score_thr: Optional[float] = None,
     mask_threshold: Optional[float] = None,
     max_results: Optional[int] = None,
     window: Optional[Any] = None,
     window_bbox_2d: Optional[Sequence[float]] = None,
+    grid_cell: Optional[str] = None,
+    register: Optional[bool] = True,
 ) -> Dict[str, Any]:
     pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
     img_w, img_h = pil_img.size
@@ -5379,6 +8712,14 @@ def _agent_tool_sam3_text(
         mask_val,
         max_results,
     )
+    aligned_label = _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or [])
+    assigned_label = aligned_label or (label or "").strip() or None
+    class_id = None
+    if assigned_label and _AGENT_ACTIVE_LABELMAP:
+        for idx, item in enumerate(_AGENT_ACTIVE_LABELMAP):
+            if str(item).strip().lower() == str(assigned_label).strip().lower():
+                class_id = idx
+                break
     payloads: List[Dict[str, Any]] = []
     for det in detections:
         x1, y1, x2, y2 = _yolo_to_xyxy(crop_img.width, crop_img.height, det.bbox)
@@ -5391,14 +8732,52 @@ def _agent_tool_sam3_text(
                 img_w,
                 img_h,
                 (x1, y1, x2, y2),
-                label=det.qwen_label,
-                class_id=det.class_id,
+                label=assigned_label or det.qwen_label,
+                class_id=class_id if assigned_label else det.class_id,
                 score=det.score,
                 source="sam3_text",
                 window=window_xyxy,
             )
         )
-    return {"detections": payloads, "prompt": prompt, "window": window_xyxy}
+    register_summary: Optional[Dict[str, Any]] = None
+    if register:
+        source_override = "sam3_text_agentic" if grid_cell else "sam3_text"
+        register_summary = _agent_register_detections(
+            payloads,
+            img_w=img_w,
+            img_h=img_h,
+            grid=_AGENT_ACTIVE_GRID,
+            labelmap=_AGENT_ACTIVE_LABELMAP or [],
+            background=None,
+            source_override=source_override,
+            owner_cell=grid_cell,
+        )
+    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
+    new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
+    updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
+    agent_view = {
+        "label": assigned_label,
+        "prompt": (prompt or "").strip() or None,
+        "grid_cell": grid_cell,
+        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_handles": new_handles,
+        "updated_clusters": len(updated_cluster_ids or []),
+        "updated_handles": updated_handles,
+        "new_items": new_summary.get("items"),
+        "new_items_total": new_summary.get("total"),
+        "new_items_truncated": new_summary.get("truncated"),
+        "label_counts": _agent_cluster_label_counts(new_cluster_ids or []),
+    }
+    return {
+        "detections": payloads,
+        "prompt": prompt,
+        "label": assigned_label,
+        "window": window_xyxy,
+        "register_summary": register_summary,
+        "__agent_view__": agent_view,
+    }
 
 
 @_register_agent_tool("sam3_similarity")
@@ -5406,6 +8785,9 @@ def _agent_tool_sam3_similarity(
     image_base64: Optional[str] = None,
     image_token: Optional[str] = None,
     exemplar_boxes: Optional[List[Dict[str, Any]]] = None,
+    exemplar_cluster_ids: Optional[List[int]] = None,
+    exemplar_handles: Optional[List[str]] = None,
+    label: Optional[str] = None,
     score_thr: Optional[float] = None,
     mask_threshold: Optional[float] = None,
     max_results: Optional[int] = None,
@@ -5413,9 +8795,14 @@ def _agent_tool_sam3_similarity(
     window: Optional[Any] = None,
     window_bbox_2d: Optional[Sequence[float]] = None,
     bbox_space: Optional[str] = None,
+    grid_cell: Optional[str] = None,
+    register: Optional[bool] = True,
 ) -> Dict[str, Any]:
     pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
     img_w, img_h = pil_img.size
+    assigned_label = str(label).strip() if label is not None else ""
+    if not assigned_label:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_label_required")
     window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
     if window_xyxy is None and window_bbox_2d is not None:
         window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
@@ -5426,8 +8813,21 @@ def _agent_tool_sam3_similarity(
         x1, y1, x2, y2 = window_xyxy
         crop_img = pil_img.crop((x1, y1, x2, y2))
         offset_x, offset_y = x1, y1
+    exemplar_boxes = list(exemplar_boxes or [])
+    exemplar_ids: List[int] = []
+    if exemplar_cluster_ids:
+        exemplar_ids.extend([int(cid) for cid in exemplar_cluster_ids])
+    if exemplar_handles:
+        exemplar_ids.extend(_agent_cluster_ids_from_handles(exemplar_handles))
+    for cid in exemplar_ids:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
+        if not cluster:
+            continue
+        bbox = cluster.get("bbox_2d")
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
     boxes_xywh: List[Tuple[float, float, float, float]] = []
-    for box in exemplar_boxes or []:
+    for box in exemplar_boxes:
         ann: Dict[str, Any] = {}
         window_ref = window_bbox_2d
         if isinstance(box, dict):
@@ -5455,6 +8855,8 @@ def _agent_tool_sam3_similarity(
         if w <= 0 or h <= 0:
             continue
         boxes_xywh.append((x1, y1, w, h))
+    if not boxes_xywh:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_exemplar_required")
     threshold_val = float(score_thr) if score_thr is not None else 0.2
     mask_val = float(mask_threshold) if mask_threshold is not None else 0.5
     detections = _run_sam3_visual_inference_multi(
@@ -5465,6 +8867,7 @@ def _agent_tool_sam3_similarity(
         mask_val,
         max_results,
     )
+    assigned_label = assigned_label
     payloads: List[Dict[str, Any]] = []
     for det in detections:
         x1, y1, x2, y2 = _yolo_to_xyxy(crop_img.width, crop_img.height, det.bbox)
@@ -5477,14 +8880,250 @@ def _agent_tool_sam3_similarity(
                 img_w,
                 img_h,
                 (x1, y1, x2, y2),
-                label=det.qwen_label,
-                class_id=det.class_id,
+                label=assigned_label,
+                class_id=None,
                 score=det.score,
                 source="sam3_similarity",
                 window=window_xyxy,
             )
         )
-    return {"detections": payloads, "window": window_xyxy}
+    register_summary: Optional[Dict[str, Any]] = None
+    if register:
+        register_summary = _agent_register_detections(
+            payloads,
+            img_w=img_w,
+            img_h=img_h,
+            grid=_AGENT_ACTIVE_GRID,
+            labelmap=_AGENT_ACTIVE_LABELMAP or [],
+            background=None,
+            source_override="sam3_similarity",
+            owner_cell=grid_cell,
+        )
+    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
+    new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
+    updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
+    exemplar_handles_out = exemplar_handles or _agent_handles_from_cluster_ids(exemplar_ids)
+    agent_view = {
+        "label": assigned_label,
+        "grid_cell": grid_cell,
+        "exemplar_handles": exemplar_handles_out,
+        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_handles": new_handles,
+        "updated_clusters": len(updated_cluster_ids or []),
+        "updated_handles": updated_handles,
+        "new_items": new_summary.get("items"),
+        "new_items_total": new_summary.get("total"),
+        "new_items_truncated": new_summary.get("truncated"),
+        "label_counts": _agent_cluster_label_counts(new_cluster_ids or []),
+    }
+    return {
+        "detections": payloads,
+        "label": assigned_label,
+        "window": window_xyxy,
+        "register_summary": register_summary,
+        "__agent_view__": agent_view,
+    }
+
+
+@_register_agent_tool("qwen_infer")
+def _agent_tool_qwen_infer(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    prompt: Optional[str] = None,
+    item_list: Optional[str] = None,
+    items: Optional[List[str]] = None,
+    image_type: Optional[str] = None,
+    extra_context: Optional[str] = None,
+    prompt_type: Optional[str] = None,
+    max_results: Optional[int] = None,
+    max_new_tokens: Optional[int] = None,
+    sam_variant: Optional[str] = None,
+    window: Optional[Any] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    grid_cell: Optional[str] = None,
+    register: Optional[bool] = True,
+) -> Dict[str, Any]:
+    pil_img, np_img, token = _agent_resolve_image(image_base64, image_token, sam_variant)
+    img_w, img_h = pil_img.size
+    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
+    if window_xyxy is None and window_bbox_2d is not None:
+        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+    crop_img = pil_img
+    crop_np = np_img
+    offset_x = 0.0
+    offset_y = 0.0
+    crop_token = token
+    if window_xyxy:
+        x1, y1, x2, y2 = window_xyxy
+        crop_img = pil_img.crop((x1, y1, x2, y2))
+        crop_np = np.asarray(crop_img)
+        crop_token = hashlib.md5(crop_np.tobytes()).hexdigest()
+        _store_preloaded_image(crop_token, crop_np, _default_variant(sam_variant))
+        offset_x, offset_y = x1, y1
+    prompt_type = (prompt_type or "bbox").strip().lower()
+    if prompt_type not in {"bbox", "point", "bbox_sam"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_qwen_prompt_type_invalid")
+    manual_prompt = (prompt or "").strip()
+    if not manual_prompt:
+        if items:
+            item_list = ", ".join([str(item).strip() for item in items if str(item).strip()])
+        item_list = (item_list or "").strip()
+        if not item_list:
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="agent_qwen_items_required")
+        manual_prompt = _render_qwen_prompt(
+            prompt_type,
+            items=item_list,
+            image_type=(image_type or "").strip() or None,
+            extra_context=(extra_context or "").strip() or None,
+        )
+    try:
+        qwen_text, proc_w, proc_h = _run_qwen_inference(manual_prompt, crop_img, max_new_tokens=max_new_tokens)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_infer_failed:{exc}") from exc
+    warnings: List[str] = []
+    try:
+        _, parsed_items = _extract_qwen_json_block(qwen_text)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        warnings.append(f"parse_error:{detail}")
+        return {
+            "detections": [],
+            "warnings": warnings,
+            "prompt": manual_prompt,
+            "prompt_type": prompt_type,
+            "raw_response": qwen_text,
+            "__agent_view__": {
+                "grid_cell": grid_cell,
+                "prompt_type": prompt_type,
+                "new_clusters": 0,
+                "new_handles": [],
+                "updated_clusters": 0,
+                "updated_handles": [],
+                "new_items": [],
+                "new_items_total": 0,
+                "new_items_truncated": False,
+                "label_counts": {},
+                "warnings": warnings,
+            },
+        }
+    normalized_items = _qwen_items_from_payload(parsed_items)
+    if not normalized_items:
+        warnings.append("no_results")
+        return {
+            "detections": [],
+            "warnings": warnings,
+            "prompt": manual_prompt,
+            "prompt_type": prompt_type,
+            "raw_response": qwen_text,
+            "__agent_view__": {
+                "grid_cell": grid_cell,
+                "prompt_type": prompt_type,
+                "new_clusters": 0,
+                "new_handles": [],
+                "updated_clusters": 0,
+                "updated_handles": [],
+                "new_items": [],
+                "new_items_total": 0,
+                "new_items_truncated": False,
+                "label_counts": {},
+                "warnings": warnings,
+            },
+        }
+    limit = int(max_results) if max_results is not None else 8
+    variant = _default_variant(sam_variant)
+    if prompt_type == "bbox":
+        boxes = _qwen_bbox_results(normalized_items, proc_w, proc_h, crop_img.width, crop_img.height, limit=limit)
+    elif prompt_type == "bbox_sam":
+        boxes = _qwen_bbox_sam_results(
+            normalized_items,
+            proc_w,
+            proc_h,
+            crop_img,
+            crop_np,
+            crop_token,
+            variant,
+            image_name=None,
+            limit=limit,
+        )
+    else:
+        boxes = _qwen_point_results(
+            normalized_items,
+            proc_w,
+            proc_h,
+            crop_img,
+            crop_np,
+            crop_token,
+            variant,
+            image_name=None,
+            limit=limit,
+        )
+    payloads: List[Dict[str, Any]] = []
+    for det in boxes:
+        x1, y1, x2, y2 = yolo_to_corners(det.bbox, crop_img.width, crop_img.height)
+        x1 += offset_x
+        y1 += offset_y
+        x2 += offset_x
+        y2 += offset_y
+        raw_label = det.qwen_label or det.class_name
+        aligned_label = _agent_fuzzy_align_label(raw_label, _AGENT_ACTIVE_LABELMAP or [])
+        payloads.append(
+            _agent_det_payload(
+                img_w,
+                img_h,
+                (x1, y1, x2, y2),
+                label=aligned_label or raw_label,
+                class_id=det.class_id,
+                score=det.score,
+                source=f"qwen_{det.source}",
+                window=window_xyxy,
+            )
+        )
+    if not payloads:
+        warnings.append("no_results")
+    register_summary: Optional[Dict[str, Any]] = None
+    if register:
+        register_summary = _agent_register_detections(
+            payloads,
+            img_w=img_w,
+            img_h=img_h,
+            grid=_AGENT_ACTIVE_GRID,
+            labelmap=_AGENT_ACTIVE_LABELMAP or [],
+            background=None,
+            source_override="qwen_infer",
+            owner_cell=grid_cell,
+        )
+    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
+    new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
+    updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
+    agent_view = {
+        "grid_cell": grid_cell,
+        "prompt_type": prompt_type,
+        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_handles": new_handles,
+        "updated_clusters": len(updated_cluster_ids or []),
+        "updated_handles": updated_handles,
+        "new_items": new_summary.get("items"),
+        "new_items_total": new_summary.get("total"),
+        "new_items_truncated": new_summary.get("truncated"),
+        "label_counts": _agent_cluster_label_counts(new_cluster_ids or []),
+        "warnings": warnings or None,
+    }
+    return {
+        "detections": payloads,
+        "warnings": warnings or None,
+        "prompt": manual_prompt,
+        "prompt_type": prompt_type,
+        "raw_response": qwen_text,
+        "window": window_xyxy,
+        "register_summary": register_summary,
+        "__agent_view__": agent_view,
+    }
 
 
 @_register_agent_tool("classify_crop")
@@ -5495,12 +9134,24 @@ def _agent_tool_classify_crop(
     bbox_xyxy_px: Optional[Sequence[float]] = None,
     window_bbox_2d: Optional[Sequence[float]] = None,
     bbox_space: Optional[str] = None,
+    cluster_id: Optional[int] = None,
+    handle: Optional[str] = None,
+    label_hint: Optional[str] = None,
     classifier_id: Optional[str] = None,
     topk: Optional[int] = None,
 ) -> Dict[str, Any]:
     pil_img, np_img, _ = _agent_resolve_image(image_base64, image_token)
     img_w, img_h = pil_img.size
     ann = {"bbox_space": bbox_space or "full"}
+    cluster = None
+    if cluster_id is None and handle:
+        cluster_id = _agent_cluster_id_from_handle(handle)
+    if cluster_id is not None:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cluster_id))
+        if not cluster:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="cluster_not_found")
+        bbox_xyxy_px = cluster.get("bbox_xyxy_px")
+        bbox_2d = cluster.get("bbox_2d")
     if bbox_xyxy_px is not None:
         ann["bbox_xyxy_px"] = list(bbox_xyxy_px[:4])
     if bbox_2d is not None:
@@ -5546,10 +9197,39 @@ def _agent_tool_classify_crop(
         if idx in bg_indices
     ][:k]
     best = topk_items[0] if topk_items else {"label": "unknown", "prob": None}
+    accept = None
+    label_target = (label_hint or (cluster.get("label") if cluster else None) or "").strip()
+    if label_target:
+        target_idx = _find_clip_head_target_index(classes, label_target)
+        if target_idx is not None:
+            keep_mask = _clip_head_keep_mask(
+                proba_arr,
+                target_index=target_idx,
+                min_prob=float(head.get("min_prob") or 0.5),
+                margin=float(head.get("margin") or 0.0),
+                background_indices=bg_indices,
+                background_guard=True,
+                background_margin=float(head.get("background_margin") or 0.0),
+            )
+            accept = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
+    if cluster is not None:
+        cluster["classifier_best"] = best.get("label")
+        cluster["classifier_prob"] = best.get("prob")
+        cluster["classifier_accept"] = accept
+    handle_out = _agent_cluster_handle(cluster) if cluster else None
+    agent_view = {
+        "handle": handle_out,
+        "label_hint": label_target or None,
+        "best": best,
+        "topk": topk_items[:5],
+        "accept": accept,
+    }
     return {
         "topk": topk_items,
         "background_topk": background_topk,
         "best": best,
+        "accept": accept,
+        "__agent_view__": agent_view,
     }
 
 
@@ -5562,10 +9242,23 @@ def _agent_tool_image_zoom_in(
     window_bbox_2d: Optional[Sequence[float]] = None,
     bbox_space: Optional[str] = None,
     label: Optional[str] = None,
+    grid_cell: Optional[str] = None,
+    intent: Optional[str] = None,
+    cluster_id: Optional[int] = None,
+    handle: Optional[str] = None,
 ) -> Dict[str, Any]:
     pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
     img_w, img_h = pil_img.size
     ann = {"bbox_space": bbox_space or "full"}
+    cluster = None
+    if cluster_id is None and handle:
+        cluster_id = _agent_cluster_id_from_handle(handle)
+    if cluster_id is not None:
+        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cluster_id))
+        if not cluster:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="cluster_not_found")
+        bbox_xyxy_px = cluster.get("bbox_xyxy_px")
+        bbox_2d = cluster.get("bbox_2d")
     if bbox_xyxy_px is not None:
         ann["bbox_xyxy_px"] = list(bbox_xyxy_px[:4])
     if bbox_2d is not None:
@@ -5580,11 +9273,34 @@ def _agent_tool_image_zoom_in(
     y2 = max(0.0, min(float(img_h), y2))
     if x2 <= x1 or y2 <= y1:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_bbox")
+    orig_xyxy = (x1, y1, x2, y2)
+    expanded = False
+    if not grid_cell:
+        (x1, y1, x2, y2), expanded = _agent_expand_window_xyxy(
+            x1,
+            y1,
+            x2,
+            y2,
+            img_w,
+            img_h,
+            AGENTIC_MIN_ZOOM_WINDOW_PX,
+        )
     crop = pil_img.crop((x1, y1, x2, y2))
     crop_np = np.asarray(crop)
     token = hashlib.md5(crop_np.tobytes()).hexdigest()
     _store_preloaded_image(token, crop_np, _default_variant(None))
     window_bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)
+    original_window_bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, *orig_xyxy)
+    handle_out = _agent_cluster_handle(cluster) if cluster else None
+    agent_view = {
+        "grid_cell": grid_cell,
+        "handle": handle_out,
+        "label": (label or "").strip() or None,
+        "intent": (intent or "").strip() or None,
+        "width": int(crop.width),
+        "height": int(crop.height),
+        "expanded": expanded,
+    }
     return {
         "image_token": token,
         "window_xyxy_px": [float(x1), float(y1), float(x2), float(y2)],
@@ -5592,6 +9308,432 @@ def _agent_tool_image_zoom_in(
         "label": (label or "").strip(),
         "width": int(crop.width),
         "height": int(crop.height),
+        "expanded": expanded,
+        "original_window_xyxy_px": list(orig_xyxy) if expanded else None,
+        "original_window_bbox_2d": list(original_window_bbox_2d) if expanded else None,
+        "__agent_view__": agent_view,
+    }
+
+
+@_register_agent_tool("view_cell_raw")
+def _agent_tool_view_cell_raw(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    grid_cell: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not grid_cell:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
+    if not _AGENT_ACTIVE_GRID:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
+    cell_xyxy = _agent_grid_cell_xyxy(
+        _AGENT_ACTIVE_GRID,
+        str(grid_cell),
+        overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+    )
+    if not cell_xyxy:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_invalid")
+    base_img = _AGENT_ACTIVE_GRID_IMAGE
+    if base_img is None:
+        base_img, _, _ = _agent_resolve_image(image_base64, image_token)
+    x1, y1, x2, y2 = cell_xyxy
+    crop = base_img.crop((x1, y1, x2, y2))
+    crop_np = np.asarray(crop)
+    token = hashlib.md5(crop_np.tobytes()).hexdigest()
+    _store_preloaded_image(token, crop_np, _default_variant(None))
+    agent_view = {
+        "grid_cell": str(grid_cell),
+        "width": int(crop.width),
+        "height": int(crop.height),
+    }
+    return {
+        "image_token": token,
+        "grid_cell": str(grid_cell),
+        "width": int(crop.width),
+        "height": int(crop.height),
+        "__agent_view__": agent_view,
+    }
+
+
+@_register_agent_tool("view_cell_overlay")
+def _agent_tool_view_cell_overlay(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    grid_cell: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not grid_cell:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
+    if not _AGENT_ACTIVE_GRID:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
+    cell_xyxy = _agent_grid_cell_xyxy(
+        _AGENT_ACTIVE_GRID,
+        str(grid_cell),
+        overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+    )
+    if not cell_xyxy:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_invalid")
+    base_img = _AGENT_ACTIVE_GRID_IMAGE
+    if base_img is None:
+        base_img, _, _ = _agent_resolve_image(image_base64, image_token)
+    overlay_img = base_img
+    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
+    if clusters:
+        labels = list(_AGENT_ACTIVE_LABELMAP or [])
+        if not labels:
+            labels = sorted(
+                {
+                    str(cluster.get("label") or "").strip()
+                    for cluster in clusters
+                    if isinstance(cluster, dict) and cluster.get("label")
+                }
+            )
+        label_colors = _agent_current_label_colors(labels)
+        label_prefixes = _agent_current_label_prefixes(labels)
+        overlay_img = _agent_render_detection_overlay(
+            base_img,
+            clusters,
+            label_colors,
+            label_prefixes=label_prefixes,
+            dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
+        )
+        _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_img
+    x1, y1, x2, y2 = cell_xyxy
+    crop = overlay_img.crop((x1, y1, x2, y2))
+    crop_np = np.asarray(crop)
+    token = hashlib.md5(crop_np.tobytes()).hexdigest()
+    _store_preloaded_image(token, crop_np, _default_variant(None))
+    agent_view = {
+        "grid_cell": str(grid_cell),
+        "width": int(crop.width),
+        "height": int(crop.height),
+    }
+    return {
+        "image_token": token,
+        "grid_cell": str(grid_cell),
+        "width": int(crop.width),
+        "height": int(crop.height),
+        "__agent_view__": agent_view,
+    }
+
+
+@_register_agent_tool("view_full_overlay")
+def _agent_tool_view_full_overlay(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    base_img = _AGENT_ACTIVE_GRID_IMAGE
+    if base_img is None:
+        base_img, _, _ = _agent_resolve_image(image_base64, image_token)
+    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
+    labels = _agent_overlay_labels(clusters)
+    label_colors = _agent_current_label_colors(labels) if labels else {}
+    label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
+    overlay_img = base_img
+    if clusters:
+        overlay_img = _agent_render_detection_overlay(
+            base_img,
+            clusters,
+            label_colors,
+            dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
+            label_prefixes=label_prefixes,
+        )
+        _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_img
+    usage_rows = _agent_grid_usage_rows(_AGENT_ACTIVE_GRID)
+    usage_text = _agent_grid_usage_text(usage_rows)
+    agent_view = {
+        "grid_usage": usage_rows,
+        "grid_usage_text": usage_text,
+        "total_cells": len(usage_rows),
+        "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
+    }
+    return {
+        "width": int(overlay_img.width),
+        "height": int(overlay_img.height),
+        "__agent_view__": agent_view,
+    }
+
+
+@_register_agent_tool("get_tile_context")
+def _agent_tool_get_tile_context(
+    grid_cell: Optional[str] = None,
+    tile_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    cell = (grid_cell or tile_id or "").strip()
+    if not cell:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
+    if not _AGENT_ACTIVE_GRID:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
+    cluster_list = _agent_tile_cluster_payload(cell)
+    counts = _agent_cluster_label_counts([item["cluster_id"] for item in cluster_list])
+    tool_usage = dict(_AGENT_GRID_TOOL_USAGE.get(cell, {}))
+    tool_usage_last = dict(_AGENT_GRID_TOOL_LAST.get(cell, {}))
+    caption_hint = _agent_tile_caption_hint(cell)
+    labels = _agent_overlay_labels(_AGENT_ACTIVE_CLUSTERS or [])
+    label_colors = _agent_current_label_colors(labels) if labels else {}
+    label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
+    agent_cluster_list = []
+    for item in cluster_list:
+        if not isinstance(item, dict):
+            continue
+        agent_cluster_list.append(
+            {
+                "handle": item.get("handle"),
+                "label": item.get("label"),
+                "score": item.get("score"),
+                "sources": item.get("sources"),
+                "grid_cell": item.get("grid_cell"),
+                "owner_cell": item.get("owner_cell"),
+                "verified": bool(item.get("verified")),
+            }
+        )
+    payload = {
+        "tile_id": cell,
+        "grid_cell": cell,
+        "tile_cluster_list": cluster_list,
+        "tile_counts": counts,
+        "tool_usage": tool_usage,
+        "tool_usage_last": tool_usage_last,
+        "caption_hint": caption_hint,
+        "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
+        "cluster_total": len(cluster_list),
+    }
+    public_payload = {
+        "tile_id": cell,
+        "grid_cell": cell,
+        "tile_cluster_list": agent_cluster_list,
+        "tile_counts": counts,
+        "tool_usage": tool_usage,
+        "tool_usage_last": tool_usage_last,
+        "caption_hint": caption_hint,
+        "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
+        "cluster_total": len(cluster_list),
+    }
+    stored = _agent_context_store(public_payload, kind="tile")
+    if stored.get("chunked"):
+        preview = {
+            "cluster_total": len(cluster_list),
+            "tile_counts": counts,
+            "tool_usage": tool_usage,
+            "tool_usage_last": tool_usage_last,
+            "caption_hint": caption_hint,
+        }
+        return {
+            "tile_id": cell,
+            "grid_cell": cell,
+            "chunked": True,
+            "context_handle": stored.get("context_handle"),
+            "chunk_total": stored.get("chunk_total"),
+            "byte_size": stored.get("byte_size"),
+            "preview": preview,
+            "__agent_view__": {
+                "tile_id": cell,
+                "grid_cell": cell,
+                "tile_cluster_list": agent_cluster_list,
+                "tile_counts": counts,
+                "tool_usage": tool_usage,
+                "tool_usage_last": tool_usage_last,
+                "caption_hint": caption_hint,
+                "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
+                "cluster_total": len(cluster_list),
+                "chunked": True,
+                "context_handle": stored.get("context_handle"),
+                "chunk_total": stored.get("chunk_total"),
+            },
+        }
+    return {
+        **payload,
+        "byte_size": stored.get("byte_size"),
+        "chunked": False,
+        "__agent_view__": {
+            "tile_id": cell,
+            "grid_cell": cell,
+            "tile_cluster_list": agent_cluster_list,
+            "tile_counts": counts,
+            "tool_usage": tool_usage,
+            "tool_usage_last": tool_usage_last,
+            "caption_hint": caption_hint,
+            "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
+            "cluster_total": len(cluster_list),
+            "chunked": False,
+        },
+    }
+
+
+@_register_agent_tool("get_tile_context_chunk")
+def _agent_tool_get_tile_context_chunk(
+    context_handle: Optional[str] = None,
+    chunk_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not context_handle:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_handle_required")
+    if chunk_index is None:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_required")
+    payload = _agent_context_chunk(context_handle, chunk_index=int(chunk_index), kind="tile")
+    return payload
+
+
+@_register_agent_tool("get_global_context")
+def _agent_tool_get_global_context() -> Dict[str, Any]:
+    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
+    counts: Dict[str, int] = {}
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        label = str(cluster.get("label") or "").strip()
+        if not label:
+            continue
+        counts[label] = counts.get(label, 0) + 1
+    usage_rows = _agent_grid_usage_rows(_AGENT_ACTIVE_GRID)
+    labels = _agent_overlay_labels(clusters)
+    label_colors = _agent_current_label_colors(labels) if labels else {}
+    label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
+    payload = {
+        "tile_summaries": list(_AGENT_TILE_SUMMARIES or []),
+        "global_counts_by_label": counts,
+        "tool_usage_heatmap": usage_rows,
+        "overall_caption": _AGENT_ACTIVE_OVERALL_CAPTION or "",
+        "windowed_captions": list(_AGENT_ACTIVE_WINDOWED_CAPTIONS or []),
+        "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
+    }
+    stored = _agent_context_store(payload, kind="global")
+    if stored.get("chunked"):
+        preview = {
+            "tile_summaries_count": len(payload["tile_summaries"]),
+            "global_counts_by_label": counts,
+        }
+        return {
+            "chunked": True,
+            "context_handle": stored.get("context_handle"),
+            "chunk_total": stored.get("chunk_total"),
+            "byte_size": stored.get("byte_size"),
+            "preview": preview,
+        }
+    return {
+        **payload,
+        "byte_size": stored.get("byte_size"),
+        "chunked": False,
+    }
+
+
+@_register_agent_tool("get_global_context_chunk")
+def _agent_tool_get_global_context_chunk(
+    context_handle: Optional[str] = None,
+    chunk_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not context_handle:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_handle_required")
+    if chunk_index is None:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_required")
+    payload = _agent_context_chunk(context_handle, chunk_index=int(chunk_index), kind="global")
+    return payload
+
+
+@_register_agent_tool("think_missed_objects")
+def _agent_tool_think_missed_objects(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> Dict[str, Any]:
+    overlay = _AGENT_ACTIVE_OVERLAY_IMAGE
+    if overlay is None:
+        base = _agent_overlay_base_image()
+        if base is None:
+            base, _, _ = _agent_resolve_image(image_base64, image_token)
+        clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
+        labels = _agent_overlay_labels(clusters)
+        label_colors = _agent_current_label_colors(labels) if labels else {}
+        label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
+        overlay = base
+        if clusters:
+            overlay = _agent_render_detection_overlay(
+                base,
+                clusters,
+                label_colors,
+                dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
+                label_prefixes=label_prefixes,
+            )
+    labels = list(_AGENT_ACTIVE_LABELMAP or [])
+    usage_rows = _agent_grid_usage_rows(_AGENT_ACTIVE_GRID)
+    usage_text = _agent_grid_usage_text(usage_rows)
+    prompt_lines = [
+        "You are reviewing an annotated aerial image.",
+        "Return JSON only: {\"missing_labels\": [...], \"missing_tiles\": [...], \"rationale\": \"...\"}.",
+        "Use labelmap classes only. Use grid cells like A1, B2.",
+        f"Labelmap: {', '.join(labels) if labels else 'none'}",
+    ]
+    if _AGENT_ACTIVE_OVERALL_CAPTION:
+        prompt_lines.append(f"Overall caption: {_AGENT_ACTIVE_OVERALL_CAPTION}")
+    if _AGENT_ACTIVE_WINDOWED_CAPTIONS:
+        sample_caps = _AGENT_ACTIVE_WINDOWED_CAPTIONS[:8]
+        cap_lines = []
+        for entry in sample_caps:
+            if isinstance(entry, dict):
+                name = entry.get("window") or "window"
+                cap = entry.get("caption") or ""
+                cap_lines.append(f"{name}: {cap}")
+        if cap_lines:
+            prompt_lines.append("Windowed captions: " + " | ".join(cap_lines))
+    if usage_text:
+        prompt_lines.append(f"Tool usage by grid: {usage_text}")
+    if notes:
+        prompt_lines.append(f"Notes: {notes}")
+    prompt = "\n".join(prompt_lines)
+    try:
+        raw, _, _ = _run_qwen_inference(
+            prompt,
+            overlay,
+            max_new_tokens=256,
+            system_prompt_override="Return JSON only.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"think_missed_failed:{exc}") from exc
+    json_text = _extract_balanced_json(raw, "{", "}") or ""
+    data: Dict[str, Any] = {}
+    if json_text:
+        try:
+            data = json.loads(json_text)
+        except Exception:
+            data = {}
+    missing_labels = data.get("missing_labels") if isinstance(data, dict) else None
+    missing_tiles = data.get("missing_tiles") if isinstance(data, dict) else None
+    rationale = data.get("rationale") if isinstance(data, dict) else None
+    return {
+        "missing_labels": missing_labels if isinstance(missing_labels, list) else [],
+        "missing_tiles": missing_tiles if isinstance(missing_tiles, list) else [],
+        "rationale": str(rationale or "").strip(),
+    }
+
+
+@_register_agent_tool("grid_label_counts")
+def _agent_tool_grid_label_counts(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    label: Optional[str] = None,
+) -> Dict[str, Any]:
+    del image_base64, image_token
+    if not _AGENT_ACTIVE_GRID:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
+    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
+    summary = _agent_grid_label_counts(grid=_AGENT_ACTIVE_GRID, clusters=clusters, label=label)
+    agent_cells = []
+    for cell in summary:
+        if not isinstance(cell, dict):
+            continue
+        agent_cells.append(
+            {
+                "grid_cell": cell.get("grid_cell"),
+                "total": cell.get("total"),
+                "counts": cell.get("counts"),
+            }
+        )
+    return {
+        "label": _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) if label else None,
+        "cells": summary,
+        "total_cells": len(summary),
+        "__agent_view__": {
+            "label": _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) if label else None,
+            "cells": agent_cells,
+            "total_cells": len(summary),
+        },
     }
 
 
@@ -5620,11 +9762,156 @@ def _agent_tool_get_labelmap(
     }
 
 
+@_register_agent_tool("list_candidates")
+def _agent_tool_list_candidates(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    label: Optional[str] = None,
+    source: Optional[str] = None,
+    min_score: Optional[float] = None,
+    include_scoreless: Optional[bool] = True,
+    sort_by: Optional[str] = "score_desc",
+    max_items: Optional[int] = None,
+) -> Dict[str, Any]:
+    del image_base64, image_token
+    active = list(_AGENT_ACTIVE_CLUSTERS or _AGENT_ACTIVE_DETECTIONS or [])
+    if not active:
+        return {"candidates": [], "total": 0, "returned": 0, "filters": {}}
+    label_filter = str(label).strip() if label else None
+    aligned_label = _agent_fuzzy_align_label(label_filter, _AGENT_ACTIVE_LABELMAP or [])
+    if aligned_label:
+        label_filter = aligned_label
+    source_filter = str(source).strip() if source else None
+    source_terms = {term for term in (source_filter or "").split(",") if term.strip()}
+    source_terms = {term.strip().lower() for term in source_terms}
+    try:
+        min_score_val = float(min_score) if min_score is not None else None
+    except (TypeError, ValueError):
+        min_score_val = None
+    include_scoreless = True if include_scoreless is None else bool(include_scoreless)
+    sort_key = (sort_by or "score_desc").strip().lower()
+
+    def score_value(det: Dict[str, Any]) -> Optional[float]:
+        raw = det.get("score")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    filtered: List[Dict[str, Any]] = []
+    for idx, det in enumerate(active):
+        if not isinstance(det, dict):
+            continue
+        det_label = str(det.get("label") or det.get("class_name") or "").strip()
+        if label_filter and det_label and det_label != label_filter:
+            continue
+        det_score = score_value(det)
+        if det_score is None:
+            if not include_scoreless:
+                continue
+        elif min_score_val is not None and det_score < min_score_val:
+            continue
+        if source_terms:
+            det_sources: Set[str] = set()
+            for key in ("source", "score_source"):
+                val = det.get(key)
+                if val:
+                    det_sources.add(str(val).strip().lower())
+            source_list = det.get("source_list")
+            if isinstance(source_list, (list, tuple)):
+                for item in source_list:
+                    if item:
+                        det_sources.add(str(item).strip().lower())
+            if not det_sources.intersection(source_terms):
+                continue
+        entry = {
+            "cluster_id": int(det.get("cluster_id")) if det.get("cluster_id") is not None else int(idx + 1),
+            "handle": _agent_cluster_handle(det),
+            "label": det_label,
+            "class_id": det.get("class_id"),
+            "score": det.get("score"),
+            "score_source": det.get("score_source") or det.get("source") or "unknown",
+            "source": det.get("source"),
+            "source_list": det.get("source_list"),
+            "candidate_count": len(det.get("candidate_ids") or []),
+            "grid_cell": det.get("grid_cell"),
+            "classifier_best": det.get("classifier_best"),
+            "classifier_prob": det.get("classifier_prob"),
+            "classifier_accept": det.get("classifier_accept"),
+        }
+        filtered.append(entry)
+
+    if sort_key in {"score", "score_desc", "confidence"}:
+        filtered.sort(key=lambda d: (score_value(d) if score_value(d) is not None else -1.0), reverse=True)
+        sort_key = "score_desc"
+    elif sort_key in {"score_asc", "confidence_asc"}:
+        filtered.sort(key=lambda d: (score_value(d) if score_value(d) is not None else 1e9))
+        sort_key = "score_asc"
+    elif sort_key == "label":
+        filtered.sort(key=lambda d: str(d.get("label") or ""))
+    elif sort_key == "source":
+        filtered.sort(key=lambda d: str(d.get("source") or ""))
+    else:
+        sort_key = "none"
+    try:
+        max_items_val = int(max_items) if max_items is not None else 0
+    except (TypeError, ValueError):
+        max_items_val = 0
+    trimmed = filtered[:max_items_val] if max_items_val > 0 else filtered
+    agent_candidates = []
+    for item in trimmed:
+        if not isinstance(item, dict):
+            continue
+        agent_candidates.append(
+            {
+                "handle": item.get("handle"),
+                "label": item.get("label"),
+                "grid_cell": item.get("grid_cell"),
+                "score": item.get("score"),
+                "score_source": item.get("score_source"),
+                "source": item.get("source"),
+                "source_list": item.get("source_list"),
+                "verified": bool(item.get("classifier_accept")),
+            }
+        )
+    return {
+        "candidates": trimmed,
+        "total": len(filtered),
+        "returned": len(trimmed),
+        "filters": {
+            "label": label_filter,
+            "source": source_filter,
+            "min_score": min_score_val,
+            "include_scoreless": include_scoreless,
+            "sort_by": sort_key,
+            "max_items": max_items_val,
+        },
+        "__agent_view__": {
+            "candidates": agent_candidates,
+            "total": len(filtered),
+            "returned": len(trimmed),
+            "filters": {
+                "label": label_filter,
+                "source": source_filter,
+                "min_score": min_score_val,
+                "include_scoreless": include_scoreless,
+                "sort_by": sort_key,
+                "max_items": max_items_val,
+            },
+        },
+    }
+
+
 @_register_agent_tool("submit_annotations")
 def _agent_tool_submit_annotations(
     image_base64: Optional[str] = None,
     image_token: Optional[str] = None,
     annotations: Optional[List[Dict[str, Any]]] = None,
+    cluster_ids: Optional[List[int]] = None,
+    handles: Optional[List[str]] = None,
+    include_all: Optional[bool] = None,
     dataset_id: Optional[str] = None,
     classifier_id: Optional[str] = None,
     window_bbox_2d: Optional[Sequence[float]] = None,
@@ -5632,6 +9919,7 @@ def _agent_tool_submit_annotations(
     cross_iou: Optional[float] = None,
     max_det: Optional[int] = None,
 ) -> Dict[str, Any]:
+    global _AGENT_LAST_SUBMIT_DETECTIONS
     pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
     img_w, img_h = pil_img.size
     labelmap = _agent_load_labelmap(dataset_id)
@@ -5643,13 +9931,57 @@ def _agent_tool_submit_annotations(
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
     background = _agent_background_classes_from_head(head)
-    normalized_annotations = []
+    normalized_annotations: List[Dict[str, Any]] = []
+    cluster_id_list: List[int] = []
+    label_overrides: Dict[int, str] = {}
+    if include_all:
+        cluster_id_list = [int(c.get("cluster_id")) for c in (_AGENT_ACTIVE_CLUSTERS or []) if c.get("cluster_id") is not None]
+    if handles:
+        cluster_id_list.extend(_agent_cluster_ids_from_handles(handles))
+    if cluster_ids:
+        cluster_id_list.extend([int(cid) for cid in cluster_ids])
     for ann in annotations or []:
+        if isinstance(ann, (int, float)):
+            cluster_id_list.append(int(ann))
+            continue
+        if isinstance(ann, dict) and ann.get("cluster_id") is not None:
+            cid_val = int(ann.get("cluster_id"))
+            cluster_id_list.append(cid_val)
+            override_label = ann.get("label")
+            if override_label:
+                label_overrides[cid_val] = str(override_label)
+            continue
         if window_bbox_2d is not None and isinstance(ann, dict) and ann.get("window_bbox_2d") is None:
             ann = {**ann, "window_bbox_2d": list(window_bbox_2d)}
         normalized_annotations.append(ann)
+    if cluster_id_list:
+        seen = set()
+        for cid in cluster_id_list:
+            if cid in seen:
+                continue
+            seen.add(cid)
+            cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
+            if not cluster:
+                continue
+            label = label_overrides.get(cid) or cluster.get("label")
+            normalized_annotations.append(
+                {
+                    "label": label,
+                    "bbox_xyxy_px": cluster.get("bbox_xyxy_px"),
+                    "bbox_2d": cluster.get("bbox_2d"),
+                    "bbox_yolo": cluster.get("bbox_yolo"),
+                    "score": cluster.get("score"),
+                    "score_source": cluster.get("score_source") or cluster.get("source"),
+                    "class_id": cluster.get("class_id"),
+                    "source": cluster.get("source") or "agent",
+                    "source_list": cluster.get("source_list"),
+                    "origin": cluster.get("origin"),
+                }
+            )
     cleaned, rejected = _agent_sanitize_detection_items(
         normalized_annotations,
+        pil_img=pil_img,
+        classifier_head=head,
         img_w=img_w,
         img_h=img_h,
         labelmap=labelmap,
@@ -5661,251 +9993,963 @@ def _agent_tool_submit_annotations(
         max_det=max_det,
         cross_iou=float(cross_iou) if cross_iou is not None else None,
     )
+    _AGENT_LAST_SUBMIT_DETECTIONS = list(merged)
+    submitted_handles = _agent_handles_from_cluster_ids(cluster_id_list)
+    agent_view = {
+        "submitted_handles": sorted(set(submitted_handles)),
+        "count": len(merged),
+    }
     return {
         "detections": merged,
         "rejected": rejected,
         "count": len(merged),
+        "__agent_view__": agent_view,
     }
 
 
-def _agent_tool_specs_text() -> str:
-    bbox_2d = {
-        "type": "array",
-        "description": "bbox_2d in 0–1000 coords relative to FULL image unless bbox_space='window'.",
-        "items": {"type": "number"},
-        "minItems": 4,
-        "maxItems": 4,
+@_register_agent_tool("log_observation")
+def _agent_tool_log_observation(
+    text: Optional[str] = None,
+    bbox_2d: Optional[Sequence[float]] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    grid_cell: Optional[str] = None,
+    label_hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    cleaned = _agent_clean_observation_text(text, max_len=160)
+    if not cleaned:
+        return {"ok": False, "error": "observation_missing"}
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "observation": cleaned,
     }
-    bbox_space = {
-        "type": "string",
-        "description": "Coordinate space for bbox_2d/bbox_xyxy_px: 'full' (default) or 'window'.",
-        "enum": ["full", "window"],
-    }
-    window_bbox_2d = {
-        "type": "array",
-        "description": "Full-image window bbox_2d in 0–1000 coords (required when bbox_space='window').",
-        "items": {"type": "number"},
-        "minItems": 4,
-        "maxItems": 4,
-    }
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_labelmap",
-                "description": "Return labelmap classes, glossary, and background classes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "dataset_id": {"type": "string"},
-                        "classifier_id": {"type": "string"},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_detector",
-                "description": "Run YOLO or RF-DETR. Returns detections in full-image coords.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_token": {"type": "string"},
-                        "detector_id": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["yolo", "rfdetr"]},
-                        "conf": {"type": "number"},
-                        "sahi": {"type": "object"},
-                        "window": {"type": "object"},
-                        "window_bbox_2d": window_bbox_2d,
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "sam3_text",
-                "description": "Run SAM3 text prompt; returns detections.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_token": {"type": "string"},
-                        "prompt": {"type": "string"},
-                        "score_thr": {"type": "number"},
-                        "mask_threshold": {"type": "number"},
-                        "max_results": {"type": "number"},
-                        "window": {"type": "object"},
-                        "window_bbox_2d": window_bbox_2d,
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "sam3_similarity",
-                "description": "Run SAM3 similarity with exemplars; returns detections.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_token": {"type": "string"},
-                        "exemplar_boxes": {"type": "array"},
-                        "bbox_labels": {"type": "array"},
-                        "bbox_space": bbox_space,
-                        "score_thr": {"type": "number"},
-                        "mask_threshold": {"type": "number"},
-                        "max_results": {"type": "number"},
-                        "window": {"type": "object"},
-                        "window_bbox_2d": window_bbox_2d,
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "classify_crop",
-                "description": "Classify a crop; returns top-k classes and background classes.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_token": {"type": "string"},
-                        "bbox_2d": bbox_2d,
-                        "bbox_xyxy_px": {"type": "array"},
-                        "bbox_space": bbox_space,
-                        "window_bbox_2d": window_bbox_2d,
-                        "classifier_id": {"type": "string"},
-                        "topk": {"type": "number"},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "look_and_inspect",
-                "description": "Inspect a window using the model's own vision; return candidate objects with bbox_2d (window coords).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_token": {"type": "string"},
-                        "bbox_2d": bbox_2d,
-                        "bbox_xyxy_px": {"type": "array"},
-                        "bbox_space": bbox_space,
-                        "window_bbox_2d": window_bbox_2d,
-                        "labelmap": {"type": "array"},
-                        "labelmap_glossary": {"type": "string"},
-                        "max_objects": {"type": "number"},
-                        "model_id": {"type": "string"},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                        "name": "image_zoom_in_tool",
-                        "description": "Return a zoomed image for a window. bbox_2d is 0–1000 full image unless bbox_space='window'.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "image_token": {"type": "string"},
-                                "bbox_2d": bbox_2d,
-                                "bbox_xyxy_px": {"type": "array"},
-                                "bbox_space": bbox_space,
-                                "window_bbox_2d": window_bbox_2d,
-                                "label": {"type": "string"},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "submit_annotations",
-                "description": "Submit final annotations (labelmap only).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "image_token": {"type": "string"},
-                        "dataset_id": {"type": "string"},
-                        "annotations": {"type": "array"},
-                        "window_bbox_2d": window_bbox_2d,
-                        "iou": {"type": "number"},
-                        "cross_iou": {"type": "number"},
-                        "max_det": {"type": "number"},
-                    },
-                },
-            },
-        },
+    if label_hint:
+        payload["label_hint"] = str(label_hint)
+    if grid_cell:
+        payload["grid_cell"] = str(grid_cell)
+    _ = bbox_2d
+    _ = window_bbox_2d
+    return payload
+
+
+@_register_agent_tool("log_status")
+def _agent_tool_log_status(text: Optional[str] = None) -> Dict[str, Any]:
+    cleaned = _agent_clean_observation_text(text, max_len=160)
+    if not cleaned:
+        return {"ok": False, "error": "status_missing"}
+    return {"ok": True, "status": cleaned}
+
+
+def _agent_tool_specs_text(grid_enabled: bool = False) -> str:
+    tool_names = [
+        "get_tile_context",
+        "get_tile_context_chunk",
+        "get_global_context",
+        "get_global_context_chunk",
+        "view_cell_raw",
+        "view_cell_overlay",
+        "view_full_overlay",
+        "list_candidates",
+        "grid_label_counts",
+        "look_and_inspect",
+        "zoom_and_detect",
+        "sam3_text",
+        "sam3_similarity",
+        "qwen_infer",
+        "classify_crop",
+        "image_zoom_in_tool",
+        "think_missed_objects",
+        "submit_annotations",
+        "log_observation",
+        "log_status",
     ]
+    tools = _agent_tool_specs_facade(grid_enabled=bool(grid_enabled), tool_names=tool_names)
     return json.dumps(tools, ensure_ascii=False, indent=2)
 
 
-def _agent_tool_specs() -> List[Dict[str, Any]]:
+
+def _agent_tool_specs(grid_enabled: bool = False) -> List[Dict[str, Any]]:
     """Return the tool specs as a list for Hermes-style tool templates."""
     try:
-        return json.loads(_agent_tool_specs_text())
+        return json.loads(_agent_tool_specs_text(grid_enabled=grid_enabled))
     except Exception:
         return []
 
 
-def _agent_build_system_prompt(
+def _agent_tool_specs_facade(
     *,
-    labelmap: List[str],
-    background: List[str],
-    glossary_text: str,
-    image_token: str,
-    detector_mode: str,
-    detector_id: Optional[str],
-    classifier_id: Optional[str],
-    sam_variant: Optional[str],
+    grid_enabled: bool,
+    tool_names: Sequence[str],
+) -> List[Dict[str, Any]]:
+    grid_cell = {
+        "type": "string",
+        "description": "Grid cell reference (e.g., C2). Columns are letters, rows are numbers; top-left is A1.",
+    }
+    required_grid = ["grid_cell"] if grid_enabled else []
+    handle_list = {
+        "type": "array",
+        "description": "Handles returned by list_candidates/get_tile_context (e.g., LV12).",
+        "items": {"type": "string"},
+    }
+    handle = {"type": "string", "description": "Handle returned by list_candidates/get_tile_context (e.g., LV12)."}
+    label = {"type": "string", "description": "Canonical labelmap class."}
+    prompt = {"type": "string", "description": "Single-term prompt/synonym for SAM3."}
+    intent = {"type": "string", "description": "Short note on what you are searching for."}
+    tool_map = {
+        "get_tile_context": {
+            "name": "get_tile_context",
+            "description": "Return tile context (cluster handles, counts, captions, tool usage).",
+            "parameters": {"type": "object", "properties": {"grid_cell": grid_cell}, "required": required_grid},
+        },
+        "get_tile_context_chunk": {
+            "name": "get_tile_context_chunk",
+            "description": "Fetch a chunk of a large tile context payload by handle + chunk_index.",
+            "parameters": {
+                "type": "object",
+                "properties": {"context_handle": {"type": "string"}, "chunk_index": {"type": "number"}},
+                "required": ["context_handle", "chunk_index"],
+            },
+        },
+        "get_global_context": {
+            "name": "get_global_context",
+            "description": "Return global context (tile summaries, counts, captions).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        "get_global_context_chunk": {
+            "name": "get_global_context_chunk",
+            "description": "Fetch a chunk of a large global context payload by handle + chunk_index.",
+            "parameters": {
+                "type": "object",
+                "properties": {"context_handle": {"type": "string"}, "chunk_index": {"type": "number"}},
+                "required": ["context_handle", "chunk_index"],
+            },
+        },
+        "view_cell_raw": {
+            "name": "view_cell_raw",
+            "description": "Return the raw image crop for a grid cell (no detection dots).",
+            "parameters": {"type": "object", "properties": {"grid_cell": grid_cell}, "required": required_grid},
+        },
+        "view_cell_overlay": {
+            "name": "view_cell_overlay",
+            "description": "Return the overlay crop for a grid cell (colored dots + handles).",
+            "parameters": {"type": "object", "properties": {"grid_cell": grid_cell}, "required": required_grid},
+        },
+        "view_full_overlay": {
+            "name": "view_full_overlay",
+            "description": "Return the full image with grid + detection overlay and tool usage summary.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        "list_candidates": {
+            "name": "list_candidates",
+            "description": "List current cluster candidates (handles, labels, scores, grid cells).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "min_score": {"type": "number"},
+                    "include_scoreless": {"type": "boolean"},
+                    "sort_by": {"type": "string", "enum": ["score_desc", "score_asc", "label", "source", "none"]},
+                    "max_items": {"type": "number"},
+                },
+                "required": [],
+            },
+        },
+        "grid_label_counts": {
+            "name": "grid_label_counts",
+            "description": "Return per-grid-cell counts (no IDs).",
+            "parameters": {"type": "object", "properties": {"label": {"type": "string"}}, "required": []},
+        },
+        "look_and_inspect": {
+            "name": "look_and_inspect",
+            "description": "Inspect a grid cell visually and propose candidate objects.",
+            "parameters": {
+                "type": "object",
+                "properties": {"grid_cell": grid_cell, "intent": intent, "max_objects": {"type": "number"}},
+                "required": required_grid,
+            },
+        },
+        "zoom_and_detect": {
+            "name": "zoom_and_detect",
+            "description": "Run detector on a grid cell (zoomed crop).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "grid_cell": grid_cell,
+                    "intent": intent,
+                    "confirm_label": label,
+                    "confirm_topk": {"type": "number"},
+                },
+                "required": required_grid,
+            },
+        },
+        "sam3_text": {
+            "name": "sam3_text",
+            "description": "Run SAM3 text prompt for a single term; assign canonical label.",
+            "parameters": {
+                "type": "object",
+                "properties": {"grid_cell": grid_cell, "label": label, "prompt": prompt},
+                "required": (required_grid + ["label"]) if required_grid else ["label"],
+            },
+        },
+        "sam3_similarity": {
+            "name": "sam3_similarity",
+            "description": "Run SAM3 similarity from exemplar handles; assign canonical label.",
+            "parameters": {
+                "type": "object",
+                "properties": {"grid_cell": grid_cell, "label": label, "exemplar_handles": handle_list},
+                "required": (required_grid + ["label", "exemplar_handles"]) if required_grid else ["label", "exemplar_handles"],
+            },
+        },
+        "qwen_infer": {
+            "name": "qwen_infer",
+            "description": "Ask Qwen-VL to propose new boxes for a list of labels.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "grid_cell": grid_cell,
+                    "items": {"type": "array", "items": {"type": "string"}},
+                    "prompt_type": {"type": "string", "enum": ["bbox", "point"]},
+                    "intent": intent,
+                },
+                "required": required_grid,
+            },
+        },
+        "classify_crop": {
+            "name": "classify_crop",
+            "description": "Classify a cluster crop to verify its label.",
+            "parameters": {
+                "type": "object",
+                "properties": {"handle": handle, "label_hint": label, "topk": {"type": "number"}},
+                "required": ["handle"],
+            },
+        },
+        "image_zoom_in_tool": {
+            "name": "image_zoom_in_tool",
+            "description": "Return a zoomed image for a grid cell or handle.",
+            "parameters": {
+                "type": "object",
+                "properties": {"grid_cell": grid_cell, "handle": handle, "intent": intent},
+                "required": [],
+            },
+        },
+        "think_missed_objects": {
+            "name": "think_missed_objects",
+            "description": "Analyze overlay + captions to suggest missing labels/tiles.",
+            "parameters": {"type": "object", "properties": {"notes": {"type": "string"}}, "required": []},
+        },
+        "submit_annotations": {
+            "name": "submit_annotations",
+            "description": "Submit final annotations using handles or include_all.",
+            "parameters": {
+                "type": "object",
+                "properties": {"handles": handle_list, "include_all": {"type": "boolean"}},
+                "required": [],
+            },
+        },
+        "log_observation": {
+            "name": "log_observation",
+            "description": "Log a single-line observation about what you see (max 160 chars).",
+            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        },
+        "log_status": {
+            "name": "log_status",
+            "description": "Log a short status update (max 160 chars).",
+            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        },
+    }
+    specs: List[Dict[str, Any]] = []
+    for name in tool_names:
+        spec = tool_map.get(name)
+        if not spec:
+            continue
+        specs.append({"type": "function", "function": spec})
+    return specs
+
+
+def _agent_tool_prompt_qwen(grid_enabled: bool = False) -> str:
+    tools = _agent_tool_specs(grid_enabled=grid_enabled)
+    tool_names: List[str] = []
+    tool_descs: List[str] = []
+    for tool in tools:
+        fn = tool.get("function") or {}
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        tool_names.append(name)
+        desc = str(fn.get("description") or "").strip()
+        params = fn.get("parameters") or {}
+        params_text = json.dumps(params, ensure_ascii=False)
+        tool_descs.append(f"### {name}\n{name}: {desc} Input parameters: {params_text}")
+    names_text = ", ".join(tool_names)
+    descs_text = "\n\n".join(tool_descs)
+    return (
+        "# Tools\n\n"
+        "## You have access to the following tools:\n\n"
+        f"{descs_text}\n\n"
+        "## When you need to call a tool, please insert the following command in your reply:\n\n"
+        f"✿FUNCTION✿: The tool to use, should be one of [{names_text}]\n"
+        "✿ARGS✿: The input of the tool\n"
+        "✿RESULT✿: Tool results\n"
+        "✿RETURN✿: Reply based on tool results. Images need to be rendered as ![](url)\n"
+        "Return ONLY the tool call, no other text.\n"
+        "If the response already starts after ✿FUNCTION✿:, continue with the tool name and do not repeat the token.\n"
+        "Keep args minimal; use only grid_cell, handles, labels, and intent as needed.\n"
+    )
+
+
+def _agent_trace_sanitize_payload(payload: QwenAgenticRequest, image_token: Optional[str]) -> Dict[str, Any]:
+    try:
+        data = payload.dict()
+    except Exception:
+        data = {}
+    image_base64 = data.get("image_base64")
+    if isinstance(image_base64, str) and image_base64:
+        data["image_base64"] = f"<base64:{len(image_base64)}>"
+    if image_token:
+        data["resolved_image_token"] = image_token
+    return data
+
+
+def _agent_trace_sanitize_messages(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    sanitized: List[Dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            sanitized.append({"role": "unknown", "content": str(msg)})
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        fn_call = msg.get("function_call")
+        fn_payload = None
+        if fn_call:
+            if hasattr(fn_call, "model_dump"):
+                try:
+                    fn_call = fn_call.model_dump()
+                except Exception:
+                    fn_call = None
+            if isinstance(fn_call, dict):
+                fn_payload = {
+                    "name": fn_call.get("name"),
+                    "arguments": fn_call.get("arguments"),
+                }
+            else:
+                fn_payload = {
+                    "name": getattr(fn_call, "name", None),
+                    "arguments": getattr(fn_call, "arguments", None),
+                }
+        if isinstance(content, list):
+            safe_content: List[Dict[str, Any]] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if not item_type:
+                    if "text" in item:
+                        item_type = "text"
+                    elif "image" in item:
+                        item_type = "image"
+                    elif "audio" in item:
+                        item_type = "audio"
+                    elif "video" in item:
+                        item_type = "video"
+                    elif "file" in item:
+                        item_type = "file"
+                if item_type == "text":
+                    safe_content.append({"type": "text", "text": str(item.get("text") or "")})
+                elif item_type == "image":
+                    image_val = item.get("image")
+                    if isinstance(image_val, str):
+                        if image_val.startswith("data:image"):
+                            safe_content.append({"type": "image", "image": f"<image_base64:{len(image_val)}>"})
+                        else:
+                            safe_content.append({"type": "image", "image": image_val[:200]})
+                    else:
+                        safe_content.append({"type": "image", "image": "<image>"})
+                elif item_type in {"audio", "video", "file"}:
+                    safe_content.append({"type": item_type, "value": "<omitted>"})
+                else:
+                    safe_content.append({"type": str(item_type or "unknown"), "value": "<omitted>"})
+            entry = {"role": role, "content": safe_content}
+            if fn_payload:
+                entry["function_call"] = fn_payload
+            sanitized.append(entry)
+        else:
+            entry = {"role": role, "content": content}
+            if fn_payload:
+                entry["function_call"] = fn_payload
+            sanitized.append(entry)
+    return sanitized
+
+
+def _agent_trace_full_jsonable(value: Any, *, _depth: int = 0) -> Any:
+    if _depth > 6:
+        return "<max_depth>"
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        if value.startswith("data:image"):
+            return f"<image_base64:{len(value)}>"
+        if len(value) > 2000 and re.fullmatch(r"[A-Za-z0-9+/=\\s]+", value):
+            return f"<base64:{len(value)}>"
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return [_agent_trace_full_jsonable(item, _depth=_depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _agent_trace_full_jsonable(item, _depth=_depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (bytes, bytearray)):
+        return f"<bytes:{len(value)}>"
+    if isinstance(value, Image.Image):
+        try:
+            return f"<image:{value.size[0]}x{value.size[1]} {value.mode}>"
+        except Exception:
+            return "<image>"
+    if isinstance(value, np.ndarray):
+        try:
+            if value.size <= 2000:
+                return value.tolist()
+        except Exception:
+            pass
+        return {"type": "ndarray", "shape": list(value.shape), "dtype": str(value.dtype)}
+    if torch is not None and isinstance(value, torch.Tensor):
+        try:
+            arr = value.detach().cpu().numpy()
+            return _agent_trace_full_jsonable(arr, _depth=_depth + 1)
+        except Exception:
+            return {"type": "tensor", "shape": list(value.shape), "dtype": str(value.dtype)}
+    if hasattr(value, "model_dump"):
+        try:
+            return _agent_trace_full_jsonable(value.model_dump(), _depth=_depth + 1)
+        except Exception:
+            return str(value)
+    try:
+        return json.loads(json.dumps(value))
+    except Exception:
+        return str(value)
+
+
+def _agent_full_trace_write(record: Dict[str, Any]) -> None:
+    if _AGENT_TRACE_FULL_WRITER is None:
+        return
+    try:
+        _AGENT_TRACE_FULL_WRITER(_agent_trace_full_jsonable(record))
+    except Exception:
+        return
+
+
+def _agent_readable_write(line: str) -> None:
+    if not line:
+        return
+    try:
+        if _AGENT_TRACE_READABLE_WRITER is not None:
+            _AGENT_TRACE_READABLE_WRITER(line)
+        if AGENTIC_READABLE_TO_CONSOLE:
+            logging.getLogger("agentic.readable").info(line)
+    except Exception:
+        return
+
+
+def _agent_readable_trim(text: Optional[str], max_len: Optional[int] = None) -> str:
+    if not text:
+        return ""
+    text = " ".join(str(text).split())
+    if max_len is None or max_len <= 0 or len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def _agent_readable_banner(title: str, *, width: int = 88, fill: str = "=") -> str:
+    cleaned = " ".join(str(title or "").strip().split())
+    if not cleaned:
+        return fill * width
+    text = f" {cleaned} "
+    if len(text) >= width:
+        return text[:width]
+    pad = width - len(text)
+    left = pad // 2
+    right = pad - left
+    return f"{fill * left}{text}{fill * right}"
+
+
+def _agent_grid_cell_for_detection(
+    det: Mapping[str, Any],
+    img_w: int,
+    img_h: int,
+    grid: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    if not grid:
+        return None
+    cell_hint = det.get("grid_cell") if isinstance(det, Mapping) else None
+    if cell_hint:
+        return str(cell_hint)
+    center = _agent_detection_center_px(dict(det), img_w, img_h)
+    if not center:
+        return None
+    cx, cy = center
+    bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, cx, cy, cx, cy)
+    return _agent_grid_cell_for_window_bbox(grid, bbox_2d)
+
+
+def _agent_detection_summary_lines(
+    detections: Sequence[Dict[str, Any]],
+    *,
+    grid: Optional[Mapping[str, Any]] = None,
+    img_w: int,
+    img_h: int,
+    warnings: Optional[Sequence[str]] = None,
+    max_cells: int = 10,
+) -> List[str]:
+    total = len(detections)
+    label_counts: Dict[str, int] = {}
+    cell_counts: Dict[str, Dict[str, int]] = {}
+    for det in detections:
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        if not label:
+            continue
+        label_counts[label] = label_counts.get(label, 0) + 1
+        if grid:
+            cell = _agent_grid_cell_for_detection(det, img_w, img_h, grid)
+            if cell:
+                cell_counts.setdefault(label, {})
+                cell_counts[label][cell] = cell_counts[label].get(cell, 0) + 1
+    lines: List[str] = []
+    labels_total = len(label_counts)
+    grid_state = "on" if grid else "off"
+    warnings_text = ""
+    if warnings:
+        warnings_text = f" warnings={len(warnings)}"
+    lines.append(f"summary: total={total} labels={labels_total} grid={grid_state}{warnings_text}")
+    ordered = sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))
+    for label, count in ordered:
+        cell_text = ""
+        cells = cell_counts.get(label) if grid else None
+        if cells:
+            cell_items = sorted(cells.items(), key=lambda item: (-item[1], item[0]))
+            parts = [f"{cell}x{cnt}" for cell, cnt in cell_items[:max_cells]]
+            if len(cell_items) > max_cells:
+                parts.append(f"+{len(cell_items) - max_cells} more")
+            cell_text = f" cells={','.join(parts)}"
+        lines.append(f"label {label}: {count}{cell_text}")
+    if warnings:
+        warn_list = ", ".join(str(w) for w in warnings)
+        lines.append(f"warnings: {warn_list}")
+    return lines
+
+
+def _agent_readable_detection_line(
+    det: Mapping[str, Any],
+    *,
+    grid: Optional[Mapping[str, Any]] = None,
+    img_w: int,
+    img_h: int,
 ) -> str:
-    label_text = ", ".join(labelmap) if labelmap else "none"
-    bg_text = ", ".join(background) if background else "none"
-    glossary_text = (glossary_text or "").strip()
-    detector_text = detector_id or "default"
-    classifier_text = classifier_id or "default"
-    sam_text = sam_variant or "sam3"
-    return (
-        "You are an annotation agent. Use tools to label ALL objects in the image. "
-        "Only use labels from the labelmap. Do not mention labels, hints, or coordinates in prose. "
-        "Every response must be a single tool call until you submit annotations. "
-        "Output ONLY the <tool_call> JSON block; no extra text.\n\n"
-        f"Labelmap: {label_text}\n"
-        f"Labelmap glossary:\n{glossary_text or 'none'}\n"
-        f"Background classes (reject): {bg_text}\n"
-        "Coordinate rules:\n"
-        "- bbox_2d is ALWAYS 0–1000 relative to the FULL image unless bbox_space='window'.\n"
-        "- If operating on a zoomed window, include window_bbox_2d (full image) and set bbox_space='window'.\n"
-        f"Image token: {image_token}\n"
-        f"Detector mode: {detector_mode} ({detector_text})\n"
-        f"Classifier: {classifier_text}\n"
-        f"SAM variant: {sam_text}\n\n"
-        "Response format (every step):\n"
-        "Return only ONE <tool_call> JSON block and nothing else. No Thought/Action lines.\n"
-        "<tool_call>{\"name\": \"run_detector\", \"arguments\": {\"image_token\": \"...\", \"mode\": \"yolo\"}}</tool_call>\n\n"
-        "Submit final results with submit_annotations exactly once."
-    )
+    label = str(det.get("label") or det.get("class_name") or "unknown")
+    bbox = None
+    if isinstance(det.get("bbox_xyxy_px"), (list, tuple)) and len(det.get("bbox_xyxy_px")) >= 4:
+        bbox = det.get("bbox_xyxy_px")
+    elif isinstance(det.get("bbox_2d"), (list, tuple)) and len(det.get("bbox_2d")) >= 4:
+        bbox = det.get("bbox_2d")
+    bbox_text = _agent_readable_format_bbox(bbox) if bbox else "[]"
+    score = det.get("score")
+    if score is None:
+        score_text = "score=n/a"
+    else:
+        try:
+            score_text = f"score={float(score):.3f}"
+        except (TypeError, ValueError):
+            score_text = "score=n/a"
+    source = str(det.get("source") or det.get("score_source") or "").strip()
+    source_text = f" source={source}" if source else ""
+    cluster_id = det.get("cluster_id")
+    id_text = f"id={cluster_id} " if cluster_id is not None else ""
+    cell_text = ""
+    if grid:
+        cell = _agent_grid_cell_for_detection(det, img_w, img_h, grid)
+        if cell:
+            cell_text = f" cell={cell}"
+    return f"{id_text}label={label} bbox={bbox_text} {score_text}{source_text}{cell_text}"
 
 
-def _agent_build_user_prompt(prompt_override: Optional[str]) -> str:
-    if prompt_override:
-        return prompt_override
-    return (
-        "Annotate the image exhaustively. Follow this inspection script:\n"
-        "1) Review detector prepass results, then inspect ALL four quadrants with look_and_inspect. "
-        "Use your own vision to propose candidate boxes (even if detectors missed them).\n"
-        "2) For each inspected candidate, call classify_crop to verify label vs background.\n"
-        "3) If a detector box looks wrong or missing, zoom in (image_zoom_in_tool) and re-check.\n"
-        "4) Use SAM3 (text or similarity) to add missed objects.\n"
-        "Stop only when no new objects are found.\n"
-        "Use the labelmap glossary for class synonyms and semantics. "
-        "When using a zoomed window, include window_bbox_2d and set bbox_space='window' for any bbox_2d you provide. "
-        "Finish by calling submit_annotations with all final boxes. "
-        "Return only a <tool_call> JSON block, no extra text or reasoning."
-    )
+def _agent_clean_observation_text(text: Optional[str], max_len: int = 160) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(str(text).replace("\n", " ").replace("\t", " ").split())
+    for prefix in ("observation:", "observations:", "note:", "notes:"):
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+            break
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 3].rstrip() + "..."
+    return cleaned
+
+
+def _agent_readable_format_bbox(bbox: Any) -> str:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return ""
+    values: List[str] = []
+    for val in bbox[:4]:
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            values.append("?")
+            continue
+        rounded = round(num)
+        if abs(num - rounded) < 0.01:
+            values.append(str(int(rounded)))
+        else:
+            values.append(f"{num:.1f}")
+    return "[" + ", ".join(values) + "]"
+
+
+def _agent_readable_bbox_from_args(args: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    if not isinstance(args, dict):
+        return "", ""
+    for key in ("window_bbox_2d", "bbox_2d", "bbox_xyxy_px"):
+        bbox = args.get(key)
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            return key, _agent_readable_format_bbox(bbox)
+    return "", ""
+
+
+def _agent_readable_tool_call_summary(tool_name: str, args: Optional[Dict[str, Any]]) -> str:
+    tool = str(tool_name or "")
+    key, coords = _agent_readable_bbox_from_args(args)
+    grid_cell = _agent_readable_trim((args or {}).get("grid_cell"))
+    cluster_id = (args or {}).get("cluster_id")
+    if tool == "run_detector":
+        mode = str((args or {}).get("mode") or "yolo")
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return f"run_detector mode={mode}{grid_text}"
+    if tool == "zoom_and_detect":
+        mode = str((args or {}).get("mode") or "yolo")
+        intent = _agent_readable_trim((args or {}).get("intent"))
+        confirm_label = _agent_readable_trim((args or {}).get("confirm_label"))
+        intent_text = f" intent=\"{intent}\"" if intent else ""
+        confirm_text = f" confirm={confirm_label}" if confirm_label else ""
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return f"zoom_and_detect mode={mode}{intent_text}{confirm_text}{grid_text}"
+    if tool == "look_and_inspect":
+        max_objects = (args or {}).get("max_objects")
+        intent = _agent_readable_trim((args or {}).get("intent"))
+        extra = f" max_objects={max_objects}" if max_objects else ""
+        if intent:
+            extra = f"{extra} intent=\"{intent}\""
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return f"inspect cell{grid_text}{extra}"
+    if tool == "image_zoom_in_tool":
+        intent = _agent_readable_trim((args or {}).get("intent"))
+        intent_text = f" intent=\"{intent}\"" if intent else ""
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        cluster_text = f" cluster={cluster_id}" if cluster_id is not None else ""
+        return f"looking closer{grid_text}{cluster_text}{intent_text}"
+    if tool in {"view_cell_raw", "view_cell_overlay"}:
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return f"{tool}{grid_text}"
+    if tool == "get_tile_context":
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return f"get_tile_context{grid_text}"
+    if tool == "get_tile_context_chunk":
+        handle = _agent_readable_trim((args or {}).get("context_handle"))
+        idx = (args or {}).get("chunk_index")
+        return f"get_tile_context_chunk handle={handle} idx={idx}"
+    if tool == "get_global_context":
+        return "get_global_context"
+    if tool == "get_global_context_chunk":
+        handle = _agent_readable_trim((args or {}).get("context_handle"))
+        idx = (args or {}).get("chunk_index")
+        return f"get_global_context_chunk handle={handle} idx={idx}"
+    if tool == "think_missed_objects":
+        return "think_missed_objects"
+    if tool == "log_observation":
+        observation = _agent_readable_trim((args or {}).get("text"))
+        if observation and grid_cell:
+            return f"observation {grid_cell} \"{observation}\""
+        if observation:
+            return f"observation \"{observation}\""
+        return "observation"
+    if tool == "log_status":
+        status = _agent_readable_trim((args or {}).get("text"))
+        if status:
+            return f"status \"{status}\""
+        return "status"
+    if tool == "classify_crop":
+        label = _agent_readable_trim((args or {}).get("label_hint"))
+        label_text = f" label={label}" if label else ""
+        cluster_text = f" cluster={cluster_id}" if cluster_id is not None else ""
+        return f"classify crop{cluster_text}{label_text}"
+    if tool == "sam3_text":
+        prompt = _agent_readable_trim((args or {}).get("prompt"))
+        label = _agent_readable_trim((args or {}).get("label"))
+        details: List[str] = []
+        if label:
+            details.append(f"label={label}")
+        if prompt:
+            details.append(f"prompt=\"{prompt}\"")
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return ("sam3_text " + " ".join(details) if details else "sam3_text") + grid_text
+    if tool == "sam3_similarity":
+        exemplars = (args or {}).get("exemplar_cluster_ids")
+        count = len(exemplars) if isinstance(exemplars, list) else 0
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return f"sam3_similarity exemplars={count}{grid_text}"
+    if tool == "qwen_infer":
+        prompt_type = (args or {}).get("prompt_type") or "bbox"
+        items = (args or {}).get("items")
+        item_list = (args or {}).get("item_list")
+        count = len(items) if isinstance(items, list) else 0
+        if not count and isinstance(item_list, str) and item_list.strip():
+            count = len([item for item in item_list.split(",") if item.strip()])
+        prompt = _agent_readable_trim((args or {}).get("prompt"))
+        details = f"type={prompt_type} items={count}"
+        if prompt:
+            details += f" prompt=\"{prompt}\""
+        grid_text = f" grid={grid_cell}" if grid_cell else ""
+        return f"qwen_infer {details}{grid_text}"
+    if tool == "list_candidates":
+        label = _agent_readable_trim((args or {}).get("label"))
+        source = _agent_readable_trim((args or {}).get("source"))
+        min_score = (args or {}).get("min_score")
+        max_items = (args or {}).get("max_items")
+        details: List[str] = []
+        if label:
+            details.append(f"label={label}")
+        if source:
+            details.append(f"source={source}")
+        if isinstance(min_score, (int, float)):
+            details.append(f"min_score={float(min_score):.2f}")
+        if isinstance(max_items, (int, float)):
+            details.append(f"max_items={int(max_items)}")
+        return "list_candidates " + " ".join(details) if details else "list_candidates"
+    if tool == "grid_label_counts":
+        label = _agent_readable_trim((args or {}).get("label"))
+        return f"grid_label_counts label={label}" if label else "grid_label_counts"
+    if tool == "submit_annotations":
+        annotations = (args or {}).get("annotations")
+        count = len(annotations) if isinstance(annotations, list) else 0
+        clusters = (args or {}).get("cluster_ids")
+        cluster_count = len(clusters) if isinstance(clusters, list) else 0
+        handles = (args or {}).get("handles")
+        handle_count = len(handles) if isinstance(handles, list) else 0
+        include_all = bool((args or {}).get("include_all"))
+        extra = ""
+        if include_all:
+            extra = " include_all"
+        elif handle_count:
+            extra = f" handles={handle_count}"
+        elif cluster_count:
+            extra = f" clusters={cluster_count}"
+        return f"submit annotations count={count}{extra}"
+    return tool
+
+
+def _agent_readable_tool_result_summary(tool_name: str, result: Any) -> str:
+    tool = str(tool_name or "")
+    if not isinstance(result, dict):
+        return f"{tool} result"
+    if result.get("blocked"):
+        reason = result.get("error") or "blocked"
+        return f"{tool} blocked ({reason})"
+    if result.get("error"):
+        err = result.get("error")
+        if isinstance(err, dict):
+            code = err.get("code") or "error"
+            return f"{tool} error ({code})"
+        return f"{tool} error ({err})"
+    if result.get("skipped"):
+        reason = result.get("reason") or "skipped"
+        return f"{tool} skipped ({reason})"
+    if tool == "classify_crop":
+        best = result.get("best") if isinstance(result, dict) else None
+        if isinstance(best, dict):
+            label = best.get("label")
+            prob = best.get("prob")
+            if label is not None and prob is not None:
+                return f"classify_crop best={label} prob={prob:.3f}"
+        return "classify_crop result"
+    if tool in {"run_detector", "zoom_and_detect", "sam3_text", "sam3_similarity", "qwen_infer", "look_and_inspect"}:
+        cluster_ids = result.get("cluster_ids")
+        count = len(cluster_ids) if isinstance(cluster_ids, list) else None
+        new_clusters = result.get("new_clusters")
+        label_counts = result.get("label_counts") if isinstance(result, dict) else None
+        caption = result.get("caption") if isinstance(result, dict) else None
+        if count is not None:
+            extra = f" new={new_clusters}" if isinstance(new_clusters, int) else ""
+            label_text = ""
+            if isinstance(label_counts, dict) and label_counts:
+                label_parts = [f"{key}={label_counts[key]}" for key in sorted(label_counts.keys())]
+                label_text = " labels=" + ",".join(label_parts[:6])
+            caption_text = f" caption=\"{_agent_readable_trim(caption)}\"" if caption and tool == "look_and_inspect" else ""
+            return f"{tool} returned {count} clusters{extra}{label_text}{caption_text}"
+        return f"{tool} result"
+    if tool in {"view_cell_raw", "view_cell_overlay"}:
+        cell = result.get("grid_cell")
+        cell_text = f" {cell}" if cell else ""
+        return f"{tool}{cell_text} ready"
+    if tool == "view_full_overlay":
+        cells = result.get("grid_usage") if isinstance(result, dict) else None
+        count = len(cells) if isinstance(cells, list) else 0
+        return f"view_full_overlay cells={count}"
+    if tool == "get_tile_context":
+        total = result.get("cluster_total") if isinstance(result, dict) else None
+        grid_cell = result.get("grid_cell") if isinstance(result, dict) else None
+        if total is not None:
+            return f"get_tile_context {grid_cell} clusters={total}"
+        return "get_tile_context result"
+    if tool == "get_tile_context_chunk":
+        idx = result.get("chunk_index") if isinstance(result, dict) else None
+        total = result.get("chunk_total") if isinstance(result, dict) else None
+        return f"get_tile_context_chunk {idx}/{total}" if idx is not None else "get_tile_context_chunk result"
+    if tool == "get_global_context":
+        count = len(result.get("tile_summaries") or []) if isinstance(result, dict) else 0
+        return f"get_global_context tiles={count}"
+    if tool == "get_global_context_chunk":
+        idx = result.get("chunk_index") if isinstance(result, dict) else None
+        total = result.get("chunk_total") if isinstance(result, dict) else None
+        return f"get_global_context_chunk {idx}/{total}" if idx is not None else "get_global_context_chunk result"
+    if tool == "think_missed_objects":
+        labels = result.get("missing_labels") if isinstance(result, dict) else None
+        tiles = result.get("missing_tiles") if isinstance(result, dict) else None
+        label_count = len(labels) if isinstance(labels, list) else 0
+        tile_count = len(tiles) if isinstance(tiles, list) else 0
+        return f"think_missed_objects labels={label_count} tiles={tile_count}"
+    if tool == "grid_label_counts":
+        cells = result.get("cells")
+        count = len(cells) if isinstance(cells, list) else 0
+        return f"grid_label_counts cells={count}"
+    if tool == "submit_annotations":
+        clusters = result.get("submitted_clusters")
+        cluster_count = len(clusters) if isinstance(clusters, list) else 0
+        count = result.get("count")
+        if cluster_count:
+            return f"submit_annotations clusters={cluster_count} count={count}"
+    if tool == "log_observation":
+        observation = _agent_readable_trim(result.get("observation")) if isinstance(result, dict) else ""
+        if observation:
+            return f"observation logged \"{observation}\""
+        return "observation logged"
+    if tool == "zoom_and_detect":
+        confirmation = result.get("confirmation") if isinstance(result, dict) else None
+        if isinstance(confirmation, dict):
+            label = confirmation.get("label")
+            match = confirmation.get("label_match")
+            if label is not None and match is not None:
+                return f"zoom_and_detect confirmation label={label} match={'yes' if match else 'no'}"
+    if tool == "image_zoom_in_tool":
+        cell = result.get("grid_cell") if isinstance(result, dict) else None
+        cluster = result.get("cluster_id") if isinstance(result, dict) else None
+        cell_text = f" grid={cell}" if cell else ""
+        cluster_text = f" cluster={cluster}" if cluster is not None else ""
+        if cell_text or cluster_text:
+            return f"image_zoom_in_tool{cell_text}{cluster_text}"
+        return "image_zoom_in_tool result"
+    for key in ("detections", "candidates", "annotations"):
+        items = result.get(key)
+        if isinstance(items, list):
+            details = _agent_readable_candidates_summary(items)
+            suffix = f": {details}" if details else ""
+            return f"{tool} returned {len(items)} {key}{suffix}"
+    return f"{tool} result"
+
+
+def _agent_readable_line(
+    event_type: str,
+    *,
+    step_id: Optional[int] = None,
+    tool_name: Optional[str] = None,
+    args: Optional[Dict[str, Any]] = None,
+    result: Any = None,
+    output_text: Optional[str] = None,
+) -> str:
+    prefix = f"step{step_id}: " if step_id is not None else ""
+    if event_type == "tool_call" and tool_name:
+        return prefix + _agent_readable_tool_call_summary(tool_name, args)
+    if event_type == "tool_result" and tool_name:
+        return prefix + _agent_readable_tool_result_summary(tool_name, result)
+    if event_type == "model_output" and output_text:
+        return prefix + f"model output \"{_agent_readable_trim(output_text)}\""
+    if event_type == "prepass" and tool_name:
+        return prefix + _agent_readable_tool_result_summary(tool_name, result)
+    return ""
+
+
+def _agent_readable_candidates_summary(items: List[Dict[str, Any]], limit: int = 8) -> str:
+    if not items:
+        return ""
+    parts: List[str] = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        cand_id = item.get("candidate_id")
+        label = str(item.get("label") or item.get("class_name") or "unknown")
+        bbox = None
+        if isinstance(item.get("bbox_xyxy_px"), (list, tuple)) and len(item.get("bbox_xyxy_px")) >= 4:
+            bbox = item.get("bbox_xyxy_px")
+        elif isinstance(item.get("bbox_2d"), (list, tuple)) and len(item.get("bbox_2d")) >= 4:
+            bbox = item.get("bbox_2d")
+        bbox_text = _agent_readable_format_bbox(bbox) if bbox else "[]"
+        score = item.get("score")
+        if score is None:
+            score_text = "score=n/a"
+        else:
+            try:
+                score_text = f"score={float(score):.3f}"
+            except (TypeError, ValueError):
+                score_text = "score=n/a"
+        id_text = f"id={cand_id} " if cand_id is not None else ""
+        parts.append(f"{id_text}{label} {bbox_text} {score_text}")
+    if len(items) > limit:
+        parts.append(f"+{len(items) - limit} more")
+    return "; ".join(parts)
+
+
+def _agent_label_counts_summary(detections: Sequence[Dict[str, Any]], limit: int = 8) -> str:
+    counts: Dict[str, int] = {}
+    for det in detections:
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        if not label:
+            continue
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return "none"
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    parts = [f"{label}({count})" for label, count in ordered[:limit]]
+    if len(ordered) > limit:
+        parts.append(f"+{len(ordered) - limit} more")
+    return ", ".join(parts)
+
+
+def _agent_clean_plan_text(text: str, max_len: int = 4000) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    for prefix in ("PLAN:", "Plan:", "FINAL:", "Final:"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+    match = re.search(r"\\d+[\\).:-]", cleaned)
+    if match:
+        cleaned = cleaned[match.start():].lstrip()
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    numbered = []
+    for line in lines:
+        if re.match(r"^\\d+[\\).:-]", line):
+            numbered.append(line)
+    if not numbered:
+        step_parts = re.split(r"(?=\\d+[\\).:-]\\s)", cleaned)
+        step_parts = [part.strip() for part in step_parts if part.strip()]
+        if step_parts and re.match(r"^\\d+[\\).:-]", step_parts[0]):
+            numbered = step_parts
+    if numbered:
+        cleaned = "\n".join(numbered)
+    else:
+        cleaned = "\n".join(lines)
+        if cleaned:
+            cleaned = re.sub(r"^(got it|sure|okay|ok|alright)[,\\s]+", "", cleaned, flags=re.IGNORECASE)
+            cleaned = f"1. {cleaned}"
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 3].rstrip() + "..."
+    return cleaned
 
 
 def _run_agentic_final_caption(
@@ -5971,6 +11015,986 @@ def _qwen_agent_message_text(msg: Any) -> str:
     return ""
 
 
+def _agent_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(str(item.get("text") or ""))
+            elif hasattr(item, "get_type_and_value"):
+                try:
+                    item_type, item_value = item.get_type_and_value()
+                except Exception:
+                    continue
+                if item_type == "text" and item_value:
+                    parts.append(str(item_value))
+        return "".join(parts)
+    return str(content)
+
+
+def _agent_stream_text_from_output(output: Sequence[Any]) -> str:
+    if not output:
+        return ""
+    for msg in reversed(output):
+        if msg is None:
+            continue
+        if isinstance(msg, dict):
+            if msg.get("role") == "assistant":
+                return _agent_content_to_text(msg.get("content"))
+            continue
+        if getattr(msg, "role", None) == "assistant":
+            text = _qwen_agent_message_text(msg)
+            if text:
+                return text
+    return ""
+
+
+def _agent_stream_tag_open(text: str, start: str, end: str) -> bool:
+    if not text:
+        return False
+    start_idx = text.rfind(start)
+    if start_idx < 0:
+        return False
+    end_idx = text.rfind(end)
+    return end_idx < start_idx
+
+
+def _agent_stream_extract_tool_name(text: str) -> Optional[str]:
+    if not text:
+        return None
+    tail = text
+    if "<tool_call>" in text:
+        tail = text.split("<tool_call>")[-1]
+    match = re.search(r"\"name\"\\s*:\\s*\"([^\"]+)\"", tail)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _agent_parse_json_relaxed(payload: Any) -> Optional[Any]:
+    if payload is None:
+        return None
+    if isinstance(payload, (dict, list)):
+        return payload
+    if not isinstance(payload, str):
+        try:
+            return json.loads(payload)
+        except Exception:
+            return None
+
+
+def _agent_strip_think(text: str) -> str:
+    if not text:
+        return ""
+    out: List[str] = []
+    idx = 0
+   # while True:
+   #     start = text.find("<think>", idx)
+   #     if start == -1:
+   #         out.append(text[idx:])
+   #         break
+   #     out.append(text[idx:start])
+   #     end = text.find("</think>", start + 7)
+   #     if end == -1:
+   #         break
+   #     idx = end + 8
+    return "".join(out)
+    text = payload.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            from qwen_agent.utils.utils import json_loads as qwen_json_loads  # type: ignore
+
+            return qwen_json_loads(text)
+        except Exception:
+            return None
+
+
+def _agent_run_prepass(
+    payload: QwenAgenticRequest,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    labelmap: List[str],
+    glossary: str,
+    as_tool_messages: bool = True,
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    model_id_override: Optional[str] = None,
+) -> Tuple[
+    List[Any],
+    List[Dict[str, Any]],
+    List[str],
+    List[AgentTraceEvent],
+    bool,
+    bool,
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    List[Dict[str, Any]],
+]:
+    img_w, img_h = pil_img.size
+    mode = (payload.prepass_mode or "").strip().lower()
+    if not mode or mode in {"none", "off", "false"}:
+        return [], [], [], [], False, False, None, None, None, None, []
+    prepass_messages: List[Any] = []
+    prepass_records: List[Dict[str, Any]] = []
+    prepass_detections: List[Dict[str, Any]] = []
+    prepass_warnings: List[str] = []
+    prepass_trace: List[AgentTraceEvent] = []
+    prepass_has_detector = False
+    prepass_has_inspect = False
+    qwen_failed = False
+    step_id = 0
+    max_items = int(payload.prepass_inspect_topk) if payload.prepass_inspect_topk is not None else 0
+    caption_summary: Optional[str] = None
+    caption_text: Optional[str] = None
+    caption_entries: List[Dict[str, Any]] = []
+    sam3_text_prompts: Dict[str, List[str]] = {}
+    sam3_text_summary: Optional[str] = None
+    prepass_source_summary: Optional[str] = None
+    grid_for_log: Optional[Dict[str, Any]] = None
+    if payload.use_detection_overlay is not False:
+        grid_for_log = _agent_grid_spec(img_w, img_h)
+
+    def add_tool_result(name: str, result: Dict[str, Any], summary: str) -> None:
+        nonlocal step_id
+        step_id += 1
+        prepass_trace.append(
+            AgentTraceEvent(
+                step_id=step_id,
+                phase="tool_call",
+                tool_name=name,
+                summary="prepass_tool_call",
+                timestamp=time.time(),
+            )
+        )
+        if trace_writer:
+            trace_writer(
+                {
+                    "type": "prepass_tool_call",
+                    "tool": name,
+                    "summary": summary,
+                    "ts": time.time(),
+                }
+            )
+        step_id += 1
+        compact = _agent_compact_tool_result(result, max_items=max_items)
+        if as_tool_messages:
+            prepass_messages.append(
+                QwenAgentMessage(
+                    role="function",
+                    name=name,
+                    content=[QwenAgentContentItem(text=json.dumps(compact, ensure_ascii=False))],
+                )
+            )
+        else:
+            prepass_records.append({"tool": name, "result": compact})
+        prepass_trace.append(
+            AgentTraceEvent(
+                step_id=step_id,
+                phase="tool_result",
+                tool_name=name,
+                summary=summary,
+                timestamp=time.time(),
+            )
+        )
+        if trace_writer:
+            trace_writer(
+                {
+                    "type": "prepass_tool_result",
+                    "tool": name,
+                    "summary": summary,
+                    "result": result,
+                    "ts": time.time(),
+                }
+            )
+        if _AGENT_TRACE_READABLE_WRITER is not None:
+            count = None
+            count_key = None
+            if isinstance(result, dict):
+                for key in ("detections", "candidates", "annotations"):
+                    items = result.get(key)
+                    if isinstance(items, list):
+                        count = len(items)
+                        count_key = key
+                        break
+            pretty_summary = summary.replace("prepass_", "prepass ")
+            line = f"{pretty_summary}"
+            if count is not None and count_key:
+                line = f"{line} -> {count} {count_key}"
+            _agent_readable_write(line)
+            if isinstance(result, dict) and count_key:
+                items = result.get(count_key)
+                if isinstance(items, list) and items:
+                    for item in items:
+                        if isinstance(item, dict):
+                            detail = _agent_readable_detection_line(
+                                item,
+                                grid=grid_for_log,
+                                img_w=img_w,
+                                img_h=img_h,
+                            )
+                            _agent_readable_write(f"{pretty_summary} item: {detail}")
+        if isinstance(result.get("detections"), list):
+            prepass_detections.extend(result.get("detections") or [])
+
+    detector_modes: List[str] = []
+    if "ensemble" in mode:
+        detector_modes = ["yolo", "rfdetr"]
+    else:
+        detector_modes = [payload.detector_mode or "yolo"]
+    sahi_enabled = "sahi" in mode
+    detector_conf = payload.prepass_inspect_score
+    if detector_conf is None and _AGENT_ACTIVE_DETECTOR_CONF is not None:
+        detector_conf = _AGENT_ACTIVE_DETECTOR_CONF
+    for det_mode in detector_modes:
+        det_args = {
+            "image_token": image_token,
+            "detector_id": payload.detector_id if det_mode == (payload.detector_mode or "yolo") else None,
+            "mode": det_mode,
+            "conf": detector_conf,
+            "sahi": {"enabled": True} if sahi_enabled else None,
+        }
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_tool_call",
+                    "tool": "run_detector",
+                    "args": det_args,
+                    "ts": time.time(),
+                }
+            )
+        try:
+            det_result = _agent_tool_run_detector(
+                image_token=det_args["image_token"],
+                detector_id=det_args["detector_id"],
+                mode=det_args["mode"],
+                conf=det_args["conf"],
+                sahi=det_args["sahi"],
+                register=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            prepass_warnings.append(f"prepass_detector_failed:{det_mode}:{exc}")
+            continue
+        det_result = {**det_result, "detector_mode": det_mode}
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_tool_result",
+                    "tool": "run_detector",
+                    "result": det_result,
+                    "ts": time.time(),
+                }
+            )
+        add_tool_result("run_detector", det_result, f"prepass_detector:{det_mode}")
+        prepass_has_detector = True
+
+    if "sam3_text" in mode and labelmap:
+        labels = [lbl for lbl in labelmap if str(lbl).strip()]
+        if labels:
+            synonym_map = _agent_generate_sam3_synonyms(labels, glossary or "")
+            score_thr = payload.prepass_sam3_text_thr
+            if score_thr is None and _AGENT_ACTIVE_SAM3_SCORE_THR is not None:
+                score_thr = _AGENT_ACTIVE_SAM3_SCORE_THR
+            mask_thr = payload.sam3_mask_threshold
+            if mask_thr is None and _AGENT_ACTIVE_SAM3_MASK_THR is not None:
+                mask_thr = _AGENT_ACTIVE_SAM3_MASK_THR
+            max_results = None
+            for label in labels:
+                prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=6)
+                if not prompts:
+                    prompts = [str(label).replace("_", " ").strip() or str(label).strip()]
+                for prompt in prompts:
+                    sam3_text_prompts.setdefault(label, []).append(prompt)
+                    sam3_args = {
+                        "image_token": image_token,
+                        "prompt": prompt,
+                        "label": label,
+                        "score_thr": score_thr,
+                        "mask_threshold": mask_thr,
+                        "max_results": max_results,
+                    }
+                    if trace_full_writer:
+                        trace_full_writer(
+                            {
+                                "type": "prepass_tool_call",
+                                "tool": "sam3_text",
+                                "args": sam3_args,
+                                "ts": time.time(),
+                            }
+                        )
+                    try:
+                        sam3_result = _agent_tool_sam3_text(
+                            image_token=sam3_args["image_token"],
+                            prompt=sam3_args["prompt"],
+                            label=sam3_args["label"],
+                            score_thr=sam3_args["score_thr"],
+                            mask_threshold=sam3_args["mask_threshold"],
+                            max_results=sam3_args["max_results"],
+                            register=False,
+                        )
+                        if trace_full_writer:
+                            trace_full_writer(
+                                {
+                                    "type": "prepass_tool_result",
+                                    "tool": "sam3_text",
+                                    "result": sam3_result,
+                                    "ts": time.time(),
+                                }
+                            )
+                        summary = f"prepass_sam3_text:{label} prompt={prompt}"
+                        add_tool_result("sam3_text", sam3_result, summary)
+                    except Exception as exc:  # noqa: BLE001
+                        prepass_warnings.append(f"prepass_sam3_text_failed:{label}:{exc}")
+
+    if "similarity" in mode and prepass_detections:
+        per_class = int(payload.prepass_similarity_per_class or 2)
+        if payload.prepass_similarity_score is not None:
+            score_thr = float(payload.prepass_similarity_score)
+        elif _AGENT_ACTIVE_SAM3_SCORE_THR is not None:
+            score_thr = float(_AGENT_ACTIVE_SAM3_SCORE_THR)
+        else:
+            score_thr = 0.2
+        by_label: Dict[str, List[Dict[str, Any]]] = {}
+        for det in prepass_detections:
+            label = str(det.get("label") or det.get("class_name") or "unknown")
+            by_label.setdefault(label, []).append(det)
+        any_similarity = False
+        for label, dets in by_label.items():
+            dets.sort(key=lambda d: float(d.get("score") or 0.0), reverse=True)
+            exemplar_boxes: List[Dict[str, Any]] = []
+            for det in dets[:per_class]:
+                if float(det.get("score") or 0.0) < score_thr:
+                    continue
+                bbox_2d = det.get("bbox_2d")
+                if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) >= 4:
+                    exemplar_boxes.append({"bbox_2d": list(bbox_2d), "bbox_space": "full"})
+            if not exemplar_boxes:
+                continue
+            any_similarity = True
+            try:
+                sim_args = {
+                    "image_token": image_token,
+                    "exemplar_boxes": exemplar_boxes,
+                    "label": label,
+                    "bbox_labels": [True for _ in exemplar_boxes],
+                    "score_thr": payload.prepass_similarity_score,
+                }
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_tool_call",
+                            "tool": "sam3_similarity",
+                            "args": sim_args,
+                            "ts": time.time(),
+                        }
+                    )
+                sim_result = _agent_tool_sam3_similarity(
+                    image_token=sim_args["image_token"],
+                    exemplar_boxes=sim_args["exemplar_boxes"],
+                    label=sim_args["label"],
+                    bbox_labels=sim_args["bbox_labels"],
+                    score_thr=sim_args["score_thr"],
+                    register=False,
+                )
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_tool_result",
+                            "tool": "sam3_similarity",
+                            "result": sim_result,
+                            "ts": time.time(),
+                        }
+                    )
+                add_tool_result("sam3_similarity", sim_result, f"prepass_sam3_similarity:{label}")
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_sam3_similarity_failed:{label}:{exc}")
+        if not any_similarity:
+            prepass_warnings.append("prepass_similarity_no_exemplars")
+
+    if "inspect" in mode and payload.prepass_inspect_quadrants is not False:
+        windows = _agent_quadrant_windows_qwen(0.1)
+        for window in windows:
+            inspect_args = {
+                "image_token": image_token,
+                "window_bbox_2d": window.get("bbox_2d"),
+                "labelmap": labelmap,
+                "labelmap_glossary": glossary,
+                "max_objects": payload.prepass_inspect_topk,
+            }
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_tool_call",
+                        "tool": "look_and_inspect",
+                        "args": inspect_args,
+                        "ts": time.time(),
+                    }
+                )
+            try:
+                inspect_result = _agent_tool_look_and_inspect(
+                    image_token=inspect_args["image_token"],
+                    window_bbox_2d=inspect_args["window_bbox_2d"],
+                    labelmap=inspect_args["labelmap"],
+                    labelmap_glossary=inspect_args["labelmap_glossary"],
+                    max_objects=inspect_args["max_objects"],
+                    register=False,
+                    include_caption=False,
+                )
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_tool_result",
+                            "tool": "look_and_inspect",
+                            "result": inspect_result,
+                            "ts": time.time(),
+                        }
+                    )
+                add_tool_result("look_and_inspect", inspect_result, f"prepass_inspect:{window.get('name')}")
+                prepass_has_inspect = True
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_inspect_failed:{window.get('name')}:{exc}")
+                qwen_failed = True
+
+    if "qwen" in mode and labelmap:
+        try:
+            max_results = int(payload.prepass_inspect_topk or 12)
+            if max_results > 30:
+                max_results = 30
+            qwen_args = {
+                "image_token": image_token,
+                "items": labelmap,
+                "prompt_type": "bbox",
+                "max_results": max_results,
+                "max_new_tokens": 512,
+                "extra_context": glossary,
+            }
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_tool_call",
+                        "tool": "qwen_infer",
+                        "args": qwen_args,
+                        "ts": time.time(),
+                    }
+                )
+            qwen_result = _agent_tool_qwen_infer(
+                image_token=qwen_args["image_token"],
+                items=qwen_args["items"],
+                prompt_type=qwen_args["prompt_type"],
+                max_results=qwen_args["max_results"],
+                max_new_tokens=qwen_args["max_new_tokens"],
+                extra_context=qwen_args["extra_context"],
+                register=False,
+            )
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_tool_result",
+                        "tool": "qwen_infer",
+                        "result": qwen_result,
+                        "ts": time.time(),
+                    }
+                )
+            add_tool_result("qwen_infer", qwen_result, "prepass_qwen_infer")
+        except Exception as exc:  # noqa: BLE001
+            prepass_warnings.append(f"prepass_qwen_infer_failed:{exc}")
+            qwen_failed = True
+
+    if payload.prepass_caption:
+        det_hint_sources = {"yolo", "rfdetr"}
+        det_hint_items = [det for det in prepass_detections if _agent_detection_has_source(det, det_hint_sources)]
+        det_hint_items.sort(key=lambda d: float(d.get("score") or 0.0), reverse=True)
+        det_hint_summary = _agent_label_counts_summary(det_hint_items, limit=10)
+        hint_limit = min(len(det_hint_items), 120)
+        caption_hints: List[QwenCaptionHint] = []
+        for det in det_hint_items[:hint_limit]:
+            label = str(det.get("label") or det.get("class_name") or "").strip()
+            bbox = det.get("bbox_xyxy_px") or None
+            if not bbox and det.get("bbox_2d"):
+                bbox = _qwen_bbox_to_xyxy(
+                    pil_img.width,
+                    pil_img.height,
+                    det.get("bbox_2d"),
+                )
+            if not label or not bbox or len(bbox) != 4:
+                continue
+            caption_hints.append(
+                QwenCaptionHint(
+                    label=label,
+                    bbox=[float(v) for v in bbox],
+                    confidence=det.get("score"),
+                )
+            )
+        prepass_prompt = (
+            "Describe the image region in 1-2 sentences. "
+            "Use detector hints as suggestions, but also mention other visible objects. "
+            "Do not mention labels, hints, or coordinates."
+        )
+        if det_hint_summary and det_hint_summary != "none":
+            prepass_prompt = f"{prepass_prompt} Detector hints: {det_hint_summary}."
+        caption_profile = (payload.prepass_caption_profile or "light").strip().lower()
+        if caption_profile not in {"light", "deep"}:
+            caption_profile = "light"
+
+        caption_text = ""
+        windowed_captions: List[Tuple[int, int, int, str]] = []
+        if caption_profile == "light":
+            caption_base_model_id = (
+                model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+            )
+            caption_model_id = (payload.prepass_caption_model_id or "").strip() or None
+            caption_variant = payload.prepass_caption_variant or "Instruct"
+            if not caption_model_id:
+                caption_model_id = _resolve_qwen_variant_model_id(caption_base_model_id, caption_variant)
+            caption_max_tokens = int(payload.prepass_caption_max_tokens or 128)
+            caption_max_tokens = max(32, min(256, caption_max_tokens))
+            system_prompt = (
+                "You are a concise captioning assistant. Respond in English with exactly one sentence."
+            )
+            decode_override = {"do_sample": False}
+            try:
+                runtime = (
+                    _ensure_qwen_ready_for_caption(caption_model_id)
+                    if caption_model_id
+                    else _ensure_qwen_ready()
+                )
+                full_prompt = (
+                    "Describe the full image in 1 short sentence. "
+                    "Use detector hints as suggestions, but mention other visible objects. "
+                    "Do not mention labels, hints, or coordinates."
+                )
+                if det_hint_summary and det_hint_summary != "none":
+                    full_prompt = f"{full_prompt} Detector hints: {det_hint_summary}."
+                caption_raw, _, _ = _run_qwen_inference(
+                    full_prompt,
+                    pil_img,
+                    max_new_tokens=caption_max_tokens,
+                    system_prompt_override=system_prompt,
+                    runtime_override=runtime,
+                    decode_override=decode_override,
+                )
+                caption_text, _ = _extract_caption_from_text(caption_raw, marker=None)
+                caption_text = _sanitize_qwen_caption(caption_text)
+                window_size = _resolve_qwen_window_size(None, pil_img.width, pil_img.height)
+                overlap = _resolve_qwen_window_overlap(None)
+                x_positions = _window_positions(pil_img.width, window_size, overlap)
+                y_positions = _window_positions(pil_img.height, window_size, overlap)
+                window_prompt = (
+                    "Describe this region in 1 short sentence. "
+                    "Focus only on this region. "
+                    "Do not mention labels, hints, or coordinates."
+                )
+                for y0 in y_positions:
+                    for x0 in x_positions:
+                        window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
+                        window_raw, _, _ = _run_qwen_inference(
+                            window_prompt,
+                            window_img,
+                            max_new_tokens=caption_max_tokens,
+                            system_prompt_override=system_prompt,
+                            runtime_override=runtime,
+                            decode_override=decode_override,
+                        )
+                        window_caption, _ = _extract_caption_from_text(window_raw, marker=None)
+                        window_caption = _sanitize_qwen_caption(window_caption)
+                        if window_caption:
+                            windowed_captions.append((x0, y0, window_size, window_caption))
+                            cell = None
+                            if grid_for_log:
+                                bbox_2d = _xyxy_to_qwen_bbox(
+                                    img_w,
+                                    img_h,
+                                    float(x0),
+                                    float(y0),
+                                    float(x0 + window_size),
+                                    float(y0 + window_size),
+                                )
+                                cell = _agent_grid_cell_for_window_bbox(grid_for_log, bbox_2d)
+                            cell_text = f" {cell}" if cell else ""
+                            _agent_readable_write(
+                                f"prepass caption window{cell_text} "
+                                f"[{x0},{y0},{x0 + window_size},{y0 + window_size}]: {window_caption}"
+                            )
+                            if trace_writer:
+                                trace_writer(
+                                    {
+                                        "type": "prepass_caption_window",
+                                        "window": [int(x0), int(y0), int(window_size)],
+                                        "grid_cell": cell,
+                                        "caption": window_caption,
+                                        "ts": time.time(),
+                                    }
+                                )
+                            if trace_full_writer:
+                                trace_full_writer(
+                                    {
+                                        "type": "prepass_caption_window",
+                                        "window": [int(x0), int(y0), int(window_size)],
+                                        "grid_cell": cell,
+                                        "caption": window_caption,
+                                        "ts": time.time(),
+                                    }
+                                )
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_caption_failed:light:{exc}")
+                qwen_failed = True
+                caption_text = ""
+                windowed_captions = []
+        if caption_profile != "light":
+            caption_variant = payload.prepass_caption_variant or payload.model_variant or "auto"
+            caption_model_id = (payload.prepass_caption_model_id or model_id_override or "").strip() or None
+            caption_max_tokens = int(payload.prepass_caption_max_tokens or 512)
+            caption_payload = QwenCaptionRequest(
+                image_token=image_token,
+                user_prompt=prepass_prompt,
+                label_hints=caption_hints or None,
+                image_width=pil_img.width,
+                image_height=pil_img.height,
+                include_counts=False,
+                include_coords=True,
+                max_boxes=min(len(caption_hints), 120),
+                max_new_tokens=caption_max_tokens,
+                model_variant=caption_variant,
+                model_id=caption_model_id,
+                final_answer_only=True,
+                two_stage_refine=True,
+                caption_mode="windowed",
+                caption_all_windows=True,
+                restrict_to_labels=False,
+                fast_mode=True,
+                multi_model_cache=True,
+            )
+            caption_base_model_id = (
+                caption_model_id
+                or model_id_override
+                or (active_qwen_metadata or {}).get("model_id")
+                or QWEN_MODEL_NAME
+            )
+            caption_max_tokens = int(caption_payload.max_new_tokens or 512)
+
+            def run_caption_attempt(request: QwenCaptionRequest) -> Tuple[str, List[Tuple[int, int, int, str]]]:
+                attempt_windows: List[Tuple[int, int, int, str]] = []
+
+                def _window_hook(x0: int, y0: int, size: int, caption: str) -> None:
+                    attempt_windows.append((x0, y0, size, caption))
+                    if _AGENT_TRACE_READABLE_WRITER is None or not caption:
+                        return
+                    cell = None
+                    if grid_for_log:
+                        bbox_2d = _xyxy_to_qwen_bbox(
+                            img_w,
+                            img_h,
+                            float(x0),
+                            float(y0),
+                            float(x0 + size),
+                            float(y0 + size),
+                        )
+                        cell = _agent_grid_cell_for_window_bbox(grid_for_log, bbox_2d)
+                    cell_text = f" {cell}" if cell else ""
+                    _agent_readable_write(
+                        f"prepass caption window{cell_text} "
+                        f"[{x0},{y0},{x0 + size},{y0 + size}]: {caption}"
+                    )
+                    if trace_writer:
+                        trace_writer(
+                            {
+                                "type": "prepass_caption_window",
+                                "window": [int(x0), int(y0), int(size)],
+                                "grid_cell": cell,
+                                "caption": caption,
+                                "ts": time.time(),
+                            }
+                        )
+                    if trace_full_writer:
+                        trace_full_writer(
+                            {
+                                "type": "prepass_caption_window",
+                                "window": [int(x0), int(y0), int(size)],
+                                "grid_cell": cell,
+                                "caption": caption,
+                                "ts": time.time(),
+                            }
+                        )
+
+                token = _CAPTION_WINDOW_HOOK.set(_window_hook)
+                try:
+                    if trace_full_writer:
+                        trace_full_writer(
+                            {
+                                "type": "prepass_caption_call",
+                                "payload": {
+                                    "model_id": request.model_id,
+                                    "variant": request.model_variant,
+                                    "caption_mode": request.caption_mode,
+                                    "caption_all_windows": request.caption_all_windows,
+                                    "restrict_to_labels": request.restrict_to_labels,
+                                    "max_new_tokens": request.max_new_tokens,
+                                    "hint_count": len(request.label_hints or []),
+                                },
+                                "ts": time.time(),
+                            }
+                        )
+                    response = qwen_caption(request)
+                    return response.caption or "", attempt_windows
+                finally:
+                    _CAPTION_WINDOW_HOOK.reset(token)
+
+            def caption_is_bad(text: str) -> bool:
+                return (
+                    not text
+                    or _caption_is_degenerate(text)
+                    or _caption_needs_completion(text)
+                    or _caption_has_meta(text)
+                )
+
+            try:
+                caption_text, windowed_captions = run_caption_attempt(caption_payload)
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_caption_failed:primary:{exc}")
+                qwen_failed = True
+                caption_text = ""
+                windowed_captions = []
+
+            if caption_is_bad(caption_text):
+                fallback_payload = caption_payload.copy(
+                    update={
+                        "model_variant": "Instruct",
+                        "use_sampling": False,
+                        "two_stage_refine": True,
+                    }
+                )
+                try:
+                    caption_text, windowed_captions = run_caption_attempt(fallback_payload)
+                except Exception as exc:  # noqa: BLE001
+                    prepass_warnings.append(f"prepass_caption_failed:fallback:{exc}")
+                    qwen_failed = True
+
+            if caption_is_bad(caption_text):
+                fallback_prompt = (
+                    "Write a concise, concrete caption (1-2 sentences) describing the visible scene. "
+                    "Mention the main objects and layout. Do not mention labels or coordinates."
+                )
+                fallback_system = (
+                    "You are a concise captioning assistant. Use the image as truth. "
+                    "Respond in English only. Return only the caption."
+                )
+                try:
+                    fallback_raw, _, _ = _run_qwen_inference(
+                        fallback_prompt,
+                        pil_img,
+                        max_new_tokens=caption_max_tokens,
+                        system_prompt_override=fallback_system,
+                        model_id_override=_resolve_qwen_variant_model_id(caption_base_model_id, "Instruct"),
+                        decode_override={"do_sample": False},
+                    )
+                    caption_text, _ = _extract_caption_from_text(fallback_raw, marker=None)
+                    caption_text = _sanitize_qwen_caption(caption_text)
+                except Exception as exc:  # noqa: BLE001
+                    prepass_warnings.append(f"prepass_caption_failed:direct:{exc}")
+                    qwen_failed = True
+
+            if caption_is_bad(caption_text):
+                caption_text = _run_qwen_caption_cleanup(
+                    caption_text or "Describe the image.",
+                    pil_img,
+                    caption_max_tokens,
+                    caption_base_model_id,
+                    use_caption_cache=True,
+                    model_id_override=_resolve_qwen_variant_model_id(caption_base_model_id, "Instruct"),
+                    runtime_override=None,
+                    allowed_labels=None,
+                    strict=True,
+                    minimal_edit=False,
+                )
+
+        if _AGENT_TRACE_READABLE_WRITER is not None and caption_text:
+            _agent_readable_write(f"prepass caption summary: {caption_text}")
+
+        if windowed_captions:
+            for x0, y0, size, caption in windowed_captions:
+                bbox_2d = _xyxy_to_qwen_bbox(
+                    pil_img.width,
+                    pil_img.height,
+                    float(x0),
+                    float(y0),
+                    float(x0 + size),
+                    float(y0 + size),
+                )
+                x_center = x0 + size / 2.0
+                y_center = y0 + size / 2.0
+                horiz = "left" if x_center < pil_img.width / 3.0 else "right" if x_center > pil_img.width * 2 / 3.0 else "center"
+                vert = "top" if y_center < pil_img.height / 3.0 else "bottom" if y_center > pil_img.height * 2 / 3.0 else "middle"
+                name = f"{vert}_{horiz}"
+                entry = {
+                    "window": name,
+                    "bbox_2d": list(bbox_2d),
+                    "caption": caption,
+                }
+                caption_entries.append(entry)
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_caption_result",
+                            "window": {"name": name, "bbox_2d": list(bbox_2d)},
+                            "caption": caption,
+                            "ts": time.time(),
+                        }
+                    )
+                if _AGENT_TRACE_READABLE_WRITER is not None:
+                    coords = _agent_readable_format_bbox(bbox_2d)
+                    _agent_readable_write(f"prepass caption {name} {coords}: {caption}")
+
+        caption_lines: List[str] = []
+        if caption_text:
+            caption_lines.append(f"Refined caption (Qwen VLM): {caption_text}")
+        if caption_entries:
+            caption_lines.append("Windowed captions (Qwen VLM). Use as hints for hidden objects:")
+            for entry in caption_entries:
+                coords = _agent_readable_format_bbox(entry.get("bbox_2d"))
+                name = entry.get("window") or "window"
+                caption_lines.append(f"- {name} {coords}: {entry.get('caption')}")
+        caption_summary = "\n".join(caption_lines) if caption_lines else "none"
+        prepass_messages.append(
+            QwenAgentMessage(
+                role="user",
+                content=[QwenAgentContentItem(text=caption_summary)],
+            )
+        )
+        step_id += 1
+        prepass_trace.append(
+            AgentTraceEvent(
+                step_id=step_id,
+                phase="intent",
+                summary="prepass_caption",
+                windows=caption_entries,
+                timestamp=time.time(),
+            )
+        )
+        if trace_writer:
+            trace_writer({"type": "prepass_caption", "windows": caption_entries, "ts": time.time()})
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_caption",
+                    "caption": caption_text,
+                    "windows": caption_entries,
+                    "ts": time.time(),
+                }
+            )
+
+    if sam3_text_prompts:
+        summary_parts = []
+        for label in sorted(sam3_text_prompts.keys()):
+            prompts = [p for p in sam3_text_prompts[label] if str(p).strip()]
+            unique = []
+            seen = set()
+            for prompt in prompts:
+                key = str(prompt).strip().lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(str(prompt).strip())
+            if unique:
+                summary_parts.append(f"{label}: {', '.join(unique[:8])}")
+        if summary_parts:
+            sam3_text_summary = "; ".join(summary_parts)
+            prepass_messages.append(
+                QwenAgentMessage(
+                    role="user",
+                    content=[
+                        QwenAgentContentItem(
+                            text=(
+                                "Prepass sam3_text prompts used (label -> prompts). "
+                                "Use these as hints; you may add new synonyms:\n"
+                                f"{sam3_text_summary}"
+                            )
+                        )
+                    ],
+                )
+            )
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_sam3_text_summary",
+                        "summary": sam3_text_summary,
+                        "ts": time.time(),
+                    }
+                )
+            if _AGENT_TRACE_READABLE_WRITER is not None:
+                _agent_readable_write(f"prepass sam3_text prompts: {sam3_text_summary}")
+
+    if prepass_detections:
+        raw_counts = _agent_source_counts(prepass_detections)
+        merged, removed = _agent_merge_prepass_detections(prepass_detections, iou_thr=0.85)
+        merged_counts = _agent_source_counts(merged)
+        prepass_detections = merged
+        prepass_source_summary = (
+            f"raw_sources({ _agent_format_source_counts(raw_counts) }); "
+            f"dedup_iou>=0.85 removed={removed} kept={len(merged)}; "
+            f"merged_sources({ _agent_format_source_counts(merged_counts) })"
+        )
+        if _AGENT_TRACE_READABLE_WRITER is not None:
+            _agent_readable_write(f"prepass dedup: {prepass_source_summary}")
+        prepass_messages.append(
+            QwenAgentMessage(
+                role="user",
+                content=[
+                    QwenAgentContentItem(
+                        text=(
+                            "Prepass detection sources: "
+                            f"{prepass_source_summary}. "
+                            "Caption hints use detector sources only (yolo/rfdetr); "
+                            "SAM3 detections are supplemental and may overlap."
+                        )
+                    )
+                ],
+            )
+        )
+
+    if prepass_records and not as_tool_messages:
+        prepass_messages.append(
+            QwenAgentMessage(
+                role="user",
+                content=[
+                    QwenAgentContentItem(
+                        text=(
+                            "Prepass tool results are available via list_candidates and tool calls; "
+                            "they are not embedded here to keep prompts compact."
+                        )
+                    )
+                ],
+            )
+        )
+    if qwen_failed:
+        try:
+            _unload_qwen_runtime()
+        except Exception:
+            pass
+    return (
+        prepass_messages,
+        prepass_detections,
+        prepass_warnings,
+        prepass_trace,
+        prepass_has_detector,
+        prepass_has_inspect,
+        caption_summary,
+        sam3_text_summary,
+        prepass_source_summary,
+        caption_text,
+        caption_entries,
+    )
+
+
 def _run_agentic_annotation_qwen_agent(
     payload: QwenAgenticRequest,
     *,
@@ -5986,7 +12010,159 @@ def _run_agentic_annotation_qwen_agent(
         elif LocalQwenVLChatModel is None:
             detail = f"{detail}:llm_missing"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    global QWEN_CAPTION_CACHE_LIMIT
+    if int(QWEN_CAPTION_CACHE_LIMIT or 0) < 1:
+        QWEN_CAPTION_CACHE_LIMIT = 1
     pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, None)
+    trace_path: Optional[str] = None
+    full_trace_path: Optional[str] = None
+    readable_trace_path: Optional[str] = None
+    latest_readable_path: Optional[str] = None
+    trace_file = QWEN_AGENTIC_TRACE_ROOT / f"agentic_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
+    full_trace_file = QWEN_AGENTIC_FULL_TRACE_ROOT / f"agentic_full_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
+    readable_trace_file = QWEN_AGENTIC_READABLE_TRACE_ROOT / f"agentic_readable_{int(time.time())}_{uuid.uuid4().hex[:8]}.log"
+    try:
+        trace_file.parent.mkdir(parents=True, exist_ok=True)
+        trace_path = str(trace_file)
+    except Exception:
+        trace_path = None
+    try:
+        full_trace_file.parent.mkdir(parents=True, exist_ok=True)
+        full_trace_path = str(full_trace_file)
+    except Exception:
+        full_trace_path = None
+    try:
+        readable_trace_file.parent.mkdir(parents=True, exist_ok=True)
+        readable_trace_path = str(readable_trace_file)
+    except Exception:
+        readable_trace_path = None
+    latest_full_path: Optional[str] = None
+    try:
+        latest_full_file = QWEN_AGENTIC_FULL_TRACE_LATEST
+        latest_full_file.parent.mkdir(parents=True, exist_ok=True)
+        if not latest_full_file.exists():
+            latest_full_file.write_text("", encoding="utf-8")
+        latest_full_path = str(latest_full_file)
+    except Exception:
+        latest_full_path = None
+    try:
+        latest_readable_file = QWEN_AGENTIC_READABLE_TRACE_LATEST
+        latest_readable_file.parent.mkdir(parents=True, exist_ok=True)
+        if not latest_readable_file.exists():
+            latest_readable_file.write_text("", encoding="utf-8")
+        latest_readable_path = str(latest_readable_file)
+    except Exception:
+        latest_readable_path = None
+
+    def _trace_write(record: Dict[str, Any]) -> None:
+        if not trace_path:
+            return
+        record["ts"] = record.get("ts") or time.time()
+        try:
+            with open(trace_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
+    def _trace_write_full(record: Dict[str, Any]) -> None:
+        if not full_trace_path and not latest_full_path:
+            return
+        record["ts"] = record.get("ts") or time.time()
+        try:
+            payload = _agent_trace_full_jsonable(record)
+        except Exception:
+            payload = {"error": "trace_encode_failed", "record": str(record)}
+        if full_trace_path:
+            try:
+                with open(full_trace_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        if latest_full_path and latest_full_path != full_trace_path:
+            try:
+                with open(latest_full_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+    def _trace_write_readable(line: str) -> None:
+        if not line or (not readable_trace_path and not latest_readable_path):
+            return
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        text = f"{stamp} {line}\n"
+        if readable_trace_path:
+            try:
+                with open(readable_trace_path, "a", encoding="utf-8") as handle:
+                    handle.write(text)
+            except Exception:
+                pass
+        if latest_readable_path and latest_readable_path != readable_trace_path:
+            try:
+                with open(latest_readable_path, "a", encoding="utf-8") as handle:
+                    handle.write(text)
+            except Exception:
+                pass
+        if AGENTIC_READABLE_TO_CONSOLE:
+            logging.getLogger("agentic.readable").info(line)
+    global _AGENT_ACTIVE_IMAGE_TOKEN, _AGENT_ACTIVE_IMAGE_BASE64, _AGENT_ACTIVE_DATASET_ID
+    global _AGENT_ACTIVE_LABELMAP, _AGENT_ACTIVE_GLOSSARY, _AGENT_ACTIVE_INSPECTED_WINDOWS
+    global _AGENT_ACTIVE_CLASSIFIER_ID, _AGENT_ACTIVE_TIGHTEN_FP
+    global _AGENT_ACTIVE_DETECTOR_CONF, _AGENT_ACTIVE_SAM3_SCORE_THR, _AGENT_ACTIVE_SAM3_MASK_THR
+    global _AGENT_ACTIVE_CLASSIFIER_MIN_PROB, _AGENT_ACTIVE_CLASSIFIER_MARGIN
+    global _AGENT_ACTIVE_CLASSIFIER_BG_MARGIN, _AGENT_ACTIVE_SCORELESS_IOU
+    global _AGENT_ACTIVE_DETECTIONS, _AGENT_ACTIVE_CLUSTERS, _AGENT_ACTIVE_GRID
+    global _AGENT_ACTIVE_GRID_IMAGE, _AGENT_ACTIVE_OVERLAY_IMAGE
+    global _AGENT_LAST_SUBMIT_DETECTIONS, _AGENT_PENDING_CLASSIFY_IDS
+    global _AGENT_TRACE_FULL_WRITER, _AGENT_TRACE_READABLE_WRITER, _AGENT_PREPASS_COMPLETE
+    def _agent_unit_float(value: Optional[float], fallback: Optional[float]) -> Optional[float]:
+        if value is None:
+            return fallback
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return fallback
+
+    tighten_fp = bool(payload.tighten_fp if payload.tighten_fp is not None else True)
+    detector_conf = _agent_unit_float(
+        payload.detector_conf,
+        AGENTIC_TIGHT_DEFAULT_DETECTOR_CONF if tighten_fp else None,
+    )
+    sam3_score_thr = _agent_unit_float(
+        payload.sam3_score_thr,
+        AGENTIC_TIGHT_DEFAULT_SAM3_SCORE if tighten_fp else None,
+    )
+    sam3_mask_thr = _agent_unit_float(
+        payload.sam3_mask_threshold,
+        AGENTIC_TIGHT_DEFAULT_SAM3_MASK if tighten_fp else None,
+    )
+    classifier_min_prob = _agent_unit_float(
+        payload.classifier_min_prob,
+        AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB if tighten_fp else None,
+    )
+    classifier_margin = _agent_unit_float(
+        payload.classifier_margin,
+        AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MARGIN if tighten_fp else None,
+    )
+    classifier_bg_margin = _agent_unit_float(
+        payload.classifier_bg_margin,
+        AGENTIC_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN if tighten_fp else None,
+    )
+    scoreless_iou = _agent_unit_float(
+        payload.scoreless_iou,
+        AGENTIC_TIGHT_DEFAULT_SCORELESS_IOU if tighten_fp else 0.0,
+    )
+
+    _AGENT_ACTIVE_IMAGE_TOKEN = token
+    _AGENT_ACTIVE_IMAGE_BASE64 = payload.image_base64
+    _AGENT_ACTIVE_DATASET_ID = payload.dataset_id
+    _AGENT_TRACE_FULL_WRITER = _trace_write_full if full_trace_path else None
+    _AGENT_TRACE_READABLE_WRITER = _trace_write_readable if readable_trace_path or latest_readable_path else None
+    _AGENT_ACTIVE_TIGHTEN_FP = tighten_fp
+    _AGENT_ACTIVE_DETECTOR_CONF = detector_conf if tighten_fp else None
+    _AGENT_ACTIVE_SAM3_SCORE_THR = sam3_score_thr if tighten_fp else None
+    _AGENT_ACTIVE_SAM3_MASK_THR = sam3_mask_thr if tighten_fp else None
+    _AGENT_ACTIVE_CLASSIFIER_MIN_PROB = classifier_min_prob if tighten_fp else None
+    _AGENT_ACTIVE_CLASSIFIER_MARGIN = classifier_margin if tighten_fp else None
+    _AGENT_ACTIVE_CLASSIFIER_BG_MARGIN = classifier_bg_margin if tighten_fp else None
+    _AGENT_ACTIVE_SCORELESS_IOU = scoreless_iou if tighten_fp else None
     img_w, img_h = pil_img.size
     labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
     labelmap = labelmap or []
@@ -5995,23 +12171,87 @@ def _run_agentic_annotation_qwen_agent(
         warnings.append("labelmap_missing")
     if payload.labelmap_glossary is not None:
         glossary = _normalize_labelmap_glossary(payload.labelmap_glossary)
+    _AGENT_ACTIVE_LABELMAP = labelmap
+    _AGENT_ACTIVE_GLOSSARY = glossary
+    _AGENT_ACTIVE_INSPECTED_WINDOWS = set()
+    _agent_reset_registries()
+    classifier_id_for_run = payload.classifier_id
+    if not classifier_id_for_run and not isinstance(active_classifier_head, dict):
+        classifier_id_for_run = _agent_default_classifier_for_dataset(payload.dataset_id)
+    _AGENT_ACTIVE_CLASSIFIER_ID = classifier_id_for_run
     head: Optional[Dict[str, Any]] = None
-    if payload.classifier_id:
-        classifier_path = _resolve_agent_clip_classifier_path(payload.classifier_id)
+    if classifier_id_for_run:
+        classifier_path = _resolve_agent_clip_classifier_path(classifier_id_for_run)
         if classifier_path is not None:
             head = _load_clip_head_from_classifier(classifier_path)
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
+    if isinstance(head, dict):
+        head = dict(head)
+        if _AGENT_ACTIVE_TIGHTEN_FP:
+            min_prob = float(head.get("min_prob") or 0.5)
+            margin = float(head.get("margin") or 0.0)
+            bg_margin = float(head.get("background_margin") or 0.0)
+            if _AGENT_ACTIVE_CLASSIFIER_MIN_PROB is not None:
+                min_prob = max(min_prob, _AGENT_ACTIVE_CLASSIFIER_MIN_PROB)
+            if _AGENT_ACTIVE_CLASSIFIER_MARGIN is not None:
+                margin = max(margin, _AGENT_ACTIVE_CLASSIFIER_MARGIN)
+            if _AGENT_ACTIVE_CLASSIFIER_BG_MARGIN is not None:
+                bg_margin = max(bg_margin, _AGENT_ACTIVE_CLASSIFIER_BG_MARGIN)
+            head["min_prob"] = min_prob
+            head["margin"] = margin
+            head["background_margin"] = bg_margin
+            _trace_write(
+                {
+                    "type": "precision_profile",
+                    "tighten_fp": True,
+                    "detector_conf": _AGENT_ACTIVE_DETECTOR_CONF,
+                    "sam3_score_thr": _AGENT_ACTIVE_SAM3_SCORE_THR,
+                    "sam3_mask_thr": _AGENT_ACTIVE_SAM3_MASK_THR,
+                    "classifier_min_prob": head["min_prob"],
+                    "classifier_margin": head["margin"],
+                    "classifier_bg_margin": head["background_margin"],
+                    "scoreless_iou": _AGENT_ACTIVE_SCORELESS_IOU,
+                }
+            )
+            _trace_write_full(
+                {
+                    "type": "precision_profile",
+                    "tighten_fp": True,
+                    "detector_conf": _AGENT_ACTIVE_DETECTOR_CONF,
+                    "sam3_score_thr": _AGENT_ACTIVE_SAM3_SCORE_THR,
+                    "sam3_mask_thr": _AGENT_ACTIVE_SAM3_MASK_THR,
+                    "classifier_min_prob": head["min_prob"],
+                    "classifier_margin": head["margin"],
+                    "classifier_bg_margin": head["background_margin"],
+                    "scoreless_iou": _AGENT_ACTIVE_SCORELESS_IOU,
+                }
+            )
+            _trace_write_readable(
+                "precision_profile: "
+                f"detector_conf={_AGENT_ACTIVE_DETECTOR_CONF or 0:.2f} "
+                f"sam3_score_thr={_AGENT_ACTIVE_SAM3_SCORE_THR or 0:.2f} "
+                f"sam3_mask_thr={_AGENT_ACTIVE_SAM3_MASK_THR or 0:.2f} "
+                f"classifier_min_prob={head['min_prob']:.2f} "
+                f"margin={head['margin']:.2f} "
+                f"bg_margin={head['background_margin']:.2f} "
+                f"scoreless_iou={(_AGENT_ACTIVE_SCORELESS_IOU or 0):.2f}"
+            )
     background = _agent_background_classes_from_head(head)
-    system_prompt = _agent_build_system_prompt(
-        labelmap=labelmap,
-        background=background,
-        glossary_text=glossary,
-        image_token=token,
-        detector_mode=payload.detector_mode or "yolo",
-        detector_id=payload.detector_id,
-        classifier_id=payload.classifier_id,
-        sam_variant=payload.sam_variant,
+    _trace_write({"type": "start", "payload": _agent_trace_sanitize_payload(payload, token)})
+    try:
+        _trace_write_full({"type": "start", "payload": payload.dict()})
+    except Exception:
+        _trace_write_full({"type": "start", "payload": str(payload)})
+    readable_model_id = payload.model_id or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    start_title = f"IMAGE START {payload.image_name or 'unknown'}"
+    _trace_write_readable(_agent_readable_banner(start_title, fill="="))
+    _trace_write_readable(
+        "start: "
+        f"dataset_id={payload.dataset_id or 'none'} "
+        f"image={payload.image_name or 'unknown'} "
+        f"model={readable_model_id} "
+        f"variant={payload.model_variant or 'auto'}"
     )
     base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
     desired_variant = (payload.model_variant or "auto").strip()
@@ -6021,194 +12261,956 @@ def _run_agentic_annotation_qwen_agent(
         model_id_override = _resolve_qwen_variant_model_id(base_model_id, desired_variant)
     else:
         model_id_override = base_model_id
-    user_prompt = _agent_build_user_prompt(payload.prompt_override)
-    max_new_tokens = max(int(payload.max_new_tokens or 0), 2000)
-    generate_cfg = {
-        "max_new_tokens": max_new_tokens,
-        "chat_template_kwargs": {"enable_thinking": desired_variant == "Thinking"},
-        "top_p": 0.8,
-        "top_k": 20,
-        "temperature": 0.7,
-        "presence_penalty": 1.5,
-        "fncall_prompt_type": "nous",
-    }
-    llm = LocalQwenVLChatModel(
-        cfg={
-            "model": model_id_override,
-            "model_id_override": model_id_override,
-            "generate_cfg": generate_cfg,
+    max_new_tokens = max(1, int(payload.max_new_tokens or 4096))
+    _trace_write_readable(_agent_readable_banner("PREPASS START", fill="-"))
+    (
+        prepass_messages,
+        prepass_detections,
+        prepass_warnings,
+        prepass_trace,
+        prepass_has_detector,
+        prepass_has_inspect,
+        prepass_caption_summary,
+        prepass_sam3_text_summary,
+        prepass_source_summary,
+        prepass_caption_text,
+        prepass_caption_entries,
+    ) = _agent_run_prepass(
+        payload,
+        pil_img=pil_img,
+        image_token=token,
+        labelmap=labelmap,
+        glossary=glossary,
+        as_tool_messages=False,
+        trace_writer=_trace_write,
+        trace_full_writer=_trace_write_full,
+        model_id_override=model_id_override,
+    )
+    _trace_write_readable(_agent_readable_banner("PREPASS END", fill="-"))
+    _AGENT_ACTIVE_OVERALL_CAPTION = prepass_caption_text
+    _AGENT_ACTIVE_WINDOWED_CAPTIONS = prepass_caption_entries
+    _trace_write(
+        {
+            "type": "prepass_summary",
+            "warnings": prepass_warnings,
+            "detections": len(prepass_detections),
+            "has_detector": prepass_has_detector,
+            "has_inspect": prepass_has_inspect,
+            "sam3_text_prompts": prepass_sam3_text_summary,
+            "source_summary": prepass_source_summary,
         }
     )
-    tools = build_local_agent_tools()
-    agent = QwenAgentAssistant(
-        llm=llm,
-        function_list=tools,
-        system_message=system_prompt,
+    _trace_write_full(
+        {
+            "type": "prepass_summary",
+            "warnings": prepass_warnings,
+            "detections": len(prepass_detections),
+            "has_detector": prepass_has_detector,
+            "has_inspect": prepass_has_inspect,
+            "sam3_text_prompts": prepass_sam3_text_summary,
+            "source_summary": prepass_source_summary,
+        }
     )
-    messages: List[QwenAgentMessage] = [
-        QwenAgentMessage(
-            role="user",
-            content=[
-                QwenAgentContentItem(image=pil_img),
-                QwenAgentContentItem(text=user_prompt),
-            ],
-        )
-    ]
-    if payload.prepass_inspect_quadrants is not False:
-        quadrants = _agent_quadrant_windows_qwen(0.1)
-        quadrant_text = json.dumps(quadrants, ensure_ascii=False)
-        messages.append(
-            QwenAgentMessage(
-                role="user",
-                content=[
-                    QwenAgentContentItem(
-                        text=(
-                            "Inspect these windows (bbox_2d in 0–1000 full-image coords). "
-                            "Call look_and_inspect for EACH window before final submission:\n"
-                            f"{quadrant_text}"
-                        )
-                    )
-                ],
-            )
-        )
+    if prepass_warnings:
+        warnings.extend(prepass_warnings)
+
+    grid_spec: Optional[Dict[str, Any]] = _agent_grid_spec(img_w, img_h)
+    _AGENT_ACTIVE_GRID = grid_spec
     detections: List[Dict[str, Any]] = []
-    trace: List[AgentTraceEvent] = []
-    tool_calls = 0
-    max_tool_calls = max(1, int(payload.max_tool_calls or 20))
-    max_steps = max(1, int(payload.max_steps or 12))
-    max_detections = max(1, int(payload.max_detections or 800))
-    iou_thr = float(payload.iou or 0.5)
-    cross_iou = float(payload.cross_iou) if payload.cross_iou is not None else None
-    trace_verbose = bool(payload.trace_verbose)
-    final_detections: Optional[List[Dict[str, Any]]] = None
-    step_id = 0
-    for ret_messages in agent.run(messages=messages):
-        if cancel_event is not None and cancel_event.is_set():
-            warnings.append("cancelled")
-            break
-        for msg in ret_messages:
-            step_id += 1
-            if step_id > max_steps:
-                warnings.append("max_steps_reached")
-                break
-            fn_call = getattr(msg, "function_call", None)
-            if fn_call is not None:
-                tool_calls += 1
-                trace.append(
-                    AgentTraceEvent(
-                        step_id=step_id,
-                        phase="tool_call",
-                        tool_name=fn_call.name,
-                        summary="agent_tool_call",
-                        tool_input=json.loads(fn_call.arguments) if trace_verbose else None,
-                        timestamp=time.time(),
-                    )
-                )
-                if trace_sink:
-                    trace_sink(trace[-1])
-                if tool_calls >= max_tool_calls:
-                    warnings.append("max_tool_calls_reached")
-                    break
-                continue
-            role = getattr(msg, "role", "")
-            if role == "function":
-                tool_name = getattr(msg, "name", None)
-                payload_text = _qwen_agent_message_text(msg)
-                tool_output: Dict[str, Any] = {}
-                if payload_text:
-                    try:
-                        tool_output = json.loads(payload_text)
-                    except Exception:
-                        tool_output = {"raw": payload_text}
-                trace.append(
-                    AgentTraceEvent(
-                        step_id=step_id,
-                        phase="tool_result",
-                        tool_name=tool_name,
-                        summary="agent_tool_result",
-                        tool_output=tool_output if trace_verbose else None,
-                        timestamp=time.time(),
-                    )
-                )
-                if trace_sink:
-                    trace_sink(trace[-1])
-                if tool_name == "submit_annotations":
-                    final = tool_output.get("detections") if isinstance(tool_output, dict) else None
-                    if isinstance(final, list):
-                        cleaned, rejected = _agent_sanitize_detection_items(
-                            final,
-                            img_w=img_w,
-                            img_h=img_h,
-                            labelmap=labelmap,
-                            background=background,
-                        )
-                        final_detections = _agent_merge_detections(
-                            cleaned,
-                            iou_thr=iou_thr,
-                            max_det=max_detections,
-                            cross_iou=cross_iou,
-                        )
-                    break
-                if tool_output.get("detections"):
-                    cleaned, rejected = _agent_sanitize_detection_items(
-                        tool_output.get("detections") or [],
-                        img_w=img_w,
-                        img_h=img_h,
-                        labelmap=labelmap,
-                        background=background,
-                    )
-                    detections.extend(cleaned)
-                    if detections:
-                        detections = _agent_merge_detections(
-                            detections,
-                            iou_thr=iou_thr,
-                            max_det=max_detections,
-                            cross_iou=cross_iou,
-                        )
-                continue
-            if role == "assistant":
-                model_text = _qwen_agent_message_text(msg)
-                if model_text:
-                    trace.append(
-                        AgentTraceEvent(
-                            step_id=step_id,
-                            phase="intent",
-                            summary="assistant_output",
-                            model_output=model_text,
-                            timestamp=time.time(),
-                        )
-                    )
-                    if trace_sink:
-                        trace_sink(trace[-1])
-        if final_detections is not None:
-            break
-        if tool_calls >= max_tool_calls:
-            break
-    if final_detections is None:
-        final_detections, qa_counts = _agent_finalize_detections(
-            detections,
+    if prepass_detections:
+        cleaned_prepass, rejected_prepass = _agent_sanitize_detection_items(
+            prepass_detections,
+            pil_img=pil_img,
+            classifier_head=None,
             img_w=img_w,
             img_h=img_h,
             labelmap=labelmap,
             background=background,
-            iou_thr=iou_thr,
-            cross_iou=cross_iou,
-            max_det=max_detections,
         )
-        trace.append(
+        if rejected_prepass:
+            warnings.append(f"prepass_rejected:{rejected_prepass}")
+        _agent_register_detections(
+            cleaned_prepass,
+            img_w=img_w,
+            img_h=img_h,
+            grid=grid_spec,
+            labelmap=labelmap,
+            background=background,
+            source_override=None,
+        )
+        detections = list(_AGENT_ACTIVE_CLUSTERS or [])
+    _agent_set_active_clusters(detections)
+    _AGENT_PREPASS_COMPLETE = True
+
+    overlay_image: Optional[Image.Image] = None
+    overlay_key_text = ""
+    overlay_radius: Optional[int] = None
+    grid_note = _agent_grid_prompt_text(grid_spec)
+    use_overlay = bool(payload.use_detection_overlay if payload.use_detection_overlay is not None else True)
+    if payload.overlay_dot_radius is not None:
+        try:
+            overlay_radius = max(1, int(payload.overlay_dot_radius))
+        except (TypeError, ValueError):
+            overlay_radius = None
+    grid_image = _agent_render_grid_overlay(pil_img, grid_spec) if grid_spec else pil_img
+    _AGENT_ACTIVE_GRID_IMAGE = grid_image
+    if use_overlay and labelmap:
+        label_colors = _agent_current_label_colors(labelmap)
+        label_prefixes = _agent_current_label_prefixes(labelmap)
+        overlay_image = _agent_render_detection_overlay(
+            grid_image,
+            detections,
+            label_colors,
+            dot_radius=overlay_radius,
+            label_prefixes=label_prefixes,
+        )
+        overlay_key_text = _agent_overlay_key_text(label_colors, label_prefixes)
+        _AGENT_ACTIVE_LABEL_COLORS = label_colors
+        _AGENT_ACTIVE_LABEL_PREFIXES = label_prefixes
+        _AGENT_ACTIVE_OVERLAY_DOT_RADIUS = overlay_radius
+        _trace_write(
+            {
+                "type": "overlay",
+                "enabled": True,
+                "detections": len(detections),
+                "dot_radius": overlay_radius,
+                "label_colors": label_colors,
+                "grid": grid_spec,
+            }
+        )
+        _trace_write_full(
+            {
+                "type": "overlay",
+                "enabled": True,
+                "detections": len(detections),
+                "dot_radius": overlay_radius,
+                "label_colors": label_colors,
+                "grid": grid_spec,
+            }
+        )
+        _trace_write_readable(
+            f"prepass overlay: detections={len(detections)} "
+            f"radius={overlay_radius if overlay_radius is not None else 'auto'}"
+        )
+    else:
+        overlay_image = grid_image
+        _trace_write(
+            {
+                "type": "overlay",
+                "enabled": True,
+                "detections": len(detections),
+                "dot_radius": overlay_radius,
+                "grid": grid_spec,
+            }
+        )
+        _trace_write_full(
+            {
+                "type": "overlay",
+                "enabled": True,
+                "detections": len(detections),
+                "dot_radius": overlay_radius,
+                "grid": grid_spec,
+            }
+        )
+
+    if labelmap:
+        _AGENT_ACTIVE_LABEL_COLORS = _agent_current_label_colors(labelmap)
+        _AGENT_ACTIVE_LABEL_PREFIXES = _agent_current_label_prefixes(labelmap)
+    _AGENT_ACTIVE_OVERLAY_DOT_RADIUS = overlay_radius
+
+    _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_image
+    overlay_enabled = overlay_image is not None
+    _AGENT_ACTIVE_GRID = grid_spec
+    grid_enabled = bool(_AGENT_ACTIVE_GRID)
+    trace: List[AgentTraceEvent] = list(prepass_trace)
+    if trace_sink:
+        for event in prepass_trace:
+            trace_sink(event)
+    if payload.prepass_only:
+        final_detections = list(_AGENT_ACTIVE_CLUSTERS or [])
+        if payload.prepass_finalize:
+            submit_result = _agent_tool_submit_annotations(
+                image_token=token,
+                dataset_id=payload.dataset_id,
+                classifier_id=payload.classifier_id,
+                include_all=True,
+                iou=payload.iou,
+                cross_iou=payload.cross_iou,
+                max_det=payload.max_detections,
+            )
+            if isinstance(submit_result, dict) and submit_result.get("detections") is not None:
+                final_detections = list(submit_result.get("detections") or [])
+                rejected = submit_result.get("rejected")
+                if rejected:
+                    warnings.append(f"prepass_finalize_rejected:{rejected}")
+        summary_lines = _agent_detection_summary_lines(
+            final_detections,
+            grid=grid_spec,
+            img_w=img_w,
+            img_h=img_h,
+            warnings=warnings,
+        )
+        _trace_write_readable(_agent_readable_banner("IMAGE END SUMMARY", fill="="))
+        for line in summary_lines:
+            _trace_write_readable(line)
+        _trace_write_readable(_agent_readable_banner("END IMAGE", fill="="))
+        _AGENT_TRACE_FULL_WRITER = None
+        _AGENT_TRACE_READABLE_WRITER = None
+        return QwenAgenticResponse(
+            detections=final_detections,
+            trace=trace,
+            warnings=warnings or None,
+            caption=None,
+            trace_path=trace_path,
+            trace_full_path=full_trace_path,
+        )
+    return _run_agentic_annotation_multiagent_controller(
+        payload,
+        pil_img=pil_img,
+        grid_spec=grid_spec,
+        trace=trace,
+        warnings=warnings,
+        trace_sink=trace_sink,
+        trace_write=_trace_write,
+        trace_write_full=_trace_write_full,
+        trace_write_readable=_trace_write_readable,
+        trace_path=trace_path,
+        full_trace_path=full_trace_path,
+        cancel_event=cancel_event,
+    )
+
+
+def _run_agentic_annotation_multiagent_controller(
+    payload: QwenAgenticRequest,
+    *,
+    pil_img: Image.Image,
+    grid_spec: Optional[Dict[str, Any]],
+    trace: List[AgentTraceEvent],
+    warnings: List[str],
+    trace_sink: Optional[Any],
+    trace_write: Callable[[Dict[str, Any]], None],
+    trace_write_full: Callable[[Dict[str, Any]], None],
+    trace_write_readable: Callable[[str], None],
+    trace_path: Optional[str],
+    full_trace_path: Optional[str],
+    cancel_event: Optional[threading.Event] = None,
+) -> QwenAgenticResponse:
+    global _AGENT_TILE_SUMMARIES
+    img_w, img_h = pil_img.size
+    trace_verbose = bool(payload.trace_verbose)
+    step_id = trace[-1].step_id if trace else 0
+    max_detections = max(1, int(payload.max_detections or 800))
+    iou_thr = float(payload.iou or 0.5)
+    cross_iou = float(payload.cross_iou) if payload.cross_iou is not None else None
+    tile_max_passes = max(1, int(payload.tile_max_passes or 2))
+    grid_cells = _agent_grid_cells(grid_spec)
+    base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    desired_variant = (payload.model_variant or "auto").strip()
+    if payload.model_id:
+        model_id_override = payload.model_id
+    elif desired_variant in {"Instruct", "Thinking"}:
+        model_id_override = _resolve_qwen_variant_model_id(base_model_id, desired_variant)
+    else:
+        model_id_override = base_model_id
+
+    tile_states: Dict[str, Dict[str, Any]] = {
+        cell: {
+            "passes": 0,
+            "error_counts": {},
+            "error_locked": False,
+            "errors_seen": [],
+            "suspected_misses": [],
+            "new_clusters": [],
+            "rejected_clusters": [],
+            "verified_clusters": [],
+            "unavailable_clusters": [],
+        }
+        for cell in grid_cells
+    }
+    tile_summaries_latest: Dict[str, Dict[str, Any]] = {}
+
+    def _append_trace(event: AgentTraceEvent) -> None:
+        trace.append(event)
+        if trace_sink:
+            trace_sink(event)
+
+    def _log_tool_call(tool_name: str, args: Optional[Dict[str, Any]]) -> None:
+        nonlocal step_id
+        step_id += 1
+        summary_text = "agent_tool_call"
+        if tool_name in {"log_observation", "log_status"} and isinstance(args, dict):
+            obs = _agent_clean_observation_text(args.get("text"), max_len=120)
+            if obs:
+                summary_text = f"observation: {obs}"
+        _append_trace(
             AgentTraceEvent(
-                step_id=step_id + 1,
-                phase="merge",
-                summary="final_merge",
-                counts=qa_counts,
+                step_id=step_id,
+                phase="tool_call",
+                tool_name=tool_name,
+                summary=summary_text,
+                tool_input=args if trace_verbose else None,
                 timestamp=time.time(),
             )
         )
+        trace_write(
+            {
+                "type": "tool_call",
+                "step_id": step_id,
+                "tool": tool_name,
+                "args": args if isinstance(args, dict) else None,
+            }
+        )
+        trace_write_full(
+            {
+                "type": "tool_call",
+                "step_id": step_id,
+                "tool": tool_name,
+                "args": args if isinstance(args, dict) else None,
+            }
+        )
+        trace_write_readable(
+            _agent_readable_line("tool_call", step_id=step_id, tool_name=tool_name, args=args)
+        )
+
+    def _log_tool_result(tool_name: str, result: Any) -> None:
+        nonlocal step_id
+        step_id += 1
+        summary_text = "agent_tool_result"
+        if tool_name in {"log_observation", "log_status"} and isinstance(result, dict):
+            obs = _agent_clean_observation_text(
+                result.get("observation") or result.get("status"),
+                max_len=120,
+            )
+            if obs:
+                summary_text = f"observation: {obs}"
+        _append_trace(
+            AgentTraceEvent(
+                step_id=step_id,
+                phase="tool_result",
+                tool_name=tool_name,
+                summary=summary_text,
+                tool_output=result if trace_verbose else None,
+                timestamp=time.time(),
+            )
+        )
+        trace_write(
+            {
+                "type": "tool_result",
+                "step_id": step_id,
+                "tool": tool_name,
+                "result": result,
+            }
+        )
+        trace_write_full(
+            {
+                "type": "tool_result",
+                "step_id": step_id,
+                "tool": tool_name,
+                "result": result,
+            }
+        )
+        trace_write_readable(
+            _agent_readable_line("tool_result", step_id=step_id, tool_name=tool_name, result=result)
+        )
+
+    def _normalize_label_list(labels: Any) -> List[str]:
+        if not isinstance(labels, (list, tuple)):
+            return []
+        aligned: List[str] = []
+        for item in labels:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            canonical = _agent_fuzzy_align_label(text, _AGENT_ACTIVE_LABELMAP or []) or text
+            if _AGENT_ACTIVE_LABELMAP and canonical not in _AGENT_ACTIVE_LABELMAP:
+                continue
+            if canonical not in aligned:
+                aligned.append(canonical)
+        return aligned
+
+    def _extract_cluster_ids(result: Any) -> Tuple[List[int], List[int]]:
+        if not isinstance(result, dict):
+            return [], []
+        new_ids = result.get("new_cluster_ids")
+        updated_ids = result.get("updated_cluster_ids")
+        if new_ids is None and isinstance(result.get("register_summary"), dict):
+            new_ids = result["register_summary"].get("new_cluster_ids")
+        if updated_ids is None and isinstance(result.get("register_summary"), dict):
+            updated_ids = result["register_summary"].get("updated_cluster_ids")
+        new_list = [int(cid) for cid in (new_ids or []) if cid is not None]
+        updated_list = [int(cid) for cid in (updated_ids or []) if cid is not None]
+        return new_list, updated_list
+
+    def _record_tool_errors(state: Dict[str, Any], tool_name: str, result: Any) -> None:
+        if not isinstance(result, dict) or "error" not in result:
+            return
+        err = result.get("error")
+        code = None
+        if isinstance(err, dict):
+            code = err.get("code")
+        elif isinstance(err, str):
+            code = err
+        if not code:
+            return
+        errors_seen = state.get("errors_seen")
+        if isinstance(errors_seen, list):
+            errors_seen.append(str(code))
+        counts = state.get("error_counts") or {}
+        counts[tool_name] = int(counts.get(tool_name, 0)) + 1
+        state["error_counts"] = counts
+        if counts[tool_name] >= 2:
+            state["error_locked"] = True
+
+    def _tool_error_info(result: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        if not isinstance(result, dict):
+            return None, None, None
+        err = result.get("error")
+        if isinstance(err, dict):
+            return (
+                str(err.get("code") or ""),
+                str(err.get("message") or ""),
+                str(err.get("fix_hint") or ""),
+            )
+        if isinstance(err, str):
+            return err, err, None
+        return None, None, None
+
+    def _fix_tool_args_for_error(
+        tool_name: str,
+        args: Dict[str, Any],
+        error_code: Optional[str],
+    ) -> Tuple[Dict[str, Any], bool]:
+        fixed = dict(args)
+        changed = False
+        if error_code == "missing_grid_cell":
+            if "grid_cell" not in fixed and _AGENT_ACTIVE_GRID:
+                cells = _agent_grid_cells(_AGENT_ACTIVE_GRID)
+                if cells:
+                    fixed["grid_cell"] = cells[0]
+                    changed = True
+        if tool_name == "sam3_text" and error_code in {"missing_label", "invalid_prompt"}:
+            label = str(fixed.get("label") or fixed.get("prompt") or "").strip()
+            if not label and _AGENT_ACTIVE_LABELMAP:
+                label = str(_AGENT_ACTIVE_LABELMAP[0]).strip()
+            if label:
+                label = _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) or label
+                fixed["label"] = label
+                if not fixed.get("prompt"):
+                    synonym_map = _agent_generate_sam3_synonyms(_AGENT_ACTIVE_LABELMAP or [], _AGENT_ACTIVE_GLOSSARY or "")
+                    prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=1)
+                    fixed["prompt"] = prompts[0] if prompts else label
+                changed = True
+        if tool_name == "sam3_similarity" and error_code in {"missing_label", "invalid_exemplar", "invalid_prompt"}:
+            label = str(fixed.get("label") or "").strip()
+            if not label and _AGENT_ACTIVE_LABELMAP:
+                label = str(_AGENT_ACTIVE_LABELMAP[0]).strip()
+            if label:
+                label = _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) or label
+                fixed["label"] = label
+                if not fixed.get("exemplar_cluster_ids") and not fixed.get("exemplar_handles"):
+                    exemplars = _similarity_exemplars(label)
+                    if exemplars:
+                        fixed["exemplar_handles"] = _agent_handles_from_cluster_ids(exemplars)
+                changed = True
+        if tool_name == "qwen_infer" and error_code in {"invalid_prompt", "missing_label"}:
+            if not fixed.get("items") and _AGENT_ACTIVE_LABELMAP:
+                fixed["items"] = list(_AGENT_ACTIVE_LABELMAP)
+                changed = True
+            if not fixed.get("extra_context") and _AGENT_ACTIVE_GLOSSARY:
+                fixed["extra_context"] = str(_AGENT_ACTIVE_GLOSSARY)
+                changed = True
+        return fixed, changed
+
+    def _build_llm_cfg(max_tokens: int) -> Dict[str, Any]:
+        cfg = {
+            "model": model_id_override,
+            "model_type": "local_qwen_vl",
+            "model_id_override": model_id_override,
+            "generate_cfg": {
+                "fncall_prompt_type": "nous",
+                "parallel_function_calls": False,
+                "function_choice": "auto",
+                "max_new_tokens": int(max_tokens),
+                "do_sample": False,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "thought_in_content": True,
+                "max_input_tokens": 0,
+            },
+        }
+        if payload.thinking_effort is not None:
+            try:
+                cfg["generate_cfg"]["thinking_effort"] = float(payload.thinking_effort)
+            except (TypeError, ValueError):
+                pass
+        if payload.thinking_scale_factor is not None:
+            try:
+                cfg["generate_cfg"]["thinking_scale_factor"] = float(payload.thinking_scale_factor)
+            except (TypeError, ValueError):
+                pass
+        if payload.immediate_action_bias is not None:
+            cfg["generate_cfg"]["immediate_action_bias"] = bool(payload.immediate_action_bias)
+        if payload.immediate_action_min_chars is not None:
+            try:
+                cfg["generate_cfg"]["immediate_action_min_chars"] = int(payload.immediate_action_min_chars)
+            except (TypeError, ValueError):
+                pass
+        if payload.immediate_action_min_seconds is not None:
+            try:
+                cfg["generate_cfg"]["immediate_action_min_seconds"] = float(payload.immediate_action_min_seconds)
+            except (TypeError, ValueError):
+                pass
+        if payload.immediate_action_logit_bias is not None:
+            try:
+                cfg["generate_cfg"]["immediate_action_logit_bias"] = float(payload.immediate_action_logit_bias)
+            except (TypeError, ValueError):
+                pass
+        return cfg
+
+    def _build_tools(tool_names: Sequence[str]) -> List[Any]:
+        if not build_local_agent_tools:
+            return []
+        specs = _agent_tool_specs_facade(grid_enabled=bool(grid_spec), tool_names=tool_names)
+        return build_local_agent_tools(specs)
+
+    def _content_to_text(content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    parts.append(str(item.get("text") or ""))
+                elif hasattr(item, "get_type_and_value"):
+                    try:
+                        item_type, item_value = item.get_type_and_value()
+                    except Exception:
+                        continue
+                    if item_type == "text":
+                        parts.append(str(item_value))
+            return "".join(parts)
+        return str(content)
+
+    def _run_agent_session(
+        agent_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        tool_names: Sequence[str],
+        *,
+        max_llm_calls: int = 3,
+    ) -> Dict[str, Any]:
+        if _AgentToolRunner is None or LocalQwenVLChatModel is None:
+            warnings.append("qwen_agent_unavailable")
+            return {"output_text": "", "tool_calls": [], "tool_results": []}
+        max_tokens = min(512, int(payload.max_new_tokens or 512))
+        llm_cfg = _build_llm_cfg(max_tokens)
+        llm = LocalQwenVLChatModel(llm_cfg)
+        tools = _build_tools(tool_names)
+        try:
+            import qwen_agent.settings as qwen_settings  # type: ignore
+            import qwen_agent.agents.fncall_agent as fncall_agent_mod  # type: ignore
+
+            if getattr(fncall_agent_mod, "MAX_LLM_CALL_PER_RUN", 0) < max_llm_calls:
+                fncall_agent_mod.MAX_LLM_CALL_PER_RUN = int(max_llm_calls)
+            if getattr(qwen_settings, "MAX_LLM_CALL_PER_RUN", 0) < max_llm_calls:
+                qwen_settings.MAX_LLM_CALL_PER_RUN = int(max_llm_calls)
+        except Exception:
+            pass
+        system_payload: Any = system_prompt
+        if llm_cfg.get("generate_cfg", {}).get("fncall_prompt_type") == "nous":
+            system_payload = [QwenAgentContentItem(text=system_prompt)]
+        bot = _AgentToolRunner(
+            llm=llm,
+            function_list=tools,
+            name=agent_name,
+            system_message=system_payload,
+        )
+        messages = [
+            QwenAgentMessage(
+                role="user",
+                content=[QwenAgentContentItem(text=user_prompt)],
+            )
+        ]
+        last_len = 0
+        output_text = ""
+        tool_calls: List[Dict[str, Any]] = []
+        tool_results: List[Dict[str, Any]] = []
+        for response in bot.run(messages=messages, stream=True):
+            if cancel_event is not None and cancel_event.is_set():
+                warnings.append("cancelled")
+                return {"output_text": output_text, "tool_calls": tool_calls, "tool_results": tool_results}
+            if not response:
+                continue
+            if len(response) <= last_len:
+                continue
+            new_msgs = response[last_len:]
+            last_len = len(response)
+            for msg in new_msgs:
+                if msg is None:
+                    continue
+                if isinstance(msg, dict):
+                    msg_dict = msg
+                elif hasattr(msg, "model_dump"):
+                    msg_dict = msg.model_dump()
+                else:
+                    msg_dict = {"role": "assistant", "content": str(msg)}
+                if not isinstance(msg_dict, dict):
+                    msg_dict = {"role": "assistant", "content": str(msg_dict)}
+                role = msg_dict.get("role")
+                fn_call = msg_dict.get("function_call")
+                if fn_call and hasattr(fn_call, "model_dump"):
+                    try:
+                        fn_call = fn_call.model_dump()
+                    except Exception:
+                        fn_call = None
+                if fn_call and not isinstance(fn_call, dict):
+                    fn_call = {
+                        "name": getattr(fn_call, "name", None),
+                        "arguments": getattr(fn_call, "arguments", None),
+                    }
+                if isinstance(fn_call, dict) and fn_call.get("name"):
+                    tool_name = str(fn_call.get("name"))
+                    raw_args = fn_call.get("arguments")
+                    parsed_args = raw_args if isinstance(raw_args, dict) else _agent_parse_json_relaxed(raw_args or "")
+                    tool_calls.append({"tool": tool_name, "args": parsed_args})
+                    _log_tool_call(tool_name, parsed_args if isinstance(parsed_args, dict) else None)
+                    continue
+                if role == "assistant" and not fn_call:
+                    assistant_text = _agent_strip_think(_content_to_text(msg_dict.get("content")))
+                    if assistant_text:
+                        output_text = assistant_text
+                        trace_write_readable(
+                            _agent_readable_line("model_output", output_text=assistant_text)
+                        )
+                if role == "function":
+                    tool_name = msg_dict.get("name")
+                    raw_content = msg_dict.get("content")
+                    raw_text = _content_to_text(raw_content)
+                    parsed_result = _agent_parse_json_relaxed(raw_text)
+                    tool_results.append({"tool": tool_name, "result": parsed_result})
+                    _log_tool_result(str(tool_name), parsed_result)
+        return {"output_text": output_text, "tool_calls": tool_calls, "tool_results": tool_results}
+
+    def _controller_tool_call(
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        allow_retry: bool = True,
+    ) -> Dict[str, Any]:
+        call = AgentToolCall(name=tool_name, arguments=args)
+        _log_tool_call(tool_name, args)
+        result = _dispatch_agent_tool(call)
+        payload = result.result or {}
+        _log_tool_result(tool_name, payload)
+        code, _, _ = _tool_error_info(payload)
+        if allow_retry and code in {"missing_grid_cell", "missing_label", "invalid_exemplar", "invalid_prompt"}:
+            fixed_args, changed = _fix_tool_args_for_error(tool_name, args, code)
+            if changed:
+                return _controller_tool_call(tool_name, fixed_args, allow_retry=False)
+        return payload
+
+    def _similarity_exemplars(label: str, min_score: float = 0.6) -> List[int]:
+        ids: List[int] = []
+        for cluster in list(_AGENT_ACTIVE_CLUSTERS or []):
+            if not isinstance(cluster, dict):
+                continue
+            clabel = str(cluster.get("label") or "").strip()
+            if clabel != label:
+                continue
+            if cluster.get("classifier_accept"):
+                ids.append(int(cluster.get("cluster_id")))
+                continue
+            try:
+                score = float(cluster.get("score") or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            if score >= min_score:
+                ids.append(int(cluster.get("cluster_id")))
+        return ids
+
+    tile_queue = list(grid_cells)
+    reviewer_rounds = 0
+    final_detections: Optional[List[Dict[str, Any]]] = None
+
+    while True:
+        new_clusters_pass: Set[int] = set()
+        while tile_queue:
+            cell = tile_queue.pop(0)
+            state = tile_states.get(cell)
+            if not state:
+                continue
+            if state.get("passes", 0) >= tile_max_passes:
+                continue
+            state["passes"] = int(state.get("passes", 0)) + 1
+            state["error_locked"] = False
+            state["errors_seen"] = []
+            state["new_clusters"] = []
+            state["verified_clusters"] = []
+            state["rejected_clusters"] = []
+            state["unavailable_clusters"] = []
+            skip_remaining = False
+
+            scout_system = (
+                "You are TileScout. Scan one grid cell for missed labels. "
+                "Tools: get_tile_context, view_cell_raw, view_cell_overlay, look_and_inspect. "
+                "Use grid_cell and handles only. Return JSON only: "
+                "{\"tile\":\"<cell>\",\"suspected_misses\":[],\"new_candidates\":[],\"notes\":\"\"}."
+            )
+            scout_user = (
+                f"Tile {cell}. Start with get_tile_context, then inspect raw/overlay. "
+                "Use look_and_inspect if you want candidate labels for this tile. Return JSON only."
+            )
+            scout_run = _run_agent_session(
+                "TileScout",
+                scout_system,
+                scout_user,
+                ["get_tile_context", "view_cell_raw", "view_cell_overlay", "look_and_inspect"],
+                max_llm_calls=3,
+            )
+            if not scout_run["tool_calls"]:
+                fallback = _controller_tool_call(
+                    "view_cell_overlay",
+                    {"grid_cell": cell},
+                )
+                scout_run["tool_results"].append({"tool": "view_cell_overlay", "result": fallback})
+            has_inspect = any(
+                str(entry.get("tool") or "") == "look_and_inspect" for entry in scout_run["tool_results"]
+            )
+            if not has_inspect:
+                inspect_result = _controller_tool_call(
+                    "look_and_inspect",
+                    {"grid_cell": cell},
+                )
+                scout_run["tool_results"].append({"tool": "look_and_inspect", "result": inspect_result})
+            for entry in scout_run["tool_results"]:
+                tool_name = str(entry.get("tool") or "")
+                tool_result = entry.get("result")
+                _record_tool_errors(state, tool_name, tool_result)
+                new_ids, _ = _extract_cluster_ids(tool_result)
+                if new_ids:
+                    state["new_clusters"] = list(set(state["new_clusters"] + new_ids))
+                    new_clusters_pass.update(new_ids)
+            if state.get("error_locked"):
+                skip_remaining = True
+            scout_output = _agent_parse_json_relaxed(scout_run.get("output_text") or "") or {}
+            missing_labels = _normalize_label_list(scout_output.get("suspected_misses"))
+            if not missing_labels:
+                candidate_counts: Dict[str, int] = {}
+                for entry in scout_run["tool_results"]:
+                    if str(entry.get("tool") or "") != "look_and_inspect":
+                        continue
+                    result = entry.get("result") or {}
+                    for cand in result.get("candidates") or []:
+                        if not isinstance(cand, dict):
+                            continue
+                        label = str(cand.get("label") or "").strip()
+                        if not label:
+                            continue
+                        candidate_counts[label] = candidate_counts.get(label, 0) + 1
+                if candidate_counts:
+                    ordered = sorted(candidate_counts.items(), key=lambda item: (-item[1], item[0]))
+                    missing_labels = [label for label, _ in ordered[:3]]
+            label_counts: Dict[str, int] = {}
+            for cluster in _agent_tile_clusters(cell):
+                if not isinstance(cluster, dict):
+                    continue
+                label = str(cluster.get("label") or "").strip()
+                if not label:
+                    continue
+                label_counts[label] = label_counts.get(label, 0) + 1
+            if label_counts:
+                missing_labels = [
+                    label for label in missing_labels if label_counts.get(label, 0) < 2
+                ]
+            state["suspected_misses"] = missing_labels
+
+            if missing_labels and not skip_remaining:
+                det_system = (
+                    "You are TileDetector. Add missing labels in one grid cell. "
+                    "Tools: get_tile_context, zoom_and_detect. "
+                    "Use grid_cell and labels only. Return JSON only: "
+                    "{\"tile\":\"<cell>\",\"label_targets\":[],\"notes\":\"\"}."
+                )
+                det_user = (
+                    f"Tile {cell}. Missing labels: {', '.join(missing_labels)}. "
+                    "Start with get_tile_context, then use zoom_and_detect for these labels. "
+                    "Return JSON only."
+                )
+                det_run = _run_agent_session(
+                    "TileDetector",
+                    det_system,
+                    det_user,
+                    ["get_tile_context", "zoom_and_detect"],
+                    max_llm_calls=4,
+                )
+                if not det_run["tool_calls"]:
+                    fallback = _controller_tool_call(
+                        "zoom_and_detect",
+                        {
+                            "grid_cell": cell,
+                            "confirm_label": missing_labels[0],
+                            "intent": f"verify {missing_labels[0]} in {cell}",
+                            "mode": "yolo",
+                            "conf": 0.7,
+                        },
+                    )
+                    det_run["tool_results"].append({"tool": "zoom_and_detect", "result": fallback})
+                det_called = {str(call.get("tool") or "") for call in det_run.get("tool_calls") or []}
+                if "zoom_and_detect" not in det_called and missing_labels:
+                    fallback = _controller_tool_call(
+                        "zoom_and_detect",
+                        {
+                            "grid_cell": cell,
+                            "confirm_label": missing_labels[0],
+                            "intent": f"verify {missing_labels[0]} in {cell}",
+                            "mode": "yolo",
+                            "conf": 0.7,
+                        },
+                    )
+                    det_run["tool_results"].append({"tool": "zoom_and_detect", "result": fallback})
+                for entry in det_run["tool_results"]:
+                    tool_name = str(entry.get("tool") or "")
+                    tool_result = entry.get("result")
+                    _record_tool_errors(state, tool_name, tool_result)
+                    new_ids, _ = _extract_cluster_ids(tool_result)
+                    if new_ids:
+                        state["new_clusters"] = list(set(state["new_clusters"] + new_ids))
+                        new_clusters_pass.update(new_ids)
+                if state.get("error_locked"):
+                    skip_remaining = True
+
+                if not skip_remaining:
+                    for label in missing_labels:
+                        exemplar_ids = _similarity_exemplars(label)
+                        if not exemplar_ids:
+                            continue
+                        sim_result = _controller_tool_call(
+                            "sam3_similarity",
+                            {"grid_cell": cell, "label": label, "exemplar_cluster_ids": exemplar_ids},
+                        )
+                        _record_tool_errors(state, "sam3_similarity", sim_result)
+                        new_ids, _ = _extract_cluster_ids(sim_result)
+                        if new_ids:
+                            state["new_clusters"] = list(set(state["new_clusters"] + new_ids))
+                            new_clusters_pass.update(new_ids)
+
+            if not skip_remaining:
+                unverified = [
+                    cluster
+                    for cluster in _agent_tile_clusters(cell)
+                    if isinstance(cluster, dict)
+                    and cluster.get("classifier_accept") is None
+                    and not cluster.get("classifier_unavailable")
+                ]
+                for cluster in unverified:
+                    cid = cluster.get("cluster_id")
+                    if cid is None:
+                        continue
+                    verify_result = _controller_tool_call(
+                        "classify_crop",
+                        {"cluster_id": int(cid), "label_hint": cluster.get("label")},
+                    )
+                    _record_tool_errors(state, "classify_crop", verify_result)
+                    code, _, _ = _tool_error_info(verify_result)
+                    if code == "classifier_unavailable":
+                        cluster["classifier_unavailable"] = True
+                        state["unavailable_clusters"].append(int(cid))
+                        continue
+                    accept = verify_result.get("accept") if isinstance(verify_result, dict) else None
+                    if accept is True:
+                        state["verified_clusters"].append(int(cid))
+                    elif accept is False:
+                        state["rejected_clusters"].append(int(cid))
+
+            counts_by_label: Dict[str, int] = {}
+            for cluster in _agent_tile_clusters(cell):
+                label = str(cluster.get("label") or "").strip()
+                if not label:
+                    continue
+                counts_by_label[label] = counts_by_label.get(label, 0) + 1
+            needs_followup = bool(state.get("suspected_misses")) and state.get("passes", 0) < tile_max_passes
+            tile_summary = {
+                "tile": cell,
+                "counts": counts_by_label,
+                "needs_followup": bool(needs_followup),
+                "notes": "; ".join([str(item) for item in state.get("errors_seen") or []])[:160],
+            }
+            tile_summaries_latest[cell] = tile_summary
+            if needs_followup:
+                tile_queue.append(cell)
+
+        _AGENT_TILE_SUMMARIES = [tile_summaries_latest[cell] for cell in sorted(tile_summaries_latest.keys())]
+        reviewer_system = (
+            "You are Global Reviewer. Decide continue vs submit. "
+            "Tools: get_global_context, view_full_overlay, list_candidates, think_missed_objects, submit_annotations. "
+            "Use handles and grid_cell only. Return JSON only: "
+            "{\"status\":\"continue\"|\"submit\",\"tiles\":[],\"reason\":\"\"}."
+        )
+        reviewer_user = "Call get_global_context, review overlays/summaries, then decide to continue or submit."
+        review_run = _run_agent_session(
+            "GlobalReviewer",
+            reviewer_system,
+            reviewer_user,
+            ["get_global_context", "view_full_overlay", "list_candidates", "think_missed_objects", "submit_annotations"],
+            max_llm_calls=3,
+        )
+        submit_from_tool = None
+        for entry in review_run["tool_results"]:
+            if str(entry.get("tool") or "") == "submit_annotations":
+                submit_from_tool = entry.get("result")
+                break
+        if submit_from_tool:
+            final_detections = submit_from_tool.get("detections") if isinstance(submit_from_tool, dict) else None
+            break
+        review_output = _agent_parse_json_relaxed(review_run.get("output_text") or "") or {}
+        status = str(review_output.get("status") or "").strip().lower()
+        tiles = review_output.get("tiles") if isinstance(review_output.get("tiles"), list) else []
+        if status == "continue" and tiles and reviewer_rounds < 1:
+            reviewer_rounds += 1
+            for tile in tiles:
+                cell = str(tile or "").strip()
+                if cell in tile_states and tile_states[cell].get("passes", 0) < tile_max_passes:
+                    tile_queue.append(cell)
+            continue
+        all_complete = all(not summary.get("needs_followup") for summary in tile_summaries_latest.values())
+        if status == "continue" and not tiles and not new_clusters_pass and all_complete:
+            break
+        break
+
+    if final_detections is None:
+        submit_result = _controller_tool_call(
+            "submit_annotations",
+            {
+                "include_all": True,
+                "iou": iou_thr,
+                "cross_iou": cross_iou,
+                "max_det": max_detections,
+            },
+        )
+        final_detections = submit_result.get("detections") if isinstance(submit_result, dict) else []
+
+    summary_lines = _agent_detection_summary_lines(
+        final_detections or [],
+        grid=grid_spec,
+        img_w=img_w,
+        img_h=img_h,
+        warnings=warnings,
+    )
+    trace_write_readable(_agent_readable_banner("IMAGE END SUMMARY", fill="="))
+    for line in summary_lines:
+        trace_write_readable(line)
+    trace_write_readable(_agent_readable_banner("END IMAGE", fill="="))
+    _AGENT_TRACE_FULL_WRITER = None
+    _AGENT_TRACE_READABLE_WRITER = None
     return QwenAgenticResponse(
         detections=final_detections or [],
         trace=trace,
         warnings=warnings or None,
         caption=None,
+        trace_path=trace_path,
+        trace_full_path=full_trace_path,
     )
 
 
@@ -7015,6 +14017,14 @@ CLIP_NEGATIVE_REPLAY_ROOT = UPLOAD_ROOT / "clip_negative_replay"
 CLIP_NEGATIVE_REPLAY_ROOT.mkdir(parents=True, exist_ok=True)
 QWEN_AGENTIC_TRACE_ROOT = UPLOAD_ROOT / "qwen_agentic_traces"
 QWEN_AGENTIC_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_AGENTIC_FULL_TRACE_ROOT = UPLOAD_ROOT / "qwen_agentic_traces_full"
+QWEN_AGENTIC_FULL_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_AGENTIC_FULL_TRACE_LATEST = QWEN_AGENTIC_FULL_TRACE_ROOT / "latest.jsonl"
+LOG_ROOT = Path("logs")
+LOG_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_AGENTIC_READABLE_TRACE_ROOT = LOG_ROOT / "agentic_readable"
+QWEN_AGENTIC_READABLE_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_AGENTIC_READABLE_TRACE_LATEST = QWEN_AGENTIC_READABLE_TRACE_ROOT / "latest.log"
 
 
 def _prune_job_registry(registry: Dict[str, Any], lock: threading.Lock, ttl_hours: Optional[int] = None) -> None:
@@ -10935,6 +17945,11 @@ def _load_dinov3_backbone(
     *,
     raise_on_error: bool = False,
 ) -> Tuple[Optional[Any], Optional[Any]]:
+    global dinov3_cuda_disabled
+    requested_device = str(target_device or "").strip() or "cpu"
+    effective_device = _dinov3_resolve_device(requested_device)
+    if effective_device != requested_device:
+        logger.warning("DINOv3 CUDA disabled; using %s instead of %s.", effective_device, requested_device)
     try:
         from transformers import AutoImageProcessor, AutoModel
     except Exception as exc:  # noqa: BLE001
@@ -10947,11 +17962,17 @@ def _load_dinov3_backbone(
         processor = AutoImageProcessor.from_pretrained(model_name)
         model = AutoModel.from_pretrained(model_name)
         model.eval()
-        model.to(target_device)
+        model.to(effective_device)
         return model, processor
     except Exception as exc:  # noqa: BLE001
+        raw_msg = str(exc)
         msg = _format_hf_model_error(exc)
-        logger.warning("Failed to load DINOv3 backbone %s on %s: %s", model_name, target_device, msg)
+        logger.warning("Failed to load DINOv3 backbone %s on %s: %s", model_name, effective_device, msg)
+        if str(effective_device).startswith("cuda"):
+            lowered = raw_msg.lower()
+            if "cuda error" in lowered or "device-side assert" in lowered:
+                dinov3_cuda_disabled = True
+                logger.warning("Disabling DINOv3 CUDA usage after error on %s.", effective_device)
         if raise_on_error:
             raise RuntimeError(msg) from exc
         return None, None
@@ -10968,7 +17989,9 @@ def _ensure_agent_dinov3_backbone_for_device(
     if not model_name:
         return None, None, dinov3_lock, str(device_str or device)
     normalized_device = str(device_str or "").strip() or str(device)
-    global_device = str(device)
+    normalized_device = _dinov3_resolve_device(normalized_device)
+    global_device = str(dinov3_model_device or device)
+    global_device = _dinov3_resolve_device(global_device)
     if (
         dinov3_model is not None
         and dinov3_processor is not None
@@ -11098,6 +18121,10 @@ def _dinov3_encode_pil_batch(
         attempt_devices.append(global_device)
     if "cpu" not in attempt_devices:
         attempt_devices.append("cpu")
+    if dinov3_cuda_disabled:
+        attempt_devices = [dev for dev in attempt_devices if not str(dev).startswith("cuda")]
+        if "cpu" not in attempt_devices:
+            attempt_devices.append("cpu")
 
     batch_size = 32
     try:
@@ -30630,7 +37657,7 @@ def set_active_model(payload: ActiveModelRequest):
     global clf, clip_model, clip_preprocess, clip_model_name, clip_initialized
     global active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
     global active_encoder_type, active_encoder_model
-    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized
+    global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
     global active_classifier_meta, active_head_normalize_embeddings, active_classifier_head
 
     classifier_path = _normalise_optional_path(payload.classifier_path) or active_classifier_path
@@ -30745,9 +37772,10 @@ def set_active_model(payload: ActiveModelRequest):
         if not encoder_model_norm:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="encoder_model_required")
         try:
+            target_device = _dinov3_resolve_device(device)
             new_dinov3_model, new_dinov3_processor = _load_dinov3_backbone(
                 encoder_model_norm,
-                device,
+                target_device,
                 raise_on_error=True,
             )
         except RuntimeError as exc:
@@ -30823,6 +37851,7 @@ def set_active_model(payload: ActiveModelRequest):
             dinov3_model = new_dinov3_model
             dinov3_processor = new_dinov3_processor
             dinov3_model_name = encoder_model_for_active
+            dinov3_model_device = target_device
             dinov3_initialized = bool(dinov3_model is not None and dinov3_processor is not None)
 
     return _current_active_payload()
@@ -31140,6 +38169,8 @@ def qwen_caption(payload: QwenCaptionRequest):
         image_width = payload.image_width or pil_img.width
         image_height = payload.image_height or pil_img.height
         caption_mode = payload.caption_mode or "full"
+        restrict_to_labels = payload.restrict_to_labels if payload.restrict_to_labels is not None else True
+        caption_all_windows = bool(payload.caption_all_windows)
         detailed_mode = caption_mode == "windowed"
         prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt(
             user_prompt,
@@ -31150,6 +38181,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             include_coords,
             max_boxes,
             detailed_mode,
+            restrict_to_labels=restrict_to_labels,
         )
         base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
         variant = payload.model_variant or "auto"
@@ -31188,8 +38220,6 @@ def qwen_caption(payload: QwenCaptionRequest):
             system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
         if final_only and is_thinking and not two_stage:
             system_prompt = f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
-        if is_thinking:
-            system_prompt = f"{system_prompt} Think step-by-step internally before answering."
         use_caption_cache = True
         if active_qwen_model_path and not model_id_override and desired_model_id == base_model_id and variant == "auto":
             use_caption_cache = False
@@ -31216,7 +38246,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             for y0 in y_positions:
                 for x0 in x_positions:
                     window_hints = grouped_hints.get((x0, y0), [])
-                    if not window_hints:
+                    if not window_hints and not caption_all_windows:
                         continue
                     window_allowed = _allowed_caption_labels(window_hints)
                     window_prompt, window_counts, _, _ = _build_qwen_caption_prompt(
@@ -31228,6 +38258,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         include_coords,
                         max_boxes,
                         detailed_mode=True,
+                        restrict_to_labels=restrict_to_labels,
                     )
                     window_prompt = (
                         f"Window region in full image: [{x0}, {y0}] to [{x0 + window_size}, {y0 + window_size}].\n"
@@ -31236,7 +38267,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         "Do not mention labels, hints, counts, or coordinates.\n"
                         f"{window_prompt}"
                     )
-                    if window_allowed:
+                    if restrict_to_labels and window_allowed:
                         window_prompt = (
                             f"{window_prompt}\nAllowed classes: {', '.join(window_allowed)}. "
                             "Do not introduce any other entity types."
@@ -31265,7 +38296,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed,
+                            allowed_labels=window_allowed if restrict_to_labels and window_allowed else None,
                             strict=True,
                             minimal_edit=True,
                         )
@@ -31280,7 +38311,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed,
+                            allowed_labels=window_allowed if restrict_to_labels and window_allowed else None,
                             strict=True,
                             minimal_edit=True,
                         )
@@ -31295,7 +38326,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed,
+                            allowed_labels=window_allowed if restrict_to_labels and window_allowed else None,
                             strict=True,
                             minimal_edit=True,
                         )
@@ -31308,19 +38339,24 @@ def qwen_caption(payload: QwenCaptionRequest):
                     )
                     if needs_refine:
                         refine_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
-                        allowed_note = (
-                            f"Allowed classes: {', '.join(window_allowed)}. Do not introduce any other entity types."
-                            if window_allowed
-                            else "Do not introduce any new entity types."
-                        )
+                        allowed_note = ""
+                        if restrict_to_labels and window_allowed:
+                            allowed_note = (
+                                f"Allowed classes: {', '.join(window_allowed)}. "
+                                "Do not introduce any other entity types."
+                            )
+                        elif not restrict_to_labels:
+                            allowed_note = "You may mention additional visible objects beyond the hints."
                         missing_note = (
                             f"Ensure the caption mentions: {', '.join(missing)}."
                             if missing
                             else "Ensure all labeled classes in this window are mentioned."
                         )
+                        refine_prompt = f"{window_prompt}\nDraft caption: {window_caption}\n{missing_note}"
+                        if allowed_note:
+                            refine_prompt = f"{refine_prompt}\n{allowed_note}"
                         refine_prompt = (
-                            f"{window_prompt}\nDraft caption: {window_caption}\n"
-                            f"{missing_note}\n{allowed_note}\n"
+                            f"{refine_prompt}\n"
                             "Edit the draft with minimal changes. Do not introduce new objects or actions. "
                             "Return only a single-sentence caption with no coordinates."
                         )
@@ -31340,6 +38376,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         refine_count += 1
                     if window_caption:
                         windowed_captions.append((x0, y0, window_size, window_caption))
+                        _emit_caption_window(x0, y0, window_size, window_caption)
             if windowed_captions:
                 window_lines = ["Close-up observations from subregions (use these to enrich the final caption):"]
                 for x0, y0, size, caption in windowed_captions:
@@ -31351,15 +38388,25 @@ def qwen_caption(payload: QwenCaptionRequest):
                     window_lines.append(
                         f"- {region} ([{x0},{y0},{x0 + size},{y0 + size}]): {caption}"
                     )
-                window_lines.append(
-                    "Now describe the full image in detail. Use all labeled object counts and the close-up observations. "
-                    "Mention every class that appears in the hints, and summarize repetitive objects (e.g., many cars as a parking lot) "
-                    "unless only a few are present or a specific action stands out. "
-                    "Do not mention labels, hints, counts, or coordinates."
-                )
-                window_lines.append(
-                    "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
-                )
+                if include_counts and restrict_to_labels:
+                    window_lines.append(
+                        "Now describe the full image in detail. Use all labeled object counts and the close-up observations. "
+                        "Mention every class that appears in the hints, and summarize repetitive objects (e.g., many cars as a parking lot) "
+                        "unless only a few are present or a specific action stands out. "
+                        "Do not mention labels, hints, counts, or coordinates."
+                    )
+                    window_lines.append(
+                        "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
+                    )
+                else:
+                    window_lines.append(
+                        "Now describe the full image in detail using the close-up observations. "
+                        "Use detector hints as suggestions, and mention other visible objects. "
+                        "Do not mention labels, hints, or coordinates."
+                    )
+                    window_lines.append(
+                        "If window observations conflict, trust the full image. Avoid self-contradictions."
+                    )
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
             draft_prompt = (
@@ -31377,14 +38424,18 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
             draft_caption = _sanitize_qwen_caption(draft_caption)
-            allowed_note = (
-                f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
-                if allowed_labels
-                else "Do not introduce any new entity types."
-            )
+            allowed_note = ""
+            if restrict_to_labels and allowed_labels:
+                allowed_note = (
+                    f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
+                )
+            elif not restrict_to_labels:
+                allowed_note = "You may mention additional visible objects beyond the hints."
+            refine_prompt = f"{prompt_text}\nDraft caption: {draft_caption}"
+            if allowed_note:
+                refine_prompt = f"{refine_prompt}\n{allowed_note}"
             refine_prompt = (
-                f"{prompt_text}\nDraft caption: {draft_caption}\n"
-                f"{allowed_note}\n"
+                f"{refine_prompt}\n"
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
                 "Return only the final caption."
             )
@@ -31426,7 +38477,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                     use_caption_cache,
                     model_id_override=cleanup_model,
                     runtime_override=get_runtime(cleanup_model),
-                    allowed_labels=allowed_labels,
+                    allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
                     strict=True,
                     minimal_edit=True,
                 )
@@ -31441,7 +38492,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels,
+                allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
                 strict=True,
                 minimal_edit=True,
             )
@@ -31456,7 +38507,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels,
+                allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
                 strict=True,
                 minimal_edit=True,
             )
@@ -31471,7 +38522,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels,
+                allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
                 strict=True,
                 minimal_edit=True,
             )
@@ -31484,19 +38535,23 @@ def qwen_caption(payload: QwenCaptionRequest):
         )
         if needs_refine:
             refine_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
-            allowed_note = (
-                f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
-                if allowed_labels
-                else "Do not introduce any new entity types."
-            )
+            allowed_note = ""
+            if restrict_to_labels and allowed_labels:
+                allowed_note = (
+                    f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
+                )
+            elif not restrict_to_labels:
+                allowed_note = "You may mention additional visible objects beyond the hints."
             missing_note = (
                 f"Ensure the caption mentions: {', '.join(missing)}."
                 if missing
                 else "Ensure all labeled classes are mentioned."
             )
+            refine_prompt = f"{prompt_text}\nDraft caption: {caption_text}\n{missing_note}"
+            if allowed_note:
+                refine_prompt = f"{refine_prompt}\n{allowed_note}"
             refine_prompt = (
-                f"{prompt_text}\nDraft caption: {caption_text}\n"
-                f"{missing_note}\n{allowed_note}\n"
+                f"{refine_prompt}\n"
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
                 "Return only the final caption with no coordinates."
             )
@@ -31651,7 +38706,7 @@ def sam3_text_prompt(payload: Sam3TextPrompt):
     if variant != "sam3":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_text_requires_sam3")
     pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
-    effective_limit = payload.max_results if payload.max_results is not None else 20
+    effective_limit = payload.max_results
     detections, masks_arr = _run_sam3_text_inference(
         pil_img,
         payload.text_prompt,
@@ -31698,7 +38753,7 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
             image_token=None,
         )
     pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
-    effective_limit = payload.max_results if payload.max_results is not None else 20
+    effective_limit = payload.max_results
     detections, masks_arr = _run_sam3_text_inference(
         pil_img,
         payload.text_prompt,
@@ -31790,7 +38845,7 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
     if variant != "sam3":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_visual_requires_sam3")
     pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
-    effective_limit = payload.max_results if payload.max_results is not None else 20
+    effective_limit = payload.max_results
     try:
         if payload.bboxes:
             detections, masks_arr = _run_sam3_visual_inference_multi(

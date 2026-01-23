@@ -1493,12 +1493,49 @@
         agentModel: null,
         agentVariant: null,
         agentDetectorMode: null,
-        agentMaxSteps: null,
-        agentMaxToolCalls: null,
+        agentEnableYolo: null,
+        agentEnableRfdetr: null,
+        agentYoloRun: null,
+        agentRfdetrRun: null,
+        agentSahiWindow: null,
+        agentSahiOverlap: null,
+        agentEnableSam3Text: null,
+        agentSam3SynBudget: null,
+        agentEnableSam3Similarity: null,
+        agentSimilarityMinScore: null,
+        agentSimilarityMidLow: null,
+        agentSimilarityMidHigh: null,
+        agentSimilarityMidCount: null,
+        agentSimilarityWindowMode: null,
+        agentSimilarityWindowSize: null,
+        agentSimilarityWindowOverlap: null,
+        agentGridCols: null,
+        agentGridRows: null,
+        agentGridOverlap: null,
+        agentOverlayDotRadius: null,
+        agentReviewEnabled: null,
+        agentReviewModel: null,
+        agentReviewVariant: null,
+        agentReviewMaxTokens: null,
+        agentReviewClasses: null,
+        agentReviewPasses: null,
         agentMaxDetections: null,
         agentIou: null,
         agentCrossIou: null,
         agentMaxTokens: null,
+        agentCaptionProfile: null,
+        agentCaptionModel: null,
+        agentCaptionVariant: null,
+        agentCaptionMaxTokens: null,
+        agentOverlay: null,
+        agentTightenFp: null,
+        agentDetectorConf: null,
+        agentSam3ScoreThr: null,
+        agentSam3MaskThr: null,
+        agentClassifierMinProb: null,
+        agentClassifierMargin: null,
+        agentClassifierBgMargin: null,
+        agentScorelessIou: null,
         agentRunButton: null,
         agentStopButton: null,
         agentTraceList: null,
@@ -13124,17 +13161,55 @@ function initQwenTrainingTab() {
         qwenElements.agentModel = document.getElementById("qwenAgentModel");
         qwenElements.agentVariant = document.getElementById("qwenAgentVariant");
         qwenElements.agentDetectorMode = document.getElementById("qwenAgentDetectorMode");
+        qwenElements.agentEnableYolo = document.getElementById("qwenAgentEnableYolo");
+        qwenElements.agentEnableRfdetr = document.getElementById("qwenAgentEnableRfdetr");
+        qwenElements.agentYoloRun = document.getElementById("qwenAgentYoloRun");
+        qwenElements.agentRfdetrRun = document.getElementById("qwenAgentRfdetrRun");
+        qwenElements.agentSahiWindow = document.getElementById("qwenAgentSahiWindow");
+        qwenElements.agentSahiOverlap = document.getElementById("qwenAgentSahiOverlap");
+        qwenElements.agentEnableSam3Text = document.getElementById("qwenAgentEnableSam3Text");
+        qwenElements.agentSam3SynBudget = document.getElementById("qwenAgentSam3SynBudget");
+        qwenElements.agentEnableSam3Similarity = document.getElementById("qwenAgentEnableSam3Similarity");
+        qwenElements.agentSimilarityMinScore = document.getElementById("qwenAgentSimilarityMinScore");
+        qwenElements.agentSimilarityMidLow = document.getElementById("qwenAgentSimilarityMidLow");
+        qwenElements.agentSimilarityMidHigh = document.getElementById("qwenAgentSimilarityMidHigh");
+        qwenElements.agentSimilarityMidCount = document.getElementById("qwenAgentSimilarityMidCount");
+        qwenElements.agentSimilarityWindowMode = document.getElementById("qwenAgentSimilarityWindowMode");
+        qwenElements.agentSimilarityWindowSize = document.getElementById("qwenAgentSimilarityWindowSize");
+        qwenElements.agentSimilarityWindowOverlap = document.getElementById("qwenAgentSimilarityWindowOverlap");
+        qwenElements.agentGridCols = document.getElementById("qwenAgentGridCols");
+        qwenElements.agentGridRows = document.getElementById("qwenAgentGridRows");
+        qwenElements.agentGridOverlap = document.getElementById("qwenAgentGridOverlap");
+        qwenElements.agentOverlayDotRadius = document.getElementById("qwenAgentOverlayDotRadius");
+        qwenElements.agentReviewEnabled = document.getElementById("qwenAgentReviewEnabled");
+        qwenElements.agentReviewModel = document.getElementById("qwenAgentReviewModel");
+        qwenElements.agentReviewVariant = document.getElementById("qwenAgentReviewVariant");
+        qwenElements.agentReviewMaxTokens = document.getElementById("qwenAgentReviewMaxTokens");
+        qwenElements.agentReviewClasses = document.getElementById("qwenAgentReviewClasses");
+        qwenElements.agentReviewPasses = document.getElementById("qwenAgentReviewPasses");
         qwenElements.agentDetectorId = document.getElementById("qwenAgentDetectorId");
         qwenElements.agentDetectorRefresh = document.getElementById("qwenAgentDetectorRefresh");
         qwenElements.agentClassifierId = document.getElementById("qwenAgentClassifierId");
         qwenElements.agentClassifierRefresh = document.getElementById("qwenAgentClassifierRefresh");
         qwenElements.agentSamVariant = document.getElementById("qwenAgentSamVariant");
-        qwenElements.agentMaxSteps = document.getElementById("qwenAgentMaxSteps");
-        qwenElements.agentMaxToolCalls = document.getElementById("qwenAgentMaxToolCalls");
         qwenElements.agentMaxDetections = document.getElementById("qwenAgentMaxDetections");
         qwenElements.agentIou = document.getElementById("qwenAgentIou");
         qwenElements.agentCrossIou = document.getElementById("qwenAgentCrossIou");
         qwenElements.agentMaxTokens = document.getElementById("qwenAgentMaxTokens");
+        qwenElements.agentCaptionProfile = document.getElementById("qwenAgentCaptionProfile");
+        qwenElements.agentCaptionModel = document.getElementById("qwenAgentCaptionModel");
+        qwenElements.agentCaptionVariant = document.getElementById("qwenAgentCaptionVariant");
+        qwenElements.agentCaptionMaxTokens = document.getElementById("qwenAgentCaptionMaxTokens");
+        qwenElements.agentThinkingEffort = document.getElementById("qwenAgentThinkingEffort");
+        qwenElements.agentOverlay = document.getElementById("qwenAgentOverlay");
+        qwenElements.agentTightenFp = document.getElementById("qwenAgentTightenFp");
+        qwenElements.agentDetectorConf = document.getElementById("qwenAgentDetectorConf");
+        qwenElements.agentSam3ScoreThr = document.getElementById("qwenAgentSam3ScoreThr");
+        qwenElements.agentSam3MaskThr = document.getElementById("qwenAgentSam3MaskThr");
+        qwenElements.agentClassifierMinProb = document.getElementById("qwenAgentClassifierMinProb");
+        qwenElements.agentClassifierMargin = document.getElementById("qwenAgentClassifierMargin");
+        qwenElements.agentClassifierBgMargin = document.getElementById("qwenAgentClassifierBgMargin");
+        qwenElements.agentScorelessIou = document.getElementById("qwenAgentScorelessIou");
         qwenElements.agentRunButton = document.getElementById("qwenAgentRun");
         qwenElements.agentStopButton = document.getElementById("qwenAgentStop");
         qwenElements.agentTraceList = document.getElementById("qwenAgentTraceList");
@@ -13142,6 +13217,26 @@ function initQwenTrainingTab() {
         qwenElements.agentBatchIncludeCurrent = document.getElementById("qwenAgentBatchIncludeCurrent");
         qwenElements.agentBatchRun = document.getElementById("qwenAgentBatchRun");
         qwenElements.unloadOthers = document.getElementById("qwenUnloadOthers");
+        if (qwenElements.agentTightenFp) {
+            const updateAgentPrecisionControls = () => {
+                const enabled = !!qwenElements.agentTightenFp?.checked;
+                [
+                    qwenElements.agentDetectorConf,
+                    qwenElements.agentSam3ScoreThr,
+                    qwenElements.agentSam3MaskThr,
+                    qwenElements.agentClassifierMinProb,
+                    qwenElements.agentClassifierMargin,
+                    qwenElements.agentClassifierBgMargin,
+                    qwenElements.agentScorelessIou,
+                ].forEach((el) => {
+                    if (el) {
+                        el.disabled = !enabled;
+                    }
+                });
+            };
+            qwenElements.agentTightenFp.addEventListener("change", updateAgentPrecisionControls);
+            updateAgentPrecisionControls();
+        }
         if (qwenElements.captionModel) {
             qwenElements.captionModel.addEventListener("change", () => {
                 const selected = qwenElements.captionModel.value;
@@ -15949,36 +16044,45 @@ function initQwenTrainingTab() {
         }
     }
 
-    async function refreshQwenAgentDetectorRuns(selectedId) {
-        if (!qwenElements.agentDetectorId) {
+    async function refreshQwenAgentDetectorRunsFor(mode, selectEl, selectedId) {
+        if (!selectEl) {
             return;
         }
-        const mode = (qwenElements.agentDetectorMode?.value || "yolo").toLowerCase();
         const active = mode === "yolo" ? detectorState.yoloActive : detectorState.rfdetrActive;
         const activeName = active?.run_name || active?.run_id;
         let runs = [];
         try {
             runs = await fetchDetectorRuns(mode);
         } catch (error) {
-            console.warn("Failed to refresh agent detector runs", error);
+            console.warn(`Failed to refresh agent ${mode} detector runs`, error);
             runs = [];
         }
-        qwenElements.agentDetectorId.innerHTML = "";
+        selectEl.innerHTML = "";
         const empty = document.createElement("option");
         empty.value = "";
         empty.textContent = activeName ? `Use active (${activeName})` : "Use active run";
-        qwenElements.agentDetectorId.appendChild(empty);
+        selectEl.appendChild(empty);
         runs.forEach((entry) => {
             const opt = document.createElement("option");
             opt.value = entry.run_id || "";
             opt.textContent = entry.run_name || entry.run_id || "run";
-            qwenElements.agentDetectorId.appendChild(opt);
+            selectEl.appendChild(opt);
         });
         const preferred = selectedId || "";
-        const match = Array.from(qwenElements.agentDetectorId.options || []).some((opt) => opt.value === preferred);
+        const match = Array.from(selectEl.options || []).some((opt) => opt.value === preferred);
         if (match) {
-            qwenElements.agentDetectorId.value = preferred;
+            selectEl.value = preferred;
         }
+    }
+
+    async function refreshQwenAgentDetectorRuns(selectedId) {
+        await refreshQwenAgentDetectorRunsFor("yolo", qwenElements.agentYoloRun, selectedId?.yolo);
+        await refreshQwenAgentDetectorRunsFor("rfdetr", qwenElements.agentRfdetrRun, selectedId?.rfdetr);
+        if (!qwenElements.agentDetectorId) {
+            return;
+        }
+        const mode = (qwenElements.agentDetectorMode?.value || "yolo").toLowerCase();
+        await refreshQwenAgentDetectorRunsFor(mode, qwenElements.agentDetectorId, selectedId?.legacy);
     }
 
     async function loadCaptionForImage(imageName) {
@@ -16375,6 +16479,32 @@ function initQwenTrainingTab() {
         return pick;
     }
 
+    function resolveCaptionModelId() {
+        const pick = qwenElements.agentCaptionModel?.value || "active";
+        const variant = qwenElements.agentCaptionVariant?.value || "auto";
+        if (!pick || pick === "active") {
+            return null;
+        }
+        if (["2B", "4B", "8B"].includes(pick)) {
+            const suffix = variant === "Thinking" ? "Thinking" : "Instruct";
+            return `Qwen/Qwen3-VL-${pick}-${suffix}`;
+        }
+        return pick;
+    }
+
+    function resolveReviewModelId() {
+        const pick = qwenElements.agentReviewModel?.value || "active";
+        const variant = qwenElements.agentReviewVariant?.value || "auto";
+        if (!pick || pick === "active") {
+            return null;
+        }
+        if (["2B", "4B", "8B"].includes(pick)) {
+            const suffix = variant === "Thinking" ? "Thinking" : "Instruct";
+            return `Qwen/Qwen3-VL-${pick}-${suffix}`;
+        }
+        return pick;
+    }
+
     async function buildQwenAgentPayload(imageName) {
         const imageRecord = images[imageName];
         if (!imageRecord) {
@@ -16391,14 +16521,49 @@ function initQwenTrainingTab() {
         const variant = qwenElements.agentVariant?.value || "auto";
         const detectorMode = qwenElements.agentDetectorMode?.value || "yolo";
         const detectorId = (qwenElements.agentDetectorId?.value || "").trim() || null;
+        const enableYolo = !!qwenElements.agentEnableYolo?.checked;
+        const enableRfdetr = !!qwenElements.agentEnableRfdetr?.checked;
+        const yoloRunId = (qwenElements.agentYoloRun?.value || "").trim() || null;
+        const rfdetrRunId = (qwenElements.agentRfdetrRun?.value || "").trim() || null;
+        const sahiWindow = parseInt(qwenElements.agentSahiWindow?.value || "", 10);
+        const sahiOverlap = parseFloat(qwenElements.agentSahiOverlap?.value || "");
+        const enableSam3Text = !!qwenElements.agentEnableSam3Text?.checked;
+        const sam3SynBudget = parseInt(qwenElements.agentSam3SynBudget?.value || "", 10);
+        const enableSam3Similarity = !!qwenElements.agentEnableSam3Similarity?.checked;
+        const similarityMinScore = parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
+        const similarityMidLow = parseFloat(qwenElements.agentSimilarityMidLow?.value || "");
+        const similarityMidHigh = parseFloat(qwenElements.agentSimilarityMidHigh?.value || "");
+        const similarityMidCount = parseInt(qwenElements.agentSimilarityMidCount?.value || "", 10);
+        const similarityWindowMode = (qwenElements.agentSimilarityWindowMode?.value || "grid").trim();
+        const similarityWindowSize = parseInt(qwenElements.agentSimilarityWindowSize?.value || "", 10);
+        const similarityWindowOverlap = parseFloat(qwenElements.agentSimilarityWindowOverlap?.value || "");
+        const gridCols = parseInt(qwenElements.agentGridCols?.value || "", 10);
+        const gridRows = parseInt(qwenElements.agentGridRows?.value || "", 10);
+        const gridOverlap = parseFloat(qwenElements.agentGridOverlap?.value || "");
+        const overlayDotRadius = parseInt(qwenElements.agentOverlayDotRadius?.value || "", 10);
+        const reviewEnabled = !!qwenElements.agentReviewEnabled?.checked;
+        const reviewMaxTokens = parseInt(qwenElements.agentReviewMaxTokens?.value || "", 10);
+        const reviewPasses = parseInt(qwenElements.agentReviewPasses?.value || "", 10);
+        const reviewClassesRaw = (qwenElements.agentReviewClasses?.value || "").trim();
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
         const samVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
-        const maxSteps = parseInt(qwenElements.agentMaxSteps?.value || "12", 10);
-        const maxToolCalls = parseInt(qwenElements.agentMaxToolCalls?.value || "20", 10);
         const maxDetections = parseInt(qwenElements.agentMaxDetections?.value || "800", 10);
         const iou = parseFloat(qwenElements.agentIou?.value || "0.5");
         const crossIouRaw = (qwenElements.agentCrossIou?.value || "").trim();
         const maxTokens = parseInt(qwenElements.agentMaxTokens?.value || "1024", 10);
+        const thinkingEffort = parseFloat(qwenElements.agentThinkingEffort?.value || "");
+        const captionProfile = (qwenElements.agentCaptionProfile?.value || "light").trim();
+        const captionVariant = (qwenElements.agentCaptionVariant?.value || "").trim();
+        const captionMaxTokens = parseInt(qwenElements.agentCaptionMaxTokens?.value || "", 10);
+        const useOverlay = qwenElements.agentOverlay?.checked;
+        const tightenFp = !!qwenElements.agentTightenFp?.checked;
+        const detectorConf = parseFloat(qwenElements.agentDetectorConf?.value || "");
+        const sam3ScoreThr = parseFloat(qwenElements.agentSam3ScoreThr?.value || "");
+        const sam3MaskThr = parseFloat(qwenElements.agentSam3MaskThr?.value || "");
+        const classifierMinProb = parseFloat(qwenElements.agentClassifierMinProb?.value || "");
+        const classifierMargin = parseFloat(qwenElements.agentClassifierMargin?.value || "");
+        const classifierBgMargin = parseFloat(qwenElements.agentClassifierBgMargin?.value || "");
+        const scorelessIou = parseFloat(qwenElements.agentScorelessIou?.value || "");
         const datasetId = getQwenAgentDatasetId();
         const glossaryText = qwenElements.agentGlossary?.value || "";
         return {
@@ -16408,15 +16573,55 @@ function initQwenTrainingTab() {
             model_variant: variant,
             detector_mode: detectorMode,
             detector_id: detectorId,
+            enable_yolo: enableYolo,
+            enable_rfdetr: enableRfdetr,
+            yolo_id: yoloRunId,
+            rfdetr_id: rfdetrRunId,
+            sahi_window_size: Number.isFinite(sahiWindow) ? sahiWindow : null,
+            sahi_overlap_ratio: Number.isFinite(sahiOverlap) ? sahiOverlap : null,
             classifier_id: classifierId,
             sam_variant: samVariant,
-            max_steps: Number.isFinite(maxSteps) ? maxSteps : 12,
-            max_tool_calls: Number.isFinite(maxToolCalls) ? maxToolCalls : 20,
+            enable_sam3_text: enableSam3Text,
+            sam3_text_synonym_budget: Number.isFinite(sam3SynBudget) ? sam3SynBudget : null,
+            enable_sam3_similarity: enableSam3Similarity,
+            similarity_min_exemplar_score: Number.isFinite(similarityMinScore) ? similarityMinScore : null,
+            similarity_mid_conf_low: Number.isFinite(similarityMidLow) ? similarityMidLow : null,
+            similarity_mid_conf_high: Number.isFinite(similarityMidHigh) ? similarityMidHigh : null,
+            similarity_mid_conf_class_count: Number.isFinite(similarityMidCount) ? similarityMidCount : null,
+            similarity_window_mode: similarityWindowMode || "grid",
+            similarity_window_size: Number.isFinite(similarityWindowSize) ? similarityWindowSize : null,
+            similarity_window_overlap: Number.isFinite(similarityWindowOverlap) ? similarityWindowOverlap : null,
+            grid_cols: Number.isFinite(gridCols) ? gridCols : null,
+            grid_rows: Number.isFinite(gridRows) ? gridRows : null,
+            grid_overlap_ratio: Number.isFinite(gridOverlap) ? gridOverlap : null,
+            overlay_dot_radius: Number.isFinite(overlayDotRadius) ? overlayDotRadius : null,
             max_detections: Number.isFinite(maxDetections) ? maxDetections : 800,
             iou: Number.isFinite(iou) ? iou : 0.5,
             cross_iou: crossIouRaw ? parseFloat(crossIouRaw) : null,
             max_new_tokens: Number.isFinite(maxTokens) ? maxTokens : 1024,
+            thinking_effort: Number.isFinite(thinkingEffort) ? thinkingEffort : null,
+            prepass_caption_profile: captionProfile || null,
+            prepass_caption_variant: captionVariant || null,
+            prepass_caption_model_id: resolveCaptionModelId(),
+            prepass_caption_max_tokens: Number.isFinite(captionMaxTokens) ? captionMaxTokens : null,
             labelmap_glossary: glossaryText || null,
+            use_detection_overlay: useOverlay !== false,
+            review_enabled: reviewEnabled,
+            review_model_id: resolveReviewModelId(),
+            review_variant: qwenElements.agentReviewVariant?.value || "auto",
+            review_max_tokens: Number.isFinite(reviewMaxTokens) ? reviewMaxTokens : null,
+            review_classes: reviewClassesRaw
+                ? reviewClassesRaw.split(",").map((item) => item.trim()).filter(Boolean)
+                : null,
+            review_passes_per_tile: Number.isFinite(reviewPasses) ? reviewPasses : null,
+            tighten_fp: tightenFp,
+            detector_conf: tightenFp && Number.isFinite(detectorConf) ? detectorConf : null,
+            sam3_score_thr: tightenFp && Number.isFinite(sam3ScoreThr) ? sam3ScoreThr : null,
+            sam3_mask_threshold: tightenFp && Number.isFinite(sam3MaskThr) ? sam3MaskThr : null,
+            classifier_min_prob: tightenFp && Number.isFinite(classifierMinProb) ? classifierMinProb : null,
+            classifier_margin: tightenFp && Number.isFinite(classifierMargin) ? classifierMargin : null,
+            classifier_bg_margin: tightenFp && Number.isFinite(classifierBgMargin) ? classifierBgMargin : null,
+            scoreless_iou: tightenFp && Number.isFinite(scorelessIou) ? scorelessIou : null,
         };
     }
 
@@ -16581,8 +16786,7 @@ function initQwenTrainingTab() {
             const toolCalls = Array.isArray(job.trace)
                 ? job.trace.filter((entry) => entry?.phase === "tool_call").length
                 : 0;
-            const maxToolCalls = job.request?.max_tool_calls;
-            const toolSummary = Number.isFinite(maxToolCalls) ? ` (${toolCalls}/${maxToolCalls} tool calls)` : "";
+            const toolSummary = toolCalls ? ` (${toolCalls} tool calls)` : "";
             setQwenAgentStatus(`${job.message || "Running"}${toolSummary}`);
         } catch (error) {
             setSamStatus(`Agent poll error: ${error.message || error}`, { variant: "error", duration: 4000 });

@@ -456,14 +456,6 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentMaxSteps">Max steps</label>
-                                            <input type="number" id="qwenAgentMaxSteps" min="1" max="30" value="12" />
-                                        </div>
-                                        <div>
-                                            <label for="qwenAgentMaxToolCalls">Max tool calls</label>
-                                            <input type="number" id="qwenAgentMaxToolCalls" min="1" max="60" value="20" />
-                                        </div>
-                                        <div>
                                             <label for="qwenAgentMaxDetections">Max detections</label>
                                             <input type="number" id="qwenAgentMaxDetections" min="50" max="2000" value="800" />
                                         </div>
@@ -478,6 +470,207 @@
                                         <div>
                                             <label for="qwenAgentMaxTokens">Max tokens</label>
                                             <input type="number" id="qwenAgentMaxTokens" min="128" max="2000" value="1024" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentCaptionProfile">Caption profile</label>
+                                            <select id="qwenAgentCaptionProfile">
+                                                <option value="light" selected>Light (agentic)</option>
+                                                <option value="deep">Deep (full)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentCaptionModel">Caption model</label>
+                                            <select id="qwenAgentCaptionModel">
+                                                <option value="active" selected>Use agent model</option>
+                                                <option value="2B">Qwen3-VL-2B</option>
+                                                <option value="4B">Qwen3-VL-4B</option>
+                                                <option value="8B">Qwen3-VL-8B</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentCaptionVariant">Caption variant</label>
+                                            <select id="qwenAgentCaptionVariant">
+                                                <option value="auto">Auto</option>
+                                                <option value="Instruct" selected>Instruct</option>
+                                                <option value="Thinking">Thinking</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentCaptionMaxTokens">Caption max tokens</label>
+                                            <input type="number" id="qwenAgentCaptionMaxTokens" min="32" max="512" value="128" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentThinkingEffort">Thinking effort</label>
+                                            <input type="number" id="qwenAgentThinkingEffort" min="0" max="2" step="0.1" value="0.7" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentOverlay">Overlay prepass detections</label>
+                                            <input type="checkbox" id="qwenAgentOverlay" checked />
+                                        </div>
+                                    </div>
+                                    <div class="training-help">Precision tuning (reduces false positives)</div>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenAgentTightenFp">Tighten false positives</label>
+                                            <input type="checkbox" id="qwenAgentTightenFp" checked />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentDetectorConf">Detector confidence</label>
+                                            <input type="number" id="qwenAgentDetectorConf" min="0" max="1" step="0.05" value="0.45" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSam3ScoreThr">SAM3 score threshold</label>
+                                            <input type="number" id="qwenAgentSam3ScoreThr" min="0" max="1" step="0.05" value="0.5" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSam3MaskThr">SAM3 mask threshold</label>
+                                            <input type="number" id="qwenAgentSam3MaskThr" min="0" max="1" step="0.05" value="0.5" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentClassifierMinProb">Classifier min prob</label>
+                                            <input type="number" id="qwenAgentClassifierMinProb" min="0" max="1" step="0.05" value="0.7" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentClassifierMargin">Classifier margin</label>
+                                            <input type="number" id="qwenAgentClassifierMargin" min="0" max="1" step="0.05" value="0.1" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentClassifierBgMargin">Classifier background margin</label>
+                                            <input type="number" id="qwenAgentClassifierBgMargin" min="0" max="1" step="0.05" value="0.1" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentScorelessIou">Scoreless min IoU</label>
+                                            <input type="number" id="qwenAgentScorelessIou" min="0" max="1" step="0.05" value="0.3" />
+                                        </div>
+                                    </div>
+                                    <div class="training-help">Deep prepass (deterministic)</div>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenAgentEnableYolo">Enable YOLO</label>
+                                            <input type="checkbox" id="qwenAgentEnableYolo" checked />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentEnableRfdetr">Enable RF-DETR</label>
+                                            <input type="checkbox" id="qwenAgentEnableRfdetr" checked />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentYoloRun">YOLO run (optional)</label>
+                                            <select id="qwenAgentYoloRun"></select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentRfdetrRun">RF-DETR run (optional)</label>
+                                            <select id="qwenAgentRfdetrRun"></select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSahiWindow">SAHI window size</label>
+                                            <input type="number" id="qwenAgentSahiWindow" min="256" max="2000" step="32" value="640" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSahiOverlap">SAHI overlap</label>
+                                            <input type="number" id="qwenAgentSahiOverlap" min="0" max="0.9" step="0.05" value="0.2" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentEnableSam3Text">Enable SAM3 text</label>
+                                            <input type="checkbox" id="qwenAgentEnableSam3Text" checked />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSam3SynBudget">SAM3 text prompt budget</label>
+                                            <input type="number" id="qwenAgentSam3SynBudget" min="1" max="30" value="10" />
+                                        </div>
+                                    </div>
+                                    <div class="training-help">Similarity expansion (SAM3)</div>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenAgentEnableSam3Similarity">Enable similarity</label>
+                                            <input type="checkbox" id="qwenAgentEnableSam3Similarity" checked />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityMinScore">Min exemplar score</label>
+                                            <input type="number" id="qwenAgentSimilarityMinScore" min="0" max="1" step="0.05" value="0.6" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityMidLow">Mid-conf low</label>
+                                            <input type="number" id="qwenAgentSimilarityMidLow" min="0" max="1" step="0.05" value="0.45" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityMidHigh">Mid-conf high</label>
+                                            <input type="number" id="qwenAgentSimilarityMidHigh" min="0" max="1" step="0.05" value="0.6" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityMidCount">Mid-conf class count</label>
+                                            <input type="number" id="qwenAgentSimilarityMidCount" min="1" max="50" value="2" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityWindowMode">Similarity window mode</label>
+                                            <select id="qwenAgentSimilarityWindowMode">
+                                                <option value="grid" selected>Grid</option>
+                                                <option value="sahi">SAHI</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityWindowSize">Similarity window size</label>
+                                            <input type="number" id="qwenAgentSimilarityWindowSize" min="256" max="2000" step="32" value="640" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityWindowOverlap">Similarity window overlap</label>
+                                            <input type="number" id="qwenAgentSimilarityWindowOverlap" min="0" max="0.9" step="0.05" value="0.2" />
+                                        </div>
+                                    </div>
+                                    <div class="training-help">Grid + overlay</div>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenAgentGridCols">Grid columns</label>
+                                            <input type="number" id="qwenAgentGridCols" min="1" max="26" value="5" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentGridRows">Grid rows</label>
+                                            <input type="number" id="qwenAgentGridRows" min="1" max="26" value="5" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentGridOverlap">Grid overlap</label>
+                                            <input type="number" id="qwenAgentGridOverlap" min="0" max="0.5" step="0.05" value="0.2" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentOverlayDotRadius">Overlay dot radius</label>
+                                            <input type="number" id="qwenAgentOverlayDotRadius" min="1" max="12" value="4" />
+                                        </div>
+                                    </div>
+                                    <div class="training-help">Review (VLM)</div>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenAgentReviewEnabled">Enable review</label>
+                                            <input type="checkbox" id="qwenAgentReviewEnabled" checked />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentReviewModel">Review model</label>
+                                            <select id="qwenAgentReviewModel">
+                                                <option value="active" selected>Use agent model</option>
+                                                <option value="2B">Qwen3-VL 2B</option>
+                                                <option value="4B">Qwen3-VL 4B</option>
+                                                <option value="8B">Qwen3-VL 8B</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Instruct">Qwen3-VL 30B-A3B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Thinking">Qwen3-VL 30B-A3B Thinking</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentReviewVariant">Review variant</label>
+                                            <select id="qwenAgentReviewVariant">
+                                                <option value="auto" selected>Auto</option>
+                                                <option value="Instruct">Instruct</option>
+                                                <option value="Thinking">Thinking</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentReviewMaxTokens">Review max tokens</label>
+                                            <input type="number" id="qwenAgentReviewMaxTokens" min="64" max="1024" value="256" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentReviewClasses">Review classes (comma-separated)</label>
+                                            <input type="text" id="qwenAgentReviewClasses" placeholder="leave empty for labelmap" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentReviewPasses">Review passes per tile</label>
+                                            <input type="number" id="qwenAgentReviewPasses" min="1" max="3" value="1" />
                                         </div>
                                     </div>
                                     <div class="qwen-caption-options">

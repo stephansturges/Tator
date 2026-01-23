@@ -6632,6 +6632,45 @@ def _agent_grid_spec(
     }
 
 
+def _agent_grid_spec_for_payload(payload: QwenAgenticRequest, img_w: int, img_h: int) -> Dict[str, Any]:
+    cols = payload.grid_cols if payload.grid_cols is not None else None
+    rows = payload.grid_rows if payload.grid_rows is not None else None
+    try:
+        cols = int(cols) if cols is not None else None
+    except (TypeError, ValueError):
+        cols = None
+    try:
+        rows = int(rows) if rows is not None else None
+    except (TypeError, ValueError):
+        rows = None
+    if cols and cols < 1:
+        cols = None
+    if rows and rows < 1:
+        rows = None
+    if cols or rows:
+        if not cols and rows:
+            cell_h = float(img_h) / float(rows)
+            cols = max(1, int(round(float(img_w) / cell_h)))
+        if not rows and cols:
+            cell_w = float(img_w) / float(cols)
+            rows = max(1, int(round(float(img_h) / cell_w)))
+        cols = max(1, int(cols or 1))
+        rows = max(1, int(rows or 1))
+        cell_w = float(img_w) / float(cols)
+        cell_h = float(img_h) / float(rows)
+        col_labels = [_agent_grid_col_label(idx) for idx in range(cols)]
+        return {
+            "cols": cols,
+            "rows": rows,
+            "cell_w": float(cell_w),
+            "cell_h": float(cell_h),
+            "col_labels": col_labels,
+            "img_w": int(img_w),
+            "img_h": int(img_h),
+        }
+    return _agent_grid_spec(img_w, img_h)
+
+
 def _agent_grid_cell_xyxy(
     grid: Mapping[str, Any],
     cell_label: str,
@@ -11163,7 +11202,7 @@ def _agent_run_prepass(
     prepass_source_summary: Optional[str] = None
     grid_for_log: Optional[Dict[str, Any]] = None
     if payload.use_detection_overlay is not False:
-        grid_for_log = _agent_grid_spec(img_w, img_h)
+        grid_for_log = _agent_grid_spec_for_payload(payload, img_w, img_h)
 
     def add_tool_result(name: str, result: Dict[str, Any], summary: str) -> None:
         nonlocal step_id
@@ -12258,7 +12297,7 @@ def _agent_similarity_windows(
                 }
             )
         return windows
-    grid_spec = _agent_grid_spec(img_w, img_h)
+    grid_spec = _agent_grid_spec_for_payload(payload, img_w, img_h)
     for cell in _agent_grid_cells(grid_spec):
         xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=payload.grid_overlap_ratio or AGENTIC_GRID_OVERLAP_RATIO)
         if not xyxy:
@@ -12716,7 +12755,7 @@ def _run_agentic_annotation_qwen_agent(
     if prepass_warnings:
         warnings.extend(prepass_warnings)
 
-    grid_spec: Optional[Dict[str, Any]] = _agent_grid_spec(img_w, img_h)
+    grid_spec: Optional[Dict[str, Any]] = _agent_grid_spec_for_payload(payload, img_w, img_h)
     _AGENT_ACTIVE_GRID = grid_spec
     detections: List[Dict[str, Any]] = []
     if prepass_detections:

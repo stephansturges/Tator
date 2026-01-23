@@ -12156,6 +12156,47 @@ def _agent_run_deep_prepass_part_a(
     }
 
 
+def _agent_deep_prepass_cleanup(
+    payload: QwenAgenticRequest,
+    *,
+    detections: List[Dict[str, Any]],
+    pil_img: Image.Image,
+    labelmap: List[str],
+) -> Dict[str, Any]:
+    img_w, img_h = pil_img.size
+    iou_thr = float(payload.iou or AGENTIC_CLUSTER_IOU)
+    merged, removed = _agent_merge_prepass_detections(detections, iou_thr=iou_thr)
+    scoreless_iou = payload.scoreless_iou or 0.0
+    if scoreless_iou:
+        merged, scoreless_removed = _agent_filter_scoreless_detections(merged, iou_thr=float(scoreless_iou))
+    else:
+        scoreless_removed = 0
+    classifier_id = payload.classifier_id
+    head: Optional[Dict[str, Any]] = None
+    if classifier_id:
+        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        if classifier_path is not None:
+            head = _load_clip_head_from_classifier(classifier_path)
+    elif isinstance(active_classifier_head, dict):
+        head = dict(active_classifier_head)
+    background = _agent_background_classes_from_head(head)
+    cleaned, rejected = _agent_sanitize_detection_items(
+        merged,
+        pil_img=pil_img,
+        classifier_head=head,
+        img_w=img_w,
+        img_h=img_h,
+        labelmap=labelmap,
+        background=background,
+    )
+    return {
+        "detections": cleaned,
+        "removed": removed,
+        "scoreless_removed": scoreless_removed,
+        "rejected": rejected,
+    }
+
+
 def _run_agentic_annotation_qwen_agent(
     payload: QwenAgenticRequest,
     *,

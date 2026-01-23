@@ -12465,6 +12465,13 @@ def _agent_review_prompt_base(
                 "Answer JSON only: {\"tile\":\"<cell>\",\"label\":\"<label>\",\"complete\":true|false}",
             ]
         )
+    elif mode == "confidence":
+        lines.extend(
+            [
+                "Question: Are any handles for this class likely false positives?",
+                "Answer JSON only: {\"tile\":\"<cell>\",\"label\":\"<label>\",\"false_positive_handles\":[\"LV12\"]}",
+            ]
+        )
     return "\n".join(lines).strip()
 
 
@@ -12525,6 +12532,79 @@ def _agent_run_completeness_review(
                 "label": label,
                 "complete": bool(data.get("complete")),
                 "mode": "completeness",
+                "model_id": model_id,
+                "variant": payload.review_variant or "auto",
+                "grid_cols": grid_spec.get("cols"),
+                "grid_rows": grid_spec.get("rows"),
+                "grid_overlap_ratio": overlap_ratio,
+                "ts": time.time(),
+            }
+            results.append(entry)
+            _AGENT_REVIEW_GRID.append(entry)
+    return results
+
+
+def _agent_run_confidence_review(
+    payload: QwenAgenticRequest,
+    *,
+    pil_img: Image.Image,
+    overlay_img: Image.Image,
+    grid_spec: Dict[str, Any],
+    labelmap: List[str],
+    glossary: str,
+    model_id: str,
+) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    if payload.review_enabled is False:
+        return results
+    review_labels = list(payload.review_classes or labelmap)
+    label_colors = _agent_current_label_colors(labelmap)
+    label_prefixes = _agent_current_label_prefixes(labelmap)
+    overlap_ratio = float(payload.grid_overlap_ratio or AGENTIC_GRID_OVERLAP_RATIO)
+    max_tokens = int(payload.review_max_tokens or 256)
+    for cell in _agent_grid_cells(grid_spec):
+        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=overlap_ratio)
+        if not xyxy:
+            continue
+        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+        raw_tile = pil_img.crop((x1, y1, x2, y2))
+        overlay_tile = overlay_img.crop((x1, y1, x2, y2))
+        for label in review_labels:
+            prompt = _agent_review_prompt_base(
+                tile=cell,
+                label=label,
+                label_colors=label_colors,
+                label_prefixes=label_prefixes,
+                glossary=glossary,
+                mode="confidence",
+            )
+            messages = [
+                {"role": "system", "content": [{"type": "text", "text": "Answer strictly in JSON."}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": raw_tile},
+                        {"type": "image", "image": overlay_tile},
+                        {"type": "text", "text": prompt},
+                    ],
+                },
+            ]
+            raw = _run_qwen_chat(
+                messages,
+                max_new_tokens=max_tokens,
+                decode_override={"temperature": 0.0, "top_p": 1.0},
+                model_id_override=model_id,
+            )
+            data = _agent_parse_json_relaxed(raw) or {}
+            handles = data.get("false_positive_handles")
+            if not isinstance(handles, list):
+                handles = []
+            handles = [str(h).strip() for h in handles if str(h).strip()]
+            entry = {
+                "tile": cell,
+                "label": label,
+                "false_positive_handles": handles,
+                "mode": "confidence",
                 "model_id": model_id,
                 "variant": payload.review_variant or "auto",
                 "grid_cols": grid_spec.get("cols"),

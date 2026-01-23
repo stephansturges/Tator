@@ -11995,6 +11995,167 @@ def _agent_run_prepass(
     )
 
 
+def _agent_attach_provenance(
+    detections: Sequence[Dict[str, Any]],
+    *,
+    source: str,
+    source_primary: Optional[str] = None,
+    source_prompt: Optional[str] = None,
+    source_exemplar_handles: Optional[Sequence[str]] = None,
+    source_detector_run_id: Optional[str] = None,
+) -> None:
+    for det in detections:
+        if not isinstance(det, dict):
+            continue
+        if source_primary:
+            det.setdefault("source_primary", source_primary)
+        else:
+            det.setdefault("source_primary", source)
+        if source_prompt:
+            det.setdefault("source_prompt", source_prompt)
+        if source_exemplar_handles:
+            det.setdefault("source_exemplar_handles", list(source_exemplar_handles))
+        if source_detector_run_id:
+            det.setdefault("source_detector_run_id", source_detector_run_id)
+        sources = det.get("source_list")
+        if not isinstance(sources, list):
+            sources = []
+        if source and source not in sources:
+            sources.append(source)
+        det["source_list"] = sources
+
+
+def _agent_run_deep_prepass_part_a(
+    payload: QwenAgenticRequest,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    labelmap: List[str],
+    glossary: str,
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    img_w, img_h = pil_img.size
+    detections: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    sam3_text_prompts: Dict[str, List[str]] = {}
+
+    def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
+        if trace_writer:
+            trace_writer({"type": event, **payload_obj, "ts": time.time()})
+        if trace_full_writer:
+            trace_full_writer({"type": event, **payload_obj, "ts": time.time()})
+
+    sahi_cfg = {
+        "enabled": True,
+        "slice_size": int(payload.sahi_window_size or 640),
+        "overlap": float(payload.sahi_overlap_ratio or 0.2),
+    }
+
+    detector_conf = payload.detector_conf
+    detector_iou = payload.iou
+    max_det = payload.max_detections
+
+    for mode in ("yolo", "rfdetr"):
+        if mode == "yolo" and payload.enable_yolo is False:
+            continue
+        if mode == "rfdetr" and payload.enable_rfdetr is False:
+            continue
+        det_id = payload.yolo_id if mode == "yolo" else payload.rfdetr_id
+        if not det_id:
+            det_id = payload.detector_id if (payload.detector_mode or "yolo") == mode else None
+        args = {
+            "image_token": image_token,
+            "detector_id": det_id,
+            "mode": mode,
+            "conf": detector_conf,
+            "sahi": sahi_cfg,
+            "max_det": max_det,
+            "iou": detector_iou,
+            "merge_iou": detector_iou,
+        }
+        _log_step("deep_prepass_tool_call", {"tool": "run_detector", "args": args})
+        try:
+            result = _agent_tool_run_detector(
+                image_token=image_token,
+                detector_id=det_id,
+                mode=mode,
+                conf=detector_conf,
+                sahi=sahi_cfg,
+                max_det=max_det,
+                iou=detector_iou,
+                merge_iou=detector_iou,
+                register=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"deep_prepass_detector_failed:{mode}:{exc}")
+            continue
+        _log_step("deep_prepass_tool_result", {"tool": "run_detector", "result": result})
+        dets = list(result.get("detections") or [])
+        _agent_attach_provenance(
+            dets,
+            source=mode,
+            source_primary=mode,
+            source_detector_run_id=det_id,
+        )
+        detections.extend(dets)
+
+    if payload.enable_sam3_text is not False and labelmap:
+        labels = [lbl for lbl in labelmap if str(lbl).strip()]
+        synonym_map = _agent_generate_sam3_synonyms(labels, glossary or "")
+        score_thr = payload.prepass_sam3_text_thr
+        if score_thr is None and _AGENT_ACTIVE_SAM3_SCORE_THR is not None:
+            score_thr = _AGENT_ACTIVE_SAM3_SCORE_THR
+        mask_thr = payload.sam3_mask_threshold
+        if mask_thr is None and _AGENT_ACTIVE_SAM3_MASK_THR is not None:
+            mask_thr = _AGENT_ACTIVE_SAM3_MASK_THR
+        prompt_budget = int(payload.sam3_text_synonym_budget or 6)
+        for label in labels:
+            prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=prompt_budget)
+            if not prompts:
+                prompts = [str(label).replace("_", " ").strip() or str(label).strip()]
+            for prompt in prompts:
+                sam3_text_prompts.setdefault(label, []).append(prompt)
+                args = {
+                    "image_token": image_token,
+                    "prompt": prompt,
+                    "label": label,
+                    "score_thr": score_thr,
+                    "mask_threshold": mask_thr,
+                    "max_results": None,
+                }
+                _log_step("deep_prepass_tool_call", {"tool": "sam3_text", "args": args})
+                try:
+                    result = _agent_tool_sam3_text(
+                        image_token=image_token,
+                        prompt=prompt,
+                        label=label,
+                        score_thr=score_thr,
+                        mask_threshold=mask_thr,
+                        max_results=None,
+                        register=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"deep_prepass_sam3_text_failed:{label}:{exc}")
+                    continue
+                _log_step("deep_prepass_tool_result", {"tool": "sam3_text", "result": result})
+                dets = list(result.get("detections") or [])
+                _agent_attach_provenance(
+                    dets,
+                    source="sam3_text",
+                    source_primary="sam3_text",
+                    source_prompt=prompt,
+                )
+                detections.extend(dets)
+
+    return {
+        "detections": detections,
+        "warnings": warnings,
+        "sam3_text_prompts": sam3_text_prompts,
+        "image_size": {"width": img_w, "height": img_h},
+    }
+
+
 def _run_agentic_annotation_qwen_agent(
     payload: QwenAgenticRequest,
     *,

@@ -12233,6 +12233,154 @@ def _agent_select_similarity_exemplars(
     return selections
 
 
+def _agent_similarity_windows(
+    payload: QwenAgenticRequest,
+    *,
+    pil_img: Image.Image,
+) -> List[Dict[str, Any]]:
+    img_w, img_h = pil_img.size
+    mode = (payload.similarity_window_mode or "grid").strip().lower()
+    windows: List[Dict[str, Any]] = []
+    if mode == "sahi":
+        slice_size = int(payload.similarity_window_size or payload.sahi_window_size or 640)
+        overlap = float(payload.similarity_window_overlap or payload.sahi_overlap_ratio or 0.2)
+        slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
+        for idx, start in enumerate(starts):
+            x1 = float(start[0])
+            y1 = float(start[1])
+            x2 = min(float(img_w), x1 + slice_size)
+            y2 = min(float(img_h), y1 + slice_size)
+            windows.append(
+                {
+                    "name": f"sahi_{idx}",
+                    "bbox_xyxy_px": [x1, y1, x2, y2],
+                    "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
+                }
+            )
+        return windows
+    grid_spec = _agent_grid_spec(img_w, img_h)
+    for cell in _agent_grid_cells(grid_spec):
+        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=payload.grid_overlap_ratio or AGENTIC_GRID_OVERLAP_RATIO)
+        if not xyxy:
+            continue
+        x1, y1, x2, y2 = xyxy
+        windows.append(
+            {
+                "name": cell,
+                "grid_cell": cell,
+                "bbox_xyxy_px": [x1, y1, x2, y2],
+                "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
+            }
+        )
+    return windows
+
+
+def _agent_exemplars_for_window(
+    exemplars: Sequence[Dict[str, Any]],
+    *,
+    img_w: int,
+    img_h: int,
+    window_xyxy: Sequence[float],
+) -> List[Dict[str, Any]]:
+    if not exemplars:
+        return []
+    if not window_xyxy or len(window_xyxy) < 4:
+        return list(exemplars)
+    wx1, wy1, wx2, wy2 = window_xyxy
+    filtered: List[Dict[str, Any]] = []
+    for det in exemplars:
+        if not isinstance(det, dict):
+            continue
+        xyxy = _resolve_agent_bbox_xyxy(det, img_w, img_h)
+        if xyxy is None:
+            continue
+        x1, y1, x2, y2 = xyxy
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        if wx1 <= cx <= wx2 and wy1 <= cy <= wy2:
+            filtered.append(det)
+    return filtered
+
+
+def _agent_run_similarity_expansion(
+    payload: QwenAgenticRequest,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    exemplars_by_label: Dict[str, List[Dict[str, Any]]],
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
+    img_w, img_h = pil_img.size
+    detections: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    windows = _agent_similarity_windows(payload, pil_img=pil_img)
+    score_thr = payload.prepass_similarity_score
+    mask_thr = payload.sam3_mask_threshold
+
+    def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
+        if trace_writer:
+            trace_writer({"type": event, **payload_obj, "ts": time.time()})
+        if trace_full_writer:
+            trace_full_writer({"type": event, **payload_obj, "ts": time.time()})
+
+    for label, exemplars in exemplars_by_label.items():
+        for window in windows:
+            window_xyxy = window.get("bbox_xyxy_px") or []
+            window_bbox_2d = window.get("bbox_2d")
+            window_exemplars = _agent_exemplars_for_window(
+                exemplars, img_w=img_w, img_h=img_h, window_xyxy=window_xyxy
+            )
+            if not window_exemplars:
+                continue
+            exemplar_boxes = []
+            exemplar_handles = []
+            for det in window_exemplars:
+                bbox = det.get("bbox_2d")
+                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
+                handle = det.get("handle")
+                if handle:
+                    exemplar_handles.append(str(handle))
+            if not exemplar_boxes:
+                continue
+            args = {
+                "image_token": image_token,
+                "label": label,
+                "exemplar_boxes": exemplar_boxes,
+                "score_thr": score_thr,
+                "mask_threshold": mask_thr,
+                "window_bbox_2d": window_bbox_2d,
+            }
+            if window.get("grid_cell"):
+                args["grid_cell"] = window.get("grid_cell")
+            _log_step("deep_prepass_tool_call", {"tool": "sam3_similarity", "args": args})
+            try:
+                result = _agent_tool_sam3_similarity(
+                    image_token=image_token,
+                    exemplar_boxes=exemplar_boxes,
+                    label=label,
+                    score_thr=score_thr,
+                    mask_threshold=mask_thr,
+                    window_bbox_2d=window_bbox_2d,
+                    grid_cell=window.get("grid_cell"),
+                    register=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"deep_prepass_similarity_failed:{label}:{window.get('name')}:{exc}")
+                continue
+            _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
+            dets = list(result.get("detections") or [])
+            _agent_attach_provenance(
+                dets,
+                source="sam3_similarity",
+                source_primary="sam3_similarity",
+                source_exemplar_handles=exemplar_handles or None,
+            )
+            detections.extend(dets)
+    return {"detections": detections, "warnings": warnings}
+
+
 def _run_agentic_annotation_qwen_agent(
     payload: QwenAgenticRequest,
     *,

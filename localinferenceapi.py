@@ -5457,6 +5457,7 @@ _AGENT_TRACE_READABLE_WRITER: Optional[Callable[[str], None]] = None
 _AGENT_TILE_CONTEXT_STORE: Dict[str, Dict[str, Any]] = {}
 _AGENT_GLOBAL_CONTEXT_STORE: Dict[str, Dict[str, Any]] = {}
 _AGENT_TILE_SUMMARIES: List[Dict[str, Any]] = []
+_AGENT_REVIEW_GRID: List[Dict[str, Any]] = []
 _AGENT_PREPASS_COMPLETE: bool = False
 
 AGENTIC_TIGHT_DEFAULT_DETECTOR_CONF = 0.45
@@ -12434,6 +12435,106 @@ def _agent_finalize_provenance(detections: Sequence[Dict[str, Any]]) -> None:
         if primary and primary not in sources:
             sources.append(primary)
         det["source_list"] = sources
+
+
+def _agent_review_prompt_base(
+    *,
+    tile: str,
+    label: str,
+    label_colors: Mapping[str, str],
+    label_prefixes: Mapping[str, str],
+    glossary: str,
+    mode: str,
+) -> str:
+    prefix = label_prefixes.get(label) or ""
+    color = label_colors.get(label) or ""
+    lines = [
+        f"Tile: {tile}",
+        f"Class: {label}",
+        f"Handle prefix: {prefix or 'n/a'}",
+        f"Color: {color or 'n/a'}",
+        "Legend (label -> prefix -> color):",
+        _agent_overlay_key_text(label_colors, label_prefixes) or "n/a",
+        "Glossary:",
+        glossary or "n/a",
+    ]
+    if mode == "completeness":
+        lines.extend(
+            [
+                "Question: Are ALL items of this class in this tile annotated?",
+                "Answer JSON only: {\"tile\":\"<cell>\",\"label\":\"<label>\",\"complete\":true|false}",
+            ]
+        )
+    return "\n".join(lines).strip()
+
+
+def _agent_run_completeness_review(
+    payload: QwenAgenticRequest,
+    *,
+    pil_img: Image.Image,
+    overlay_img: Image.Image,
+    grid_spec: Dict[str, Any],
+    labelmap: List[str],
+    glossary: str,
+    model_id: str,
+) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    if payload.review_enabled is False:
+        return results
+    review_labels = list(payload.review_classes or labelmap)
+    label_colors = _agent_current_label_colors(labelmap)
+    label_prefixes = _agent_current_label_prefixes(labelmap)
+    overlap_ratio = float(payload.grid_overlap_ratio or AGENTIC_GRID_OVERLAP_RATIO)
+    max_tokens = int(payload.review_max_tokens or 256)
+    for cell in _agent_grid_cells(grid_spec):
+        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=overlap_ratio)
+        if not xyxy:
+            continue
+        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
+        raw_tile = pil_img.crop((x1, y1, x2, y2))
+        overlay_tile = overlay_img.crop((x1, y1, x2, y2))
+        for label in review_labels:
+            prompt = _agent_review_prompt_base(
+                tile=cell,
+                label=label,
+                label_colors=label_colors,
+                label_prefixes=label_prefixes,
+                glossary=glossary,
+                mode="completeness",
+            )
+            messages = [
+                {"role": "system", "content": [{"type": "text", "text": "Answer strictly in JSON."}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": raw_tile},
+                        {"type": "image", "image": overlay_tile},
+                        {"type": "text", "text": prompt},
+                    ],
+                },
+            ]
+            raw = _run_qwen_chat(
+                messages,
+                max_new_tokens=max_tokens,
+                decode_override={"temperature": 0.0, "top_p": 1.0},
+                model_id_override=model_id,
+            )
+            data = _agent_parse_json_relaxed(raw) or {}
+            entry = {
+                "tile": cell,
+                "label": label,
+                "complete": bool(data.get("complete")),
+                "mode": "completeness",
+                "model_id": model_id,
+                "variant": payload.review_variant or "auto",
+                "grid_cols": grid_spec.get("cols"),
+                "grid_rows": grid_spec.get("rows"),
+                "grid_overlap_ratio": overlap_ratio,
+                "ts": time.time(),
+            }
+            results.append(entry)
+            _AGENT_REVIEW_GRID.append(entry)
+    return results
 
 
 def _run_agentic_annotation_qwen_agent(

@@ -1,9 +1,9 @@
-/!\ Under active development. A lot of things are somewhat broken, especially in the dataset management side. SAM3 recipe "mining" as well as SAM3 training are both very much WIP. They work, but the methods are not optimized yet so don't take current performance as an indicator of anything. /!\
+/!\ Under active development. Dataset management + training flows are active areas of work; expect periodic changes. /!\
 
 
 # 🥔 Tator – Local CLIP + SAM Image Annotation Toolkit
 
-Tator is a single-machine annotation workflow that pairs a clean, fast, simple, web-based frontend with a FastAPI backend to deliver _fast_ bounding-box annotation for images as well as some cool optional automation like class suggestions powered by CLIP and bbox cleanup / auto-suggestion using Segment Anything (SAM). The UI now bundles labeling, CLIP training, and model management in one place so you can iterate on datasets without leaving the browser.
+Tator is a single-machine annotation workflow that pairs a clean, fast, simple, web-based frontend with a FastAPI backend to deliver fast bounding‑box labeling, light automation (CLIP class suggestions + SAM geometry fixes), and a deterministic **deep prelabeling** pipeline that combines multiple detectors + SAM3 and filters them through a calibration model. The UI bundles labeling, training, dataset management, and prelabeling in one place so you can iterate without leaving the browser.
 
 ## Lightning-Fast Labeling Modes
 
@@ -44,7 +44,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
 - **Qwen 3 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. The active model (selected on the Qwen Models tab) always supplies the system prompt and defaults so inference matches training.
 - **Qwen 3 captioning** – generate long-form captions with label hints and optional reasoning models, then save them into a `text_labels/` folder alongside YOLO exports (use the Label Images panel).
-- **Qwen deep prelabeling** – deterministic prepass (detectors + SAM3 + dedupe) with optional glossary expansion + calibration filtering.
+- **Deep prelabeling** – deterministic prepass (detectors + SAM3 + dedupe) with optional glossary expansion + **calibration (XGBoost)** to filter candidates.
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **YOLOv8 training** – launch detect/segment runs from the UI, track progress, and keep only `best.pt` + metrics for easy sharing.
 - **RF-DETR training** – launch detect/segment runs from the UI, track progress, and keep best checkpoints + metrics for easy sharing.
@@ -57,7 +57,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - `tools/` – reusable training helpers and CLI scripts.
 - `sam3/` – optional upstream SAM3 checkout (needed for SAM3 training; inference can use downloaded checkpoints).
 - `tests/` – unit tests.
-- `uploads/` – runtime artifacts (CLIP embedding cache, Agent Mining jobs/recipes/cascades, Qwen runs, exports).
+- `uploads/` – runtime artifacts (CLIP embedding cache, Agent Mining jobs/recipes/cascades, Qwen runs, calibration jobs + caches, glossaries, exports).
 
 ## How Tator Works (Architecture + Code Paths)
 
@@ -87,13 +87,16 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 │  - clip_embeddings/   cached CLIP features used by training + mining       │
 │  - agent_mining/      jobs/, cache/, recipes/, cascades/                   │
 │  - qwen_runs/         datasets/, checkpoints/, metadata.json               │
+│  - calibration_jobs/  job state + logs for prepass calibration             │
+│  - calibration_cache/ cached prepass/features/labels for calibration       │
+│  - glossaries/        saved glossary library (glossaries.json)             │
 │  - yolo_runs/         best.pt, metrics.json, results.csv, run.json         │
 │  - rfdetr_runs/       checkpoints, metrics, results.json, run.json         │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Qwen deep prelabeling (prepass + calibration)
-- Configure the active Qwen model in `Qwen Models`, then open the **Deep prelabeling** panel.
+### Deep prelabeling (prepass + calibration)
+- Open the **Deep prelabeling** panel to configure detectors + SAM3.
 - The prepass is deterministic: detectors (YOLO/RF‑DETR), SAM3 text + similarity, and IoU dedupe.
 - Optional glossary expansion uses Qwen to propose extra SAM3 terms per class.
 - Calibration (XGBoost) filters the candidate pool to maximize F1 while enforcing a recall floor.
@@ -129,6 +132,22 @@ Key notes:
 - **Dedupe**: run twice (after detectors + text, and after similarity) to stabilize cluster assignment.
 - **Calibration**: the calibration prepass uses `prepass_keep_all=true` and `prepass_caption=false` so the MLP sees the full candidate pool with no classifier gating.
 
+### YOLO‑first dataset management
+Tator treats YOLO as canonical. Every dataset should have:
+- `labelmap.txt`
+- `train/images/`, `train/labels/`
+- optional `val/images/`, `val/labels/`
+
+If a dataset exists only as COCO, the backend **auto‑converts COCO → YOLO** during dataset listing so label ordering is consistent across inference, prepass, and calibration. COCO JSONs are still kept (derived) for SAM3/RF‑DETR tooling.
+
+### Glossary management
+Each dataset can store a **canonical glossary** (used for SAM3 text prompts). The UI supports:
+- selecting a dataset glossary,
+- editing or replacing the glossary text,
+- saving to dataset metadata.
+
+You can also use a glossary library entry (named glossaries) or a custom glossary override in Deep prelabeling.
+
 Settings per step (what the user configures)
 - **Detectors (YOLO / RF‑DETR)**:
   - **Selectors**: choose one or more trained detectors to run (YOLO and/or RF‑DETR) and pick the specific trained run for each in the Deep prelabeling panel.
@@ -162,6 +181,11 @@ Standardized prepass + calibration flow (current default)
 6. **Calibration features**: build candidate features (including classifier prob vector + per‑source scores + context counts).
 7. **Calibrator**: XGBoost accept/reject (context features, log1p counts + z‑score normalization).
 8. **Final output**: calibrated detections with dedupe IoU 0.75.
+
+Calibration workflow + caching
+- Calibration runs are stored under `uploads/calibration_jobs/<job_id>/`.
+- Intermediate prepass + feature + label caches are stored under `uploads/calibration_cache/` and keyed by the payload hash.
+- You can poll a running job via `GET /qwen/calibration/jobs/{job_id}` to track progress.
 
 Calibration benchmark (IoU=0.50, qwen_dataset, cal_8180972c, validation split)
 | Pipeline | Precision | Recall | F1 |
@@ -209,7 +233,7 @@ Tator/
 - **SAM assists (Label Images tab)**: UI actions → SAM endpoints (SAM1/2/3 depending on `SAM_VARIANT`) → detections written into the current image session.
 - **SAM3 text prompt**: `SAM3 Text Prompt` panel → SAM3 processor runtime → returns boxes/polygons via the same `QwenDetection` response model used elsewhere.
 - **Qwen captioning**: `Label Images` panel → `/qwen/caption` → prompt uses scene hints + optional label hints → captions can be saved into `text_labels/` in YOLO exports.
-- **Qwen deep prelabeling**: `Qwen Models` panel → `/qwen/prepass` → deterministic prepass + calibration → merged detections returned to UI.
+- **Deep prelabeling**: `Deep prelabeling` panel → `/qwen/prepass` → deterministic prepass + calibration → merged detections returned to UI.
 - **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → results include per-class recipes in either:
   - `sam3_greedy`: prompt bank + optional crop bank (positives/negatives) + optional embedded pretrained CLIP head
   - `sam3_steps` (`schema_version=2`): explicit multi-step prompt chain (step list), plus optional embedded pretrained CLIP head
@@ -299,22 +323,31 @@ Dataset Management displays readiness tags so you can see when a dataset is usab
 - **YOLO‑SEG** – YOLO polygon labels detected (required for YOLOv8 segmentation training).
 - **COCO** – COCO annotations present (used by SAM3 training + recipe mining).
 - **COCO‑SEG** – COCO polygon annotations present (required for RF‑DETR segmentation training).
+If a dataset only has COCO, the backend auto‑converts COCO → YOLO so the labelmap order stays consistent for inference and calibration.
+
+### Dataset Management & Glossaries
+- Upload YOLO datasets (zip) in the **Datasets** panel; the backend normalizes layout and stores metadata.
+- Each dataset has a **canonical glossary** (used by SAM3 text prompts). Edit or replace it in the Dataset Manager.
+- You can also maintain a **glossary library** (named glossaries) and reuse it across datasets.
+- When running Deep prelabeling, choose glossary source: dataset glossary, glossary library entry, or custom text.
 
 ### Captioning with Qwen3 (Label Images tab)
 1. Load an image and click **Qwen Captioning** in the Label Images panel.
 2. Pick a caption model (active run or a base Qwen3 size) plus a variant (Instruct/Thinking).
 3. Optionally add style prompts and opening phrases (JSON list or one per line).
-4. If you need extra detail, switch **Caption detail** to *Detailed (windowed)* and tune the window size + overlap.
+4. For extra detail, use **Detailed (windowed)** — always 2×2 tiles with ~20% overlap, expanded to model input resolution.
 5. Adjust **Sampling preset** (recommended defaults per variant: Instruct vs Thinking) if you want more creative diversity or deterministic outputs.
 6. Click **Run caption** and optionally save the caption as a `text_labels` entry.
-5. Export as YOLO ZIP: captions live under `text_labels/` next to label files.
-6. **Fast mode** keeps Qwen models loaded between caption requests (faster, higher VRAM). Leave it off for max stability.
+7. Export as YOLO ZIP: captions live under `text_labels/` next to label files.
+8. **Fast mode** keeps Qwen models loaded between caption requests (faster, higher VRAM). Leave it off for max stability.
 
 Captioning quality guardrails:
 - Counts are injected as immutable facts (the model should not say “visible” vs “authoritative” counts).
 - Meta language is banned (“labels,” “hints,” “bounding boxes,” etc.). If it leaks in, a cleanup pass rewrites the caption.
 - Repetition/loops and truncation are detected; a minimal‑diff cleanup rewrites into a single clean sentence when needed.
 - Refine mode (Thinking → Instruct) is constrained to minimal edits so it doesn’t invent new objects or actions.
+- Windowed captions are merged with explicit “preserve detail” instructions (people counts, vehicles, unique objects).
+- Labelmap tokens (e.g., `light_vehicle`) are explicitly discouraged in the final caption; natural language is preferred.
 
 ### Training detectors (YOLOv8 + RF-DETR)
 1. Open **Train YOLO** or **Train RF-DETR**.
@@ -328,6 +361,7 @@ Captioning quality guardrails:
 - 2026-01-13: Added YOLOv8 + RF-DETR training UIs, run tracking, and saved-run management with best checkpoints only.
 - 2026-01-13: Expanded model catalog (Thinking/Instruct + FP8 options) and GPU capability warnings for large caption models.
 - 2026-01-16: Captioning guardrails (fixed counts, meta‑language removal, repetition/truncation cleanup) + fast‑mode toggle for speed/VRAM tradeoff + decode presets (temp/top‑p) per variant.
+- 2026-01-23: Deep prelabeling + calibration (XGBoost), glossary library, and YOLO‑first dataset auto‑conversion (COCO → YOLO).
 
 ### Optional: Setting up SAM3
 SAM3 support is optional but recommended if you plan to use the text-prompt workflow. Follow Meta’s instructions plus the notes below (summarised from `sam3integration.txt`):
@@ -431,6 +465,12 @@ You can keep the UI/data on your laptop and push all SAM/CLIP heavy lifting to a
 - Press **`X`** with a bbox selected and SAM/CLIP will refine it in place; double-tap `X` to batch-tweak the entire class (the tweak always targets whichever class is currently selected in the sidebar). *(GIF placeholder)*
 - Import YOLO `.txt` folders or zipped annotation bundles via the dedicated buttons—the app now streams bboxes even while images are still ingesting.
 - Auto class, SAM box/point modes, and multi-point masks share a top progress indicator and support keyboard shortcuts documented in the panel footer.
+
+### Deep Prelabeling Tab
+- Select detector runs (YOLO, RF‑DETR) and a classifier head.
+- Choose glossary source and optional Qwen expansion (max new terms per class).
+- Decide whether to enable windowed SAM3 similarity (global similarity always runs).
+- Start a prepass + calibration job; progress is streamed and cached so repeats are fast.
 
 #### Keyboard Shortcuts
 - `X` – press while a bbox is selected to trigger the one-click SAM tweak.

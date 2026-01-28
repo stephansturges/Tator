@@ -1487,9 +1487,12 @@
         agentDatasetSelect: null,
         agentDatasetRefresh: null,
         agentDatasetSummary: null,
+        agentGlossarySource: null,
+        agentGlossarySelect: null,
+        agentGlossaryRefresh: null,
+        agentGlossaryLibraryRow: null,
         agentGlossary: null,
-        agentGlossarySave: null,
-        agentGlossaryReload: null,
+        agentGlossaryHint: null,
         agentModel: null,
         agentVariant: null,
         agentDetectorMode: null,
@@ -1500,6 +1503,7 @@
         agentSahiWindow: null,
         agentSahiOverlap: null,
         agentEnableSam3Text: null,
+        agentSam3ExpandGlossary: null,
         agentSam3SynBudget: null,
         agentEnableSam3Similarity: null,
         agentSimilarityMinScore: null,
@@ -1519,6 +1523,17 @@
         agentReviewMaxTokens: null,
         agentReviewClasses: null,
         agentReviewPasses: null,
+        calibrationStatus: null,
+        calibrationDataset: null,
+        calibrationDatasetRefresh: null,
+        calibrationImageCount: null,
+        calibrationMaxTerms: null,
+        calibrationBaseFp: null,
+        calibrationRelaxFp: null,
+        calibrationRun: null,
+        calibrationCancel: null,
+        agentEnsembleJob: null,
+        agentEnsembleRefresh: null,
         agentMaxDetections: null,
         agentIou: null,
         agentCrossIou: null,
@@ -1646,6 +1661,11 @@
     const qwenAgentDatasetState = {
         items: [],
         selectedId: "",
+    };
+    const qwenCalibrationState = {
+        jobId: null,
+        overlay: null,
+        timerId: null,
     };
     const CAPTION_PRESETS = [
         { id: "concise", label: "Concise scene caption", text: "Write a short caption (1-2 sentences) describing the scene and main objects." },
@@ -2305,11 +2325,36 @@ const sam3TrainState = {
         refreshBtn: null,
         list: null,
         deleteButtons: new Map(),
+        glossaryDatasetSelect: null,
+        glossaryDatasetRefresh: null,
+        glossaryDatasetSummary: null,
+        glossaryDatasetEditor: null,
+        glossaryDatasetLoad: null,
+        glossaryDatasetSave: null,
+        glossaryDatasetSaveAs: null,
+        glossaryDatasetSaveName: null,
+        glossaryDatasetMessage: null,
+        glossaryLibrarySelect: null,
+        glossaryLibraryRefresh: null,
+        glossaryLibraryName: null,
+        glossaryLibraryEditor: null,
+        glossaryLibraryNew: null,
+        glossaryLibrarySave: null,
+        glossaryLibraryDelete: null,
+        glossaryLibraryDownload: null,
+        glossaryLibraryUpload: null,
+        glossaryLibraryMessage: null,
     };
 
     const datasetManagerState = {
         datasets: [],
         uploading: false,
+    };
+
+    const glossaryLibraryState = {
+        entries: [],
+        selectedName: "",
+        inFlight: false,
     };
 
     function setDatasetUploadMessage(text, tone) {
@@ -2318,10 +2363,10 @@ const sam3TrainState = {
         datasetManagerElements.uploadMessage.className = `training-message ${tone || ""}`;
     }
 
-	    function renderDatasetList(list) {
-	        datasetManagerState.datasets = Array.isArray(list) ? list : [];
-	        const container = datasetManagerElements.list;
-	        if (container) {
+    function renderDatasetList(list) {
+        datasetManagerState.datasets = Array.isArray(list) ? list : [];
+        const container = datasetManagerElements.list;
+        if (container) {
 	            container.innerHTML = "";
             if (!datasetManagerState.datasets.length) {
                 const empty = document.createElement("div");
@@ -2475,6 +2520,320 @@ const sam3TrainState = {
             }
         }
         renderSegBuilderDatasets(datasetManagerState.datasets);
+        renderGlossaryDatasetOptions(datasetManagerState.datasets);
+    }
+
+    function renderGlossaryDatasetOptions(list) {
+        if (!datasetManagerElements.glossaryDatasetSelect) {
+            return;
+        }
+        const previous = datasetManagerElements.glossaryDatasetSelect.value || "";
+        datasetManagerElements.glossaryDatasetSelect.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = list.length ? "Select dataset" : "No datasets available";
+        datasetManagerElements.glossaryDatasetSelect.appendChild(placeholder);
+        list.forEach((entry) => {
+            const opt = document.createElement("option");
+            opt.value = entry.id || "";
+            opt.textContent = entry.label || entry.id || "dataset";
+            datasetManagerElements.glossaryDatasetSelect.appendChild(opt);
+        });
+        if (previous && list.some((entry) => entry.id === previous)) {
+            datasetManagerElements.glossaryDatasetSelect.value = previous;
+        } else if (list.length) {
+            datasetManagerElements.glossaryDatasetSelect.value = list[0].id || "";
+        }
+        updateGlossaryDatasetSummary();
+    }
+
+    function updateGlossaryDatasetSummary() {
+        if (!datasetManagerElements.glossaryDatasetSummary) {
+            return;
+        }
+        const datasetId = datasetManagerElements.glossaryDatasetSelect?.value || "";
+        if (!datasetId) {
+            datasetManagerElements.glossaryDatasetSummary.textContent = "Select a dataset to edit its canonical glossary.";
+            return;
+        }
+        const entry = datasetManagerState.datasets.find((item) => item.id === datasetId);
+        if (!entry) {
+            datasetManagerElements.glossaryDatasetSummary.textContent = "";
+            return;
+        }
+        const bits = [];
+        if (entry.type) bits.push(entry.type.toUpperCase());
+        if (entry.image_count) bits.push(`${entry.image_count} img`);
+        datasetManagerElements.glossaryDatasetSummary.textContent = bits.length ? bits.join(" • ") : "Dataset selected.";
+    }
+
+    function setGlossaryMessage(target, text, tone = "info") {
+        if (!target) return;
+        target.textContent = text || "";
+        target.className = `training-message ${tone}`;
+    }
+
+    async function loadDatasetGlossary() {
+        if (!datasetManagerElements.glossaryDatasetSelect || !datasetManagerElements.glossaryDatasetEditor) {
+            return;
+        }
+        const datasetId = datasetManagerElements.glossaryDatasetSelect.value || "";
+        if (!datasetId) {
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Select a dataset first.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const data = await resp.json();
+            datasetManagerElements.glossaryDatasetEditor.value = data?.glossary || "";
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Loaded dataset glossary.", "success");
+        } catch (err) {
+            console.error("Failed to load dataset glossary", err);
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, err.message || "Load failed", "error");
+        }
+    }
+
+    async function saveDatasetGlossary() {
+        if (!datasetManagerElements.glossaryDatasetSelect || !datasetManagerElements.glossaryDatasetEditor) {
+            return;
+        }
+        const datasetId = datasetManagerElements.glossaryDatasetSelect.value || "";
+        if (!datasetId) {
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Select a dataset first.", "warn");
+            return;
+        }
+        const glossary = datasetManagerElements.glossaryDatasetEditor.value || "";
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ glossary }),
+            });
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Saved dataset glossary.", "success");
+        } catch (err) {
+            console.error("Failed to save dataset glossary", err);
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, err.message || "Save failed", "error");
+        }
+    }
+
+    async function saveDatasetGlossaryAs() {
+        if (!datasetManagerElements.glossaryDatasetEditor || !datasetManagerElements.glossaryDatasetSaveName) {
+            return;
+        }
+        const name = (datasetManagerElements.glossaryDatasetSaveName.value || "").trim();
+        if (!name) {
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Enter a name to save in the library.", "warn");
+            return;
+        }
+        const glossary = datasetManagerElements.glossaryDatasetEditor.value || "";
+        try {
+            const resp = await fetch(`${API_ROOT}/glossaries`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name, glossary }),
+            });
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            await refreshGlossaryLibrary();
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Saved to glossary library.", "success");
+        } catch (err) {
+            console.error("Failed to save glossary to library", err);
+            setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, err.message || "Save failed", "error");
+        }
+    }
+
+    async function refreshGlossaryLibrary(options = {}) {
+        if (glossaryLibraryState.inFlight) {
+            return;
+        }
+        glossaryLibraryState.inFlight = true;
+        try {
+            const resp = await fetch(`${API_ROOT}/glossaries`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const data = await resp.json();
+            glossaryLibraryState.entries = Array.isArray(data) ? data : [];
+            renderGlossaryLibraryOptions();
+        } catch (err) {
+            console.error("Failed to refresh glossary library", err);
+            if (!options.silent) {
+                setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Load failed", "error");
+            }
+        } finally {
+            glossaryLibraryState.inFlight = false;
+        }
+    }
+
+    function renderGlossaryLibraryOptions() {
+        const entries = glossaryLibraryState.entries;
+        const selects = [
+            datasetManagerElements.glossaryLibrarySelect,
+            qwenElements.agentGlossarySelect,
+        ].filter(Boolean);
+        selects.forEach((select) => {
+            const previous = select.value || "";
+            select.innerHTML = "";
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = entries.length ? "Select glossary" : "No glossaries saved";
+            select.appendChild(placeholder);
+            entries.forEach((entry) => {
+                const opt = document.createElement("option");
+                opt.value = entry.name || "";
+                opt.textContent = entry.name || "glossary";
+                select.appendChild(opt);
+            });
+            if (previous && entries.some((entry) => entry.name === previous)) {
+                select.value = previous;
+            }
+        });
+        updateQwenAgentGlossaryMode();
+    }
+
+    async function loadGlossaryLibraryEntry(name, target) {
+        if (!name) {
+            if (target) target.value = "";
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/glossaries/${encodeURIComponent(name)}`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const data = await resp.json();
+            if (target) {
+                target.value = data?.glossary || "";
+            }
+            return data?.glossary || "";
+        } catch (err) {
+            console.error("Failed to load glossary entry", err);
+            if (target === datasetManagerElements.glossaryLibraryEditor) {
+                setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Load failed", "error");
+            }
+            return "";
+        }
+    }
+
+    async function saveGlossaryLibraryEntry() {
+        if (!datasetManagerElements.glossaryLibraryName || !datasetManagerElements.glossaryLibraryEditor) {
+            return;
+        }
+        const name = (datasetManagerElements.glossaryLibraryName.value || "").trim();
+        if (!name) {
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Enter a glossary name.", "warn");
+            return;
+        }
+        const glossary = datasetManagerElements.glossaryLibraryEditor.value || "";
+        try {
+            const resp = await fetch(`${API_ROOT}/glossaries`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name, glossary }),
+            });
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            await refreshGlossaryLibrary({ silent: true });
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Saved glossary.", "success");
+        } catch (err) {
+            console.error("Failed to save glossary entry", err);
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Save failed", "error");
+        }
+    }
+
+    async function deleteGlossaryLibraryEntry() {
+        if (!datasetManagerElements.glossaryLibrarySelect) {
+            return;
+        }
+        const name = datasetManagerElements.glossaryLibrarySelect.value || "";
+        if (!name) {
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Select a glossary to delete.", "warn");
+            return;
+        }
+        const ok = window.confirm(`Delete glossary "${name}"?`);
+        if (!ok) return;
+        try {
+            const resp = await fetch(`${API_ROOT}/glossaries/${encodeURIComponent(name)}`, { method: "DELETE" });
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            datasetManagerElements.glossaryLibrarySelect.value = "";
+            if (datasetManagerElements.glossaryLibraryName) datasetManagerElements.glossaryLibraryName.value = "";
+            if (datasetManagerElements.glossaryLibraryEditor) datasetManagerElements.glossaryLibraryEditor.value = "";
+            await refreshGlossaryLibrary({ silent: true });
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Deleted glossary.", "success");
+        } catch (err) {
+            console.error("Failed to delete glossary entry", err);
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Delete failed", "error");
+        }
+    }
+
+    function downloadGlossaryLibraryEntry() {
+        if (!datasetManagerElements.glossaryLibrarySelect || !datasetManagerElements.glossaryLibraryEditor) {
+            return;
+        }
+        const name = datasetManagerElements.glossaryLibrarySelect.value || "";
+        if (!name) {
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Select a glossary to download.", "warn");
+            return;
+        }
+        const payload = {
+            name,
+            glossary: datasetManagerElements.glossaryLibraryEditor.value || "",
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${name}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    async function handleGlossaryLibraryUpload() {
+        if (!datasetManagerElements.glossaryLibraryUpload || !datasetManagerElements.glossaryLibraryUpload.files?.length) {
+            return;
+        }
+        const file = datasetManagerElements.glossaryLibraryUpload.files[0];
+        try {
+            const text = await file.text();
+            let payload;
+            try {
+                payload = JSON.parse(text);
+            } catch (err) {
+                payload = null;
+            }
+            if (payload && typeof payload === "object") {
+                const name = payload.name || payload.id || "";
+                const glossary = payload.glossary || payload.body || "";
+                if (name) {
+                    datasetManagerElements.glossaryLibraryName.value = name;
+                }
+                if (glossary) {
+                    datasetManagerElements.glossaryLibraryEditor.value = glossary;
+                } else if (typeof payload === "object") {
+                    datasetManagerElements.glossaryLibraryEditor.value = JSON.stringify(payload, null, 2);
+                }
+            } else {
+                datasetManagerElements.glossaryLibraryEditor.value = text;
+            }
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Loaded glossary file. Save to apply.", "info");
+        } catch (err) {
+            console.error("Failed to upload glossary file", err);
+            setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Upload failed", "error");
+        } finally {
+            datasetManagerElements.glossaryLibraryUpload.value = "";
+        }
     }
 
 	    async function handleDatasetDelete(entry) {
@@ -2715,10 +3074,29 @@ const sam3TrainState = {
 	        datasetManagerElements.uploadCurrentBtn = document.getElementById("datasetUploadCurrentBtn");
 	        datasetManagerElements.uploadCurrentName = document.getElementById("datasetUploadCurrentName");
 	        datasetManagerElements.uploadCurrentContext = document.getElementById("datasetUploadCurrentContext");
-	        datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
-	        datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
-	        datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
-	        datasetManagerElements.list = document.getElementById("datasetList");
+        datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
+        datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
+        datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
+        datasetManagerElements.list = document.getElementById("datasetList");
+        datasetManagerElements.glossaryDatasetSelect = document.getElementById("datasetGlossaryDataset");
+        datasetManagerElements.glossaryDatasetRefresh = document.getElementById("datasetGlossaryRefresh");
+        datasetManagerElements.glossaryDatasetSummary = document.getElementById("datasetGlossarySummary");
+        datasetManagerElements.glossaryDatasetEditor = document.getElementById("datasetGlossaryEditor");
+        datasetManagerElements.glossaryDatasetLoad = document.getElementById("datasetGlossaryLoad");
+        datasetManagerElements.glossaryDatasetSave = document.getElementById("datasetGlossarySave");
+        datasetManagerElements.glossaryDatasetSaveAs = document.getElementById("datasetGlossarySaveAs");
+        datasetManagerElements.glossaryDatasetSaveName = document.getElementById("datasetGlossarySaveName");
+        datasetManagerElements.glossaryDatasetMessage = document.getElementById("datasetGlossaryMessage");
+        datasetManagerElements.glossaryLibrarySelect = document.getElementById("glossaryLibrarySelect");
+        datasetManagerElements.glossaryLibraryRefresh = document.getElementById("glossaryLibraryRefresh");
+        datasetManagerElements.glossaryLibraryName = document.getElementById("glossaryLibraryName");
+        datasetManagerElements.glossaryLibraryEditor = document.getElementById("glossaryLibraryEditor");
+        datasetManagerElements.glossaryLibraryNew = document.getElementById("glossaryLibraryNew");
+        datasetManagerElements.glossaryLibrarySave = document.getElementById("glossaryLibrarySave");
+        datasetManagerElements.glossaryLibraryDelete = document.getElementById("glossaryLibraryDelete");
+        datasetManagerElements.glossaryLibraryDownload = document.getElementById("glossaryLibraryDownload");
+        datasetManagerElements.glossaryLibraryUpload = document.getElementById("glossaryLibraryUpload");
+        datasetManagerElements.glossaryLibraryMessage = document.getElementById("glossaryLibraryMessage");
         if (datasetManagerElements.uploadBtn) {
             datasetManagerElements.uploadBtn.addEventListener("click", () => uploadDatasetZip());
         }
@@ -2731,9 +3109,81 @@ const sam3TrainState = {
         if (datasetManagerElements.refreshBtnTop) {
             datasetManagerElements.refreshBtnTop.addEventListener("click", () => refreshDatasetList());
         }
+        if (datasetManagerElements.glossaryDatasetRefresh) {
+            datasetManagerElements.glossaryDatasetRefresh.addEventListener("click", () => refreshDatasetList());
+        }
+        if (datasetManagerElements.glossaryDatasetSelect) {
+            datasetManagerElements.glossaryDatasetSelect.addEventListener("change", () => {
+                updateGlossaryDatasetSummary();
+            });
+        }
+        if (datasetManagerElements.glossaryDatasetLoad) {
+            datasetManagerElements.glossaryDatasetLoad.addEventListener("click", () => {
+                loadDatasetGlossary();
+            });
+        }
+        if (datasetManagerElements.glossaryDatasetSave) {
+            datasetManagerElements.glossaryDatasetSave.addEventListener("click", () => {
+                saveDatasetGlossary();
+            });
+        }
+        if (datasetManagerElements.glossaryDatasetSaveAs) {
+            datasetManagerElements.glossaryDatasetSaveAs.addEventListener("click", () => {
+                saveDatasetGlossaryAs();
+            });
+        }
+        if (datasetManagerElements.glossaryLibraryRefresh) {
+            datasetManagerElements.glossaryLibraryRefresh.addEventListener("click", () => {
+                refreshGlossaryLibrary();
+            });
+        }
+        if (datasetManagerElements.glossaryLibrarySelect) {
+            datasetManagerElements.glossaryLibrarySelect.addEventListener("change", () => {
+                const name = datasetManagerElements.glossaryLibrarySelect.value || "";
+                if (datasetManagerElements.glossaryLibraryName) {
+                    datasetManagerElements.glossaryLibraryName.value = name;
+                }
+                loadGlossaryLibraryEntry(name, datasetManagerElements.glossaryLibraryEditor);
+            });
+        }
+        if (datasetManagerElements.glossaryLibraryNew) {
+            datasetManagerElements.glossaryLibraryNew.addEventListener("click", () => {
+                if (datasetManagerElements.glossaryLibrarySelect) {
+                    datasetManagerElements.glossaryLibrarySelect.value = "";
+                }
+                if (datasetManagerElements.glossaryLibraryName) {
+                    datasetManagerElements.glossaryLibraryName.value = "";
+                }
+                if (datasetManagerElements.glossaryLibraryEditor) {
+                    datasetManagerElements.glossaryLibraryEditor.value = "";
+                }
+                setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "New glossary ready. Enter a name and save.", "info");
+            });
+        }
+        if (datasetManagerElements.glossaryLibrarySave) {
+            datasetManagerElements.glossaryLibrarySave.addEventListener("click", () => {
+                saveGlossaryLibraryEntry();
+            });
+        }
+        if (datasetManagerElements.glossaryLibraryDelete) {
+            datasetManagerElements.glossaryLibraryDelete.addEventListener("click", () => {
+                deleteGlossaryLibraryEntry();
+            });
+        }
+        if (datasetManagerElements.glossaryLibraryDownload) {
+            datasetManagerElements.glossaryLibraryDownload.addEventListener("click", () => {
+                downloadGlossaryLibraryEntry();
+            });
+        }
+        if (datasetManagerElements.glossaryLibraryUpload) {
+            datasetManagerElements.glossaryLibraryUpload.addEventListener("change", () => {
+                handleGlossaryLibraryUpload();
+            });
+        }
         initSegBuilderUi();
         await refreshDatasetList();
         await refreshSegBuilderJobs();
+        await refreshGlossaryLibrary({ silent: true });
     }
 
     const sam3PromptElements = {
@@ -13155,9 +13605,12 @@ function initQwenTrainingTab() {
         qwenElements.agentDatasetSelect = document.getElementById("qwenAgentDataset");
         qwenElements.agentDatasetRefresh = document.getElementById("qwenAgentDatasetRefresh");
         qwenElements.agentDatasetSummary = document.getElementById("qwenAgentDatasetSummary");
+        qwenElements.agentGlossarySource = document.getElementById("qwenAgentGlossarySource");
+        qwenElements.agentGlossarySelect = document.getElementById("qwenAgentGlossarySelect");
+        qwenElements.agentGlossaryRefresh = document.getElementById("qwenAgentGlossaryRefresh");
+        qwenElements.agentGlossaryLibraryRow = document.getElementById("qwenAgentGlossaryLibraryRow");
         qwenElements.agentGlossary = document.getElementById("qwenAgentGlossary");
-        qwenElements.agentGlossarySave = document.getElementById("qwenAgentGlossarySave");
-        qwenElements.agentGlossaryReload = document.getElementById("qwenAgentGlossaryReload");
+        qwenElements.agentGlossaryHint = document.getElementById("qwenAgentGlossaryHint");
         qwenElements.agentModel = document.getElementById("qwenAgentModel");
         qwenElements.agentVariant = document.getElementById("qwenAgentVariant");
         qwenElements.agentDetectorMode = document.getElementById("qwenAgentDetectorMode");
@@ -13168,8 +13621,10 @@ function initQwenTrainingTab() {
         qwenElements.agentSahiWindow = document.getElementById("qwenAgentSahiWindow");
         qwenElements.agentSahiOverlap = document.getElementById("qwenAgentSahiOverlap");
         qwenElements.agentEnableSam3Text = document.getElementById("qwenAgentEnableSam3Text");
+        qwenElements.agentSam3ExpandGlossary = document.getElementById("qwenAgentSam3ExpandGlossary");
         qwenElements.agentSam3SynBudget = document.getElementById("qwenAgentSam3SynBudget");
         qwenElements.agentEnableSam3Similarity = document.getElementById("qwenAgentEnableSam3Similarity");
+        qwenElements.agentSimilarityScoreThr = document.getElementById("qwenAgentSimilarityScoreThr");
         qwenElements.agentSimilarityMinScore = document.getElementById("qwenAgentSimilarityMinScore");
         qwenElements.agentSimilarityMidLow = document.getElementById("qwenAgentSimilarityMidLow");
         qwenElements.agentSimilarityMidHigh = document.getElementById("qwenAgentSimilarityMidHigh");
@@ -13177,16 +13632,28 @@ function initQwenTrainingTab() {
         qwenElements.agentSimilarityWindowMode = document.getElementById("qwenAgentSimilarityWindowMode");
         qwenElements.agentSimilarityWindowSize = document.getElementById("qwenAgentSimilarityWindowSize");
         qwenElements.agentSimilarityWindowOverlap = document.getElementById("qwenAgentSimilarityWindowOverlap");
+        qwenElements.agentSimilarityWindowExtension = document.getElementById("qwenAgentSimilarityWindowExtension");
         qwenElements.agentGridCols = document.getElementById("qwenAgentGridCols");
         qwenElements.agentGridRows = document.getElementById("qwenAgentGridRows");
         qwenElements.agentGridOverlap = document.getElementById("qwenAgentGridOverlap");
         qwenElements.agentOverlayDotRadius = document.getElementById("qwenAgentOverlayDotRadius");
-        qwenElements.agentReviewEnabled = document.getElementById("qwenAgentReviewEnabled");
-        qwenElements.agentReviewModel = document.getElementById("qwenAgentReviewModel");
-        qwenElements.agentReviewVariant = document.getElementById("qwenAgentReviewVariant");
-        qwenElements.agentReviewMaxTokens = document.getElementById("qwenAgentReviewMaxTokens");
-        qwenElements.agentReviewClasses = document.getElementById("qwenAgentReviewClasses");
-        qwenElements.agentReviewPasses = document.getElementById("qwenAgentReviewPasses");
+        qwenElements.agentReviewEnabled = null;
+        qwenElements.agentReviewModel = null;
+        qwenElements.agentReviewVariant = null;
+        qwenElements.agentReviewMaxTokens = null;
+        qwenElements.agentReviewClasses = null;
+        qwenElements.agentReviewPasses = null;
+        qwenElements.calibrationStatus = document.getElementById("qwenCalibrationStatus");
+        qwenElements.calibrationDataset = document.getElementById("qwenCalibrationDataset");
+        qwenElements.calibrationDatasetRefresh = document.getElementById("qwenCalibrationDatasetRefresh");
+        qwenElements.calibrationImageCount = document.getElementById("qwenCalibrationImageCount");
+        qwenElements.calibrationMaxTerms = document.getElementById("qwenCalibrationMaxTerms");
+        qwenElements.calibrationBaseFp = document.getElementById("qwenCalibrationBaseFp");
+        qwenElements.calibrationRelaxFp = document.getElementById("qwenCalibrationRelaxFp");
+        qwenElements.calibrationRun = document.getElementById("qwenCalibrationRun");
+        qwenElements.calibrationCancel = document.getElementById("qwenCalibrationCancel");
+        qwenElements.agentEnsembleJob = document.getElementById("qwenAgentEnsembleJob");
+        qwenElements.agentEnsembleRefresh = document.getElementById("qwenAgentEnsembleRefresh");
         qwenElements.agentDetectorId = document.getElementById("qwenAgentDetectorId");
         qwenElements.agentDetectorRefresh = document.getElementById("qwenAgentDetectorRefresh");
         qwenElements.agentClassifierId = document.getElementById("qwenAgentClassifierId");
@@ -13236,6 +13703,16 @@ function initQwenTrainingTab() {
             };
             qwenElements.agentTightenFp.addEventListener("change", updateAgentPrecisionControls);
             updateAgentPrecisionControls();
+        }
+        if (qwenElements.agentSam3ExpandGlossary) {
+            const updateSam3GlossaryControls = () => {
+                const enabled = !!qwenElements.agentSam3ExpandGlossary?.checked;
+                if (qwenElements.agentSam3SynBudget) {
+                    qwenElements.agentSam3SynBudget.disabled = !enabled;
+                }
+            };
+            qwenElements.agentSam3ExpandGlossary.addEventListener("change", updateSam3GlossaryControls);
+            updateSam3GlossaryControls();
         }
         if (qwenElements.captionModel) {
             qwenElements.captionModel.addEventListener("change", () => {
@@ -13407,6 +13884,13 @@ function initQwenTrainingTab() {
                 });
             });
         }
+        if (qwenElements.calibrationDatasetRefresh) {
+            qwenElements.calibrationDatasetRefresh.addEventListener("click", () => {
+                refreshQwenAgentDatasets().catch((error) => {
+                    console.error("Failed to refresh calibration datasets", error);
+                });
+            });
+        }
         if (qwenElements.agentDetectorRefresh) {
             qwenElements.agentDetectorRefresh.addEventListener("click", () => {
                 refreshQwenAgentDetectorRuns().catch((error) => {
@@ -13428,6 +13912,13 @@ function initQwenTrainingTab() {
                 });
             });
         }
+        if (qwenElements.agentEnsembleRefresh) {
+            qwenElements.agentEnsembleRefresh.addEventListener("click", () => {
+                refreshQwenAgentEnsembleJobs().catch((error) => {
+                    console.warn("Failed to refresh calibration MLP jobs", error);
+                });
+            });
+        }
         if (qwenElements.agentDatasetSelect) {
             qwenElements.agentDatasetSelect.addEventListener("change", () => {
                 qwenAgentDatasetState.selectedId = qwenElements.agentDatasetSelect.value || "";
@@ -13437,18 +13928,23 @@ function initQwenTrainingTab() {
                 });
             });
         }
-        if (qwenElements.agentGlossarySave) {
-            qwenElements.agentGlossarySave.addEventListener("click", () => {
-                saveQwenAgentGlossary().catch((error) => {
-                    setSamStatus(`Glossary save failed: ${error.message || error}`, { variant: "error", duration: 4000 });
-                });
+        if (qwenElements.agentGlossarySource) {
+            qwenElements.agentGlossarySource.addEventListener("change", () => {
+                updateQwenAgentGlossaryMode();
             });
         }
-        if (qwenElements.agentGlossaryReload) {
-            qwenElements.agentGlossaryReload.addEventListener("click", () => {
-                loadQwenAgentGlossary().catch((error) => {
-                    setSamStatus(`Glossary reload failed: ${error.message || error}`, { variant: "error", duration: 4000 });
-                });
+        if (qwenElements.agentGlossarySelect) {
+            qwenElements.agentGlossarySelect.addEventListener("change", () => {
+                if ((qwenElements.agentGlossarySource?.value || "") === "library") {
+                    loadQwenAgentGlossary().catch((error) => {
+                        console.warn("Failed to load glossary library entry", error);
+                    });
+                }
+            });
+        }
+        if (qwenElements.agentGlossaryRefresh) {
+            qwenElements.agentGlossaryRefresh.addEventListener("click", () => {
+                refreshGlossaryLibrary();
             });
         }
         if (qwenElements.agentRunButton) {
@@ -13459,6 +13955,16 @@ function initQwenTrainingTab() {
         if (qwenElements.agentStopButton) {
             qwenElements.agentStopButton.addEventListener("click", () => {
                 stopQwenAgentJob();
+            });
+        }
+        if (qwenElements.calibrationRun) {
+            qwenElements.calibrationRun.addEventListener("click", () => {
+                startCalibrationJob();
+            });
+        }
+        if (qwenElements.calibrationCancel) {
+            qwenElements.calibrationCancel.addEventListener("click", () => {
+                cancelCalibrationJob();
             });
         }
         if (qwenElements.agentBatchRun) {
@@ -13487,6 +13993,7 @@ function initQwenTrainingTab() {
         updateQwenRunButton();
         updateQwenCaptionButton();
         updateQwenAgentButtons();
+        updateCalibrationButtons();
         setQwenCaptionStatus("Idle");
         updateQwenClassOptions({ resetOverride: true });
         refreshQwenCaptionDatasets({ silent: true }).catch((error) => {
@@ -13495,8 +14002,15 @@ function initQwenTrainingTab() {
         refreshQwenAgentDatasets({ silent: true }).catch((error) => {
             console.debug("Unable to load agent datasets", error);
         });
+        refreshGlossaryLibrary({ silent: true }).catch((error) => {
+            console.debug("Unable to load glossaries", error);
+        });
+        updateQwenAgentGlossaryMode();
         refreshQwenAgentClassifiers().catch((error) => {
             console.debug("Unable to load agent classifiers", error);
+        });
+        refreshQwenAgentEnsembleJobs().catch((error) => {
+            console.debug("Unable to load calibration MLP jobs", error);
         });
         refreshQwenAgentDetectorRuns().catch((error) => {
             console.debug("Unable to load agent detector runs", error);
@@ -15937,6 +16451,25 @@ function initQwenTrainingTab() {
                 option.textContent = entry.label || entry.id || "dataset";
                 qwenElements.agentDatasetSelect.appendChild(option);
             });
+            if (qwenElements.calibrationDataset) {
+                const prevCal = qwenElements.calibrationDataset.value || "";
+                qwenElements.calibrationDataset.innerHTML = "";
+                const calPlaceholder = document.createElement("option");
+                calPlaceholder.value = "";
+                calPlaceholder.textContent = qwenAgentDatasetState.items.length ? "Select dataset" : "No datasets available";
+                qwenElements.calibrationDataset.appendChild(calPlaceholder);
+                qwenAgentDatasetState.items.forEach((entry) => {
+                    const option = document.createElement("option");
+                    option.value = entry.id || "";
+                    option.textContent = entry.label || entry.id || "dataset";
+                    qwenElements.calibrationDataset.appendChild(option);
+                });
+                if (prevCal && qwenAgentDatasetState.items.some((entry) => entry.id === prevCal)) {
+                    qwenElements.calibrationDataset.value = prevCal;
+                } else if (qwenAgentDatasetState.items.length) {
+                    qwenElements.calibrationDataset.value = qwenAgentDatasetState.items[0].id || "";
+                }
+            }
             if (previous && qwenAgentDatasetState.items.some((entry) => entry.id === previous)) {
                 qwenElements.agentDatasetSelect.value = previous;
                 qwenAgentDatasetState.selectedId = previous;
@@ -15961,8 +16494,43 @@ function initQwenTrainingTab() {
         }
     }
 
+    function updateQwenAgentGlossaryMode() {
+        if (!qwenElements.agentGlossarySource || !qwenElements.agentGlossary) {
+            return;
+        }
+        const mode = qwenElements.agentGlossarySource.value || "dataset";
+        const isLibrary = mode === "library";
+        const isCustom = mode === "custom";
+        if (qwenElements.agentGlossaryLibraryRow) {
+            qwenElements.agentGlossaryLibraryRow.style.display = isLibrary ? "flex" : "none";
+        }
+        if (qwenElements.agentGlossarySelect) {
+            qwenElements.agentGlossarySelect.disabled = !isLibrary;
+        }
+        qwenElements.agentGlossary.readOnly = !isCustom;
+        if (!isCustom) {
+            qwenElements.agentGlossary.placeholder = "Glossary preview";
+        } else {
+            qwenElements.agentGlossary.placeholder = "Paste JSON: {\"light_vehicle\": [\"car\", \"sedan\"], ... }";
+        }
+        loadQwenAgentGlossary().catch(() => {});
+    }
+
     async function loadQwenAgentGlossary() {
-        if (!qwenElements.agentGlossary) {
+        if (!qwenElements.agentGlossarySource || !qwenElements.agentGlossary) {
+            return;
+        }
+        const mode = qwenElements.agentGlossarySource.value || "dataset";
+        if (mode === "custom") {
+            return;
+        }
+        if (mode === "library") {
+            const name = qwenElements.agentGlossarySelect?.value || "";
+            if (!name) {
+                qwenElements.agentGlossary.value = "";
+                return;
+            }
+            await loadGlossaryLibraryEntry(name, qwenElements.agentGlossary);
             return;
         }
         const datasetId = getQwenAgentDatasetId();
@@ -15977,28 +16545,6 @@ function initQwenTrainingTab() {
         }
         const data = await resp.json();
         qwenElements.agentGlossary.value = data?.glossary || "";
-    }
-
-    async function saveQwenAgentGlossary() {
-        if (!qwenElements.agentGlossary) {
-            return;
-        }
-        const datasetId = getQwenAgentDatasetId();
-        if (!datasetId) {
-            setSamStatus("Select a dataset before saving the glossary.", { variant: "warn", duration: 3000 });
-            return;
-        }
-        const payload = { glossary: qwenElements.agentGlossary.value || "" };
-        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-        if (!resp.ok) {
-            const detail = await resp.text();
-            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
-        }
-        setSamStatus("Labelmap glossary saved.", { variant: "success", duration: 2500 });
     }
 
     async function refreshQwenAgentClassifiers(selectedPath) {
@@ -16041,6 +16587,43 @@ function initQwenTrainingTab() {
             }
         } catch (error) {
             console.warn("Failed to refresh agent classifiers", error);
+        }
+    }
+
+    async function refreshQwenAgentEnsembleJobs(selectedId) {
+        if (!qwenElements.agentEnsembleJob) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/calibration/jobs`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const jobs = await resp.json();
+            const list = Array.isArray(jobs) ? jobs : [];
+            qwenElements.agentEnsembleJob.innerHTML = "";
+            const empty = document.createElement("option");
+            empty.value = "";
+            empty.textContent = "No calibration filter";
+            qwenElements.agentEnsembleJob.appendChild(empty);
+            list
+                .filter((job) => job?.status === "completed" && job?.result?.model && job?.result?.meta)
+                .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+                .forEach((job) => {
+                    const opt = document.createElement("option");
+                    opt.value = job.job_id || "";
+                    const datasetId = job?.request?.dataset_id || "dataset";
+                    const count = job?.request?.max_images || job?.total || "";
+                    opt.textContent = `${job.job_id} • ${datasetId} • ${count} imgs`;
+                    qwenElements.agentEnsembleJob.appendChild(opt);
+                });
+            const preferred = selectedId || "";
+            const match = Array.from(qwenElements.agentEnsembleJob.options || []).some((opt) => opt.value === preferred);
+            if (match) {
+                qwenElements.agentEnsembleJob.value = preferred;
+            }
+        } catch (error) {
+            console.warn("Failed to refresh calibration MLP jobs", error);
         }
     }
 
@@ -16457,12 +17040,29 @@ function initQwenTrainingTab() {
         qwenElements.agentStatus.textContent = message || "";
     }
 
+    function setCalibrationStatus(message) {
+        if (!qwenElements.calibrationStatus) {
+            return;
+        }
+        qwenElements.calibrationStatus.textContent = message || "";
+    }
+
     function updateQwenAgentButtons() {
         if (qwenElements.agentRunButton) {
             qwenElements.agentRunButton.disabled = !qwenAvailable || qwenAgentActive || !currentImage;
         }
         if (qwenElements.agentStopButton) {
             qwenElements.agentStopButton.disabled = !qwenAgentActive;
+        }
+    }
+
+    function updateCalibrationButtons() {
+        const running = !!qwenCalibrationState.jobId;
+        if (qwenElements.calibrationRun) {
+            qwenElements.calibrationRun.disabled = running || !qwenAvailable;
+        }
+        if (qwenElements.calibrationCancel) {
+            qwenElements.calibrationCancel.disabled = !running;
         }
     }
 
@@ -16530,6 +17130,7 @@ function initQwenTrainingTab() {
         const enableSam3Text = !!qwenElements.agentEnableSam3Text?.checked;
         const sam3SynBudget = parseInt(qwenElements.agentSam3SynBudget?.value || "", 10);
         const enableSam3Similarity = !!qwenElements.agentEnableSam3Similarity?.checked;
+        const similarityScoreThr = parseFloat(qwenElements.agentSimilarityScoreThr?.value || "");
         const similarityMinScore = parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
         const similarityMidLow = parseFloat(qwenElements.agentSimilarityMidLow?.value || "");
         const similarityMidHigh = parseFloat(qwenElements.agentSimilarityMidHigh?.value || "");
@@ -16537,18 +17138,16 @@ function initQwenTrainingTab() {
         const similarityWindowMode = (qwenElements.agentSimilarityWindowMode?.value || "grid").trim();
         const similarityWindowSize = parseInt(qwenElements.agentSimilarityWindowSize?.value || "", 10);
         const similarityWindowOverlap = parseFloat(qwenElements.agentSimilarityWindowOverlap?.value || "");
+        const similarityWindowExtension = !!qwenElements.agentSimilarityWindowExtension?.checked;
         const gridCols = parseInt(qwenElements.agentGridCols?.value || "", 10);
         const gridRows = parseInt(qwenElements.agentGridRows?.value || "", 10);
         const gridOverlap = parseFloat(qwenElements.agentGridOverlap?.value || "");
         const overlayDotRadius = parseInt(qwenElements.agentOverlayDotRadius?.value || "", 10);
-        const reviewEnabled = !!qwenElements.agentReviewEnabled?.checked;
-        const reviewMaxTokens = parseInt(qwenElements.agentReviewMaxTokens?.value || "", 10);
-        const reviewPasses = parseInt(qwenElements.agentReviewPasses?.value || "", 10);
-        const reviewClassesRaw = (qwenElements.agentReviewClasses?.value || "").trim();
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
+        const ensembleJobId = (qwenElements.agentEnsembleJob?.value || "").trim();
         const samVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
         const maxDetections = parseInt(qwenElements.agentMaxDetections?.value || "800", 10);
-        const iou = parseFloat(qwenElements.agentIou?.value || "0.5");
+        const iou = parseFloat(qwenElements.agentIou?.value || "0.75");
         const crossIouRaw = (qwenElements.agentCrossIou?.value || "").trim();
         const maxTokens = parseInt(qwenElements.agentMaxTokens?.value || "1024", 10);
         const thinkingEffort = parseFloat(qwenElements.agentThinkingEffort?.value || "");
@@ -16565,7 +17164,10 @@ function initQwenTrainingTab() {
         const classifierBgMargin = parseFloat(qwenElements.agentClassifierBgMargin?.value || "");
         const scorelessIou = parseFloat(qwenElements.agentScorelessIou?.value || "");
         const datasetId = getQwenAgentDatasetId();
-        const glossaryText = qwenElements.agentGlossary?.value || "";
+        const glossarySource = (qwenElements.agentGlossarySource?.value || "dataset").trim();
+        const glossaryText = glossarySource === "dataset" ? "" : (qwenElements.agentGlossary?.value || "");
+        const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
+        const sam3SynBudgetValue = Number.isFinite(sam3SynBudget) ? sam3SynBudget : null;
         return {
             dataset_id: datasetId || null,
             image_base64: base64,
@@ -16580,10 +17182,13 @@ function initQwenTrainingTab() {
             sahi_window_size: Number.isFinite(sahiWindow) ? sahiWindow : null,
             sahi_overlap_ratio: Number.isFinite(sahiOverlap) ? sahiOverlap : null,
             classifier_id: classifierId,
+            ensemble_enabled: ensembleJobId ? true : false,
+            ensemble_job_id: ensembleJobId || null,
             sam_variant: samVariant,
             enable_sam3_text: enableSam3Text,
-            sam3_text_synonym_budget: Number.isFinite(sam3SynBudget) ? sam3SynBudget : null,
+            sam3_text_synonym_budget: expandGlossary ? sam3SynBudgetValue : 0,
             enable_sam3_similarity: enableSam3Similarity,
+            prepass_similarity_score: Number.isFinite(similarityScoreThr) ? similarityScoreThr : null,
             similarity_min_exemplar_score: Number.isFinite(similarityMinScore) ? similarityMinScore : null,
             similarity_mid_conf_low: Number.isFinite(similarityMidLow) ? similarityMidLow : null,
             similarity_mid_conf_high: Number.isFinite(similarityMidHigh) ? similarityMidHigh : null,
@@ -16591,6 +17196,7 @@ function initQwenTrainingTab() {
             similarity_window_mode: similarityWindowMode || "grid",
             similarity_window_size: Number.isFinite(similarityWindowSize) ? similarityWindowSize : null,
             similarity_window_overlap: Number.isFinite(similarityWindowOverlap) ? similarityWindowOverlap : null,
+            similarity_window_extension: similarityWindowExtension,
             grid_cols: Number.isFinite(gridCols) ? gridCols : null,
             grid_rows: Number.isFinite(gridRows) ? gridRows : null,
             grid_overlap_ratio: Number.isFinite(gridOverlap) ? gridOverlap : null,
@@ -16606,14 +17212,6 @@ function initQwenTrainingTab() {
             prepass_caption_max_tokens: Number.isFinite(captionMaxTokens) ? captionMaxTokens : null,
             labelmap_glossary: glossaryText || null,
             use_detection_overlay: useOverlay !== false,
-            review_enabled: reviewEnabled,
-            review_model_id: resolveReviewModelId(),
-            review_variant: qwenElements.agentReviewVariant?.value || "auto",
-            review_max_tokens: Number.isFinite(reviewMaxTokens) ? reviewMaxTokens : null,
-            review_classes: reviewClassesRaw
-                ? reviewClassesRaw.split(",").map((item) => item.trim()).filter(Boolean)
-                : null,
-            review_passes_per_tile: Number.isFinite(reviewPasses) ? reviewPasses : null,
             tighten_fp: tightenFp,
             detector_conf: tightenFp && Number.isFinite(detectorConf) ? detectorConf : null,
             sam3_score_thr: tightenFp && Number.isFinite(sam3ScoreThr) ? sam3ScoreThr : null,
@@ -16623,6 +17221,150 @@ function initQwenTrainingTab() {
             classifier_bg_margin: tightenFp && Number.isFinite(classifierBgMargin) ? classifierBgMargin : null,
             scoreless_iou: tightenFp && Number.isFinite(scorelessIou) ? scorelessIou : null,
         };
+    }
+
+    function buildCalibrationPayload() {
+        const datasetId = (qwenElements.calibrationDataset?.value || getQwenAgentDatasetId() || "").trim();
+        if (!datasetId) {
+            throw new Error("Select a dataset for calibration.");
+        }
+        const imageCount = parseInt(qwenElements.calibrationImageCount?.value || "2000", 10);
+        const maxTermsRaw = (qwenElements.calibrationMaxTerms?.value || "").trim();
+        const maxTerms = maxTermsRaw === "" ? NaN : parseInt(maxTermsRaw, 10);
+        const baseFp = parseFloat(qwenElements.calibrationBaseFp?.value || "0.2");
+        const relaxFp = parseFloat(qwenElements.calibrationRelaxFp?.value || "0.2");
+        const detectorConf = parseFloat(qwenElements.agentDetectorConf?.value || "");
+        const sam3Score = parseFloat(qwenElements.agentSam3ScoreThr?.value || "");
+        const sam3Mask = parseFloat(qwenElements.agentSam3MaskThr?.value || "");
+        const simScore = parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
+        const simScoreThr = parseFloat(qwenElements.agentSimilarityScoreThr?.value || "");
+        const sahiWindow = parseInt(qwenElements.agentSahiWindow?.value || "", 10);
+        const sahiOverlap = parseFloat(qwenElements.agentSahiOverlap?.value || "");
+        const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
+        const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
+        const similarityWindowExtension = !!qwenElements.agentSimilarityWindowExtension?.checked;
+        return {
+            dataset_id: datasetId,
+            max_images: Number.isFinite(imageCount) ? imageCount : 2000,
+            sam3_text_synonym_budget: expandGlossary ? (Number.isFinite(maxTerms) ? maxTerms : null) : 0,
+            base_fp_ratio: Number.isFinite(baseFp) ? baseFp : 0.2,
+            relax_fp_ratio: Number.isFinite(relaxFp) ? relaxFp : 0.2,
+            detector_conf: Number.isFinite(detectorConf) ? detectorConf : null,
+            sam3_score_thr: Number.isFinite(sam3Score) ? sam3Score : null,
+            sam3_mask_threshold: Number.isFinite(sam3Mask) ? sam3Mask : null,
+            prepass_sam3_text_thr: Number.isFinite(sam3Score) ? sam3Score : null,
+            prepass_similarity_score: Number.isFinite(simScoreThr) ? simScoreThr : null,
+            similarity_min_exemplar_score: Number.isFinite(simScore) ? simScore : null,
+            similarity_window_extension: similarityWindowExtension,
+            sahi_window_size: Number.isFinite(sahiWindow) ? sahiWindow : null,
+            sahi_overlap_ratio: Number.isFinite(sahiOverlap) ? sahiOverlap : null,
+            classifier_id: classifierId,
+        };
+    }
+
+    async function startCalibrationJob() {
+        if (qwenCalibrationState.jobId) {
+            return;
+        }
+        if (!qwenAvailable) {
+            setSamStatus("Qwen backend is unavailable.", { variant: "warn", duration: 3500 });
+            return;
+        }
+        let payload;
+        try {
+            payload = buildCalibrationPayload();
+        } catch (error) {
+            setSamStatus(error?.message || error, { variant: "warn", duration: 3000 });
+            return;
+        }
+        setCalibrationStatus("Starting…");
+        updateCalibrationButtons();
+        try {
+            const resp = await fetch(`${API_ROOT}/calibration/jobs`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            }
+            const job = await resp.json();
+            qwenCalibrationState.jobId = job.job_id;
+            qwenCalibrationState.overlay = showProgressModal("Calibration starting…");
+            setCalibrationStatus("Running");
+            updateCalibrationButtons();
+            pollCalibrationJob();
+        } catch (error) {
+            setCalibrationStatus("Error");
+            updateCalibrationButtons();
+            setSamStatus(`Calibration error: ${error.message || error}`, { variant: "error", duration: 5000 });
+        }
+    }
+
+    async function pollCalibrationJob() {
+        if (!qwenCalibrationState.jobId) {
+            return;
+        }
+        if (qwenCalibrationState.timerId) {
+            clearInterval(qwenCalibrationState.timerId);
+        }
+        qwenCalibrationState.timerId = window.setInterval(async () => {
+            if (!qwenCalibrationState.jobId) {
+                return;
+            }
+            try {
+                const resp = await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(qwenCalibrationState.jobId)}`);
+                if (!resp.ok) {
+                    const detail = await resp.text();
+                    throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+                }
+                const job = await resp.json();
+                const percent = Math.round((job.progress || 0) * 100);
+                const processed = Number.isFinite(job.processed) ? job.processed : 0;
+                const total = Number.isFinite(job.total) ? job.total : 0;
+                const phase = job.phase || job.status || "running";
+                const message = job.message || phase;
+                if (qwenCalibrationState.overlay) {
+                    qwenCalibrationState.overlay.update(
+                        `Calibration ${message} — ${percent}% (${processed}/${total})`
+                    );
+                }
+                if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+                    if (qwenCalibrationState.overlay) {
+                        qwenCalibrationState.overlay.close();
+                    }
+                    if (qwenCalibrationState.timerId) {
+                        clearInterval(qwenCalibrationState.timerId);
+                        qwenCalibrationState.timerId = null;
+                    }
+                    qwenCalibrationState.jobId = null;
+                    setCalibrationStatus(job.status === "completed" ? "Done" : job.status);
+                    updateCalibrationButtons();
+                    if (job.status === "completed") {
+                        enqueueTaskNotice("Calibration completed.", { durationMs: 4500 });
+                    } else if (job.error) {
+                        setSamStatus(`Calibration error: ${job.error}`, { variant: "error", duration: 5000 });
+                    }
+                }
+            } catch (error) {
+                if (qwenCalibrationState.overlay) {
+                    qwenCalibrationState.overlay.update(`Calibration status error: ${error.message || error}`);
+                }
+            }
+        }, 3000);
+    }
+
+    async function cancelCalibrationJob() {
+        if (!qwenCalibrationState.jobId) {
+            return;
+        }
+        try {
+            await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(qwenCalibrationState.jobId)}/cancel`, { method: "POST" });
+            setCalibrationStatus("Cancel requested");
+        } catch (error) {
+            setSamStatus(`Cancel failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+        }
     }
 
     function renderQwenAgentTrace(trace) {
@@ -16728,7 +17470,7 @@ function initQwenTrainingTab() {
 
     function applyAgentDetections(detections) {
         if (!Array.isArray(detections) || detections.length === 0) {
-            setSamStatus("Agent returned no detections.", { variant: "warn", duration: 3000 });
+            setSamStatus("Prepass returned no detections.", { variant: "warn", duration: 3000 });
             return;
         }
         const grouped = {};
@@ -16742,59 +17484,8 @@ function initQwenTrainingTab() {
             grouped[label].push({ bbox, score: det.score });
         });
         Object.entries(grouped).forEach(([label, entries]) => {
-            applyDetectionsToClass(entries, label, "Agent");
+            applyDetectionsToClass(entries, label, "Prepass");
         });
-    }
-
-    async function pollQwenAgentJob(jobId, imageName) {
-        if (!jobId) {
-            return;
-        }
-        try {
-            const resp = await fetch(`${API_ROOT}/qwen/agentic/jobs/${encodeURIComponent(jobId)}`);
-            if (!resp.ok) {
-                const detail = await resp.text();
-                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
-            }
-            const job = await resp.json();
-            renderQwenAgentTrace(job.trace || []);
-            if (job.status === "completed") {
-                qwenAgentActive = false;
-                qwenAgentJobId = null;
-                updateQwenAgentButtons();
-                setQwenAgentStatus("Done");
-                applyAgentDetections(job?.result?.detections || []);
-                if (job?.result?.detections?.length) {
-                    enqueueTaskNotice(`Agent completed: ${job.result.detections.length} boxes.`, { durationMs: 4500 });
-                }
-                return;
-            }
-            if (job.status === "failed" || job.status === "cancelled") {
-                qwenAgentActive = false;
-                qwenAgentJobId = null;
-                updateQwenAgentButtons();
-                setQwenAgentStatus(job.status === "failed" ? "Failed" : "Cancelled");
-                if (job.error) {
-                    setSamStatus(`Agent error: ${job.error}`, { variant: "error", duration: 5000 });
-                }
-                if (job.status === "cancelled" && job?.result?.detections) {
-                    applyAgentDetections(job.result.detections || []);
-                    enqueueTaskNotice(`Agent stopped: ${job.result.detections.length} boxes retained.`, { durationMs: 4500 });
-                }
-                return;
-            }
-            const toolCalls = Array.isArray(job.trace)
-                ? job.trace.filter((entry) => entry?.phase === "tool_call").length
-                : 0;
-            const toolSummary = toolCalls ? ` (${toolCalls} tool calls)` : "";
-            setQwenAgentStatus(`${job.message || "Running"}${toolSummary}`);
-        } catch (error) {
-            setSamStatus(`Agent poll error: ${error.message || error}`, { variant: "error", duration: 4000 });
-        } finally {
-            if (qwenAgentActive && qwenAgentJobId === jobId) {
-                qwenAgentPollTimer = setTimeout(() => pollQwenAgentJob(jobId, imageName), 1200);
-            }
-        }
     }
 
     async function startQwenAgentJob(imageName) {
@@ -16813,10 +17504,10 @@ function initQwenTrainingTab() {
         qwenAgentTraceSeen = 0;
         qwenAgentWindowOverlays = [];
         updateQwenAgentButtons();
-        setQwenAgentStatus("Starting…");
+        setQwenAgentStatus("Running prepass…");
         try {
             const payload = await buildQwenAgentPayload(imageName);
-            const resp = await fetch(`${API_ROOT}/qwen/agentic/jobs`, {
+            const resp = await fetch(`${API_ROOT}/qwen/prepass`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
@@ -16825,44 +17516,35 @@ function initQwenTrainingTab() {
                 const detail = await resp.text();
                 throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
             }
-            const job = await resp.json();
-            qwenAgentJobId = job.job_id;
-            setQwenAgentStatus("Running");
-            renderQwenAgentTrace(job.trace || []);
-            pollQwenAgentJob(job.job_id, imageName);
+            const result = await resp.json();
+            qwenAgentActive = false;
+            updateQwenAgentButtons();
+            setQwenAgentStatus("Done");
+            renderQwenAgentTrace(result.trace || []);
+            applyAgentDetections(result?.detections || []);
+            if (result?.detections?.length) {
+                enqueueTaskNotice(`Prepass completed: ${result.detections.length} boxes.`, { durationMs: 4500 });
+            }
         } catch (error) {
             qwenAgentActive = false;
             updateQwenAgentButtons();
             setQwenAgentStatus("Error");
-            setSamStatus(`Agent error: ${error.message || error}`, { variant: "error", duration: 5000 });
-            console.error("Qwen agentic failed", error);
+            setSamStatus(`Prepass error: ${error.message || error}`, { variant: "error", duration: 5000 });
+            console.error("Qwen prepass failed", error);
         }
     }
 
     async function stopQwenAgentJob() {
-        if (!qwenAgentJobId) {
-            return;
-        }
-        try {
-            await fetch(`${API_ROOT}/qwen/agentic/jobs/${encodeURIComponent(qwenAgentJobId)}/cancel`, { method: "POST" });
-        } catch (error) {
-            console.warn("Failed to cancel agent job", error);
-        } finally {
-            qwenAgentActive = false;
-            qwenAgentJobId = null;
-            if (qwenAgentPollTimer) {
-                clearTimeout(qwenAgentPollTimer);
-                qwenAgentPollTimer = null;
-            }
-            updateQwenAgentButtons();
-            setQwenAgentStatus("Cancelled");
-            enqueueTaskNotice("Agent stop requested.", { durationMs: 3500 });
-        }
+        qwenAgentActive = false;
+        qwenAgentBatchCancel = true;
+        updateQwenAgentButtons();
+        setQwenAgentStatus("Cancelled");
+        enqueueTaskNotice("Prepass stop requested.", { durationMs: 3500 });
     }
 
     async function runQwenAgentBatch(imageNames, options = {}) {
         if (!Array.isArray(imageNames) || imageNames.length === 0) {
-            setSamStatus("No images selected for agent run.", { variant: "warn", duration: 3000 });
+            setSamStatus("No images selected for prepass run.", { variant: "warn", duration: 3000 });
             return;
         }
         if (qwenAgentBatchActive) {
@@ -16873,7 +17555,7 @@ function initQwenTrainingTab() {
         const includeCurrent = options.includeCurrent !== false;
         let processed = 0;
         setQwenAgentStatus(`Batch running (0/${imageNames.length})`);
-        setSamStatus("Running agent batch…", { variant: "info", duration: 0 });
+        setSamStatus("Running prepass batch…", { variant: "info", duration: 0 });
         try {
             for (const imageName of imageNames) {
                 if (qwenAgentBatchCancel) {
@@ -16891,10 +17573,10 @@ function initQwenTrainingTab() {
                 setQwenAgentStatus(`Batch running (${processed}/${imageNames.length})`);
             }
             setQwenAgentStatus("Batch complete");
-            setSamStatus("Agent batch complete.", { variant: "success", duration: 3500 });
+            setSamStatus("Prepass batch complete.", { variant: "success", duration: 3500 });
         } catch (error) {
             setQwenAgentStatus("Batch error");
-            setSamStatus(`Agent batch error: ${error.message || error}`, { variant: "error", duration: 5000 });
+            setSamStatus(`Prepass batch error: ${error.message || error}`, { variant: "error", duration: 5000 });
         } finally {
             qwenAgentBatchActive = false;
         }

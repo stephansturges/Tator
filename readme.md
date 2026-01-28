@@ -44,7 +44,7 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 - **One-click SAM bbox tweak** – press `X` while a bbox is selected to resubmit it through SAM (and CLIP if enabled) for a quick cleanup; double-tap `X` to fan the tweak out to the entire class.
 - **Qwen 3 prompts** – zero-shot prompts spawn new boxes for the currently selected class; choose raw bounding boxes, have Qwen place clicks for SAM, or let it emit bounding boxes that immediately flow through SAM for cleanup. The active model (selected on the Qwen Models tab) always supplies the system prompt and defaults so inference matches training.
 - **Qwen 3 captioning** – generate long-form captions with label hints and optional reasoning models, then save them into a `text_labels/` folder alongside YOLO exports (use the Label Images panel).
-- **Qwen 3 agentic annotation** – run a tool-calling loop that uses detectors, SAM3, and classifiers to auto-label an image end-to-end, with a live trace of what the agent is doing.
+- **Qwen deep prelabeling** – deterministic prepass (detectors + SAM3 + dedupe) with optional glossary expansion + calibration filtering.
 - **Live request queue** – a small corner overlay lists every in-flight SAM preload/activation/tweak so you always know what the backend is working on.
 - **YOLOv8 training** – launch detect/segment runs from the UI, track progress, and keep only `best.pt` + metrics for easy sharing.
 - **RF-DETR training** – launch detect/segment runs from the UI, track progress, and keep best checkpoints + metrics for easy sharing.
@@ -92,27 +92,104 @@ Enable preloading to keep the next image warmed up inside SAM. You’ll see prog
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Qwen agentic annotation (tool-calling loop)
-- Configure the active Qwen model in `Qwen Models`, then open the **Agentic Annotation** panel.
-- The agent pulls the labelmap (and optional glossary) from the dataset and is allowed to call:
-  - detectors (YOLO/RF‑DETR), SAM3 text + similarity, and classifiers,
-  - an image zoom tool to look closer at sub-windows.
-- The agent runs through **Qwen‑Agent** (default) with function‑calling tools; legacy tool parsing has been removed.
-- The backend enforces canonical labelmap names during `submit_annotations`, performs QA/NMS merge, and returns a trace so the UI can display the full reasoning flow.
-- The dataset glossary can be edited from the agentic panel to map label names to human-friendly descriptions and aliases.
-- Each agentic run stores a JSONL trace in `uploads/qwen_agentic_traces/` and can be fetched via `GET /qwen/agentic/jobs/{job_id}/trace`.
+### Qwen deep prelabeling (prepass + calibration)
+- Configure the active Qwen model in `Qwen Models`, then open the **Deep prelabeling** panel.
+- The prepass is deterministic: detectors (YOLO/RF‑DETR), SAM3 text + similarity, and IoU dedupe.
+- Optional glossary expansion uses Qwen to propose extra SAM3 terms per class.
+- Calibration (XGBoost) filters the candidate pool to maximize F1 while enforcing a recall floor.
+- Endpoint: `POST /qwen/prepass` (returns detections + a compact trace of prepass steps).
+- We previously experimented with an agentic annotation loop. It was removed in favor of this deterministic prepass + calibration stack, which is faster, more stable, and easier to tune. Qwen is now only used for glossary expansion and captioning.
 
-### Agentic smoke test (10 images)
+### Prepass architecture (detectors + SAM3 + dedupe)
+The prepass is a deterministic, multi‑stage detector stack that builds a high‑recall candidate pool before calibration.
+
+```text
+Full image
+   │
+   ├─ Detectors (YOLO, RF‑DETR)
+   │    ├─ full‑frame pass
+   │    └─ SAHI windowed pass (slice + merge)
+   │
+   ├─ SAM3 text (glossary terms + optional Qwen expansion)
+   │
+   ├─ Dedupe A (IoU merge) + optional cleanup
+   │    └─ classifier cleanup only if prepass_keep_all=false
+   │
+   ├─ SAM3 similarity (global full‑frame)
+   │    └─ optional windowed similarity extension
+   │
+   └─ Dedupe B (IoU merge) + optional cleanup
+        └─ final prepass candidate set (with provenance)
+```
+
+Key notes:
+- **Full‑frame + SAHI**: every detector runs twice (full‑frame and SAHI), then both streams are merged in the same dedupe pass.
+- **SAM3 text**: uses the dataset glossary by default; Qwen can optionally add extra terms (capped per class).
+- **Similarity**: always runs global similarity; windowed similarity is an opt‑in extension.
+- **Dedupe**: run twice (after detectors + text, and after similarity) to stabilize cluster assignment.
+- **Calibration**: the calibration prepass uses `prepass_keep_all=true` and `prepass_caption=false` so the MLP sees the full candidate pool with no classifier gating.
+
+Settings per step (what the user configures)
+- **Detectors (YOLO / RF‑DETR)**:
+  - **Selectors**: choose one or more trained detectors to run (YOLO and/or RF‑DETR) and pick the specific trained run for each in the Deep prelabeling panel.
+  - **Windowing**: SAHI window size + overlap (Deep prelabeling panel).
+- **SAM3 text**:
+  - **Glossary source**: dataset glossary vs glossary library vs custom text (Deep prelabeling panel).
+  - **Qwen expansion**: toggle “Extend glossary with Qwen” and set max new terms per class (Deep prelabeling panel).
+- **SAM3 similarity**:
+  - **Exemplar min score**: choose the minimum score for exemplar selection (Deep prelabeling panel).
+  - **Windowed similarity extension**: optional checkbox to add windowed similarity on top of global similarity (Deep prelabeling panel).
+- **Classifier (used in later stages / calibration features)**:
+  - **Selector**: choose the classifier head to generate per‑class probabilities for the calibration features (Deep prelabeling panel).
+  - Note: calibration prepass keeps all candidates; the classifier is not used as a gate there.
+
+Default thresholds (currently hard‑coded, not user‑exposed)
+- Detector confidence: `0.45` — minimum confidence for YOLO/RF‑DETR detections (both full‑frame + SAHI) before they enter the candidate pool.
+- SAM3 text score threshold: `0.20` — minimum SAM3 text score required for a prompt‑based detection to be kept in the prepass.
+- SAM3 similarity score threshold: `0.30` — minimum SAM3 similarity score for similarity‑based detections (global and optional windowed pass).
+- Similarity exemplar min score: `0.60` — minimum score for a detection to be used as an exemplar when seeding similarity search.
+- SAM3 runtime score/mask: `0.20 / 0.20` — SAM3 internal score and mask thresholds used during inference; lower values favor recall.
+- Dedupe IoU (both passes): `0.75` — IoU threshold used to merge overlapping detections after detectors + text, and again after similarity.
+- Calibration evaluation IoU: `0.50` — IoU used when computing TP/FP/FN during calibration evaluation.
+- Scoreless IoU: `0.00` — scoreless candidate filter is disabled by default (keeps all candidates).
+
+Standardized prepass + calibration flow (current default)
+1. **Detectors**: run full‑frame + SAHI for each selected detector (YOLO/RF‑DETR).
+2. **SAM3 text**: run with glossary (optionally Qwen‑expanded).
+3. **Dedupe pass A**: merge overlaps across detector + SAM3 text candidates.
+4. **SAM3 similarity**: run global similarity (windowed extension is optional).
+5. **Dedupe pass B**: merge overlaps after similarity expansion.
+6. **Calibration features**: build candidate features (including classifier prob vector + per‑source scores + context counts).
+7. **Calibrator**: XGBoost accept/reject (context features, log1p counts + z‑score normalization).
+8. **Final output**: calibrated detections with dedupe IoU 0.75.
+
+Calibration benchmark (IoU=0.50, qwen_dataset, cal_8180972c, validation split)
+| Pipeline | Precision | Recall | F1 |
+| --- | --- | --- | --- |
+| YOLO‑supported clusters (source_list contains yolo) | 0.769 | 0.532 | 0.629 |
+| RF‑DETR‑supported clusters (source_list contains rfdetr) | 0.712 | 0.562 | 0.628 |
+| YOLO + RF‑DETR (dedupe on source_list union) | 0.663 | 0.635 | 0.649 |
+| **Prepass + XGBoost (context)** | **0.844** | **0.688** | **0.758** |
+
+Notes:
+- The detector baselines above are derived from **prepass clusters** using `source_list` membership (i.e., clusters that had detector support). This is more faithful than filtering by `score_source` alone, which only keeps clusters whose primary score came from a detector.
+- “Raw detector” baselines should be measured from a detector‑only run if you want a pure comparison.
+
+Notes:
+- The IoU=0.50 evaluation is used for calibration selection (recall‑friendly for prelabeling).
+- At IoU=0.75, the candidate‑pool ceiling recall from this prepass is ~0.543 (so higher recall targets require a richer prepass or looser IoU).
+
+### Prepass smoke test (10 images)
 Run a minimal smoke test locally:
 ```bash
-bash tools/run_qwen_agentic_smoke.sh --count 10 --seed 42 --dataset qwen_dataset
+bash tools/run_qwen_prepass_smoke.sh --count 10 --seed 42 --dataset qwen_dataset
 ```
 This writes a JSONL log of detections + trace events for each image.
 
-### Agentic benchmark (TP/FP/FN vs COCO)
+### Prepass benchmark (TP/FP/FN vs COCO)
 Run the benchmark harness to compare detections against COCO GT:
 ```bash
-bash tools/run_qwen_agentic_benchmark.sh --count 10 --seed 42 --dataset qwen_dataset
+bash tools/run_qwen_prepass_benchmark.sh --count 10 --seed 42 --dataset qwen_dataset
 ```
 The script writes a JSONL log plus a summary JSON with per‑class TP/FP/FN.
 
@@ -132,7 +209,7 @@ Tator/
 - **SAM assists (Label Images tab)**: UI actions → SAM endpoints (SAM1/2/3 depending on `SAM_VARIANT`) → detections written into the current image session.
 - **SAM3 text prompt**: `SAM3 Text Prompt` panel → SAM3 processor runtime → returns boxes/polygons via the same `QwenDetection` response model used elsewhere.
 - **Qwen captioning**: `Label Images` panel → `/qwen/caption` → prompt uses scene hints + optional label hints → captions can be saved into `text_labels/` in YOLO exports.
-- **Qwen agentic annotation**: `Qwen Models` panel → `/qwen/agentic` → agent loop calls detectors/SAM3/classifiers with a labelmap glossary → traces + merged detections returned to UI.
+- **Qwen deep prelabeling**: `Qwen Models` panel → `/qwen/prepass` → deterministic prepass + calibration → merged detections returned to UI.
 - **Agent Mining (recipe search)**: Agent Mining tab → `/agent_mining/jobs` (start/poll/cancel) → results include per-class recipes in either:
   - `sam3_greedy`: prompt bank + optional crop bank (positives/negatives) + optional embedded pretrained CLIP head
   - `sam3_steps` (`schema_version=2`): explicit multi-step prompt chain (step list), plus optional embedded pretrained CLIP head

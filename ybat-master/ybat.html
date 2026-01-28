@@ -389,27 +389,45 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="qwen-agentic">
+                                <div class="qwen-prepass">
                                     <div class="qwen-caption__header">
-                                        <strong>Agentic annotation (Qwen)</strong>
+                                        <strong>Deep prelabeling (Qwen)</strong>
                                         <span id="qwenAgentStatus" class="qwen-caption-status"></span>
                                     </div>
-                                    <div class="training-help">Runs a tool-calling agent to annotate the full image. Uses the current labelmap or a selected dataset.</div>
+                                    <div class="training-help">Runs a deep prepass (detectors + SAM3 + dedupe + optional calibration). Uses the current labelmap or a selected dataset.</div>
+                                    <details class="training-help" style="margin-bottom: 10px;">
+                                        <summary><strong>Prepass flow + defaults</strong></summary>
+                                        <div style="margin-top: 6px;">
+                                            <div><strong>Flow:</strong> Detectors (full-frame + SAHI) → SAM3 text → Dedupe A → SAM3 similarity (global, optional windowed) → Dedupe B → Calibration (XGBoost) → Final output.</div>
+                                            <div style="margin-top: 6px;"><strong>Defaults:</strong> detector conf 0.45, SAM3 text 0.20, similarity 0.30, exemplar min 0.60, SAM3 runtime 0.20/0.20, dedupe IoU 0.75, eval IoU 0.50, scoreless IoU 0.00.</div>
+                                            <div style="margin-top: 6px;"><strong>Tip:</strong> Prepass runs deterministically; any optional review has been removed.</div>
+                                        </div>
+                                    </details>
                                     <label for="qwenAgentDataset">Dataset (labelmap)</label>
                                     <div class="qwen-caption-row">
                                         <select id="qwenAgentDataset"></select>
                                         <button type="button" id="qwenAgentDatasetRefresh" class="training-button secondary">Refresh</button>
                                     </div>
                                     <div id="qwenAgentDatasetSummary" class="training-help"></div>
-                                    <label for="qwenAgentGlossary">Labelmap glossary (optional)</label>
-                                    <textarea id="qwenAgentGlossary" rows="4" placeholder="light_vehicle: cars, sedans, SUVs, pickup trucks. truck: large commercial vehicle."></textarea>
+                                    <label for="qwenAgentGlossarySource">Glossary source<span class="help-icon" title="Select where to pull label synonyms from: dataset canonical glossary, a named glossary from the library, or custom text pasted below.">?</span></label>
                                     <div class="qwen-caption-row">
-                                        <button type="button" id="qwenAgentGlossarySave" class="training-button secondary">Save glossary</button>
-                                        <button type="button" id="qwenAgentGlossaryReload" class="training-button training-button--ghost">Reload</button>
+                                        <select id="qwenAgentGlossarySource">
+                                            <option value="dataset" selected>Dataset canonical</option>
+                                            <option value="library">Named glossary</option>
+                                            <option value="custom">Custom text</option>
+                                        </select>
+                                        <button type="button" id="qwenAgentGlossaryRefresh" class="training-button secondary">Refresh list</button>
                                     </div>
+                                    <div class="qwen-caption-row" id="qwenAgentGlossaryLibraryRow">
+                                        <label for="qwenAgentGlossarySelect">Named glossary<span class="help-icon" title="Select a saved glossary to override the dataset glossary for this run.">?</span></label>
+                                        <select id="qwenAgentGlossarySelect"></select>
+                                    </div>
+                                    <label for="qwenAgentGlossary">Glossary (preview or custom)</label>
+                                    <textarea id="qwenAgentGlossary" rows="4" placeholder="Paste JSON: {\"light_vehicle\": [\"car\", \"sedan\"], ... }"></textarea>
+                                    <div id="qwenAgentGlossaryHint" class="training-help">Dataset mode uses the dataset’s canonical glossary. Named/custom modes override the dataset glossary for this run.</div>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenAgentModel">Agent model</label>
+                                            <label for="qwenAgentModel">Qwen model</label>
                                             <select id="qwenAgentModel">
                                                 <option value="active">Use active model</option>
                                                 <option value="2B">Qwen3-VL 2B</option>
@@ -420,7 +438,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentVariant">Variant</label>
+                                            <label for="qwenAgentVariant">Variant<span class="help-icon" title="Choose Instruct or Thinking variants. Thinking is slower and may be more verbose.">?</span></label>
                                             <select id="qwenAgentVariant">
                                                 <option value="auto" selected>Auto</option>
                                                 <option value="Instruct">Instruct</option>
@@ -428,24 +446,31 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentDetectorMode">Detector</label>
+                                            <label for="qwenAgentDetectorMode">Detector (tool calls)<span class="help-icon" title="Used for manual run_detector tool calls. Prepass uses the YOLO/RF-DETR selectors below.">?</span></label>
                                             <select id="qwenAgentDetectorMode">
                                                 <option value="yolo" selected>YOLO (active)</option>
                                                 <option value="rfdetr">RF-DETR (active)</option>
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentDetectorId">Detector run (optional)</label>
+                                            <label for="qwenAgentDetectorId">Detector run (tool calls)<span class="help-icon" title="Optional specific run used only for manual run_detector calls.">?</span></label>
                                             <div class="qwen-caption-row">
                                                 <select id="qwenAgentDetectorId"></select>
                                                 <button type="button" id="qwenAgentDetectorRefresh" class="training-button secondary">Refresh</button>
                                             </div>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentClassifierId">Classifier (optional)</label>
+                                            <label for="qwenAgentClassifierId">Classifier (optional)<span class="help-icon" title="Select a trained classifier head to generate per-class probabilities for calibration features. This does not gate prepass candidates.">?</span></label>
                                             <div class="qwen-caption-row">
                                                 <select id="qwenAgentClassifierId"></select>
                                                 <button type="button" id="qwenAgentClassifierRefresh" class="training-button secondary">Refresh</button>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentEnsembleJob">Calibration (XGBoost)<span class="help-icon" title="Select a completed calibration job to filter prepass detections using the ensemble XGBoost model. Requires dataset image names.">?</span></label>
+                                            <div class="qwen-caption-row">
+                                                <select id="qwenAgentEnsembleJob"></select>
+                                                <button type="button" id="qwenAgentEnsembleRefresh" class="training-button secondary">Refresh</button>
                                             </div>
                                         </div>
                                         <div>
@@ -461,7 +486,7 @@
                                         </div>
                                         <div>
                                             <label for="qwenAgentIou">NMS IoU</label>
-                                            <input type="number" id="qwenAgentIou" min="0" max="1" step="0.05" value="0.5" />
+                                            <input type="number" id="qwenAgentIou" min="0" max="1" step="0.05" value="0.75" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentCrossIou">Cross-class IoU</label>
@@ -474,7 +499,7 @@
                                         <div>
                                             <label for="qwenAgentCaptionProfile">Caption profile</label>
                                             <select id="qwenAgentCaptionProfile">
-                                                <option value="light" selected>Light (agentic)</option>
+                                                <option value="light" selected>Light (prepass)</option>
                                                 <option value="deep">Deep (full)</option>
                                             </select>
                                         </div>
@@ -520,72 +545,80 @@
                                         </div>
                                         <div>
                                             <label for="qwenAgentSam3ScoreThr">SAM3 score threshold</label>
-                                            <input type="number" id="qwenAgentSam3ScoreThr" min="0" max="1" step="0.05" value="0.5" />
+                                            <input type="number" id="qwenAgentSam3ScoreThr" min="0" max="1" step="0.05" value="0.2" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentSam3MaskThr">SAM3 mask threshold</label>
-                                            <input type="number" id="qwenAgentSam3MaskThr" min="0" max="1" step="0.05" value="0.5" />
+                                            <input type="number" id="qwenAgentSam3MaskThr" min="0" max="1" step="0.05" value="0.2" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentClassifierMinProb">Classifier min prob</label>
-                                            <input type="number" id="qwenAgentClassifierMinProb" min="0" max="1" step="0.05" value="0.7" />
+                                            <input type="number" id="qwenAgentClassifierMinProb" min="0" max="1" step="0.05" value="0.35" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentClassifierMargin">Classifier margin</label>
-                                            <input type="number" id="qwenAgentClassifierMargin" min="0" max="1" step="0.05" value="0.1" />
+                                            <input type="number" id="qwenAgentClassifierMargin" min="0" max="1" step="0.05" value="0.05" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentClassifierBgMargin">Classifier background margin</label>
-                                            <input type="number" id="qwenAgentClassifierBgMargin" min="0" max="1" step="0.05" value="0.1" />
+                                            <input type="number" id="qwenAgentClassifierBgMargin" min="0" max="1" step="0.05" value="0.05" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentScorelessIou">Scoreless min IoU</label>
-                                            <input type="number" id="qwenAgentScorelessIou" min="0" max="1" step="0.05" value="0.3" />
+                                            <input type="number" id="qwenAgentScorelessIou" min="0" max="1" step="0.05" value="0.0" />
                                         </div>
                                     </div>
                                     <div class="training-help">Deep prepass (deterministic)</div>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenAgentEnableYolo">Enable YOLO</label>
+                                            <label for="qwenAgentEnableYolo">Enable YOLO<span class="help-icon" title="Run YOLO in full-frame + SAHI windowed mode during prepass.">?</span></label>
                                             <input type="checkbox" id="qwenAgentEnableYolo" checked />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentEnableRfdetr">Enable RF-DETR</label>
+                                            <label for="qwenAgentEnableRfdetr">Enable RF-DETR<span class="help-icon" title="Run RF-DETR in full-frame + SAHI windowed mode during prepass.">?</span></label>
                                             <input type="checkbox" id="qwenAgentEnableRfdetr" checked />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentYoloRun">YOLO run (optional)</label>
+                                            <label for="qwenAgentYoloRun">YOLO run (optional)<span class="help-icon" title="Select a trained YOLO run to use for this prepass. Leave blank to use the active model.">?</span></label>
                                             <select id="qwenAgentYoloRun"></select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentRfdetrRun">RF-DETR run (optional)</label>
+                                            <label for="qwenAgentRfdetrRun">RF-DETR run (optional)<span class="help-icon" title="Select a trained RF-DETR run to use for this prepass. Leave blank to use the active model.">?</span></label>
                                             <select id="qwenAgentRfdetrRun"></select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSahiWindow">SAHI window size</label>
+                                            <label for="qwenAgentSahiWindow">SAHI window size<span class="help-icon" title="Slice size for windowed detection. Smaller windows find small objects but increase runtime.">?</span></label>
                                             <input type="number" id="qwenAgentSahiWindow" min="256" max="2000" step="32" value="640" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSahiOverlap">SAHI overlap</label>
+                                            <label for="qwenAgentSahiOverlap">SAHI overlap<span class="help-icon" title="Overlap between SAHI windows. Higher overlap improves recall near boundaries at the cost of speed.">?</span></label>
                                             <input type="number" id="qwenAgentSahiOverlap" min="0" max="0.9" step="0.05" value="0.2" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentEnableSam3Text">Enable SAM3 text</label>
+                                            <label for="qwenAgentEnableSam3Text">Enable SAM3 text<span class="help-icon" title="Run SAM3 text prompts from the glossary to expand candidate coverage.">?</span></label>
                                             <input type="checkbox" id="qwenAgentEnableSam3Text" checked />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSam3SynBudget">SAM3 text prompt budget</label>
-                                            <input type="number" id="qwenAgentSam3SynBudget" min="1" max="30" value="10" />
+                                            <label for="qwenAgentSam3ExpandGlossary">Extend glossary with Qwen<span class="help-icon" title="Use Qwen to propose extra SAM3 text prompts beyond the glossary terms. Turn off to use only the glossary list.">?</span></label>
+                                            <input type="checkbox" id="qwenAgentSam3ExpandGlossary" checked />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSam3SynBudget">Max new terms per class<span class="help-icon" title="Cap for Qwen-proposed additions per class during SAM3 text prompting. Leave blank for no cap.">?</span></label>
+                                            <input type="number" id="qwenAgentSam3SynBudget" min="0" step="1" value="10" placeholder="no cap" />
                                         </div>
                                     </div>
                                     <div class="training-help">Similarity expansion (SAM3)</div>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenAgentEnableSam3Similarity">Enable similarity</label>
+                                            <label for="qwenAgentEnableSam3Similarity">Enable similarity<span class="help-icon" title="Use SAM3 similarity to find objects similar to high-confidence exemplars.">?</span></label>
                                             <input type="checkbox" id="qwenAgentEnableSam3Similarity" checked />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSimilarityMinScore">Min exemplar score</label>
+                                            <label for="qwenAgentSimilarityScoreThr">Similarity score threshold<span class="help-icon" title="Minimum score for similarity detections. Lower values increase recall but add false positives.">?</span></label>
+                                            <input type="number" id="qwenAgentSimilarityScoreThr" min="0" max="1" step="0.05" value="0.3" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityMinScore">Min exemplar score<span class="help-icon" title="Minimum detection score required to seed similarity search for a class.">?</span></label>
                                             <input type="number" id="qwenAgentSimilarityMinScore" min="0" max="1" step="0.05" value="0.6" />
                                         </div>
                                         <div>
@@ -601,19 +634,23 @@
                                             <input type="number" id="qwenAgentSimilarityMidCount" min="1" max="50" value="2" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSimilarityWindowMode">Similarity window mode</label>
+                                            <label for="qwenAgentSimilarityWindowMode">Similarity window mode<span class="help-icon" title="When enabled, defines how windowed similarity slices the image (grid vs SAHI).">?</span></label>
                                             <select id="qwenAgentSimilarityWindowMode">
                                                 <option value="grid" selected>Grid</option>
                                                 <option value="sahi">SAHI</option>
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSimilarityWindowSize">Similarity window size</label>
+                                            <label for="qwenAgentSimilarityWindowSize">Similarity window size<span class="help-icon" title="Window size for optional similarity extension. Smaller windows increase detail but slow down prepass.">?</span></label>
                                             <input type="number" id="qwenAgentSimilarityWindowSize" min="256" max="2000" step="32" value="640" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSimilarityWindowOverlap">Similarity window overlap</label>
+                                            <label for="qwenAgentSimilarityWindowOverlap">Similarity window overlap<span class="help-icon" title="Overlap between similarity windows to avoid missing boundary objects.">?</span></label>
                                             <input type="number" id="qwenAgentSimilarityWindowOverlap" min="0" max="0.9" step="0.05" value="0.2" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityWindowExtension">Windowed similarity extension<span class="help-icon" title="Runs an extra windowed similarity pass after the global pass. This is slower but can find small/edge objects.">?</span></label>
+                                            <input type="checkbox" id="qwenAgentSimilarityWindowExtension" />
                                         </div>
                                     </div>
                                     <div class="training-help">Grid + overlay</div>
@@ -635,59 +672,55 @@
                                             <input type="number" id="qwenAgentOverlayDotRadius" min="1" max="12" value="4" />
                                         </div>
                                     </div>
-                                    <div class="training-help">Review (VLM)</div>
-                                    <div class="qwen-caption-grid">
-                                        <div>
-                                            <label for="qwenAgentReviewEnabled">Enable review</label>
-                                            <input type="checkbox" id="qwenAgentReviewEnabled" checked />
-                                        </div>
-                                        <div>
-                                            <label for="qwenAgentReviewModel">Review model</label>
-                                            <select id="qwenAgentReviewModel">
-                                                <option value="active" selected>Use agent model</option>
-                                                <option value="2B">Qwen3-VL 2B</option>
-                                                <option value="4B">Qwen3-VL 4B</option>
-                                                <option value="8B">Qwen3-VL 8B</option>
-                                                <option value="Qwen/Qwen3-VL-30B-A3B-Instruct">Qwen3-VL 30B-A3B Instruct</option>
-                                                <option value="Qwen/Qwen3-VL-30B-A3B-Thinking">Qwen3-VL 30B-A3B Thinking</option>
-                                            </select>
-                                        </div>
-                                        <div>
-                                            <label for="qwenAgentReviewVariant">Review variant</label>
-                                            <select id="qwenAgentReviewVariant">
-                                                <option value="auto" selected>Auto</option>
-                                                <option value="Instruct">Instruct</option>
-                                                <option value="Thinking">Thinking</option>
-                                            </select>
-                                        </div>
-                                        <div>
-                                            <label for="qwenAgentReviewMaxTokens">Review max tokens</label>
-                                            <input type="number" id="qwenAgentReviewMaxTokens" min="64" max="1024" value="256" />
-                                        </div>
-                                        <div>
-                                            <label for="qwenAgentReviewClasses">Review classes (comma-separated)</label>
-                                            <input type="text" id="qwenAgentReviewClasses" placeholder="leave empty for labelmap" />
-                                        </div>
-                                        <div>
-                                            <label for="qwenAgentReviewPasses">Review passes per tile</label>
-                                            <input type="number" id="qwenAgentReviewPasses" min="1" max="3" value="1" />
-                                        </div>
-                                    </div>
                                     <div class="qwen-caption-options">
-                                        <label for="qwenAgentBatchCount">Apply agent to next N images</label>
+                                        <label for="qwenAgentBatchCount">Apply prepass to next N images</label>
                                         <div class="qwen-caption-row">
                                             <input type="number" id="qwenAgentBatchCount" min="1" value="3" />
-                                            <button type="button" id="qwenAgentBatchRun" class="training-button secondary">Run next N</button>
+                                            <button type="button" id="qwenAgentBatchRun" class="training-button secondary">Run prepass on next N</button>
                                         </div>
                                         <label><input type="checkbox" id="qwenAgentBatchIncludeCurrent" checked /> Include current image</label>
                                     </div>
                                     <div class="training-actions">
-                                        <button type="button" id="qwenAgentRun" class="training-button secondary">Run agent on image</button>
-                                        <button type="button" id="qwenAgentStop" class="training-button secondary" disabled>Stop agent</button>
+                                        <button type="button" id="qwenAgentRun" class="training-button secondary">Run prepass on image</button>
+                                        <button type="button" id="qwenAgentStop" class="training-button secondary" disabled>Stop prepass</button>
                                     </div>
                                     <div class="qwen-agent-trace">
-                                        <div class="training-help">Agent trace (latest steps)</div>
+                                        <div class="training-help">Prepass trace (latest steps)</div>
                                         <div id="qwenAgentTraceList" class="qwen-agent-trace__list"></div>
+                                    </div>
+                                </div>
+                                <div class="qwen-prepass">
+                                    <div class="qwen-caption__header">
+                                        <strong>Calibration (Prepass + XGBoost)</strong>
+                                        <span id="qwenCalibrationStatus" class="qwen-caption-status"></span>
+                                    </div>
+                                    <div class="training-help">Build a calibration dataset, train the XGBoost calibrator, and relax thresholds to your FP/TP cap. This blocks the UI while running.</div>
+                                    <div class="qwen-caption-row">
+                                        <label for="qwenCalibrationDataset">Dataset</label>
+                                        <select id="qwenCalibrationDataset"></select>
+                                        <button type="button" id="qwenCalibrationDatasetRefresh" class="training-button secondary">Refresh</button>
+                                    </div>
+                                    <div class="qwen-caption-grid">
+                                        <div>
+                                            <label for="qwenCalibrationImageCount">Images to sample</label>
+                                            <input type="number" id="qwenCalibrationImageCount" min="10" max="100000" value="2000" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCalibrationMaxTerms">Max SAM3 terms per class<span class="help-icon" title="Cap for Qwen-expanded glossary terms per class used during calibration prepass. Leave blank for no cap.">?</span></label>
+                                            <input type="number" id="qwenCalibrationMaxTerms" min="0" step="1" value="10" placeholder="no cap" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCalibrationBaseFp">Base FP/TP cap<span class="help-icon" title="Initial per-class threshold calibration target (stricter).">?</span></label>
+                                            <input type="number" id="qwenCalibrationBaseFp" min="0" max="1" step="0.05" value="0.2" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCalibrationRelaxFp">Relaxed FP/TP cap<span class="help-icon" title="Relax thresholds per class to maximize recall while keeping FP/TP under this cap.">?</span></label>
+                                            <input type="number" id="qwenCalibrationRelaxFp" min="0" max="1" step="0.05" value="0.2" />
+                                        </div>
+                                    </div>
+                                    <div class="training-actions">
+                                        <button type="button" id="qwenCalibrationRun" class="training-button secondary">Start calibration</button>
+                                        <button type="button" id="qwenCalibrationCancel" class="training-button secondary" disabled>Cancel</button>
                                     </div>
                                 </div>
                                 <section class="sam3-text-panel" id="sam3TextPanel" aria-labelledby="sam3TextTitle">
@@ -2870,6 +2903,66 @@
                                     <button type="button" id="datasetListRefreshTop" class="training-button">Refresh list</button>
                                 </div>
                                 <div id="datasetList" class="training-history"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="training-card">
+                        <div class="training-card__header">
+                            <div class="training-card__title">Glossary Library</div>
+                            <div class="training-help">Manage canonical dataset glossaries and named glossaries for prepass runs.</div>
+                        </div>
+                        <div class="training-card__body">
+                            <div class="training-subsection">
+                                <div class="training-subsection__title">Dataset canonical glossary</div>
+                                <div class="training-grid">
+                                    <div>
+                                        <label for="datasetGlossaryDataset">Dataset</label>
+                                        <div class="qwen-caption-row">
+                                            <select id="datasetGlossaryDataset"></select>
+                                            <button type="button" id="datasetGlossaryRefresh" class="training-button secondary">Refresh</button>
+                                        </div>
+                                        <div id="datasetGlossarySummary" class="training-help"></div>
+                                    </div>
+                                    <div>
+                                        <label for="datasetGlossarySaveName">Save as named glossary</label>
+                                        <input type="text" id="datasetGlossarySaveName" placeholder="e.g. qwen_dataset_v1" />
+                                    </div>
+                                </div>
+                                <label for="datasetGlossaryEditor">Glossary (JSON or label: synonyms)</label>
+                                <textarea id="datasetGlossaryEditor" rows="6" placeholder="{&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], ... }"></textarea>
+                                <div class="training-actions">
+                                    <button type="button" id="datasetGlossaryLoad" class="training-button secondary">Load</button>
+                                    <button type="button" id="datasetGlossarySave" class="training-button">Save to dataset</button>
+                                    <button type="button" id="datasetGlossarySaveAs" class="training-button secondary">Save to library</button>
+                                </div>
+                                <div id="datasetGlossaryMessage" class="training-message"></div>
+                            </div>
+                            <div class="training-subsection">
+                                <div class="training-subsection__title">Named glossaries</div>
+                                <div class="training-grid">
+                                    <div>
+                                        <label for="glossaryLibrarySelect">Saved glossaries</label>
+                                        <div class="qwen-caption-row">
+                                            <select id="glossaryLibrarySelect"></select>
+                                            <button type="button" id="glossaryLibraryRefresh" class="training-button secondary">Refresh</button>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label for="glossaryLibraryName">Glossary name</label>
+                                        <input type="text" id="glossaryLibraryName" placeholder="e.g. coastal_dataset" />
+                                    </div>
+                                </div>
+                                <label for="glossaryLibraryEditor">Glossary body</label>
+                                <textarea id="glossaryLibraryEditor" rows="6" placeholder="{&quot;boat&quot;: [&quot;ship&quot;, &quot;kayak&quot;], ... }"></textarea>
+                                <div class="training-actions">
+                                    <button type="button" id="glossaryLibraryNew" class="training-button secondary">New</button>
+                                    <button type="button" id="glossaryLibrarySave" class="training-button">Save</button>
+                                    <button type="button" id="glossaryLibraryDelete" class="training-button secondary">Delete</button>
+                                    <button type="button" id="glossaryLibraryDownload" class="training-button secondary">Download</button>
+                                    <input type="file" id="glossaryLibraryUpload" accept=".json,.txt" class="file-input-hidden" />
+                                    <label for="glossaryLibraryUpload" class="training-button secondary" role="button" tabindex="0">Upload</label>
+                                </div>
+                                <div id="glossaryLibraryMessage" class="training-message"></div>
                             </div>
                         </div>
                     </div>

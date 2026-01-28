@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64, colorsys, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket, gc, queue
+import base64, colorsys, copy, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket, gc, queue
 from array import array
 from contextvars import ContextVar
 from pathlib import Path
@@ -472,18 +472,6 @@ class ImmediateActionBiasProcessor(_BASE_LOGITS_PROCESSOR):
         self.logit_bias = float(logit_bias)
         self._think_started_at: Dict[int, float] = {}
         self._wait_seen: Set[int] = set()
-
-    @staticmethod
-    def _extract_open_think_text(text: str) -> Optional[str]:
-        if not text:
-            return None
-        #start = text.rfind("<think>")
-        #if start < 0:
-        #    return None
-        #end = text.rfind("</think>")
-        #if end > start:
-        #    return None
-        return text #[start + len("<think>") :]
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         if self.logit_bias <= 0:
@@ -5306,7 +5294,7 @@ class QwenCaptionResponse(BaseModel):
     truncated: bool
 
 
-class QwenAgenticRequest(BaseModel):
+class QwenPrepassRequest(BaseModel):
     dataset_id: Optional[str] = None
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
@@ -5325,20 +5313,22 @@ class QwenAgenticRequest(BaseModel):
     classifier_id: Optional[str] = None
     sam_variant: Optional[str] = "sam3"
     enable_sam3_text: Optional[bool] = True
-    sam3_text_synonym_budget: Optional[int] = None
+    sam3_text_synonym_budget: Optional[int] = 10
     enable_sam3_similarity: Optional[bool] = True
-    similarity_min_exemplar_score: Optional[float] = None
+    similarity_min_exemplar_score: Optional[float] = 0.6
     similarity_mid_conf_low: Optional[float] = None
     similarity_mid_conf_high: Optional[float] = None
     similarity_mid_conf_class_count: Optional[int] = None
     similarity_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     similarity_window_size: Optional[int] = None
     similarity_window_overlap: Optional[float] = None
+    similarity_window_extension: Optional[bool] = False
     prepass_mode: Optional[str] = "ensemble_sahi_sam3_text_similarity"
-    prepass_only: Optional[bool] = False
-    prepass_finalize: Optional[bool] = False
-    prepass_sam3_text_thr: Optional[float] = None
-    prepass_similarity_score: Optional[float] = None
+    prepass_only: Optional[bool] = True
+    prepass_finalize: Optional[bool] = True
+    prepass_keep_all: Optional[bool] = False
+    prepass_sam3_text_thr: Optional[float] = 0.2
+    prepass_similarity_score: Optional[float] = 0.3
     prepass_similarity_per_class: Optional[int] = None
     prepass_inspect_topk: Optional[int] = None
     prepass_inspect_score: Optional[float] = None
@@ -5355,17 +5345,18 @@ class QwenAgenticRequest(BaseModel):
     overlay_dot_radius: Optional[int] = None
     tighten_fp: Optional[bool] = True
     detector_conf: Optional[float] = 0.45
-    sam3_score_thr: Optional[float] = 0.5
-    sam3_mask_threshold: Optional[float] = 0.5
+    sam3_score_thr: Optional[float] = 0.2
+    sam3_mask_threshold: Optional[float] = 0.2
     classifier_min_prob: Optional[float] = 0.35
     classifier_margin: Optional[float] = 0.05
     classifier_bg_margin: Optional[float] = 0.05
-    scoreless_iou: Optional[float] = 0.3
+    scoreless_iou: Optional[float] = 0.0
+    ensemble_enabled: Optional[bool] = False
+    ensemble_job_id: Optional[str] = None
     max_detections: Optional[int] = 2000
-    iou: Optional[float] = 0.5
+    iou: Optional[float] = 0.75
     cross_iou: Optional[float] = None
     max_new_tokens: Optional[int] = 4096
-    tile_max_passes: Optional[int] = 2
     thinking_effort: Optional[float] = None
     thinking_scale_factor: Optional[float] = None
     immediate_action_bias: Optional[bool] = True
@@ -5373,15 +5364,41 @@ class QwenAgenticRequest(BaseModel):
     immediate_action_min_seconds: Optional[float] = 2.0
     immediate_action_logit_bias: Optional[float] = 6.0
     trace_verbose: Optional[bool] = False
-    review_enabled: Optional[bool] = True
-    review_model_id: Optional[str] = None
-    review_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = None
-    review_max_tokens: Optional[int] = None
-    review_classes: Optional[List[str]] = None
-    review_passes_per_tile: Optional[int] = None
 
 
-class QwenAgenticResponse(BaseModel):
+class CalibrationRequest(BaseModel):
+    dataset_id: str
+    max_images: Optional[int] = 2000
+    seed: Optional[int] = 42
+    base_fp_ratio: Optional[float] = 0.2
+    relax_fp_ratio: Optional[float] = 0.2
+    recall_floor: Optional[float] = 0.6
+    sam3_text_synonym_budget: Optional[int] = 10
+    prepass_sam3_text_thr: Optional[float] = 0.2
+    prepass_similarity_score: Optional[float] = 0.3
+    sam3_score_thr: Optional[float] = 0.2
+    sam3_mask_threshold: Optional[float] = 0.2
+    similarity_min_exemplar_score: Optional[float] = 0.6
+    similarity_window_extension: Optional[bool] = False
+    detector_conf: Optional[float] = 0.45
+    sahi_window_size: Optional[int] = None
+    sahi_overlap_ratio: Optional[float] = None
+    classifier_id: Optional[str] = None
+    support_iou: Optional[float] = 0.5
+    context_radius: Optional[float] = 0.075
+    label_iou: Optional[float] = 0.9
+    eval_iou: Optional[float] = 0.5
+    dedupe_iou: Optional[float] = 0.75
+    scoreless_iou: Optional[float] = 0.0
+    model_hidden: Optional[str] = "256,128"
+    model_dropout: Optional[float] = 0.1
+    model_epochs: Optional[int] = 20
+    model_lr: Optional[float] = 1e-3
+    model_weight_decay: Optional[float] = 1e-4
+    model_seed: Optional[int] = 42
+
+
+class QwenPrepassResponse(BaseModel):
     detections: List[Dict[str, Any]]
     trace: List[AgentTraceEvent]
     warnings: Optional[List[str]] = None
@@ -5457,30 +5474,25 @@ _AGENT_TRACE_READABLE_WRITER: Optional[Callable[[str], None]] = None
 _AGENT_TILE_CONTEXT_STORE: Dict[str, Dict[str, Any]] = {}
 _AGENT_GLOBAL_CONTEXT_STORE: Dict[str, Dict[str, Any]] = {}
 _AGENT_TILE_SUMMARIES: List[Dict[str, Any]] = []
-_AGENT_REVIEW_GRID: List[Dict[str, Any]] = []
 _AGENT_PREPASS_COMPLETE: bool = False
 
-AGENTIC_TIGHT_DEFAULT_DETECTOR_CONF = 0.45
-AGENTIC_TIGHT_DEFAULT_SAM3_SCORE = 0.5
-AGENTIC_TIGHT_DEFAULT_SAM3_MASK = 0.5
-AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB = 0.35
-AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MARGIN = 0.05
-AGENTIC_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN = 0.05
-AGENTIC_TIGHT_DEFAULT_SCORELESS_IOU = 0.3
-AGENTIC_CLASSIFIER_STRICT_MIN_PROB = 0.65
-AGENTIC_CLASSIFIER_STRICT_MARGIN = 0.15
-AGENTIC_CLASSIFIER_STRICT_BG_MARGIN = 0.15
-AGENTIC_STRICT_SAM3_MIN_SCORE = 0.7
-AGENTIC_CLASSIFIER_AGENTIC_ONLY_MIN_PROB = 0.8
-AGENTIC_CLASSIFIER_AGENTIC_ONLY_MARGIN = 0.2
-AGENTIC_CLASSIFIER_AGENTIC_ONLY_BG_MARGIN = 0.2
-AGENTIC_LLM_HEARTBEAT_SECS = 0
-AGENTIC_GRID_OVERLAP_RATIO = 0.2
-AGENTIC_CONTEXT_CHUNK_BYTES = 5 * 1024 * 1024
-AGENTIC_MIN_ZOOM_WINDOW_PX = 200
-AGENTIC_READABLE_TO_CONSOLE = True
-AGENTIC_CLUSTER_IOU = 0.7
-AGENTIC_INSPECT_MAX_OBJECTS = 0
+PREPASS_TIGHT_DEFAULT_DETECTOR_CONF = 0.45
+PREPASS_TIGHT_DEFAULT_SAM3_SCORE = 0.5
+PREPASS_TIGHT_DEFAULT_SAM3_MASK = 0.5
+PREPASS_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB = 0.35
+PREPASS_TIGHT_DEFAULT_CLASSIFIER_MARGIN = 0.05
+PREPASS_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN = 0.05
+PREPASS_TIGHT_DEFAULT_SCORELESS_IOU = 0.3
+PREPASS_CLASSIFIER_STRICT_MIN_PROB = 0.65
+PREPASS_CLASSIFIER_STRICT_MARGIN = 0.15
+PREPASS_CLASSIFIER_STRICT_BG_MARGIN = 0.15
+PREPASS_STRICT_SAM3_MIN_SCORE = 0.7
+PREPASS_GRID_OVERLAP_RATIO = 0.2
+PREPASS_CONTEXT_CHUNK_BYTES = 5 * 1024 * 1024
+PREPASS_MIN_ZOOM_WINDOW_PX = 200
+PREPASS_READABLE_TO_CONSOLE = str(os.environ.get("PREPASS_READABLE_TO_CONSOLE", "1")).lower() not in {"0", "false", "no"}
+PREPASS_CLUSTER_IOU = 0.75
+PREPASS_INSPECT_MAX_OBJECTS = 0
 
 
 def _register_agent_tool(name: str):
@@ -5604,35 +5616,7 @@ def _agent_classifier_matches_labelmap(path: Path, labelmap: Sequence[str]) -> b
     return bool(label_norm) and label_norm == clf_norm
 
 
-if QwenAgentAssistant is not None and QwenAgentContentItem is not None:
-    class _AgentToolRunner(QwenAgentAssistant):  # type: ignore[misc]
-        def _serialize_tool_result(self, tool_result: Any) -> str:
-            if isinstance(tool_result, str):
-                return tool_result
-            if isinstance(tool_result, dict) and "__agent_view__" in tool_result:
-                tool_result = tool_result.get("__agent_view__")
-            try:
-                return json.dumps(tool_result, ensure_ascii=False, indent=2)
-            except Exception:
-                return json.dumps({"error": "tool_result_unserializable"}, ensure_ascii=True)
-
-        def _tool_result_content(  # type: ignore[override]
-            self,
-            tool_name: str,
-            tool_args: Mapping[str, Any],
-            tool_result: Any,
-        ) -> List[QwenAgentContentItem]:
-            serialized = self._serialize_tool_result(tool_result)
-            content = [QwenAgentContentItem(text=serialized)]
-            overlay_ref = _agent_tool_overlay_image_ref(tool_name, tool_args, tool_result)
-            if overlay_ref:
-                content.append(QwenAgentContentItem(image=overlay_ref))
-                _agent_full_trace_write(
-                    {"type": "tool_result_image", "tool": tool_name, "chars": len(overlay_ref), "ts": time.time()}
-                )
-            return content
-else:
-    _AgentToolRunner = None  # type: ignore[assignment]
+_AgentToolRunner = None  # legacy tool runner removed
 
 
 def _agent_error_payload(code: str, message: Optional[str] = None, fix_hint: Optional[str] = None) -> Dict[str, Any]:
@@ -5730,7 +5714,7 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
             cell_xyxy = _agent_grid_cell_xyxy(
                 _AGENT_ACTIVE_GRID,
                 str(grid_cell),
-                overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+                overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
             )
             if not cell_xyxy:
                 cols = int(_AGENT_ACTIVE_GRID.get("cols") or 0)
@@ -5846,7 +5830,11 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
                 if label:
                     args["label"] = label
             if not prompt and label:
-                synonym_map = _agent_generate_sam3_synonyms(_AGENT_ACTIVE_LABELMAP or [], _AGENT_ACTIVE_GLOSSARY or "")
+                synonym_map, _ = _agent_generate_sam3_synonyms(
+                    _AGENT_ACTIVE_LABELMAP or [],
+                    _AGENT_ACTIVE_GLOSSARY or "",
+                    max_synonyms=10,
+                )
                 prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=1)
                 if prompts:
                     args["prompt"] = prompts[0]
@@ -6021,19 +6009,97 @@ def _normalize_labelmap_glossary(raw_glossary: Any) -> str:
     return str(raw_glossary).strip()
 
 
+_DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
+    "bike": ["bike", "motorbike", "scooter", "motorcycle"],
+    "boat": ["boat", "canoe", "kayak", "surfboard", "ship"],
+    "building": ["building", "house", "store", "office building", "residential building", "warehouse"],
+    "bus": ["bus", "omnibus", "autobus", "coach"],
+    "container": ["container", "truck container", "shipping container"],
+    "digger": [
+        "digger",
+        "excavator",
+        "tractor",
+        "backhoe",
+        "construction vehicle",
+        "bulldozer",
+        "steam shovel",
+        "loader excavator",
+        "dozer",
+        "earthmover",
+        "heavy machinery",
+    ],
+    "gastank": [
+        "silos",
+        "tank",
+        "storage tank",
+        "barrel",
+        "pressure vessel",
+        "oil silo",
+        "storage silo",
+        "oil tank",
+    ],
+    "light_vehicle": [
+        "car",
+        "light vehicle",
+        "light_vehicle",
+        "pickup truck",
+        "sedan",
+        "suv",
+        "van",
+        "4x4",
+        "family car",
+        "passenger vehicle",
+        "automobile",
+        "hatchback",
+    ],
+    "person": [
+        "cyclist",
+        "person",
+        "swimmer",
+        "human",
+        "passenger",
+        "pedestrian",
+        "walker",
+        "hiker",
+        "individual",
+    ],
+    "solarpanels": ["array", "solar panel", "solarpanels"],
+    "truck": [
+        "truck",
+        "lorry",
+        "commercial vehicle",
+        "semi truck",
+        "articulated truck",
+        "heavy-duty vehicle",
+        "big rig",
+        "18-wheeler",
+        "semi-trailer truck",
+    ],
+    "utility_pole": [
+        "antenna",
+        "pole",
+        "utility pole",
+        "utility_pole",
+        "street fixture",
+        "drying rack",
+        "streetlight",
+        "street lamp",
+        "electricity pylon",
+        "power pylon",
+        "transmission tower",
+        "high-voltage pole",
+        "lattice tower",
+        "mast",
+        "comms mast",
+        "aerial mast",
+        "satellite dish",
+        "mounting pole",
+        "light fixture",
+    ],
+}
+
 _DEFAULT_SAM3_SYNONYMS: Dict[str, List[str]] = {
-    "light_vehicle": ["car", "vehicle", "van", "pickup", "suv", "sedan", "4x4", "jeep"],
-    "person": ["person", "people", "human", "man", "woman"],
-    "building": ["building", "house", "shed", "structure"],
-    "utility_pole": ["utility pole", "power pole", "telephone pole", "pole"],
-    "boat": ["boat", "ship", "vessel", "canoe", "kayak"],
-    "bike": ["bike", "bicycle", "motorbike", "moped"],
-    "container": ["container", "shipping container", "cargo container"],
-    "truck": ["truck", "lorry", "pickup truck"],
-    "gastank": ["gas tank", "fuel tank", "storage tank"],
-    "digger": ["digger", "excavator", "backhoe", "bulldozer"],
-    "solarpanels": ["solar panel", "solar panels", "solar array"],
-    "bus": ["bus", "coach"],
+    key: list(value) for key, value in _DEFAULT_GLOSSARY_MAP.items()
 }
 _SAM3_SYNONYM_CACHE: Dict[str, Dict[str, List[str]]] = {}
 _SAM3_SYNONYM_CACHE_ORDER: deque[str] = deque()
@@ -6100,9 +6166,59 @@ def _parse_glossary_synonyms(glossary: str, labelmap: Sequence[str]) -> Dict[str
     return mapping
 
 
-def _sam3_synonym_cache_key(labelmap: Sequence[str], glossary: str) -> str:
+def _parse_glossary_mapping(glossary: str, labelmap: Sequence[str]) -> Dict[str, List[str]]:
+    text = str(glossary or "").strip()
+    if not text:
+        return {}
+    norm_to_label = {_glossary_label_key(lbl): lbl for lbl in labelmap if str(lbl).strip()}
+    parsed: Any = None
+    if text.startswith("{") or text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+    mapping: Dict[str, List[str]] = {}
+    if isinstance(parsed, dict):
+        for key, value in parsed.items():
+            label = norm_to_label.get(_glossary_label_key(key))
+            if not label:
+                continue
+            terms: List[str] = []
+            if isinstance(value, (list, tuple)):
+                terms = [str(item) for item in value]
+            elif isinstance(value, str):
+                terms = _split_synonym_terms(value)
+            cleaned = _normalize_synonym_list(terms)
+            if cleaned:
+                mapping[label] = cleaned
+    elif isinstance(parsed, list):
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("label") or item.get("name")
+            if not key:
+                continue
+            label = norm_to_label.get(_glossary_label_key(key))
+            if not label:
+                continue
+            raw_terms = item.get("terms") or item.get("synonyms") or item.get("glossary")
+            terms: List[str] = []
+            if isinstance(raw_terms, (list, tuple)):
+                terms = [str(term) for term in raw_terms]
+            elif isinstance(raw_terms, str):
+                terms = _split_synonym_terms(raw_terms)
+            cleaned = _normalize_synonym_list(terms)
+            if cleaned:
+                mapping[label] = cleaned
+    if mapping:
+        return mapping
+    return _parse_glossary_synonyms(glossary, labelmap)
+
+
+def _sam3_synonym_cache_key(labelmap: Sequence[str], glossary: str, max_synonyms: Optional[int]) -> str:
     joined = ",".join([str(lbl).strip() for lbl in labelmap if str(lbl).strip()])
-    payload = f"{joined}\n{glossary or ''}".encode("utf-8", errors="ignore")
+    limit = "none" if max_synonyms is None else str(int(max_synonyms))
+    payload = f"{joined}\n{glossary or ''}\nmax={limit}".encode("utf-8", errors="ignore")
     return hashlib.md5(payload).hexdigest()
 
 
@@ -6174,69 +6290,110 @@ def _normalize_synonym_list(terms: Sequence[str]) -> List[str]:
     return normalized
 
 
+def _dedupe_synonyms(terms: Sequence[str]) -> List[str]:
+    output: List[str] = []
+    seen: Set[str] = set()
+    for term in terms:
+        key = str(term).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(term)
+    return output
+
+
 def _agent_generate_sam3_synonyms(
     labelmap: Sequence[str],
     glossary: str,
     *,
-    max_synonyms: int = 6,
-) -> Dict[str, List[str]]:
+    max_synonyms: Optional[int] = 10,
+) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, List[str]]]]:
     labels = [str(lbl).strip() for lbl in labelmap if str(lbl).strip()]
     if not labels:
-        return {}
-    cache_key = _sam3_synonym_cache_key(labels, glossary or "")
-    cached = _get_cached_sam3_synonyms(cache_key)
-    if cached is not None:
-        return cached
-    prompt = (
-        "You are generating text prompts for an image segmentation model. "
-        "Return ONLY a JSON object mapping each label to a list of 3-6 short noun phrases (1-3 words). "
-        "Use lowercase. Avoid filler phrases like 'including' or 'all kinds of'. "
-        "Do not include commas inside a phrase. If unsure, return an empty list for that label.\n"
-        f"Labelmap: {', '.join(labels)}\n"
-        f"Glossary (hints only):\n{glossary or 'none'}\n"
-        "Example:\n"
-        "{\"light_vehicle\": [\"car\", \"van\", \"pickup truck\", \"suv\", \"sedan\"]}"
-    )
-    raw = ""
-    try:
-        raw = _generate_qwen_text(prompt, max_new_tokens=512)
-    except Exception:
-        raw = ""
-    data: Dict[str, Any] = {}
-    json_text = _extract_balanced_json(raw, "{", "}")
-    if json_text:
-        try:
-            data = json.loads(json_text)
-        except Exception:
-            data = {}
-    if not data and raw:
-        for line in raw.splitlines():
-            if ":" not in line:
-                continue
-            key, rest = line.split(":", 1)
-            data[key.strip()] = [item.strip() for item in rest.split(",") if item.strip()]
-    norm_to_label = {_normalize_class_name_for_match(lbl): lbl for lbl in labels}
+        return {}, {}
+    glossary_terms = _parse_glossary_mapping(glossary, labels)
+    limit: Optional[int]
+    if max_synonyms is None:
+        limit = None
+    else:
+        limit = max(0, int(max_synonyms))
     mapping: Dict[str, List[str]] = {}
-    for key, value in (data or {}).items():
-        label = norm_to_label.get(_normalize_class_name_for_match(key))
-        if not label:
-            continue
-        terms: List[str] = []
-        if isinstance(value, (list, tuple)):
-            terms = [str(item) for item in value]
-        elif isinstance(value, str):
-            terms = [value]
+    if limit is None or limit > 0:
+        cache_key = _sam3_synonym_cache_key(labels, glossary or "", limit)
+        cached = _get_cached_sam3_synonyms(cache_key)
+        if cached is None:
+            if limit is None:
+                limit_text = "as many short noun phrases (1-3 words) as are useful"
+            else:
+                limit_text = f"up to {limit} short noun phrases (1-3 words)"
+            prompt = (
+                "You generate short text prompts for a segmentation model. "
+                f"Return ONLY JSON. For each label, provide {limit_text}. "
+                "Use lowercase. No extra text, no markdown, no explanation. "
+                "Avoid filler like 'including' or 'all kinds of'. "
+                "If unsure, return an empty list for that label.\n"
+                f"Labelmap: {', '.join(labels)}\n"
+                f"Glossary hints:\n{glossary or 'none'}\n"
+                "JSON example:\n"
+                "{\"light_vehicle\": [\"car\", \"van\", \"pickup truck\", \"suv\", \"sedan\"]}"
+            )
+            raw = ""
+            try:
+                raw = _generate_qwen_text(prompt, max_new_tokens=384, use_system_prompt=False)
+            except Exception:
+                raw = ""
+            data: Dict[str, Any] = {}
+            json_text = _extract_balanced_json(raw, "{", "}")
+            if json_text:
+                try:
+                    data = json.loads(json_text)
+                except Exception:
+                    data = {}
+            if not data and raw:
+                for line in raw.splitlines():
+                    if ":" not in line:
+                        continue
+                    key, rest = line.split(":", 1)
+                    data[key.strip()] = [item.strip() for item in rest.split(",") if item.strip()]
+            norm_to_label = {_normalize_class_name_for_match(lbl): lbl for lbl in labels}
+            for key, value in (data or {}).items():
+                label = norm_to_label.get(_normalize_class_name_for_match(key))
+                if not label:
+                    continue
+                terms: List[str] = []
+                if isinstance(value, (list, tuple)):
+                    terms = [str(item) for item in value]
+                elif isinstance(value, str):
+                    terms = [value]
+                cleaned = _normalize_synonym_list(terms)
+                if cleaned:
+                    mapping[label] = cleaned if limit is None else cleaned[:limit]
+            for label in labels:
+                if label not in mapping:
+                    mapping[label] = []
+            _set_cached_sam3_synonyms(cache_key, mapping)
         else:
-            terms = []
-        cleaned = _normalize_synonym_list(terms)
-        if cleaned:
-            mapping[label] = cleaned[:max_synonyms]
+            mapping = cached
+    else:
+        mapping = {label: [] for label in labels}
+
+    term_meta: Dict[str, Dict[str, List[str]]] = {}
     for label in labels:
-        if label not in mapping or not mapping[label]:
+        base_terms = _normalize_synonym_list([label, str(label).replace("_", " ")])
+        glossary_list = _normalize_synonym_list(glossary_terms.get(label, []))
+        expanded_terms = _normalize_synonym_list(mapping.get(label, []))
+        expanded_terms = _dedupe_synonyms(glossary_list + expanded_terms)
+        if not expanded_terms:
             fallback = _DEFAULT_SAM3_SYNONYMS.get(_glossary_label_key(label), [])
-            mapping[label] = _normalize_synonym_list(fallback)
-    _set_cached_sam3_synonyms(cache_key, mapping)
-    return mapping
+            expanded_terms = _normalize_synonym_list(fallback)
+        if expanded_terms and limit is not None and limit > 0 and not glossary_list:
+            expanded_terms = expanded_terms[:limit]
+        term_meta[label] = {
+            "base_terms": base_terms,
+            "expanded_terms": expanded_terms,
+        }
+        mapping[label] = expanded_terms
+    return mapping, term_meta
 
 
 def _sam3_prompt_variants(
@@ -6265,10 +6422,12 @@ def _sam3_prompt_variants(
     if "_" in canonical:
         add(canonical.replace("_", " "))
     add(canonical)
-    for term in synonym_map.get(canonical, []):
+    expanded_terms = synonym_map.get(canonical, [])
+    for term in expanded_terms:
         add(term)
-    for term in _DEFAULT_SAM3_SYNONYMS.get(label_norm, []):
-        add(term)
+    if not expanded_terms:
+        for term in _DEFAULT_SAM3_SYNONYMS.get(label_norm, []):
+            add(term)
     if max_prompts > 0:
         prompts = prompts[:max_prompts]
     return prompts
@@ -6318,7 +6477,7 @@ def _agent_tool_look_and_inspect(
         glossary = _normalize_labelmap_glossary(labelmap_glossary)
         if not glossary and _AGENT_ACTIVE_GLOSSARY:
             glossary = _normalize_labelmap_glossary(_AGENT_ACTIVE_GLOSSARY)
-        max_items = AGENTIC_INSPECT_MAX_OBJECTS
+        max_items = PREPASS_INSPECT_MAX_OBJECTS
         prompt_lines = [
             "Inspect this window and list ALL visible objects from the labelmap.",
             "Return ONLY a JSON array. Each item: {\"label\": <labelmap label>, \"bbox_2d\": [x1,y1,x2,y2]}",
@@ -6494,31 +6653,15 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
 def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
     def _normalize(name: str) -> str:
         return "".join(ch for ch in name.lower().strip() if ch.isalnum() or ch == "_")
-
-    default_map = {
-        "light_vehicle": (
-            "all kinds of civilian cars, including pickup trucks, vans, and sedans."
-        ),
-        "person": "people, including those on bikes or in water.",
-        "building": "all kinds of buildings.",
-        "utility_pole": "utility poles, power poles, antennas, and satellite dishes.",
-        "upole": "utility poles, power poles, antennas, and satellite dishes.",
-        "boat": "boats, ships, canoes, kayaks, surfboards, and other floaty craft.",
-        "bike": "bikes, mopeds, motorbikes, and other two-wheeled vehicles.",
-        "container": "shipping containers, including those on trucks.",
-        "truck": "large commercial vehicles, articulated trucks, and big delivery trucks.",
-        "gastank": "cylindrical tanks (fuel tanks, gas tanks, grain silos) for storing liquids.",
-        "digger": "construction vehicles, tractors, and construction gear.",
-        "solarpanels": "solar panels and solar arrays.",
-        "bus": "buses.",
-    }
-    lines: List[str] = []
+    mapped: Dict[str, List[str]] = {}
     for label in labelmap:
         norm = _normalize(label)
-        desc = default_map.get(norm)
-        if desc:
-            lines.append(f"{label} -> {desc}")
-    return "\n".join(lines).strip()
+        synonyms = _DEFAULT_GLOSSARY_MAP.get(norm)
+        if synonyms:
+            mapped[label] = synonyms
+    if not mapped:
+        return ""
+    return json.dumps(mapped, indent=2, ensure_ascii=True)
 
 
 def _agent_compact_tool_result(result: Dict[str, Any], max_items: int = 0) -> Dict[str, Any]:
@@ -6633,7 +6776,7 @@ def _agent_grid_spec(
     }
 
 
-def _agent_grid_spec_for_payload(payload: QwenAgenticRequest, img_w: int, img_h: int) -> Dict[str, Any]:
+def _agent_grid_spec_for_payload(payload: QwenPrepassRequest, img_w: int, img_h: int) -> Dict[str, Any]:
     cols = payload.grid_cols if payload.grid_cols is not None else None
     rows = payload.grid_rows if payload.grid_rows is not None else None
     try:
@@ -7018,7 +7161,7 @@ def _agent_register_detections(
     if _AGENT_ACTIVE_CLUSTERS is None:
         _AGENT_ACTIVE_CLUSTERS = []
     if iou_thr is None:
-        iou_thr = AGENTIC_CLUSTER_IOU
+        iou_thr = PREPASS_CLUSTER_IOU
     new_cluster_ids: List[int] = []
     updated_cluster_ids: List[int] = []
     candidate_ids: List[int] = []
@@ -7027,6 +7170,10 @@ def _agent_register_detections(
         _AGENT_NEXT_CANDIDATE_ID += 1
         candidate_ids.append(candidate_id)
         source = source_override or det.get("source") or det.get("score_source") or "agent"
+        source_primary = det.get("source_primary") or source
+        source_prompt = det.get("source_prompt")
+        source_exemplar_handles = det.get("source_exemplar_handles")
+        source_detector_run_id = det.get("source_detector_run_id")
         source_list = set(det.get("source_list") or [])
         if source:
             source_list.add(str(source))
@@ -7042,6 +7189,10 @@ def _agent_register_detections(
             "score": det.get("score"),
             "score_source": det.get("score_source") or det.get("source"),
             "source": source,
+            "source_primary": source_primary,
+            "source_prompt": source_prompt,
+            "source_exemplar_handles": source_exemplar_handles,
+            "source_detector_run_id": source_detector_run_id,
             "source_list": sorted(source_list) if source_list else None,
             "grid_cell": cell,
             "owner_cell": owner,
@@ -7053,7 +7204,7 @@ def _agent_register_detections(
         if cluster is None:
             cluster_id = _AGENT_NEXT_CLUSTER_ID
             _AGENT_NEXT_CLUSTER_ID += 1
-            origin_tag = "agentic" if _AGENT_PREPASS_COMPLETE else "prepass"
+            origin_tag = "prepass"
             cluster_entry = {
                 "cluster_id": cluster_id,
                 "label": det.get("label"),
@@ -7064,6 +7215,10 @@ def _agent_register_detections(
                 "score": det.get("score"),
                 "score_source": det.get("score_source") or det.get("source"),
                 "source": source,
+                "source_primary": source_primary,
+                "source_prompt": source_prompt,
+                "source_exemplar_handles": source_exemplar_handles,
+                "source_detector_run_id": source_detector_run_id,
                 "source_list": sorted(source_list) if source_list else None,
                 "origin": origin_tag,
                 "candidate_ids": [candidate_id],
@@ -7115,6 +7270,10 @@ def _agent_register_detections(
                     "score": det.get("score"),
                     "score_source": det.get("score_source") or det.get("source"),
                     "source": source,
+                    "source_primary": source_primary,
+                    "source_prompt": source_prompt,
+                    "source_exemplar_handles": source_exemplar_handles,
+                    "source_detector_run_id": source_detector_run_id,
                     "grid_cell": cell,
                 }
             )
@@ -7124,6 +7283,15 @@ def _agent_register_detections(
             for key, value in keep_classifier.items():
                 if value is not None and cluster.get(key) is None:
                     cluster[key] = value
+        else:
+            if source_primary and cluster.get("source_primary") is None:
+                cluster["source_primary"] = source_primary
+            if source_prompt and cluster.get("source_prompt") is None:
+                cluster["source_prompt"] = source_prompt
+            if source_exemplar_handles and cluster.get("source_exemplar_handles") is None:
+                cluster["source_exemplar_handles"] = list(source_exemplar_handles)
+            if source_detector_run_id and cluster.get("source_detector_run_id") is None:
+                cluster["source_detector_run_id"] = source_detector_run_id
         updated_cluster_ids.append(cluster_id)
     _agent_set_active_clusters(_AGENT_ACTIVE_CLUSTERS)
     return {
@@ -7551,7 +7719,7 @@ def _agent_context_store(
     raw = json.dumps(payload, ensure_ascii=True)
     raw_bytes = raw.encode("utf-8", errors="ignore")
     byte_size = len(raw_bytes)
-    limit = int(max_bytes or AGENTIC_CONTEXT_CHUNK_BYTES)
+    limit = int(max_bytes or PREPASS_CONTEXT_CHUNK_BYTES)
     if limit <= 0 or byte_size <= limit:
         return {"payload": payload, "byte_size": byte_size, "chunked": False}
     chunk_size = max(1, limit)
@@ -7628,7 +7796,7 @@ def _agent_overlay_crop_xyxy(
         cell_xyxy = _agent_grid_cell_xyxy(
             _AGENT_ACTIVE_GRID,
             str(grid_cell),
-            overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+            overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
         )
         return _agent_clip_xyxy(cell_xyxy, img_w, img_h)
 
@@ -7683,38 +7851,6 @@ def _agent_overlay_crop_xyxy(
         return _agent_clip_xyxy(xyxy, img_w, img_h)
 
     return None
-
-
-def _agent_tool_overlay_image_ref(
-    tool_name: str,
-    tool_args: Mapping[str, Any],
-    tool_result: Any,
-) -> Optional[str]:
-    base_img = _agent_overlay_base_image()
-    if base_img is None:
-        return None
-    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
-    labels = _agent_overlay_labels(clusters)
-    label_colors = _agent_current_label_colors(labels) if labels else {}
-    label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
-    overlay_img = base_img
-    if clusters:
-        overlay_img = _agent_render_detection_overlay(
-            base_img,
-            clusters,
-            label_colors,
-            dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
-            label_prefixes=label_prefixes,
-        )
-        _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_img
-    img_w, img_h = overlay_img.size
-    crop_xyxy = _agent_overlay_crop_xyxy(tool_args, tool_result, img_w, img_h)
-    if crop_xyxy:
-        overlay_img = overlay_img.crop(crop_xyxy)
-    try:
-        return _agent_image_to_data_uri(overlay_img)
-    except Exception:
-        return None
 
 
 def _agent_expand_window_xyxy(
@@ -8170,6 +8306,11 @@ def _agent_sanitize_detection_items(
             min_prob = float(classifier_head.get("min_prob") or 0.5)
             margin = float(classifier_head.get("margin") or 0.0)
             background_margin = float(classifier_head.get("background_margin") or 0.0)
+            row = proba_arr[0]
+            order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
+            best_idx = order[0] if order else None
+            best_label = classes[best_idx] if best_idx is not None else None
+            best_prob = float(row[best_idx]) if best_idx is not None else None
             source = str(score_source or ann.get("source") or "").strip().lower()
             strict_sources = {
                 "sam3_similarity",
@@ -8177,16 +8318,15 @@ def _agent_sanitize_detection_items(
                 "qwen_infer",
                 "yolo_zoom",
                 "rfdetr_zoom",
-                "sam3_text_agentic",
             }
             strict = source in strict_sources
             if not strict and source == "sam3_text":
-                if score is None or score < AGENTIC_STRICT_SAM3_MIN_SCORE:
+                if score is None or score < PREPASS_STRICT_SAM3_MIN_SCORE:
                     strict = True
             if strict:
-                min_prob = max(min_prob, AGENTIC_CLASSIFIER_STRICT_MIN_PROB)
-                margin = max(margin, AGENTIC_CLASSIFIER_STRICT_MARGIN)
-                background_margin = max(background_margin, AGENTIC_CLASSIFIER_STRICT_BG_MARGIN)
+                min_prob = max(min_prob, PREPASS_CLASSIFIER_STRICT_MIN_PROB)
+                margin = max(margin, PREPASS_CLASSIFIER_STRICT_MARGIN)
+                background_margin = max(background_margin, PREPASS_CLASSIFIER_STRICT_BG_MARGIN)
             source_list = set()
             raw_sources = ann.get("source_list")
             if isinstance(raw_sources, (list, tuple)):
@@ -8194,25 +8334,7 @@ def _agent_sanitize_detection_items(
             if source:
                 source_list.add(source)
             detector_sources = {"yolo", "rfdetr", "sam3_text"}
-            agentic_sources = {
-                "qwen_infer",
-                "qwen_inspect",
-                "sam3_similarity",
-                "yolo_zoom",
-                "rfdetr_zoom",
-                "sam3_text_agentic",
-            }
             has_detector = bool(source_list.intersection(detector_sources))
-            has_agentic = bool(source_list.intersection(agentic_sources))
-            if has_agentic and not has_detector:
-                min_prob = max(min_prob, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MIN_PROB)
-                margin = max(margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MARGIN)
-                background_margin = max(background_margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_BG_MARGIN)
-            origin = str(ann.get("origin") or "").strip().lower()
-            if origin == "agentic":
-                min_prob = max(min_prob, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MIN_PROB)
-                margin = max(margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_MARGIN)
-                background_margin = max(background_margin, AGENTIC_CLASSIFIER_AGENTIC_ONLY_BG_MARGIN)
             keep_mask = _clip_head_keep_mask(
                 proba_arr,
                 target_index=target_idx,
@@ -8222,6 +8344,9 @@ def _agent_sanitize_detection_items(
                 background_guard=True,
                 background_margin=background_margin,
             )
+            ann["classifier_best"] = best_label
+            ann["classifier_prob"] = best_prob
+            ann["classifier_accept"] = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
             if keep_mask is None or not bool(keep_mask[0]):
                 rejected += 1
                 continue
@@ -8235,6 +8360,9 @@ def _agent_sanitize_detection_items(
                 "class_id": label_index[aligned],
                 "score": score,
                 "score_source": score_source,
+                "sam3_prompt_term": ann.get("sam3_prompt_term"),
+                "sam3_prompt_label": ann.get("sam3_prompt_label"),
+                "sam3_prompt_source": ann.get("sam3_prompt_source"),
                 "classifier_best": ann.get("classifier_best"),
                 "classifier_prob": ann.get("classifier_prob"),
                 "classifier_accept": ann.get("classifier_accept"),
@@ -8744,7 +8872,7 @@ def _agent_tool_sam3_text(
         crop_img = pil_img.crop((x1, y1, x2, y2))
         offset_x, offset_y = x1, y1
     threshold_val = float(score_thr) if score_thr is not None else 0.2
-    mask_val = float(mask_threshold) if mask_threshold is not None else 0.5
+    mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
     detections = _run_sam3_text_inference(
         crop_img,
         (prompt or "").strip(),
@@ -8781,7 +8909,7 @@ def _agent_tool_sam3_text(
         )
     register_summary: Optional[Dict[str, Any]] = None
     if register:
-        source_override = "sam3_text_agentic" if grid_cell else "sam3_text"
+        source_override = "sam3_text"
         register_summary = _agent_register_detections(
             payloads,
             img_w=img_w,
@@ -8898,7 +9026,7 @@ def _agent_tool_sam3_similarity(
     if not boxes_xywh:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_exemplar_required")
     threshold_val = float(score_thr) if score_thr is not None else 0.2
-    mask_val = float(mask_threshold) if mask_threshold is not None else 0.5
+    mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
     detections = _run_sam3_visual_inference_multi(
         crop_img,
         boxes_xywh,
@@ -9214,6 +9342,15 @@ def _agent_tool_classify_crop(
             head = _load_clip_head_from_classifier(classifier_path)
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
+    if _AGENT_TRACE_FULL_WRITER is not None:
+        _trace_write_full(
+            {
+                "type": "classifier_head",
+                "present": bool(head),
+                "classifier_id": classifier_id,
+                "head_type": type(head).__name__ if head is not None else None,
+            }
+        )
     if not isinstance(head, dict):
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_unavailable")
     feats = _encode_pil_batch_for_head([crop], head=head)
@@ -9323,7 +9460,7 @@ def _agent_tool_image_zoom_in(
             y2,
             img_w,
             img_h,
-            AGENTIC_MIN_ZOOM_WINDOW_PX,
+            PREPASS_MIN_ZOOM_WINDOW_PX,
         )
     crop = pil_img.crop((x1, y1, x2, y2))
     crop_np = np.asarray(crop)
@@ -9368,7 +9505,7 @@ def _agent_tool_view_cell_raw(
     cell_xyxy = _agent_grid_cell_xyxy(
         _AGENT_ACTIVE_GRID,
         str(grid_cell),
-        overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+        overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
     )
     if not cell_xyxy:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_invalid")
@@ -9407,7 +9544,7 @@ def _agent_tool_view_cell_overlay(
     cell_xyxy = _agent_grid_cell_xyxy(
         _AGENT_ACTIVE_GRID,
         str(grid_cell),
-        overlap_ratio=AGENTIC_GRID_OVERLAP_RATIO,
+        overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
     )
     if not cell_xyxy:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_invalid")
@@ -10047,6 +10184,128 @@ def _agent_tool_submit_annotations(
     }
 
 
+def _agent_apply_ensemble_filter(
+    detections: List[Dict[str, Any]],
+    *,
+    dataset_id: Optional[str],
+    image_name: Optional[str],
+    classifier_id: Optional[str],
+    job_id: Optional[str],
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
+    warnings: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    if not job_id:
+        return detections
+    if not dataset_id or not image_name:
+        if warnings is not None:
+            warnings.append("ensemble_filter_missing_dataset_or_image")
+        return detections
+    job_dir = CALIBRATION_ROOT / job_id
+    model_path = job_dir / "ensemble_mlp.pt"
+    meta_path = job_dir / "ensemble_mlp.meta.json"
+    if not model_path.exists() or not meta_path.exists():
+        if warnings is not None:
+            warnings.append("ensemble_filter_model_missing")
+        return detections
+    if not detections:
+        return detections
+    classifier_path = None
+    if classifier_id:
+        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+    if classifier_path is None:
+        if warnings is not None:
+            warnings.append("ensemble_filter_classifier_missing")
+        return detections
+
+    tmp_dir = UPLOAD_ROOT / "tmp_ensemble"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    stamp = uuid.uuid4().hex[:8]
+    jsonl_path = tmp_dir / f"ensemble_{stamp}.jsonl"
+    features_path = tmp_dir / f"ensemble_{stamp}.npz"
+    scored_path = tmp_dir / f"ensemble_{stamp}.scored.jsonl"
+    try:
+        with jsonl_path.open("w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {"image": image_name, "detections": detections},
+                    ensure_ascii=True,
+                )
+                + "\n"
+            )
+        root_dir = Path(__file__).resolve().parent
+        build_cmd = [
+            sys.executable,
+            str(root_dir / "tools" / "build_ensemble_features.py"),
+            "--input",
+            str(jsonl_path),
+            "--dataset",
+            dataset_id,
+            "--output",
+            str(features_path),
+            "--support-iou",
+            "0.5",
+            "--min-crop-size",
+            "4",
+            "--device",
+            "cuda",
+            "--classifier-id",
+            str(classifier_path),
+        ]
+        subprocess.run(build_cmd, check=True)
+        score_cmd = [
+            sys.executable,
+            str(root_dir / "tools" / "score_ensemble_candidates.py"),
+            "--model",
+            str(model_path),
+            "--meta",
+            str(meta_path),
+            "--data",
+            str(features_path),
+            "--output",
+            str(scored_path),
+        ]
+        subprocess.run(score_cmd, check=True)
+        accepted: List[Dict[str, Any]] = []
+        for line in scored_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            if entry.get("ensemble_accept"):
+                accepted.append(entry)
+        if trace_writer:
+            trace_writer(
+                {
+                    "type": "ensemble_filter",
+                    "accepted": len(accepted),
+                    "total": len(detections),
+                    "job_id": job_id,
+                }
+            )
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "ensemble_filter",
+                    "accepted": len(accepted),
+                    "total": len(detections),
+                    "job_id": job_id,
+                }
+            )
+        if trace_readable:
+            trace_readable(
+                f"ensemble filter: accepted={len(accepted)} total={len(detections)} job={job_id}"
+            )
+        return accepted
+    except Exception as exc:  # noqa: BLE001
+        if warnings is not None:
+            warnings.append(f"ensemble_filter_failed:{exc}")
+        return detections
+
+
 @_register_agent_tool("log_observation")
 def _agent_tool_log_observation(
     text: Optional[str] = None,
@@ -10336,7 +10595,7 @@ def _agent_tool_prompt_qwen(grid_enabled: bool = False) -> str:
     )
 
 
-def _agent_trace_sanitize_payload(payload: QwenAgenticRequest, image_token: Optional[str]) -> Dict[str, Any]:
+def _agent_trace_sanitize_payload(payload: QwenPrepassRequest, image_token: Optional[str]) -> Dict[str, Any]:
     try:
         data = payload.dict()
     except Exception:
@@ -10485,8 +10744,8 @@ def _agent_readable_write(line: str) -> None:
     try:
         if _AGENT_TRACE_READABLE_WRITER is not None:
             _AGENT_TRACE_READABLE_WRITER(line)
-        if AGENTIC_READABLE_TO_CONSOLE:
-            logging.getLogger("agentic.readable").info(line)
+        if PREPASS_READABLE_TO_CONSOLE:
+            logging.getLogger("prepass.readable").info(line)
     except Exception:
         return
 
@@ -10992,52 +11251,6 @@ def _agent_clean_plan_text(text: str, max_len: int = 4000) -> str:
     return cleaned
 
 
-def _run_agentic_final_caption(
-    *,
-    pil_img: Image.Image,
-    detections: Sequence[Dict[str, Any]],
-    model_id: str,
-    glossary: str,
-    max_new_tokens: int,
-) -> str:
-    img_w, img_h = pil_img.size
-    hints = []
-    for det in detections:
-        label = str(det.get("label") or det.get("class_name") or "").strip()
-        bbox = det.get("bbox_xyxy_px") or None
-        if not label or not bbox or len(bbox) != 4:
-            continue
-        hints.append(QwenCaptionHint(label=label, bbox=[float(v) for v in bbox], confidence=det.get("score")))
-    if not hints:
-        return ""
-    prompt_text, counts, _, _ = _build_qwen_caption_prompt(
-        "Write a detailed caption using the label hints. Do not mention coordinates or the word 'label'.",
-        hints,
-        img_w,
-        img_h,
-        include_counts=True,
-        include_coords=True,
-        max_boxes=min(len(hints), 200),
-        detailed_mode=True,
-    )
-    system_prompt = (
-        "You are a captioning assistant. Use the image as truth. "
-        "Use the label hints as grounding, but do not mention coordinates or labels. "
-        "Respond in English only. Return only the final caption."
-    )
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-        {"role": "user", "content": [{"type": "image", "image": pil_img}, {"type": "text", "text": prompt_text}]},
-    ]
-    qwen_text = _run_qwen_chat(
-        messages,
-        max_new_tokens=min(2000, max_new_tokens),
-        decode_override={"temperature": 0.4, "top_p": 0.9},
-        model_id_override=model_id,
-    )
-    caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
-    caption_text = _sanitize_qwen_caption(caption_text)
-    return caption_text
 def _qwen_agent_message_text(msg: Any) -> str:
     content = getattr(msg, "content", None)
     if isinstance(content, str):
@@ -11127,38 +11340,9 @@ def _agent_parse_json_relaxed(payload: Any) -> Optional[Any]:
             return None
 
 
-def _agent_strip_think(text: str) -> str:
-    if not text:
-        return ""
-    out: List[str] = []
-    idx = 0
-   # while True:
-   #     start = text.find("<think>", idx)
-   #     if start == -1:
-   #         out.append(text[idx:])
-   #         break
-   #     out.append(text[idx:start])
-   #     end = text.find("</think>", start + 7)
-   #     if end == -1:
-   #         break
-   #     idx = end + 8
-    return "".join(out)
-    text = payload.strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except Exception:
-        try:
-            from qwen_agent.utils.utils import json_loads as qwen_json_loads  # type: ignore
-
-            return qwen_json_loads(text)
-        except Exception:
-            return None
-
 
 def _agent_run_prepass(
-    payload: QwenAgenticRequest,
+    payload: QwenPrepassRequest,
     *,
     pil_img: Image.Image,
     image_token: str,
@@ -11199,6 +11383,7 @@ def _agent_run_prepass(
     caption_text: Optional[str] = None
     caption_entries: List[Dict[str, Any]] = []
     sam3_text_prompts: Dict[str, List[str]] = {}
+    sam3_text_term_map: Dict[str, Dict[str, List[str]]] = {}
     sam3_text_summary: Optional[str] = None
     prepass_source_summary: Optional[str] = None
     grid_for_log: Optional[Dict[str, Any]] = None
@@ -11341,7 +11526,13 @@ def _agent_run_prepass(
     if "sam3_text" in mode and labelmap:
         labels = [lbl for lbl in labelmap if str(lbl).strip()]
         if labels:
-            synonym_map = _agent_generate_sam3_synonyms(labels, glossary or "")
+            prompt_budget = 10 if payload.sam3_text_synonym_budget is None else int(payload.sam3_text_synonym_budget)
+            synonym_map, term_meta = _agent_generate_sam3_synonyms(
+                labels,
+                glossary or "",
+                max_synonyms=prompt_budget,
+            )
+            sam3_text_term_map = term_meta
             score_thr = payload.prepass_sam3_text_thr
             if score_thr is None and _AGENT_ACTIVE_SAM3_SCORE_THR is not None:
                 score_thr = _AGENT_ACTIVE_SAM3_SCORE_THR
@@ -11350,10 +11541,18 @@ def _agent_run_prepass(
                 mask_thr = _AGENT_ACTIVE_SAM3_MASK_THR
             max_results = None
             for label in labels:
-                prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=6)
+                base_terms = term_meta.get(label, {}).get("base_terms", [])
+                expanded_terms = term_meta.get(label, {}).get("expanded_terms", [])
+                max_prompts = max(2, len(synonym_map.get(label, [])) + 2)
+                prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=max_prompts)
                 if not prompts:
                     prompts = [str(label).replace("_", " ").strip() or str(label).strip()]
                 for prompt in prompts:
+                    prompt_origin = "base"
+                    if prompt in expanded_terms:
+                        prompt_origin = "expanded"
+                    elif prompt not in base_terms:
+                        prompt_origin = "unknown"
                     sam3_text_prompts.setdefault(label, []).append(prompt)
                     sam3_args = {
                         "image_token": image_token,
@@ -11382,6 +11581,14 @@ def _agent_run_prepass(
                             max_results=sam3_args["max_results"],
                             register=False,
                         )
+                        dets = sam3_result.get("detections") if isinstance(sam3_result, dict) else None
+                        if isinstance(dets, list):
+                            for det in dets:
+                                if not isinstance(det, dict):
+                                    continue
+                                det["sam3_prompt_term"] = prompt
+                                det["sam3_prompt_label"] = label
+                                det["sam3_prompt_source"] = prompt_origin
                         if trace_full_writer:
                             trace_full_writer(
                                 {
@@ -12066,7 +12273,7 @@ def _agent_attach_provenance(
 
 
 def _agent_run_deep_prepass_part_a(
-    payload: QwenAgenticRequest,
+    payload: QwenPrepassRequest,
     *,
     pil_img: Image.Image,
     image_token: str,
@@ -12074,11 +12281,13 @@ def _agent_run_deep_prepass_part_a(
     glossary: str,
     trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
     trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     img_w, img_h = pil_img.size
     detections: List[Dict[str, Any]] = []
     warnings: List[str] = []
     sam3_text_prompts: Dict[str, List[str]] = {}
+    sam3_text_term_map: Dict[str, Dict[str, List[str]]] = {}
 
     def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
         if trace_writer:
@@ -12091,10 +12300,11 @@ def _agent_run_deep_prepass_part_a(
         "slice_size": int(payload.sahi_window_size or 640),
         "overlap": float(payload.sahi_overlap_ratio or 0.2),
     }
+    full_cfg = {"enabled": False}
 
     detector_conf = payload.detector_conf
     detector_iou = payload.iou
-    max_det = payload.max_detections
+    max_det = None
 
     for mode in ("yolo", "rfdetr"):
         if mode == "yolo" and payload.enable_yolo is False:
@@ -12104,57 +12314,87 @@ def _agent_run_deep_prepass_part_a(
         det_id = payload.yolo_id if mode == "yolo" else payload.rfdetr_id
         if not det_id:
             det_id = payload.detector_id if (payload.detector_mode or "yolo") == mode else None
-        args = {
-            "image_token": image_token,
-            "detector_id": det_id,
-            "mode": mode,
-            "conf": detector_conf,
-            "sahi": sahi_cfg,
-            "max_det": max_det,
-            "iou": detector_iou,
-            "merge_iou": detector_iou,
-        }
-        _log_step("deep_prepass_tool_call", {"tool": "run_detector", "args": args})
-        try:
-            result = _agent_tool_run_detector(
-                image_token=image_token,
-                detector_id=det_id,
-                mode=mode,
-                conf=detector_conf,
-                sahi=sahi_cfg,
-                max_det=max_det,
-                iou=detector_iou,
-                merge_iou=detector_iou,
-                register=False,
+        for run_name, run_sahi in (("full", full_cfg), ("sahi", sahi_cfg)):
+            args = {
+                "image_token": image_token,
+                "detector_id": det_id,
+                "mode": mode,
+                "conf": detector_conf,
+                "sahi": run_sahi,
+                "max_det": max_det,
+                "iou": detector_iou,
+                "merge_iou": detector_iou,
+            }
+            if trace_readable:
+                if run_name == "sahi":
+                    trace_readable(
+                        f"deep_prepass detector:{mode} start sahi="
+                        f"{sahi_cfg.get('slice_size')}x{sahi_cfg.get('slice_size')} "
+                        f"overlap={sahi_cfg.get('overlap')}"
+                    )
+                else:
+                    trace_readable(f"deep_prepass detector:{mode} start full")
+            _log_step("deep_prepass_tool_call", {"tool": "run_detector", "args": args})
+            try:
+                result = _agent_tool_run_detector(
+                    image_token=image_token,
+                    detector_id=det_id,
+                    mode=mode,
+                    conf=detector_conf,
+                    sahi=run_sahi,
+                    max_det=max_det,
+                    iou=detector_iou,
+                    merge_iou=detector_iou,
+                    register=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"deep_prepass_detector_failed:{mode}:{run_name}:{exc}")
+                continue
+            _log_step("deep_prepass_tool_result", {"tool": "run_detector", "result": result})
+            dets = list(result.get("detections") or [])
+            if trace_readable:
+                trace_readable(f"deep_prepass detector:{mode} {run_name} detections={len(dets)}")
+            run_id = det_id
+            if run_name:
+                run_id = f"{det_id or mode}:{run_name}"
+            _agent_attach_provenance(
+                dets,
+                source=mode,
+                source_primary=mode,
+                source_detector_run_id=run_id,
             )
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"deep_prepass_detector_failed:{mode}:{exc}")
-            continue
-        _log_step("deep_prepass_tool_result", {"tool": "run_detector", "result": result})
-        dets = list(result.get("detections") or [])
-        _agent_attach_provenance(
-            dets,
-            source=mode,
-            source_primary=mode,
-            source_detector_run_id=det_id,
-        )
-        detections.extend(dets)
+            detections.extend(dets)
 
     if payload.enable_sam3_text is not False and labelmap:
         labels = [lbl for lbl in labelmap if str(lbl).strip()]
-        synonym_map = _agent_generate_sam3_synonyms(labels, glossary or "")
+        prompt_budget = payload.sam3_text_synonym_budget
+        if prompt_budget is not None:
+            prompt_budget = int(prompt_budget)
+        synonym_map, term_meta = _agent_generate_sam3_synonyms(
+            labels,
+            glossary or "",
+            max_synonyms=prompt_budget,
+        )
+        sam3_text_term_map = term_meta
         score_thr = payload.prepass_sam3_text_thr
         if score_thr is None and _AGENT_ACTIVE_SAM3_SCORE_THR is not None:
             score_thr = _AGENT_ACTIVE_SAM3_SCORE_THR
         mask_thr = payload.sam3_mask_threshold
         if mask_thr is None and _AGENT_ACTIVE_SAM3_MASK_THR is not None:
             mask_thr = _AGENT_ACTIVE_SAM3_MASK_THR
-        prompt_budget = int(payload.sam3_text_synonym_budget or 6)
         for label in labels:
-            prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=prompt_budget)
+            base_terms = term_meta.get(label, {}).get("base_terms", [])
+            expanded_terms = term_meta.get(label, {}).get("expanded_terms", [])
+            max_prompts = max(2, len(synonym_map.get(label, [])) + 2)
+            prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=max_prompts)
             if not prompts:
                 prompts = [str(label).replace("_", " ").strip() or str(label).strip()]
             for prompt in prompts:
+                prompt_origin = "base"
+                if prompt in expanded_terms:
+                    prompt_origin = "expanded"
+                elif prompt not in base_terms:
+                    prompt_origin = "unknown"
                 sam3_text_prompts.setdefault(label, []).append(prompt)
                 args = {
                     "image_token": image_token,
@@ -12180,6 +12420,16 @@ def _agent_run_deep_prepass_part_a(
                     continue
                 _log_step("deep_prepass_tool_result", {"tool": "sam3_text", "result": result})
                 dets = list(result.get("detections") or [])
+                for det in dets:
+                    if not isinstance(det, dict):
+                        continue
+                    det["sam3_prompt_term"] = prompt
+                    det["sam3_prompt_label"] = label
+                    det["sam3_prompt_source"] = prompt_origin
+                if trace_readable:
+                    trace_readable(
+                        f"deep_prepass sam3_text label={label} prompt={prompt} detections={len(dets)}"
+                    )
                 _agent_attach_provenance(
                     dets,
                     source="sam3_text",
@@ -12192,33 +12442,35 @@ def _agent_run_deep_prepass_part_a(
         "detections": detections,
         "warnings": warnings,
         "sam3_text_prompts": sam3_text_prompts,
+        "sam3_text_term_map": sam3_text_term_map,
         "image_size": {"width": img_w, "height": img_h},
     }
 
 
 def _agent_deep_prepass_cleanup(
-    payload: QwenAgenticRequest,
+    payload: QwenPrepassRequest,
     *,
     detections: List[Dict[str, Any]],
     pil_img: Image.Image,
     labelmap: List[str],
 ) -> Dict[str, Any]:
     img_w, img_h = pil_img.size
-    iou_thr = float(payload.iou or AGENTIC_CLUSTER_IOU)
+    iou_thr = float(payload.iou or PREPASS_CLUSTER_IOU)
     merged, removed = _agent_merge_prepass_detections(detections, iou_thr=iou_thr)
     scoreless_iou = payload.scoreless_iou or 0.0
     if scoreless_iou:
         merged, scoreless_removed = _agent_filter_scoreless_detections(merged, iou_thr=float(scoreless_iou))
     else:
         scoreless_removed = 0
-    classifier_id = payload.classifier_id
     head: Optional[Dict[str, Any]] = None
-    if classifier_id:
-        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
-        if classifier_path is not None:
-            head = _load_clip_head_from_classifier(classifier_path)
-    elif isinstance(active_classifier_head, dict):
-        head = dict(active_classifier_head)
+    if not payload.prepass_keep_all:
+        classifier_id = payload.classifier_id
+        if classifier_id:
+            classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+            if classifier_path is not None:
+                head = _load_clip_head_from_classifier(classifier_path)
+        elif isinstance(active_classifier_head, dict):
+            head = dict(active_classifier_head)
     background = _agent_background_classes_from_head(head)
     cleaned, rejected = _agent_sanitize_detection_items(
         merged,
@@ -12238,14 +12490,12 @@ def _agent_deep_prepass_cleanup(
 
 
 def _agent_select_similarity_exemplars(
-    payload: QwenAgenticRequest,
+    payload: QwenPrepassRequest,
     *,
     detections: List[Dict[str, Any]],
+    trace_readable: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     min_score = float(payload.similarity_min_exemplar_score or 0.6)
-    mid_low = float(payload.similarity_mid_conf_low or 0.45)
-    mid_high = float(payload.similarity_mid_conf_high or min_score)
-    mid_class_count = int(payload.similarity_mid_conf_class_count or 2)
     by_label: Dict[str, List[Dict[str, Any]]] = {}
     for det in detections:
         if not isinstance(det, dict):
@@ -12258,23 +12508,26 @@ def _agent_select_similarity_exemplars(
     for label, dets in by_label.items():
         dets_sorted = sorted(dets, key=lambda d: float(d.get("score") or 0.0), reverse=True)
         high = [d for d in dets_sorted if float(d.get("score") or 0.0) >= min_score]
-        mid = [
-            d
-            for d in dets_sorted
-            if mid_low <= float(d.get("score") or 0.0) < mid_high
-        ]
         chosen: List[Dict[str, Any]] = []
         if high:
             chosen.extend(high[:3])
-        if len(dets_sorted) <= mid_class_count and mid:
-            chosen.extend(mid[:2])
         if chosen:
             selections[label] = chosen
+            if trace_readable:
+                handles = []
+                for det in chosen:
+                    handle = det.get("handle")
+                    if handle:
+                        handles.append(str(handle))
+                handle_text = ", ".join(handles) if handles else "n/a"
+                trace_readable(
+                    f"deep_prepass similarity exemplars label={label} count={len(chosen)} handles={handle_text}"
+                )
     return selections
 
 
 def _agent_similarity_windows(
-    payload: QwenAgenticRequest,
+    payload: QwenPrepassRequest,
     *,
     pil_img: Image.Image,
 ) -> List[Dict[str, Any]]:
@@ -12300,7 +12553,7 @@ def _agent_similarity_windows(
         return windows
     grid_spec = _agent_grid_spec_for_payload(payload, img_w, img_h)
     for cell in _agent_grid_cells(grid_spec):
-        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=payload.grid_overlap_ratio or AGENTIC_GRID_OVERLAP_RATIO)
+        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=payload.grid_overlap_ratio or PREPASS_GRID_OVERLAP_RATIO)
         if not xyxy:
             continue
         x1, y1, x2, y2 = xyxy
@@ -12342,14 +12595,84 @@ def _agent_exemplars_for_window(
     return filtered
 
 
-def _agent_run_similarity_expansion(
-    payload: QwenAgenticRequest,
+def _agent_run_similarity_global(
+    payload: QwenPrepassRequest,
     *,
     pil_img: Image.Image,
     image_token: str,
     exemplars_by_label: Dict[str, List[Dict[str, Any]]],
     trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
     trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    detections: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    score_thr = payload.prepass_similarity_score
+    mask_thr = payload.sam3_mask_threshold
+
+    def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
+        if trace_writer:
+            trace_writer({"type": event, **payload_obj, "ts": time.time()})
+        if trace_full_writer:
+            trace_full_writer({"type": event, **payload_obj, "ts": time.time()})
+
+    for label, exemplars in exemplars_by_label.items():
+        exemplar_boxes = []
+        exemplar_handles = []
+        for det in exemplars:
+            bbox = det.get("bbox_2d")
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
+            handle = det.get("handle")
+            if handle:
+                exemplar_handles.append(str(handle))
+        if not exemplar_boxes:
+            continue
+        args = {
+            "image_token": image_token,
+            "label": label,
+            "exemplar_boxes": exemplar_boxes,
+            "score_thr": score_thr,
+            "mask_threshold": mask_thr,
+        }
+        _log_step("deep_prepass_tool_call", {"tool": "sam3_similarity", "args": args})
+        try:
+            result = _agent_tool_sam3_similarity(
+                image_token=image_token,
+                exemplar_boxes=exemplar_boxes,
+                label=label,
+                score_thr=score_thr,
+                mask_threshold=mask_thr,
+                register=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"deep_prepass_similarity_failed:{label}:full:{exc}")
+            continue
+        _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
+        dets = list(result.get("detections") or [])
+        if trace_readable:
+            trace_readable(
+                f"deep_prepass sam3_similarity label={label} window=full detections={len(dets)}"
+            )
+        _agent_attach_provenance(
+            dets,
+            source="sam3_similarity",
+            source_primary="sam3_similarity",
+            source_exemplar_handles=exemplar_handles or None,
+        )
+        detections.extend(dets)
+    return {"detections": detections, "warnings": warnings}
+
+
+def _agent_run_similarity_expansion(
+    payload: QwenPrepassRequest,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    exemplars_by_label: Dict[str, List[Dict[str, Any]]],
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     img_w, img_h = pil_img.size
     detections: List[Dict[str, Any]] = []
@@ -12411,6 +12734,11 @@ def _agent_run_similarity_expansion(
                 continue
             _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
             dets = list(result.get("detections") or [])
+            if trace_readable:
+                window_name = window.get("name") or window.get("grid_cell") or "window"
+                trace_readable(
+                    f"deep_prepass sam3_similarity label={label} window={window_name} detections={len(dets)}"
+                )
             _agent_attach_provenance(
                 dets,
                 source="sam3_similarity",
@@ -12437,202 +12765,15 @@ def _agent_finalize_provenance(detections: Sequence[Dict[str, Any]]) -> None:
         det["source_list"] = sources
 
 
-def _agent_review_prompt_base(
-    *,
-    tile: str,
-    label: str,
-    label_colors: Mapping[str, str],
-    label_prefixes: Mapping[str, str],
-    glossary: str,
-    mode: str,
-) -> str:
-    prefix = label_prefixes.get(label) or ""
-    color = label_colors.get(label) or ""
-    lines = [
-        f"Tile: {tile}",
-        f"Class: {label}",
-        f"Handle prefix: {prefix or 'n/a'}",
-        f"Color: {color or 'n/a'}",
-        "Legend (label -> prefix -> color):",
-        _agent_overlay_key_text(label_colors, label_prefixes) or "n/a",
-        "Glossary:",
-        glossary or "n/a",
-    ]
-    if mode == "completeness":
-        lines.extend(
-            [
-                "Question: Are ALL items of this class in this tile annotated?",
-                "Answer JSON only: {\"tile\":\"<cell>\",\"label\":\"<label>\",\"complete\":true|false}",
-            ]
-        )
-    elif mode == "confidence":
-        lines.extend(
-            [
-                "Question: Are any handles for this class likely false positives?",
-                "Answer JSON only: {\"tile\":\"<cell>\",\"label\":\"<label>\",\"false_positive_handles\":[\"LV12\"]}",
-            ]
-        )
-    return "\n".join(lines).strip()
-
-
-def _agent_run_completeness_review(
-    payload: QwenAgenticRequest,
-    *,
-    pil_img: Image.Image,
-    overlay_img: Image.Image,
-    grid_spec: Dict[str, Any],
-    labelmap: List[str],
-    glossary: str,
-    model_id: str,
-) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
-    if payload.review_enabled is False:
-        return results
-    review_labels = list(payload.review_classes or labelmap)
-    label_colors = _agent_current_label_colors(labelmap)
-    label_prefixes = _agent_current_label_prefixes(labelmap)
-    overlap_ratio = float(payload.grid_overlap_ratio or AGENTIC_GRID_OVERLAP_RATIO)
-    max_tokens = int(payload.review_max_tokens or 256)
-    for cell in _agent_grid_cells(grid_spec):
-        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=overlap_ratio)
-        if not xyxy:
-            continue
-        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-        raw_tile = pil_img.crop((x1, y1, x2, y2))
-        overlay_tile = overlay_img.crop((x1, y1, x2, y2))
-        for label in review_labels:
-            prompt = _agent_review_prompt_base(
-                tile=cell,
-                label=label,
-                label_colors=label_colors,
-                label_prefixes=label_prefixes,
-                glossary=glossary,
-                mode="completeness",
-            )
-            messages = [
-                {"role": "system", "content": [{"type": "text", "text": "Answer strictly in JSON."}]},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": raw_tile},
-                        {"type": "image", "image": overlay_tile},
-                        {"type": "text", "text": prompt},
-                    ],
-                },
-            ]
-            raw = _run_qwen_chat(
-                messages,
-                max_new_tokens=max_tokens,
-                decode_override={"temperature": 0.0, "top_p": 1.0},
-                model_id_override=model_id,
-            )
-            data = _agent_parse_json_relaxed(raw) or {}
-            entry = {
-                "tile": cell,
-                "label": label,
-                "complete": bool(data.get("complete")),
-                "mode": "completeness",
-                "model_id": model_id,
-                "variant": payload.review_variant or "auto",
-                "grid_cols": grid_spec.get("cols"),
-                "grid_rows": grid_spec.get("rows"),
-                "grid_overlap_ratio": overlap_ratio,
-                "ts": time.time(),
-            }
-            results.append(entry)
-            _AGENT_REVIEW_GRID.append(entry)
-    return results
-
-
-def _agent_run_confidence_review(
-    payload: QwenAgenticRequest,
-    *,
-    pil_img: Image.Image,
-    overlay_img: Image.Image,
-    grid_spec: Dict[str, Any],
-    labelmap: List[str],
-    glossary: str,
-    model_id: str,
-) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
-    if payload.review_enabled is False:
-        return results
-    review_labels = list(payload.review_classes or labelmap)
-    label_colors = _agent_current_label_colors(labelmap)
-    label_prefixes = _agent_current_label_prefixes(labelmap)
-    overlap_ratio = float(payload.grid_overlap_ratio or AGENTIC_GRID_OVERLAP_RATIO)
-    max_tokens = int(payload.review_max_tokens or 256)
-    for cell in _agent_grid_cells(grid_spec):
-        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=overlap_ratio)
-        if not xyxy:
-            continue
-        x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-        raw_tile = pil_img.crop((x1, y1, x2, y2))
-        overlay_tile = overlay_img.crop((x1, y1, x2, y2))
-        for label in review_labels:
-            prompt = _agent_review_prompt_base(
-                tile=cell,
-                label=label,
-                label_colors=label_colors,
-                label_prefixes=label_prefixes,
-                glossary=glossary,
-                mode="confidence",
-            )
-            messages = [
-                {"role": "system", "content": [{"type": "text", "text": "Answer strictly in JSON."}]},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": raw_tile},
-                        {"type": "image", "image": overlay_tile},
-                        {"type": "text", "text": prompt},
-                    ],
-                },
-            ]
-            raw = _run_qwen_chat(
-                messages,
-                max_new_tokens=max_tokens,
-                decode_override={"temperature": 0.0, "top_p": 1.0},
-                model_id_override=model_id,
-            )
-            data = _agent_parse_json_relaxed(raw) or {}
-            handles = data.get("false_positive_handles")
-            if not isinstance(handles, list):
-                handles = []
-            handles = [str(h).strip() for h in handles if str(h).strip()]
-            entry = {
-                "tile": cell,
-                "label": label,
-                "false_positive_handles": handles,
-                "mode": "confidence",
-                "model_id": model_id,
-                "variant": payload.review_variant or "auto",
-                "grid_cols": grid_spec.get("cols"),
-                "grid_rows": grid_spec.get("rows"),
-                "grid_overlap_ratio": overlap_ratio,
-                "ts": time.time(),
-            }
-            results.append(entry)
-            _AGENT_REVIEW_GRID.append(entry)
-    return results
-
-
-def _run_agentic_annotation_qwen_agent(
-    payload: QwenAgenticRequest,
+def _run_prepass_annotation_qwen(
+    payload: QwenPrepassRequest,
     *,
     trace_sink: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
-) -> QwenAgenticResponse:
-    if QWEN_AGENT_IMPORT_ERROR is not None or QwenAgentAssistant is None or LocalQwenVLChatModel is None:
-        detail = "qwen_agent_unavailable"
-        if QWEN_AGENT_IMPORT_ERROR is not None:
-            detail = f"{detail}:{QWEN_AGENT_IMPORT_ERROR}"
-        elif QwenAgentAssistant is None:
-            detail = f"{detail}:assistant_missing"
-        elif LocalQwenVLChatModel is None:
-            detail = f"{detail}:llm_missing"
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+) -> QwenPrepassResponse:
     global QWEN_CAPTION_CACHE_LIMIT
+    # Prepass-only mode is enforced; no agentic review loop is executed.
+    payload = payload.copy(update={"prepass_only": True})
     if int(QWEN_CAPTION_CACHE_LIMIT or 0) < 1:
         QWEN_CAPTION_CACHE_LIMIT = 1
     pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, None)
@@ -12640,9 +12781,9 @@ def _run_agentic_annotation_qwen_agent(
     full_trace_path: Optional[str] = None
     readable_trace_path: Optional[str] = None
     latest_readable_path: Optional[str] = None
-    trace_file = QWEN_AGENTIC_TRACE_ROOT / f"agentic_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
-    full_trace_file = QWEN_AGENTIC_FULL_TRACE_ROOT / f"agentic_full_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
-    readable_trace_file = QWEN_AGENTIC_READABLE_TRACE_ROOT / f"agentic_readable_{int(time.time())}_{uuid.uuid4().hex[:8]}.log"
+    trace_file = QWEN_PREPASS_TRACE_ROOT / f"prepass_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
+    full_trace_file = QWEN_PREPASS_FULL_TRACE_ROOT / f"prepass_full_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
+    readable_trace_file = QWEN_PREPASS_READABLE_TRACE_ROOT / f"prepass_readable_{int(time.time())}_{uuid.uuid4().hex[:8]}.log"
     try:
         trace_file.parent.mkdir(parents=True, exist_ok=True)
         trace_path = str(trace_file)
@@ -12660,7 +12801,7 @@ def _run_agentic_annotation_qwen_agent(
         readable_trace_path = None
     latest_full_path: Optional[str] = None
     try:
-        latest_full_file = QWEN_AGENTIC_FULL_TRACE_LATEST
+        latest_full_file = QWEN_PREPASS_FULL_TRACE_LATEST
         latest_full_file.parent.mkdir(parents=True, exist_ok=True)
         if not latest_full_file.exists():
             latest_full_file.write_text("", encoding="utf-8")
@@ -12668,7 +12809,7 @@ def _run_agentic_annotation_qwen_agent(
     except Exception:
         latest_full_path = None
     try:
-        latest_readable_file = QWEN_AGENTIC_READABLE_TRACE_LATEST
+        latest_readable_file = QWEN_PREPASS_READABLE_TRACE_LATEST
         latest_readable_file.parent.mkdir(parents=True, exist_ok=True)
         if not latest_readable_file.exists():
             latest_readable_file.write_text("", encoding="utf-8")
@@ -12722,8 +12863,8 @@ def _run_agentic_annotation_qwen_agent(
                     handle.write(text)
             except Exception:
                 pass
-        if AGENTIC_READABLE_TO_CONSOLE:
-            logging.getLogger("agentic.readable").info(line)
+        if PREPASS_READABLE_TO_CONSOLE:
+            logging.getLogger("prepass.readable").info(line)
     global _AGENT_ACTIVE_IMAGE_TOKEN, _AGENT_ACTIVE_IMAGE_BASE64, _AGENT_ACTIVE_DATASET_ID
     global _AGENT_ACTIVE_LABELMAP, _AGENT_ACTIVE_GLOSSARY, _AGENT_ACTIVE_INSPECTED_WINDOWS
     global _AGENT_ACTIVE_CLASSIFIER_ID, _AGENT_ACTIVE_TIGHTEN_FP
@@ -12745,31 +12886,31 @@ def _run_agentic_annotation_qwen_agent(
     tighten_fp = bool(payload.tighten_fp if payload.tighten_fp is not None else True)
     detector_conf = _agent_unit_float(
         payload.detector_conf,
-        AGENTIC_TIGHT_DEFAULT_DETECTOR_CONF if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_DETECTOR_CONF if tighten_fp else None,
     )
     sam3_score_thr = _agent_unit_float(
         payload.sam3_score_thr,
-        AGENTIC_TIGHT_DEFAULT_SAM3_SCORE if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_SAM3_SCORE if tighten_fp else None,
     )
     sam3_mask_thr = _agent_unit_float(
         payload.sam3_mask_threshold,
-        AGENTIC_TIGHT_DEFAULT_SAM3_MASK if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_SAM3_MASK if tighten_fp else None,
     )
     classifier_min_prob = _agent_unit_float(
         payload.classifier_min_prob,
-        AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB if tighten_fp else None,
     )
     classifier_margin = _agent_unit_float(
         payload.classifier_margin,
-        AGENTIC_TIGHT_DEFAULT_CLASSIFIER_MARGIN if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_CLASSIFIER_MARGIN if tighten_fp else None,
     )
     classifier_bg_margin = _agent_unit_float(
         payload.classifier_bg_margin,
-        AGENTIC_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN if tighten_fp else None,
     )
     scoreless_iou = _agent_unit_float(
         payload.scoreless_iou,
-        AGENTIC_TIGHT_DEFAULT_SCORELESS_IOU if tighten_fp else 0.0,
+        PREPASS_TIGHT_DEFAULT_SCORELESS_IOU if tighten_fp else 0.0,
     )
 
     _AGENT_ACTIVE_IMAGE_TOKEN = token
@@ -12883,76 +13024,90 @@ def _run_agentic_annotation_qwen_agent(
         model_id_override = _resolve_qwen_variant_model_id(base_model_id, desired_variant)
     else:
         model_id_override = base_model_id
-    max_new_tokens = max(1, int(payload.max_new_tokens or 4096))
-    _trace_write_readable(_agent_readable_banner("PREPASS START", fill="-"))
-    (
-        prepass_messages,
-        prepass_detections,
-        prepass_warnings,
-        prepass_trace,
-        prepass_has_detector,
-        prepass_has_inspect,
-        prepass_caption_summary,
-        prepass_sam3_text_summary,
-        prepass_source_summary,
-        prepass_caption_text,
-        prepass_caption_entries,
-    ) = _agent_run_prepass(
+    grid_spec: Optional[Dict[str, Any]] = _agent_grid_spec_for_payload(payload, img_w, img_h)
+    _AGENT_ACTIVE_GRID = grid_spec
+    trace: List[AgentTraceEvent] = []
+    step_id = 0
+
+    def _append_trace(phase: str, summary: str, counts: Optional[Dict[str, int]] = None) -> None:
+        nonlocal step_id
+        step_id += 1
+        event = AgentTraceEvent(
+            step_id=step_id,
+            phase=phase,
+            summary=summary,
+            counts=counts,
+            timestamp=time.time(),
+        )
+        trace.append(event)
+        if trace_sink:
+            trace_sink(event)
+
+    _trace_write_readable(_agent_readable_banner("DEEP PREPASS START", fill="-"))
+    deep_prepass = _agent_run_deep_prepass(
         payload,
         pil_img=pil_img,
         image_token=token,
         labelmap=labelmap,
         glossary=glossary,
-        as_tool_messages=False,
         trace_writer=_trace_write,
         trace_full_writer=_trace_write_full,
-        model_id_override=model_id_override,
+        trace_readable=_trace_write_readable,
     )
-    _trace_write_readable(_agent_readable_banner("PREPASS END", fill="-"))
-    _AGENT_ACTIVE_OVERALL_CAPTION = prepass_caption_text
-    _AGENT_ACTIVE_WINDOWED_CAPTIONS = prepass_caption_entries
+    _trace_write_readable(_agent_readable_banner("DEEP PREPASS END", fill="-"))
+    deep_detections = list(deep_prepass.get("detections") or [])
+    deep_warnings = list(deep_prepass.get("warnings") or [])
+    if deep_warnings:
+        warnings.extend(deep_warnings)
+    if payload.ensemble_enabled and payload.ensemble_job_id:
+        deep_detections = _agent_apply_ensemble_filter(
+            deep_detections,
+            dataset_id=payload.dataset_id,
+            image_name=payload.image_name,
+            classifier_id=classifier_id_for_run,
+            job_id=payload.ensemble_job_id,
+            trace_writer=_trace_write,
+            trace_full_writer=_trace_write_full,
+            trace_readable=_trace_write_readable,
+            warnings=warnings,
+        )
+    _append_trace("merge", "deep_prepass_complete", counts={"detections": len(deep_detections)})
+
+    caption_text, caption_entries = _agent_run_deep_prepass_caption(
+        payload,
+        pil_img=pil_img,
+        image_token=token,
+        detections=deep_detections,
+        model_id_override=model_id_override,
+        grid_for_log=grid_spec,
+        trace_writer=_trace_write,
+        trace_full_writer=_trace_write_full,
+    )
+    _AGENT_ACTIVE_OVERALL_CAPTION = caption_text
+    _AGENT_ACTIVE_WINDOWED_CAPTIONS = caption_entries
+
+    source_summary = _agent_format_source_counts(_agent_source_counts(deep_detections))
     _trace_write(
         {
-            "type": "prepass_summary",
-            "warnings": prepass_warnings,
-            "detections": len(prepass_detections),
-            "has_detector": prepass_has_detector,
-            "has_inspect": prepass_has_inspect,
-            "sam3_text_prompts": prepass_sam3_text_summary,
-            "source_summary": prepass_source_summary,
+            "type": "deep_prepass_summary",
+            "detections": len(deep_detections),
+            "source_summary": source_summary,
+            "warnings": deep_warnings,
         }
     )
     _trace_write_full(
         {
-            "type": "prepass_summary",
-            "warnings": prepass_warnings,
-            "detections": len(prepass_detections),
-            "has_detector": prepass_has_detector,
-            "has_inspect": prepass_has_inspect,
-            "sam3_text_prompts": prepass_sam3_text_summary,
-            "source_summary": prepass_source_summary,
+            "type": "deep_prepass_summary",
+            "detections": len(deep_detections),
+            "source_summary": source_summary,
+            "warnings": deep_warnings,
         }
     )
-    if prepass_warnings:
-        warnings.extend(prepass_warnings)
 
-    grid_spec: Optional[Dict[str, Any]] = _agent_grid_spec_for_payload(payload, img_w, img_h)
-    _AGENT_ACTIVE_GRID = grid_spec
     detections: List[Dict[str, Any]] = []
-    if prepass_detections:
-        cleaned_prepass, rejected_prepass = _agent_sanitize_detection_items(
-            prepass_detections,
-            pil_img=pil_img,
-            classifier_head=None,
-            img_w=img_w,
-            img_h=img_h,
-            labelmap=labelmap,
-            background=background,
-        )
-        if rejected_prepass:
-            warnings.append(f"prepass_rejected:{rejected_prepass}")
+    if deep_detections:
         _agent_register_detections(
-            cleaned_prepass,
+            deep_detections,
             img_w=img_w,
             img_h=img_h,
             grid=grid_spec,
@@ -12965,9 +13120,7 @@ def _run_agentic_annotation_qwen_agent(
     _AGENT_PREPASS_COMPLETE = True
 
     overlay_image: Optional[Image.Image] = None
-    overlay_key_text = ""
     overlay_radius: Optional[int] = None
-    grid_note = _agent_grid_prompt_text(grid_spec)
     use_overlay = bool(payload.use_detection_overlay if payload.use_detection_overlay is not None else True)
     if payload.overlay_dot_radius is not None:
         try:
@@ -12986,7 +13139,6 @@ def _run_agentic_annotation_qwen_agent(
             dot_radius=overlay_radius,
             label_prefixes=label_prefixes,
         )
-        overlay_key_text = _agent_overlay_key_text(label_colors, label_prefixes)
         _AGENT_ACTIVE_LABEL_COLORS = label_colors
         _AGENT_ACTIVE_LABEL_PREFIXES = label_prefixes
         _AGENT_ACTIVE_OVERLAY_DOT_RADIUS = overlay_radius
@@ -13011,7 +13163,7 @@ def _run_agentic_annotation_qwen_agent(
             }
         )
         _trace_write_readable(
-            f"prepass overlay: detections={len(detections)} "
+            f"deep prepass overlay: detections={len(detections)} "
             f"radius={overlay_radius if overlay_radius is not None else 'auto'}"
         )
     else:
@@ -13039,795 +13191,43 @@ def _run_agentic_annotation_qwen_agent(
         _AGENT_ACTIVE_LABEL_COLORS = _agent_current_label_colors(labelmap)
         _AGENT_ACTIVE_LABEL_PREFIXES = _agent_current_label_prefixes(labelmap)
     _AGENT_ACTIVE_OVERLAY_DOT_RADIUS = overlay_radius
-
     _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_image
-    overlay_enabled = overlay_image is not None
-    _AGENT_ACTIVE_GRID = grid_spec
-    grid_enabled = bool(_AGENT_ACTIVE_GRID)
-    trace: List[AgentTraceEvent] = list(prepass_trace)
-    if trace_sink:
-        for event in prepass_trace:
-            trace_sink(event)
-    if payload.prepass_only:
-        final_detections = list(_AGENT_ACTIVE_CLUSTERS or [])
-        if payload.prepass_finalize:
-            submit_result = _agent_tool_submit_annotations(
-                image_token=token,
-                dataset_id=payload.dataset_id,
-                classifier_id=payload.classifier_id,
-                include_all=True,
-                iou=payload.iou,
-                cross_iou=payload.cross_iou,
-                max_det=payload.max_detections,
-            )
-            if isinstance(submit_result, dict) and submit_result.get("detections") is not None:
-                final_detections = list(submit_result.get("detections") or [])
-                rejected = submit_result.get("rejected")
-                if rejected:
-                    warnings.append(f"prepass_finalize_rejected:{rejected}")
-        summary_lines = _agent_detection_summary_lines(
-            final_detections,
-            grid=grid_spec,
-            img_w=img_w,
-            img_h=img_h,
-            warnings=warnings,
+    _AGENT_ACTIVE_DETECTIONS = deep_detections
+
+    if not payload.prepass_only:
+        warnings.append("prepass_only_enforced")
+
+    final_detections = list(_AGENT_ACTIVE_CLUSTERS or [])
+    if payload.prepass_finalize:
+        submit_result = _agent_tool_submit_annotations(
+            image_token=token,
+            dataset_id=payload.dataset_id,
+            classifier_id=payload.classifier_id,
+            include_all=True,
+            iou=payload.iou,
+            cross_iou=payload.cross_iou,
+            max_det=None,
         )
-        _trace_write_readable(_agent_readable_banner("IMAGE END SUMMARY", fill="="))
-        for line in summary_lines:
-            _trace_write_readable(line)
-        _trace_write_readable(_agent_readable_banner("END IMAGE", fill="="))
-        _AGENT_TRACE_FULL_WRITER = None
-        _AGENT_TRACE_READABLE_WRITER = None
-        return QwenAgenticResponse(
-            detections=final_detections,
-            trace=trace,
-            warnings=warnings or None,
-            caption=None,
-            trace_path=trace_path,
-            trace_full_path=full_trace_path,
-        )
-    return _run_agentic_annotation_multiagent_controller(
-        payload,
-        pil_img=pil_img,
-        grid_spec=grid_spec,
-        trace=trace,
-        warnings=warnings,
-        trace_sink=trace_sink,
-        trace_write=_trace_write,
-        trace_write_full=_trace_write_full,
-        trace_write_readable=_trace_write_readable,
-        trace_path=trace_path,
-        full_trace_path=full_trace_path,
-        cancel_event=cancel_event,
-    )
-
-
-def _run_agentic_annotation_multiagent_controller(
-    payload: QwenAgenticRequest,
-    *,
-    pil_img: Image.Image,
-    grid_spec: Optional[Dict[str, Any]],
-    trace: List[AgentTraceEvent],
-    warnings: List[str],
-    trace_sink: Optional[Any],
-    trace_write: Callable[[Dict[str, Any]], None],
-    trace_write_full: Callable[[Dict[str, Any]], None],
-    trace_write_readable: Callable[[str], None],
-    trace_path: Optional[str],
-    full_trace_path: Optional[str],
-    cancel_event: Optional[threading.Event] = None,
-) -> QwenAgenticResponse:
-    global _AGENT_TILE_SUMMARIES
-    img_w, img_h = pil_img.size
-    trace_verbose = bool(payload.trace_verbose)
-    step_id = trace[-1].step_id if trace else 0
-    max_detections = max(1, int(payload.max_detections or 800))
-    iou_thr = float(payload.iou or 0.5)
-    cross_iou = float(payload.cross_iou) if payload.cross_iou is not None else None
-    tile_max_passes = max(1, int(payload.tile_max_passes or 2))
-    grid_cells = _agent_grid_cells(grid_spec)
-    base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
-    desired_variant = (payload.model_variant or "auto").strip()
-    if payload.model_id:
-        model_id_override = payload.model_id
-    elif desired_variant in {"Instruct", "Thinking"}:
-        model_id_override = _resolve_qwen_variant_model_id(base_model_id, desired_variant)
-    else:
-        model_id_override = base_model_id
-
-    tile_states: Dict[str, Dict[str, Any]] = {
-        cell: {
-            "passes": 0,
-            "error_counts": {},
-            "error_locked": False,
-            "errors_seen": [],
-            "suspected_misses": [],
-            "new_clusters": [],
-            "rejected_clusters": [],
-            "verified_clusters": [],
-            "unavailable_clusters": [],
-        }
-        for cell in grid_cells
-    }
-    tile_summaries_latest: Dict[str, Dict[str, Any]] = {}
-
-    def _append_trace(event: AgentTraceEvent) -> None:
-        trace.append(event)
-        if trace_sink:
-            trace_sink(event)
-
-    def _log_tool_call(tool_name: str, args: Optional[Dict[str, Any]]) -> None:
-        nonlocal step_id
-        step_id += 1
-        summary_text = "agent_tool_call"
-        if tool_name in {"log_observation", "log_status"} and isinstance(args, dict):
-            obs = _agent_clean_observation_text(args.get("text"), max_len=120)
-            if obs:
-                summary_text = f"observation: {obs}"
-        _append_trace(
-            AgentTraceEvent(
-                step_id=step_id,
-                phase="tool_call",
-                tool_name=tool_name,
-                summary=summary_text,
-                tool_input=args if trace_verbose else None,
-                timestamp=time.time(),
-            )
-        )
-        trace_write(
-            {
-                "type": "tool_call",
-                "step_id": step_id,
-                "tool": tool_name,
-                "args": args if isinstance(args, dict) else None,
-            }
-        )
-        trace_write_full(
-            {
-                "type": "tool_call",
-                "step_id": step_id,
-                "tool": tool_name,
-                "args": args if isinstance(args, dict) else None,
-            }
-        )
-        trace_write_readable(
-            _agent_readable_line("tool_call", step_id=step_id, tool_name=tool_name, args=args)
-        )
-
-    def _log_tool_result(tool_name: str, result: Any) -> None:
-        nonlocal step_id
-        step_id += 1
-        summary_text = "agent_tool_result"
-        if tool_name in {"log_observation", "log_status"} and isinstance(result, dict):
-            obs = _agent_clean_observation_text(
-                result.get("observation") or result.get("status"),
-                max_len=120,
-            )
-            if obs:
-                summary_text = f"observation: {obs}"
-        _append_trace(
-            AgentTraceEvent(
-                step_id=step_id,
-                phase="tool_result",
-                tool_name=tool_name,
-                summary=summary_text,
-                tool_output=result if trace_verbose else None,
-                timestamp=time.time(),
-            )
-        )
-        trace_write(
-            {
-                "type": "tool_result",
-                "step_id": step_id,
-                "tool": tool_name,
-                "result": result,
-            }
-        )
-        trace_write_full(
-            {
-                "type": "tool_result",
-                "step_id": step_id,
-                "tool": tool_name,
-                "result": result,
-            }
-        )
-        trace_write_readable(
-            _agent_readable_line("tool_result", step_id=step_id, tool_name=tool_name, result=result)
-        )
-
-    def _normalize_label_list(labels: Any) -> List[str]:
-        if not isinstance(labels, (list, tuple)):
-            return []
-        aligned: List[str] = []
-        for item in labels:
-            text = str(item or "").strip()
-            if not text:
-                continue
-            canonical = _agent_fuzzy_align_label(text, _AGENT_ACTIVE_LABELMAP or []) or text
-            if _AGENT_ACTIVE_LABELMAP and canonical not in _AGENT_ACTIVE_LABELMAP:
-                continue
-            if canonical not in aligned:
-                aligned.append(canonical)
-        return aligned
-
-    def _extract_cluster_ids(result: Any) -> Tuple[List[int], List[int]]:
-        if not isinstance(result, dict):
-            return [], []
-        new_ids = result.get("new_cluster_ids")
-        updated_ids = result.get("updated_cluster_ids")
-        if new_ids is None and isinstance(result.get("register_summary"), dict):
-            new_ids = result["register_summary"].get("new_cluster_ids")
-        if updated_ids is None and isinstance(result.get("register_summary"), dict):
-            updated_ids = result["register_summary"].get("updated_cluster_ids")
-        new_list = [int(cid) for cid in (new_ids or []) if cid is not None]
-        updated_list = [int(cid) for cid in (updated_ids or []) if cid is not None]
-        return new_list, updated_list
-
-    def _record_tool_errors(state: Dict[str, Any], tool_name: str, result: Any) -> None:
-        if not isinstance(result, dict) or "error" not in result:
-            return
-        err = result.get("error")
-        code = None
-        if isinstance(err, dict):
-            code = err.get("code")
-        elif isinstance(err, str):
-            code = err
-        if not code:
-            return
-        errors_seen = state.get("errors_seen")
-        if isinstance(errors_seen, list):
-            errors_seen.append(str(code))
-        counts = state.get("error_counts") or {}
-        counts[tool_name] = int(counts.get(tool_name, 0)) + 1
-        state["error_counts"] = counts
-        if counts[tool_name] >= 2:
-            state["error_locked"] = True
-
-    def _tool_error_info(result: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        if not isinstance(result, dict):
-            return None, None, None
-        err = result.get("error")
-        if isinstance(err, dict):
-            return (
-                str(err.get("code") or ""),
-                str(err.get("message") or ""),
-                str(err.get("fix_hint") or ""),
-            )
-        if isinstance(err, str):
-            return err, err, None
-        return None, None, None
-
-    def _fix_tool_args_for_error(
-        tool_name: str,
-        args: Dict[str, Any],
-        error_code: Optional[str],
-    ) -> Tuple[Dict[str, Any], bool]:
-        fixed = dict(args)
-        changed = False
-        if error_code == "missing_grid_cell":
-            if "grid_cell" not in fixed and _AGENT_ACTIVE_GRID:
-                cells = _agent_grid_cells(_AGENT_ACTIVE_GRID)
-                if cells:
-                    fixed["grid_cell"] = cells[0]
-                    changed = True
-        if tool_name == "sam3_text" and error_code in {"missing_label", "invalid_prompt"}:
-            label = str(fixed.get("label") or fixed.get("prompt") or "").strip()
-            if not label and _AGENT_ACTIVE_LABELMAP:
-                label = str(_AGENT_ACTIVE_LABELMAP[0]).strip()
-            if label:
-                label = _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) or label
-                fixed["label"] = label
-                if not fixed.get("prompt"):
-                    synonym_map = _agent_generate_sam3_synonyms(_AGENT_ACTIVE_LABELMAP or [], _AGENT_ACTIVE_GLOSSARY or "")
-                    prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=1)
-                    fixed["prompt"] = prompts[0] if prompts else label
-                changed = True
-        if tool_name == "sam3_similarity" and error_code in {"missing_label", "invalid_exemplar", "invalid_prompt"}:
-            label = str(fixed.get("label") or "").strip()
-            if not label and _AGENT_ACTIVE_LABELMAP:
-                label = str(_AGENT_ACTIVE_LABELMAP[0]).strip()
-            if label:
-                label = _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) or label
-                fixed["label"] = label
-                if not fixed.get("exemplar_cluster_ids") and not fixed.get("exemplar_handles"):
-                    exemplars = _similarity_exemplars(label)
-                    if exemplars:
-                        fixed["exemplar_handles"] = _agent_handles_from_cluster_ids(exemplars)
-                changed = True
-        if tool_name == "qwen_infer" and error_code in {"invalid_prompt", "missing_label"}:
-            if not fixed.get("items") and _AGENT_ACTIVE_LABELMAP:
-                fixed["items"] = list(_AGENT_ACTIVE_LABELMAP)
-                changed = True
-            if not fixed.get("extra_context") and _AGENT_ACTIVE_GLOSSARY:
-                fixed["extra_context"] = str(_AGENT_ACTIVE_GLOSSARY)
-                changed = True
-        return fixed, changed
-
-    def _build_llm_cfg(max_tokens: int) -> Dict[str, Any]:
-        cfg = {
-            "model": model_id_override,
-            "model_type": "local_qwen_vl",
-            "model_id_override": model_id_override,
-            "generate_cfg": {
-                "fncall_prompt_type": "nous",
-                "parallel_function_calls": False,
-                "function_choice": "auto",
-                "max_new_tokens": int(max_tokens),
-                "do_sample": False,
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "thought_in_content": True,
-                "max_input_tokens": 0,
-            },
-        }
-        if payload.thinking_effort is not None:
-            try:
-                cfg["generate_cfg"]["thinking_effort"] = float(payload.thinking_effort)
-            except (TypeError, ValueError):
-                pass
-        if payload.thinking_scale_factor is not None:
-            try:
-                cfg["generate_cfg"]["thinking_scale_factor"] = float(payload.thinking_scale_factor)
-            except (TypeError, ValueError):
-                pass
-        if payload.immediate_action_bias is not None:
-            cfg["generate_cfg"]["immediate_action_bias"] = bool(payload.immediate_action_bias)
-        if payload.immediate_action_min_chars is not None:
-            try:
-                cfg["generate_cfg"]["immediate_action_min_chars"] = int(payload.immediate_action_min_chars)
-            except (TypeError, ValueError):
-                pass
-        if payload.immediate_action_min_seconds is not None:
-            try:
-                cfg["generate_cfg"]["immediate_action_min_seconds"] = float(payload.immediate_action_min_seconds)
-            except (TypeError, ValueError):
-                pass
-        if payload.immediate_action_logit_bias is not None:
-            try:
-                cfg["generate_cfg"]["immediate_action_logit_bias"] = float(payload.immediate_action_logit_bias)
-            except (TypeError, ValueError):
-                pass
-        return cfg
-
-    def _build_tools(tool_names: Sequence[str]) -> List[Any]:
-        if not build_local_agent_tools:
-            return []
-        specs = _agent_tool_specs_facade(grid_enabled=bool(grid_spec), tool_names=tool_names)
-        return build_local_agent_tools(specs)
-
-    def _content_to_text(content: Any) -> str:
-        if content is None:
-            return ""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: List[str] = []
-            for item in content:
-                if isinstance(item, dict) and "text" in item:
-                    parts.append(str(item.get("text") or ""))
-                elif hasattr(item, "get_type_and_value"):
-                    try:
-                        item_type, item_value = item.get_type_and_value()
-                    except Exception:
-                        continue
-                    if item_type == "text":
-                        parts.append(str(item_value))
-            return "".join(parts)
-        return str(content)
-
-    def _run_agent_session(
-        agent_name: str,
-        system_prompt: str,
-        user_prompt: str,
-        tool_names: Sequence[str],
-        *,
-        max_llm_calls: int = 3,
-    ) -> Dict[str, Any]:
-        if _AgentToolRunner is None or LocalQwenVLChatModel is None:
-            warnings.append("qwen_agent_unavailable")
-            return {"output_text": "", "tool_calls": [], "tool_results": []}
-        max_tokens = min(512, int(payload.max_new_tokens or 512))
-        llm_cfg = _build_llm_cfg(max_tokens)
-        llm = LocalQwenVLChatModel(llm_cfg)
-        tools = _build_tools(tool_names)
-        try:
-            import qwen_agent.settings as qwen_settings  # type: ignore
-            import qwen_agent.agents.fncall_agent as fncall_agent_mod  # type: ignore
-
-            if getattr(fncall_agent_mod, "MAX_LLM_CALL_PER_RUN", 0) < max_llm_calls:
-                fncall_agent_mod.MAX_LLM_CALL_PER_RUN = int(max_llm_calls)
-            if getattr(qwen_settings, "MAX_LLM_CALL_PER_RUN", 0) < max_llm_calls:
-                qwen_settings.MAX_LLM_CALL_PER_RUN = int(max_llm_calls)
-        except Exception:
-            pass
-        system_payload: Any = system_prompt
-        if llm_cfg.get("generate_cfg", {}).get("fncall_prompt_type") == "nous":
-            system_payload = [QwenAgentContentItem(text=system_prompt)]
-        bot = _AgentToolRunner(
-            llm=llm,
-            function_list=tools,
-            name=agent_name,
-            system_message=system_payload,
-        )
-        messages = [
-            QwenAgentMessage(
-                role="user",
-                content=[QwenAgentContentItem(text=user_prompt)],
-            )
-        ]
-        last_len = 0
-        output_text = ""
-        tool_calls: List[Dict[str, Any]] = []
-        tool_results: List[Dict[str, Any]] = []
-        for response in bot.run(messages=messages, stream=True):
-            if cancel_event is not None and cancel_event.is_set():
-                warnings.append("cancelled")
-                return {"output_text": output_text, "tool_calls": tool_calls, "tool_results": tool_results}
-            if not response:
-                continue
-            if len(response) <= last_len:
-                continue
-            new_msgs = response[last_len:]
-            last_len = len(response)
-            for msg in new_msgs:
-                if msg is None:
-                    continue
-                if isinstance(msg, dict):
-                    msg_dict = msg
-                elif hasattr(msg, "model_dump"):
-                    msg_dict = msg.model_dump()
-                else:
-                    msg_dict = {"role": "assistant", "content": str(msg)}
-                if not isinstance(msg_dict, dict):
-                    msg_dict = {"role": "assistant", "content": str(msg_dict)}
-                role = msg_dict.get("role")
-                fn_call = msg_dict.get("function_call")
-                if fn_call and hasattr(fn_call, "model_dump"):
-                    try:
-                        fn_call = fn_call.model_dump()
-                    except Exception:
-                        fn_call = None
-                if fn_call and not isinstance(fn_call, dict):
-                    fn_call = {
-                        "name": getattr(fn_call, "name", None),
-                        "arguments": getattr(fn_call, "arguments", None),
-                    }
-                if isinstance(fn_call, dict) and fn_call.get("name"):
-                    tool_name = str(fn_call.get("name"))
-                    raw_args = fn_call.get("arguments")
-                    parsed_args = raw_args if isinstance(raw_args, dict) else _agent_parse_json_relaxed(raw_args or "")
-                    tool_calls.append({"tool": tool_name, "args": parsed_args})
-                    _log_tool_call(tool_name, parsed_args if isinstance(parsed_args, dict) else None)
-                    continue
-                if role == "assistant" and not fn_call:
-                    assistant_text = _agent_strip_think(_content_to_text(msg_dict.get("content")))
-                    if assistant_text:
-                        output_text = assistant_text
-                        trace_write_readable(
-                            _agent_readable_line("model_output", output_text=assistant_text)
-                        )
-                if role == "function":
-                    tool_name = msg_dict.get("name")
-                    raw_content = msg_dict.get("content")
-                    raw_text = _content_to_text(raw_content)
-                    parsed_result = _agent_parse_json_relaxed(raw_text)
-                    tool_results.append({"tool": tool_name, "result": parsed_result})
-                    _log_tool_result(str(tool_name), parsed_result)
-        return {"output_text": output_text, "tool_calls": tool_calls, "tool_results": tool_results}
-
-    def _controller_tool_call(
-        tool_name: str,
-        args: Dict[str, Any],
-        *,
-        allow_retry: bool = True,
-    ) -> Dict[str, Any]:
-        call = AgentToolCall(name=tool_name, arguments=args)
-        _log_tool_call(tool_name, args)
-        result = _dispatch_agent_tool(call)
-        payload = result.result or {}
-        _log_tool_result(tool_name, payload)
-        code, _, _ = _tool_error_info(payload)
-        if allow_retry and code in {"missing_grid_cell", "missing_label", "invalid_exemplar", "invalid_prompt"}:
-            fixed_args, changed = _fix_tool_args_for_error(tool_name, args, code)
-            if changed:
-                return _controller_tool_call(tool_name, fixed_args, allow_retry=False)
-        return payload
-
-    def _similarity_exemplars(label: str, min_score: float = 0.6) -> List[int]:
-        ids: List[int] = []
-        for cluster in list(_AGENT_ACTIVE_CLUSTERS or []):
-            if not isinstance(cluster, dict):
-                continue
-            clabel = str(cluster.get("label") or "").strip()
-            if clabel != label:
-                continue
-            if cluster.get("classifier_accept"):
-                ids.append(int(cluster.get("cluster_id")))
-                continue
-            try:
-                score = float(cluster.get("score") or 0.0)
-            except (TypeError, ValueError):
-                score = 0.0
-            if score >= min_score:
-                ids.append(int(cluster.get("cluster_id")))
-        return ids
-
-    tile_queue = list(grid_cells)
-    reviewer_rounds = 0
-    final_detections: Optional[List[Dict[str, Any]]] = None
-
-    while True:
-        new_clusters_pass: Set[int] = set()
-        while tile_queue:
-            cell = tile_queue.pop(0)
-            state = tile_states.get(cell)
-            if not state:
-                continue
-            if state.get("passes", 0) >= tile_max_passes:
-                continue
-            state["passes"] = int(state.get("passes", 0)) + 1
-            state["error_locked"] = False
-            state["errors_seen"] = []
-            state["new_clusters"] = []
-            state["verified_clusters"] = []
-            state["rejected_clusters"] = []
-            state["unavailable_clusters"] = []
-            skip_remaining = False
-
-            scout_system = (
-                "You are TileScout. Scan one grid cell for missed labels. "
-                "Tools: get_tile_context, view_cell_raw, view_cell_overlay, look_and_inspect. "
-                "Use grid_cell and handles only. Return JSON only: "
-                "{\"tile\":\"<cell>\",\"suspected_misses\":[],\"new_candidates\":[],\"notes\":\"\"}."
-            )
-            scout_user = (
-                f"Tile {cell}. Start with get_tile_context, then inspect raw/overlay. "
-                "Use look_and_inspect if you want candidate labels for this tile. Return JSON only."
-            )
-            scout_run = _run_agent_session(
-                "TileScout",
-                scout_system,
-                scout_user,
-                ["get_tile_context", "view_cell_raw", "view_cell_overlay", "look_and_inspect"],
-                max_llm_calls=3,
-            )
-            if not scout_run["tool_calls"]:
-                fallback = _controller_tool_call(
-                    "view_cell_overlay",
-                    {"grid_cell": cell},
-                )
-                scout_run["tool_results"].append({"tool": "view_cell_overlay", "result": fallback})
-            has_inspect = any(
-                str(entry.get("tool") or "") == "look_and_inspect" for entry in scout_run["tool_results"]
-            )
-            if not has_inspect:
-                inspect_result = _controller_tool_call(
-                    "look_and_inspect",
-                    {"grid_cell": cell},
-                )
-                scout_run["tool_results"].append({"tool": "look_and_inspect", "result": inspect_result})
-            for entry in scout_run["tool_results"]:
-                tool_name = str(entry.get("tool") or "")
-                tool_result = entry.get("result")
-                _record_tool_errors(state, tool_name, tool_result)
-                new_ids, _ = _extract_cluster_ids(tool_result)
-                if new_ids:
-                    state["new_clusters"] = list(set(state["new_clusters"] + new_ids))
-                    new_clusters_pass.update(new_ids)
-            if state.get("error_locked"):
-                skip_remaining = True
-            scout_output = _agent_parse_json_relaxed(scout_run.get("output_text") or "") or {}
-            missing_labels = _normalize_label_list(scout_output.get("suspected_misses"))
-            if not missing_labels:
-                candidate_counts: Dict[str, int] = {}
-                for entry in scout_run["tool_results"]:
-                    if str(entry.get("tool") or "") != "look_and_inspect":
-                        continue
-                    result = entry.get("result") or {}
-                    for cand in result.get("candidates") or []:
-                        if not isinstance(cand, dict):
-                            continue
-                        label = str(cand.get("label") or "").strip()
-                        if not label:
-                            continue
-                        candidate_counts[label] = candidate_counts.get(label, 0) + 1
-                if candidate_counts:
-                    ordered = sorted(candidate_counts.items(), key=lambda item: (-item[1], item[0]))
-                    missing_labels = [label for label, _ in ordered[:3]]
-            label_counts: Dict[str, int] = {}
-            for cluster in _agent_tile_clusters(cell):
-                if not isinstance(cluster, dict):
-                    continue
-                label = str(cluster.get("label") or "").strip()
-                if not label:
-                    continue
-                label_counts[label] = label_counts.get(label, 0) + 1
-            if label_counts:
-                missing_labels = [
-                    label for label in missing_labels if label_counts.get(label, 0) < 2
-                ]
-            state["suspected_misses"] = missing_labels
-
-            if missing_labels and not skip_remaining:
-                det_system = (
-                    "You are TileDetector. Add missing labels in one grid cell. "
-                    "Tools: get_tile_context, zoom_and_detect. "
-                    "Use grid_cell and labels only. Return JSON only: "
-                    "{\"tile\":\"<cell>\",\"label_targets\":[],\"notes\":\"\"}."
-                )
-                det_user = (
-                    f"Tile {cell}. Missing labels: {', '.join(missing_labels)}. "
-                    "Start with get_tile_context, then use zoom_and_detect for these labels. "
-                    "Return JSON only."
-                )
-                det_run = _run_agent_session(
-                    "TileDetector",
-                    det_system,
-                    det_user,
-                    ["get_tile_context", "zoom_and_detect"],
-                    max_llm_calls=4,
-                )
-                if not det_run["tool_calls"]:
-                    fallback = _controller_tool_call(
-                        "zoom_and_detect",
-                        {
-                            "grid_cell": cell,
-                            "confirm_label": missing_labels[0],
-                            "intent": f"verify {missing_labels[0]} in {cell}",
-                            "mode": "yolo",
-                            "conf": 0.7,
-                        },
-                    )
-                    det_run["tool_results"].append({"tool": "zoom_and_detect", "result": fallback})
-                det_called = {str(call.get("tool") or "") for call in det_run.get("tool_calls") or []}
-                if "zoom_and_detect" not in det_called and missing_labels:
-                    fallback = _controller_tool_call(
-                        "zoom_and_detect",
-                        {
-                            "grid_cell": cell,
-                            "confirm_label": missing_labels[0],
-                            "intent": f"verify {missing_labels[0]} in {cell}",
-                            "mode": "yolo",
-                            "conf": 0.7,
-                        },
-                    )
-                    det_run["tool_results"].append({"tool": "zoom_and_detect", "result": fallback})
-                for entry in det_run["tool_results"]:
-                    tool_name = str(entry.get("tool") or "")
-                    tool_result = entry.get("result")
-                    _record_tool_errors(state, tool_name, tool_result)
-                    new_ids, _ = _extract_cluster_ids(tool_result)
-                    if new_ids:
-                        state["new_clusters"] = list(set(state["new_clusters"] + new_ids))
-                        new_clusters_pass.update(new_ids)
-                if state.get("error_locked"):
-                    skip_remaining = True
-
-                if not skip_remaining:
-                    for label in missing_labels:
-                        exemplar_ids = _similarity_exemplars(label)
-                        if not exemplar_ids:
-                            continue
-                        sim_result = _controller_tool_call(
-                            "sam3_similarity",
-                            {"grid_cell": cell, "label": label, "exemplar_cluster_ids": exemplar_ids},
-                        )
-                        _record_tool_errors(state, "sam3_similarity", sim_result)
-                        new_ids, _ = _extract_cluster_ids(sim_result)
-                        if new_ids:
-                            state["new_clusters"] = list(set(state["new_clusters"] + new_ids))
-                            new_clusters_pass.update(new_ids)
-
-            if not skip_remaining:
-                unverified = [
-                    cluster
-                    for cluster in _agent_tile_clusters(cell)
-                    if isinstance(cluster, dict)
-                    and cluster.get("classifier_accept") is None
-                    and not cluster.get("classifier_unavailable")
-                ]
-                for cluster in unverified:
-                    cid = cluster.get("cluster_id")
-                    if cid is None:
-                        continue
-                    verify_result = _controller_tool_call(
-                        "classify_crop",
-                        {"cluster_id": int(cid), "label_hint": cluster.get("label")},
-                    )
-                    _record_tool_errors(state, "classify_crop", verify_result)
-                    code, _, _ = _tool_error_info(verify_result)
-                    if code == "classifier_unavailable":
-                        cluster["classifier_unavailable"] = True
-                        state["unavailable_clusters"].append(int(cid))
-                        continue
-                    accept = verify_result.get("accept") if isinstance(verify_result, dict) else None
-                    if accept is True:
-                        state["verified_clusters"].append(int(cid))
-                    elif accept is False:
-                        state["rejected_clusters"].append(int(cid))
-
-            counts_by_label: Dict[str, int] = {}
-            for cluster in _agent_tile_clusters(cell):
-                label = str(cluster.get("label") or "").strip()
-                if not label:
-                    continue
-                counts_by_label[label] = counts_by_label.get(label, 0) + 1
-            needs_followup = bool(state.get("suspected_misses")) and state.get("passes", 0) < tile_max_passes
-            tile_summary = {
-                "tile": cell,
-                "counts": counts_by_label,
-                "needs_followup": bool(needs_followup),
-                "notes": "; ".join([str(item) for item in state.get("errors_seen") or []])[:160],
-            }
-            tile_summaries_latest[cell] = tile_summary
-            if needs_followup:
-                tile_queue.append(cell)
-
-        _AGENT_TILE_SUMMARIES = [tile_summaries_latest[cell] for cell in sorted(tile_summaries_latest.keys())]
-        reviewer_system = (
-            "You are Global Reviewer. Decide continue vs submit. "
-            "Tools: get_global_context, view_full_overlay, list_candidates, think_missed_objects, submit_annotations. "
-            "Use handles and grid_cell only. Return JSON only: "
-            "{\"status\":\"continue\"|\"submit\",\"tiles\":[],\"reason\":\"\"}."
-        )
-        reviewer_user = "Call get_global_context, review overlays/summaries, then decide to continue or submit."
-        review_run = _run_agent_session(
-            "GlobalReviewer",
-            reviewer_system,
-            reviewer_user,
-            ["get_global_context", "view_full_overlay", "list_candidates", "think_missed_objects", "submit_annotations"],
-            max_llm_calls=3,
-        )
-        submit_from_tool = None
-        for entry in review_run["tool_results"]:
-            if str(entry.get("tool") or "") == "submit_annotations":
-                submit_from_tool = entry.get("result")
-                break
-        if submit_from_tool:
-            final_detections = submit_from_tool.get("detections") if isinstance(submit_from_tool, dict) else None
-            break
-        review_output = _agent_parse_json_relaxed(review_run.get("output_text") or "") or {}
-        status = str(review_output.get("status") or "").strip().lower()
-        tiles = review_output.get("tiles") if isinstance(review_output.get("tiles"), list) else []
-        if status == "continue" and tiles and reviewer_rounds < 1:
-            reviewer_rounds += 1
-            for tile in tiles:
-                cell = str(tile or "").strip()
-                if cell in tile_states and tile_states[cell].get("passes", 0) < tile_max_passes:
-                    tile_queue.append(cell)
-            continue
-        all_complete = all(not summary.get("needs_followup") for summary in tile_summaries_latest.values())
-        if status == "continue" and not tiles and not new_clusters_pass and all_complete:
-            break
-        break
-
-    if final_detections is None:
-        submit_result = _controller_tool_call(
-            "submit_annotations",
-            {
-                "include_all": True,
-                "iou": iou_thr,
-                "cross_iou": cross_iou,
-                "max_det": max_detections,
-            },
-        )
-        final_detections = submit_result.get("detections") if isinstance(submit_result, dict) else []
-
+        if isinstance(submit_result, dict) and submit_result.get("detections") is not None:
+            final_detections = list(submit_result.get("detections") or [])
+            rejected = submit_result.get("rejected")
+            if rejected:
+                warnings.append(f"prepass_finalize_rejected:{rejected}")
     summary_lines = _agent_detection_summary_lines(
-        final_detections or [],
+        final_detections,
         grid=grid_spec,
         img_w=img_w,
         img_h=img_h,
         warnings=warnings,
     )
-    trace_write_readable(_agent_readable_banner("IMAGE END SUMMARY", fill="="))
+    _trace_write_readable(_agent_readable_banner("IMAGE END SUMMARY", fill="="))
     for line in summary_lines:
-        trace_write_readable(line)
-    trace_write_readable(_agent_readable_banner("END IMAGE", fill="="))
+        _trace_write_readable(line)
+    _trace_write_readable(_agent_readable_banner("END IMAGE", fill="="))
     _AGENT_TRACE_FULL_WRITER = None
     _AGENT_TRACE_READABLE_WRITER = None
-    return QwenAgenticResponse(
-        detections=final_detections or [],
+    return QwenPrepassResponse(
+        detections=final_detections,
         trace=trace,
         warnings=warnings or None,
         caption=None,
@@ -13836,13 +13236,13 @@ def _run_agentic_annotation_multiagent_controller(
     )
 
 
-def _run_agentic_annotation(
-    payload: QwenAgenticRequest,
+def _run_prepass_annotation(
+    payload: QwenPrepassRequest,
     *,
     trace_sink: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
-) -> QwenAgenticResponse:
-    return _run_agentic_annotation_qwen_agent(payload, trace_sink=trace_sink, cancel_event=cancel_event)
+) -> QwenPrepassResponse:
+    return _run_prepass_annotation_qwen(payload, trace_sink=trace_sink, cancel_event=cancel_event)
 
 
 class Sam3TextPromptResponse(BaseModel):
@@ -14428,6 +13828,11 @@ RFDETR_KEEP_FILES = {
     RFDETR_RUN_META_NAME,
 }
 
+GLOSSARY_LIBRARY_ROOT = Path(os.environ.get("GLOSSARY_ROOT", "./uploads/glossaries"))
+GLOSSARY_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
+GLOSSARY_LIBRARY_PATH = GLOSSARY_LIBRARY_ROOT / "glossaries.json"
+GLOSSARY_LIBRARY_LOCK = threading.Lock()
+
 YOLO_INFER_LOCK = threading.RLock()
 yolo_infer_model: Any = None
 yolo_infer_path: Optional[str] = None
@@ -14597,14 +14002,16 @@ class AgentMiningJob:
 
 
 @dataclass
-class QwenAgenticJob:
+class CalibrationJob:
     job_id: str
     status: str = "queued"
     message: str = "Queued"
+    phase: str = "queued"
+    progress: float = 0.0
+    processed: int = 0
+    total: int = 0
     request: Dict[str, Any] = field(default_factory=dict)
     result: Optional[Dict[str, Any]] = None
-    trace: List[Dict[str, Any]] = field(default_factory=list)
-    trace_path: Optional[str] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -14625,8 +14032,8 @@ PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
 PROMPT_HELPER_JOBS_LOCK = threading.Lock()
 AGENT_MINING_JOBS: Dict[str, AgentMiningJob] = {}
 AGENT_MINING_JOBS_LOCK = threading.Lock()
-QWEN_AGENTIC_JOBS: Dict[str, QwenAgenticJob] = {}
-QWEN_AGENTIC_JOBS_LOCK = threading.Lock()
+CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
+CALIBRATION_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
@@ -14637,16 +14044,20 @@ DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
 DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 CLIP_NEGATIVE_REPLAY_ROOT = UPLOAD_ROOT / "clip_negative_replay"
 CLIP_NEGATIVE_REPLAY_ROOT.mkdir(parents=True, exist_ok=True)
-QWEN_AGENTIC_TRACE_ROOT = UPLOAD_ROOT / "qwen_agentic_traces"
-QWEN_AGENTIC_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
-QWEN_AGENTIC_FULL_TRACE_ROOT = UPLOAD_ROOT / "qwen_agentic_traces_full"
-QWEN_AGENTIC_FULL_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
-QWEN_AGENTIC_FULL_TRACE_LATEST = QWEN_AGENTIC_FULL_TRACE_ROOT / "latest.jsonl"
+QWEN_PREPASS_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces"
+QWEN_PREPASS_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_PREPASS_FULL_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces_full"
+QWEN_PREPASS_FULL_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_PREPASS_FULL_TRACE_LATEST = QWEN_PREPASS_FULL_TRACE_ROOT / "latest.jsonl"
 LOG_ROOT = Path("logs")
 LOG_ROOT.mkdir(parents=True, exist_ok=True)
-QWEN_AGENTIC_READABLE_TRACE_ROOT = LOG_ROOT / "agentic_readable"
-QWEN_AGENTIC_READABLE_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
-QWEN_AGENTIC_READABLE_TRACE_LATEST = QWEN_AGENTIC_READABLE_TRACE_ROOT / "latest.log"
+QWEN_PREPASS_READABLE_TRACE_ROOT = LOG_ROOT / "prepass_readable"
+QWEN_PREPASS_READABLE_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+QWEN_PREPASS_READABLE_TRACE_LATEST = QWEN_PREPASS_READABLE_TRACE_ROOT / "latest.log"
+CALIBRATION_ROOT = UPLOAD_ROOT / "calibration_jobs"
+CALIBRATION_CACHE_ROOT = UPLOAD_ROOT / "calibration_cache"
+CALIBRATION_FEATURES_VERSION = 3
+CALIBRATION_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _prune_job_registry(registry: Dict[str, Any], lock: threading.Lock, ttl_hours: Optional[int] = None) -> None:
@@ -29026,6 +28437,11 @@ class DatasetGlossaryPayload(BaseModel):
     glossary: Optional[str] = None
 
 
+class GlossaryLibraryPayload(BaseModel):
+    name: str = ""
+    glossary: Optional[str] = None
+
+
 def _build_qwen_instruction(context_text: str, class_names: List[str]) -> str:
     parts: List[str] = []
     context_text = (context_text or "").strip()
@@ -29489,10 +28905,92 @@ def _persist_dataset_glossary(dataset_root: Path, glossary_text: str) -> None:
         _persist_sam3_dataset_metadata(dataset_root, fallback)
 
 
+def _normalize_glossary_name(name: str) -> str:
+    return re.sub(r"\\s+", " ", str(name or "").strip())
+
+
+def _glossary_key(name: str) -> str:
+    return _normalize_glossary_name(name).lower()
+
+
+def _load_glossary_library() -> List[Dict[str, Any]]:
+    if not GLOSSARY_LIBRARY_PATH.exists():
+        return []
+    try:
+        with GLOSSARY_LIBRARY_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return []
+    entries = data.get("glossaries") if isinstance(data, dict) else data
+    return list(entries) if isinstance(entries, list) else []
+
+
+def _persist_glossary_library(entries: List[Dict[str, Any]]) -> None:
+    payload = {"glossaries": entries}
+    tmp_path = GLOSSARY_LIBRARY_PATH.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=True)
+    tmp_path.replace(GLOSSARY_LIBRARY_PATH)
+
+
+def _find_glossary_entry(entries: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
+    key = _glossary_key(name)
+    if not key:
+        return None
+    for entry in entries:
+        if _glossary_key(entry.get("name")) == key:
+            return entry
+    return None
+
+
+def _upsert_glossary_entry(name: str, glossary_text: str) -> Dict[str, Any]:
+    normalized_name = _normalize_glossary_name(name)
+    if not normalized_name:
+        raise ValueError("glossary_name_required")
+    glossary_text = _normalize_labelmap_glossary(glossary_text)
+    with GLOSSARY_LIBRARY_LOCK:
+        entries = _load_glossary_library()
+        entry = _find_glossary_entry(entries, normalized_name)
+        now = time.time()
+        if entry:
+            entry["name"] = normalized_name
+            entry["glossary"] = glossary_text
+            entry["updated_at"] = now
+        else:
+            entry = {
+                "name": normalized_name,
+                "glossary": glossary_text,
+                "created_at": now,
+                "updated_at": now,
+            }
+            entries.append(entry)
+        entries.sort(key=lambda item: _glossary_key(item.get("name")))
+        _persist_glossary_library(entries)
+    return entry
+
+
+def _delete_glossary_entry(name: str) -> bool:
+    normalized_name = _normalize_glossary_name(name)
+    if not normalized_name:
+        return False
+    with GLOSSARY_LIBRARY_LOCK:
+        entries = _load_glossary_library()
+        before = len(entries)
+        entries = [entry for entry in entries if _glossary_key(entry.get("name")) != _glossary_key(normalized_name)]
+        if len(entries) == before:
+            return False
+        _persist_glossary_library(entries)
+    return True
+
+
 @app.get("/datasets/{dataset_id}/glossary")
 def get_dataset_glossary(dataset_id: str):
     dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
     glossary = _load_dataset_glossary(dataset_root)
+    if not glossary:
+        labelmap = _discover_yolo_labelmap(dataset_root) or _load_qwen_labelmap(dataset_root)
+        if labelmap:
+            glossary = _default_agent_glossary_for_labelmap(labelmap)
     return {"dataset_id": dataset_id, "glossary": glossary}
 
 
@@ -29502,6 +29000,62 @@ def update_dataset_glossary(dataset_id: str, payload: DatasetGlossaryPayload = B
     glossary_text = _normalize_labelmap_glossary(payload.glossary)
     _persist_dataset_glossary(dataset_root, glossary_text)
     return {"dataset_id": dataset_id, "glossary": glossary_text, "saved": True}
+
+
+@app.get("/glossaries")
+def list_glossaries():
+    entries = _load_glossary_library()
+    response = []
+    for entry in entries:
+        response.append(
+            {
+                "name": entry.get("name"),
+                "created_at": entry.get("created_at"),
+                "updated_at": entry.get("updated_at"),
+            }
+        )
+    return response
+
+
+@app.get("/glossaries/{glossary_name}")
+def get_glossary(glossary_name: str):
+    entries = _load_glossary_library()
+    entry = _find_glossary_entry(entries, glossary_name)
+    if not entry:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
+    return {
+        "name": entry.get("name"),
+        "glossary": _normalize_labelmap_glossary(entry.get("glossary")),
+        "created_at": entry.get("created_at"),
+        "updated_at": entry.get("updated_at"),
+    }
+
+
+@app.post("/glossaries")
+def upsert_glossary(payload: GlossaryLibraryPayload = Body(default_factory=GlossaryLibraryPayload)):
+    name = _normalize_glossary_name(payload.name)
+    if not name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_name_required")
+    glossary_text = _normalize_labelmap_glossary(payload.glossary)
+    try:
+        entry = _upsert_glossary_entry(name, glossary_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc))
+    return {
+        "name": entry.get("name"),
+        "glossary": entry.get("glossary"),
+        "created_at": entry.get("created_at"),
+        "updated_at": entry.get("updated_at"),
+        "saved": True,
+    }
+
+
+@app.delete("/glossaries/{glossary_name}")
+def delete_glossary(glossary_name: str):
+    ok = _delete_glossary_entry(glossary_name)
+    if not ok:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
+    return {"name": glossary_name, "deleted": True}
 
 
 @app.delete("/datasets/{dataset_id}")
@@ -31206,21 +30760,502 @@ def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
     }
 
 
-def _serialize_qwen_agentic_job(job: QwenAgenticJob) -> Dict[str, Any]:
+def _serialize_calibration_job(job: CalibrationJob) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
         "status": job.status,
         "message": job.message,
+        "phase": job.phase,
+        "progress": job.progress,
+        "processed": job.processed,
+        "total": job.total,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "request": job.request,
         "result": job.result,
-        "trace": job.trace,
-        "trace_path": job.trace_path,
         "error": job.error,
     }
 
 
+def _calibration_update(job: CalibrationJob, **kwargs: Any) -> None:
+    for key, value in kwargs.items():
+        setattr(job, key, value)
+    job.updated_at = time.time()
+
+
+def _calibration_list_images(dataset_id: str) -> List[str]:
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    images: List[str] = []
+    for split in ("val", "train"):
+        split_root = dataset_root / split
+        if not split_root.exists():
+            continue
+        for entry in sorted(split_root.iterdir()):
+            if entry.is_file() and entry.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}:
+                images.append(entry.name)
+    return images
+
+
+def _calibration_sample_images(images: List[str], *, max_images: int, seed: int) -> List[str]:
+    if max_images <= 0 or len(images) <= max_images:
+        return list(images)
+    rng = random.Random(seed)
+    picks = list(images)
+    rng.shuffle(picks)
+    return picks[:max_images]
+
+
+def _calibration_cache_image(pil_img: Image.Image, sam_variant: Optional[str]) -> str:
+    np_img = np.ascontiguousarray(np.array(pil_img.convert("RGB")))
+    token = hashlib.md5(np_img.tobytes()).hexdigest()
+    _store_preloaded_image(token, np_img, _default_variant(sam_variant))
+    return token
+
+
+def _calibration_hash_payload(payload: Dict[str, Any]) -> str:
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+
+
+def _calibration_safe_link(src: Path, dest: Path) -> None:
+    try:
+        if dest.is_symlink() and not dest.exists():
+            dest.unlink()
+        if dest.exists() or dest.is_symlink():
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(str(src.resolve()), dest)
+    except Exception:
+        try:
+            if dest.exists():
+                return
+            shutil.copy2(src, dest)
+        except Exception:
+            pass
+
+
+def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> None:
+    with CALIBRATION_JOBS_LOCK:
+        CALIBRATION_JOBS[job.job_id] = job
+    _calibration_update(job, status="running", message="Selecting images…", phase="select_images", request=payload.dict())
+    output_dir = CALIBRATION_ROOT / job.job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
+        if not labelmap:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="calibration_labelmap_missing")
+        images = _calibration_list_images(payload.dataset_id)
+        if not images:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_images_missing")
+        max_images = int(payload.max_images or 0)
+        seed = int(payload.seed or 0)
+        selected = _calibration_sample_images(images, max_images=max_images, seed=seed)
+        total = len(selected)
+        _calibration_update(job, total=total, processed=0, progress=0.0)
+
+        prepass_path = output_dir / "prepass.jsonl"
+        CALIBRATION_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        prepass_payload = QwenPrepassRequest(
+            dataset_id=payload.dataset_id,
+            enable_yolo=True,
+            enable_rfdetr=True,
+            sam_variant="sam3",
+            enable_sam3_text=True,
+            enable_sam3_similarity=True,
+            prepass_caption=False,
+            prepass_only=True,
+            prepass_finalize=False,
+            prepass_keep_all=True,
+            sam3_text_synonym_budget=None
+            if payload.sam3_text_synonym_budget is None
+            else int(payload.sam3_text_synonym_budget),
+            prepass_sam3_text_thr=float(payload.prepass_sam3_text_thr or 0.2),
+            prepass_similarity_score=float(payload.prepass_similarity_score or 0.3),
+            similarity_min_exemplar_score=float(payload.similarity_min_exemplar_score or 0.6),
+            similarity_window_extension=bool(payload.similarity_window_extension),
+            sam3_score_thr=float(payload.sam3_score_thr or 0.2),
+            sam3_mask_threshold=float(payload.sam3_mask_threshold or 0.2),
+            detector_conf=float(payload.detector_conf or 0.45),
+            sahi_window_size=payload.sahi_window_size,
+            sahi_overlap_ratio=payload.sahi_overlap_ratio,
+            classifier_id=payload.classifier_id,
+            scoreless_iou=float(payload.scoreless_iou or 0.0),
+            iou=float(payload.dedupe_iou or 0.75),
+        )
+
+        labelmap_hash = hashlib.sha1(",".join(labelmap).encode("utf-8")).hexdigest()
+        glossary_hash = hashlib.sha1((glossary or "").encode("utf-8")).hexdigest()
+        selected_hash = hashlib.sha1(json.dumps(selected, sort_keys=True).encode("utf-8")).hexdigest()
+        prepass_key = _calibration_hash_payload(
+            {
+                "dataset_id": payload.dataset_id,
+                "seed": seed,
+                "max_images": max_images,
+                "selected_hash": selected_hash,
+                "labelmap_hash": labelmap_hash,
+                "glossary_hash": glossary_hash,
+                "prepass": {
+                    "sam3_text_synonym_budget": None
+                    if payload.sam3_text_synonym_budget is None
+                    else int(payload.sam3_text_synonym_budget),
+                    "prepass_sam3_text_thr": float(payload.prepass_sam3_text_thr or 0.2),
+                    "prepass_similarity_score": float(payload.prepass_similarity_score or 0.3),
+                    "similarity_min_exemplar_score": float(payload.similarity_min_exemplar_score or 0.6),
+                    "similarity_window_extension": bool(payload.similarity_window_extension),
+                    "sam3_score_thr": float(payload.sam3_score_thr or 0.2),
+                    "sam3_mask_threshold": float(payload.sam3_mask_threshold or 0.2),
+                    "detector_conf": float(payload.detector_conf or 0.45),
+                    "sahi_window_size": payload.sahi_window_size,
+                    "sahi_overlap_ratio": payload.sahi_overlap_ratio,
+                    "scoreless_iou": float(payload.scoreless_iou or 0.0),
+                    "dedupe_iou": float(payload.dedupe_iou or 0.75),
+                },
+            }
+        )
+        prepass_cache_dir = CALIBRATION_CACHE_ROOT / "prepass" / prepass_key
+        prepass_cache_dir.mkdir(parents=True, exist_ok=True)
+        prepass_cache_path = prepass_cache_dir / "prepass.jsonl"
+        prepass_cache_meta = prepass_cache_dir / "prepass.meta.json"
+
+        cached_prepass = False
+        if prepass_cache_path.exists() and prepass_cache_meta.exists():
+            try:
+                meta_obj = json.loads(prepass_cache_meta.read_text())
+                if meta_obj.get("complete") and int(meta_obj.get("count", 0)) == total:
+                    cached_prepass = True
+            except Exception:
+                cached_prepass = False
+
+        if cached_prepass:
+            _calibration_update(job, message="Using cached prepass…", phase="prepass", processed=total, progress=1.0)
+            _calibration_safe_link(prepass_cache_path, prepass_path)
+        else:
+            _calibration_update(job, message="Running deep prepass…", phase="prepass")
+            tmp_path = prepass_cache_path.with_suffix(".jsonl.tmp")
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                for idx, image_name in enumerate(selected):
+                    if job.cancel_event.is_set():
+                        raise RuntimeError("cancelled")
+                    img_path = None
+                    dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+                    for split in ("val", "train"):
+                        candidate = dataset_root / split / image_name
+                        if candidate.exists():
+                            img_path = candidate
+                            break
+                    if img_path is None:
+                        continue
+                    with Image.open(img_path) as img:
+                        pil_img = img.convert("RGB")
+                    image_token = _calibration_cache_image(pil_img, prepass_payload.sam_variant)
+                    result = _agent_run_deep_prepass(
+                        prepass_payload,
+                        pil_img=pil_img,
+                        image_token=image_token,
+                        labelmap=labelmap,
+                        glossary=glossary,
+                        trace_writer=None,
+                        trace_full_writer=None,
+                        trace_readable=None,
+                    )
+                    detections = list(result.get("detections") or [])
+                    warnings = list(result.get("warnings") or [])
+                    handle.write(
+                        json.dumps(
+                            {
+                                "image": image_name,
+                                "dataset_id": payload.dataset_id,
+                                "detections": detections,
+                                "warnings": warnings,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                    processed = idx + 1
+                    progress = processed / total if total else 1.0
+                    _calibration_update(job, processed=processed, progress=progress)
+            tmp_path.replace(prepass_cache_path)
+            prepass_cache_meta.write_text(
+                json.dumps(
+                    {
+                        "complete": True,
+                        "count": total,
+                        "dataset_id": payload.dataset_id,
+                        "selected_images": selected,
+                        "selected_hash": selected_hash,
+                        "labelmap_hash": labelmap_hash,
+                        "glossary_hash": glossary_hash,
+                        "prepass_key": prepass_key,
+                    },
+                    indent=2,
+                )
+            )
+            _calibration_safe_link(prepass_cache_path, prepass_path)
+
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+
+        features_path = output_dir / "ensemble_features.npz"
+        labeled_path = output_dir / f"ensemble_features_iou{float(payload.label_iou or 0.9):.2f}.npz"
+        model_prefix = output_dir / "ensemble_mlp"
+        meta_path = Path(str(model_prefix) + ".meta.json")
+        eval_path = output_dir / "ensemble_mlp.eval.json"
+
+        root_dir = Path(__file__).resolve().parent
+
+        def _run_step(phase: str, message: str, args: List[str]) -> None:
+            _calibration_update(job, phase=phase, message=message)
+            if job.cancel_event.is_set():
+                raise RuntimeError("cancelled")
+            subprocess.run(args, check=True)
+
+        classifier_id = payload.classifier_id or ""
+        features_key = _calibration_hash_payload(
+            {
+                "prepass_key": prepass_key,
+                "classifier_id": classifier_id or "",
+                "support_iou": float(payload.support_iou or 0.5),
+                "min_crop_size": 4,
+                "context_radius": float(payload.context_radius or 0.075),
+                "features_version": CALIBRATION_FEATURES_VERSION,
+            }
+        )
+        features_cache_dir = CALIBRATION_CACHE_ROOT / "features" / features_key
+        features_cache_dir.mkdir(parents=True, exist_ok=True)
+        features_cache_path = features_cache_dir / "ensemble_features.npz"
+        features_cache_meta = features_cache_dir / "features.meta.json"
+        cached_features = features_cache_path.exists()
+
+        if cached_features:
+            _calibration_update(job, phase="features", message="Using cached features…", progress=1.0)
+            _calibration_safe_link(features_cache_path, features_path)
+        else:
+            _run_step(
+                "features",
+                "Building features…",
+                [
+                    sys.executable,
+                    str(root_dir / "tools" / "build_ensemble_features.py"),
+                    "--input",
+                    str(prepass_path),
+                    "--dataset",
+                    payload.dataset_id,
+                    "--output",
+                    str(features_cache_path),
+                    "--support-iou",
+                    str(float(payload.support_iou or 0.5)),
+                    "--min-crop-size",
+                    "4",
+                    "--context-radius",
+                    str(float(payload.context_radius or 0.075)),
+                    "--device",
+                    "cuda",
+                ]
+                + (["--classifier-id", classifier_id] if classifier_id else []),
+            )
+            features_cache_meta.write_text(
+                json.dumps(
+                    {
+                        "prepass_key": prepass_key,
+                        "features_key": features_key,
+                        "features_version": CALIBRATION_FEATURES_VERSION,
+                    },
+                    indent=2,
+                )
+            )
+            _calibration_safe_link(features_cache_path, features_path)
+
+        labeled_key = _calibration_hash_payload(
+            {
+                "features_key": features_key,
+                "label_iou": float(payload.label_iou or 0.9),
+            }
+        )
+        labeled_cache_dir = CALIBRATION_CACHE_ROOT / "labeled" / labeled_key
+        labeled_cache_dir.mkdir(parents=True, exist_ok=True)
+        labeled_cache_path = labeled_cache_dir / f"ensemble_features_iou{float(payload.label_iou or 0.9):.2f}.npz"
+        labeled_cache_meta = labeled_cache_dir / "labeled.meta.json"
+        cached_labeled = labeled_cache_path.exists()
+
+        if cached_labeled:
+            _calibration_update(job, phase="labeling", message="Using cached labels…", progress=1.0)
+            _calibration_safe_link(labeled_cache_path, labeled_path)
+        else:
+            _run_step(
+                "labeling",
+                "Labeling candidates…",
+                [
+                    sys.executable,
+                    str(root_dir / "tools" / "label_candidates_iou90.py"),
+                    "--input",
+                    str(features_path),
+                    "--dataset",
+                    payload.dataset_id,
+                    "--output",
+                    str(labeled_cache_path),
+                    "--iou",
+                    str(float(payload.label_iou or 0.9)),
+                ],
+            )
+            labeled_cache_meta.write_text(
+                json.dumps(
+                    {
+                        "features_key": features_key,
+                        "labeled_key": labeled_key,
+                        "label_iou": float(payload.label_iou or 0.9),
+                    },
+                    indent=2,
+                )
+            )
+            _calibration_safe_link(labeled_cache_path, labeled_path)
+        _run_step(
+            "train",
+            "Training MLP…",
+            [
+                sys.executable,
+                str(root_dir / "tools" / "train_ensemble_mlp.py"),
+                "--input",
+                str(labeled_path),
+                "--output",
+                str(model_prefix),
+                "--hidden",
+                str(payload.model_hidden or "256,128"),
+                "--dropout",
+                str(float(payload.model_dropout or 0.1)),
+                "--epochs",
+                str(int(payload.model_epochs or 20)),
+                "--lr",
+                str(float(payload.model_lr or 1e-3)),
+                "--weight-decay",
+                str(float(payload.model_weight_decay or 1e-4)),
+                "--seed",
+                str(int(payload.model_seed or 42)),
+                "--device",
+                "cuda",
+            ],
+        )
+        _run_step(
+            "calibrate",
+            "Calibrating thresholds…",
+            [
+                sys.executable,
+                str(root_dir / "tools" / "calibrate_ensemble_threshold.py"),
+                "--model",
+                str(Path(str(model_prefix) + ".pt")),
+                "--data",
+                str(labeled_path),
+                "--meta",
+                str(meta_path),
+                "--target-fp-ratio",
+                str(float(payload.base_fp_ratio or 0.1)),
+                "--min-recall",
+                str(float(payload.recall_floor or 0.6)),
+                "--steps",
+                "200",
+                "--per-class",
+                "--optimize",
+                "f1",
+            ],
+        )
+        _run_step(
+            "relax",
+            "Relaxing thresholds…",
+            [
+                sys.executable,
+                str(root_dir / "tools" / "relax_ensemble_thresholds.py"),
+                "--model",
+                str(Path(str(model_prefix) + ".pt")),
+                "--data",
+                str(labeled_path),
+                "--meta",
+                str(meta_path),
+                "--fp-ratio-cap",
+                str(float(payload.relax_fp_ratio or 0.2)),
+            ],
+        )
+        _calibration_update(job, phase="eval", message="Evaluating model…")
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        iou_grid = "0.5,0.6,0.7,0.75,0.8,0.85,0.9"
+        eval_cmd = [
+            sys.executable,
+            str(root_dir / "tools" / "eval_ensemble_mlp_dedupe.py"),
+            "--model",
+            str(Path(str(model_prefix) + ".pt")),
+            "--meta",
+            str(meta_path),
+            "--data",
+            str(labeled_path),
+            "--dataset",
+            payload.dataset_id,
+            "--eval-iou",
+            str(float(payload.eval_iou or 0.5)),
+            "--eval-iou-grid",
+            iou_grid,
+            "--dedupe-iou",
+            str(float(payload.dedupe_iou or 0.1)),
+            "--dedupe-iou-grid",
+            iou_grid,
+            "--scoreless-iou",
+            str(float(payload.scoreless_iou or 0.0)),
+            "--use-val-split",
+        ]
+        eval_run = subprocess.run(eval_cmd, check=True, capture_output=True, text=True)
+        eval_text = eval_run.stdout.strip()
+        if eval_text:
+            eval_path.write_text(eval_text)
+
+        metrics = {}
+        try:
+            metrics = json.loads(eval_path.read_text())
+        except Exception:
+            metrics = {}
+
+        job.result = {
+            "output_dir": str(output_dir),
+            "prepass_jsonl": str(prepass_path),
+            "features": str(features_path),
+            "labeled": str(labeled_path),
+            "model": str(Path(str(model_prefix) + ".pt")),
+            "meta": str(meta_path),
+            "eval": str(eval_path),
+            "metrics": metrics,
+        }
+        _calibration_update(job, status="completed", message="Done", phase="completed", progress=1.0)
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, RuntimeError) and str(exc) == "cancelled":
+            _calibration_update(job, status="cancelled", message="Cancelled", phase="cancelled")
+        else:
+            logger.exception("Calibration job %s failed", job.job_id)
+            _calibration_update(job, status="failed", message="Failed", phase="failed", error=str(exc))
+    finally:
+        job.updated_at = time.time()
+
+
+def _start_calibration_job(payload: CalibrationRequest) -> CalibrationJob:
+    job_id = f"cal_{uuid.uuid4().hex[:8]}"
+    job = CalibrationJob(job_id=job_id)
+    with CALIBRATION_JOBS_LOCK:
+        CALIBRATION_JOBS[job.job_id] = job
+    thread = threading.Thread(target=_run_calibration_job, args=(job, payload), daemon=True)
+    thread.start()
+    return job
+
+
+def _cancel_calibration_job(job_id: str) -> CalibrationJob:
+    with CALIBRATION_JOBS_LOCK:
+        job = CALIBRATION_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+    if job.status in {"completed", "failed", "cancelled"}:
+        return job
+    job.cancel_event.set()
+    job.status = "cancelled"
+    job.message = "Cancelled"
+    job.phase = "cancelled"
+    job.updated_at = time.time()
+    return job
 def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -32549,99 +32584,6 @@ def _cancel_agent_mining_job(job_id: str) -> AgentMiningJob:
         job = AGENT_MINING_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_job_not_found")
-    if job.status in {"completed", "failed", "cancelled"}:
-        return job
-    job.cancel_event.set()
-    job.status = "cancelled"
-    job.message = "Cancelled"
-    job.updated_at = time.time()
-    return job
-
-
-def _run_qwen_agentic_job(job: QwenAgenticJob, payload: QwenAgenticRequest) -> None:
-    with QWEN_AGENTIC_JOBS_LOCK:
-        QWEN_AGENTIC_JOBS[job.job_id] = job
-    job.status = "running"
-    job.message = "Running agent"
-    job.request = payload.dict()
-    job.updated_at = time.time()
-    trace_path = QWEN_AGENTIC_TRACE_ROOT / f"{job.job_id}.jsonl"
-    job.trace_path = str(trace_path)
-    try:
-        trace_path.parent.mkdir(parents=True, exist_ok=True)
-        with trace_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({
-                "type": "job_start",
-                "job_id": job.job_id,
-                "timestamp": time.time(),
-                "request": job.request,
-            }, ensure_ascii=False) + "\n")
-    except Exception:
-        # Best-effort; still run without persistence if filesystem is unavailable.
-        job.trace_path = None
-    try:
-        def _trace_sink(event: AgentTraceEvent) -> None:
-            job.trace.append(event.dict())
-            job.updated_at = time.time()
-            if job.trace_path:
-                try:
-                    with open(job.trace_path, "a", encoding="utf-8") as handle:
-                        handle.write(json.dumps({
-                            "type": "trace",
-                            "timestamp": time.time(),
-                            "event": event.dict(),
-                        }, ensure_ascii=False) + "\n")
-                except Exception:
-                    pass
-
-        result = _run_agentic_annotation(
-            payload,
-            trace_sink=_trace_sink,
-            cancel_event=job.cancel_event,
-        )
-        job.result = result.dict()
-        if job.cancel_event.is_set():
-            job.status = "cancelled"
-            job.message = "Cancelled"
-        else:
-            job.status = "completed"
-            job.message = "Done"
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Qwen agentic job %s failed", job.job_id)
-        job.status = "failed"
-        job.error = str(exc)
-        job.message = "Failed"
-    finally:
-        job.updated_at = time.time()
-        if job.trace_path:
-            try:
-                with open(job.trace_path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps({
-                        "type": "job_end",
-                        "timestamp": time.time(),
-                        "status": job.status,
-                        "error": job.error,
-                        "result": job.result,
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-
-
-def _start_qwen_agentic_job(payload: QwenAgenticRequest) -> QwenAgenticJob:
-    job_id = f"qa_{uuid.uuid4().hex[:8]}"
-    job = QwenAgenticJob(job_id=job_id)
-    with QWEN_AGENTIC_JOBS_LOCK:
-        QWEN_AGENTIC_JOBS[job.job_id] = job
-    thread = threading.Thread(target=_run_qwen_agentic_job, args=(job, payload), daemon=True)
-    thread.start()
-    return job
-
-
-def _cancel_qwen_agentic_job(job_id: str) -> QwenAgenticJob:
-    with QWEN_AGENTIC_JOBS_LOCK:
-        job = QWEN_AGENTIC_JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_agentic_job_not_found")
     if job.status in {"completed", "failed", "cancelled"}:
         return job
     job.cancel_event.set()
@@ -39253,74 +39195,45 @@ def qwen_caption(payload: QwenCaptionRequest):
     return response
 
 
-@app.post("/qwen/agentic", response_model=QwenAgenticResponse)
-def qwen_agentic(payload: QwenAgenticRequest):
+@app.post("/qwen/prepass", response_model=QwenPrepassResponse)
+def qwen_prepass(payload: QwenPrepassRequest):
     try:
-        return _run_agentic_annotation(payload)
+        payload = payload.copy(update={"prepass_only": True})
+        return _run_prepass_annotation(payload)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_agentic_failed:{exc}") from exc
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_prepass_failed:{exc}") from exc
 
 
-@app.post("/qwen/agentic/jobs")
-def start_qwen_agentic_job(payload: QwenAgenticRequest):
-    job = _start_qwen_agentic_job(payload)
-    return _serialize_qwen_agentic_job(job)
+@app.post("/calibration/jobs")
+def start_calibration_job(payload: CalibrationRequest = Body(...)):
+    job = _start_calibration_job(payload)
+    return _serialize_calibration_job(job)
 
 
-@app.get("/qwen/agentic/jobs")
-def list_qwen_agentic_jobs():
-    _prune_job_registry(QWEN_AGENTIC_JOBS, QWEN_AGENTIC_JOBS_LOCK)
-    with QWEN_AGENTIC_JOBS_LOCK:
-        jobs = list(QWEN_AGENTIC_JOBS.values())
+@app.get("/calibration/jobs")
+def list_calibration_jobs():
+    _prune_job_registry(CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK)
+    with CALIBRATION_JOBS_LOCK:
+        jobs = list(CALIBRATION_JOBS.values())
     jobs.sort(key=lambda j: j.created_at, reverse=True)
-    return [_serialize_qwen_agentic_job(job) for job in jobs]
+    return [_serialize_calibration_job(job) for job in jobs]
 
 
-@app.get("/qwen/agentic/jobs/{job_id}")
-def get_qwen_agentic_job(job_id: str):
-    with QWEN_AGENTIC_JOBS_LOCK:
-        job = QWEN_AGENTIC_JOBS.get(job_id)
+@app.get("/calibration/jobs/{job_id}")
+def get_calibration_job(job_id: str):
+    with CALIBRATION_JOBS_LOCK:
+        job = CALIBRATION_JOBS.get(job_id)
     if not job:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_agentic_job_not_found")
-    return _serialize_qwen_agentic_job(job)
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+    return _serialize_calibration_job(job)
 
 
-@app.get("/qwen/agentic/jobs/{job_id}/trace")
-def get_qwen_agentic_trace(job_id: str):
-    with QWEN_AGENTIC_JOBS_LOCK:
-        job = QWEN_AGENTIC_JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_agentic_job_not_found")
-    records: List[Dict[str, Any]] = []
-    trace_path = Path(job.trace_path) if job.trace_path else None
-    if trace_path and trace_path.exists():
-        try:
-            with trace_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        records.append(json.loads(line))
-                    except Exception:
-                        continue
-        except Exception:
-            records = []
-    if not records:
-        records = [{"type": "trace", "event": entry} for entry in (job.trace or [])]
-    return {
-        "job_id": job.job_id,
-        "trace_path": job.trace_path,
-        "records": records,
-    }
-
-
-@app.post("/qwen/agentic/jobs/{job_id}/cancel")
-def cancel_qwen_agentic_job(job_id: str):
-    job = _cancel_qwen_agentic_job(job_id)
-    return _serialize_qwen_agentic_job(job)
+@app.post("/calibration/jobs/{job_id}/cancel")
+def cancel_calibration_job(job_id: str):
+    job = _cancel_calibration_job(job_id)
+    return _serialize_calibration_job(job)
 
 @app.post("/sam3/text_prompt", response_model=Sam3TextPromptResponse)
 def sam3_text_prompt(payload: Sam3TextPrompt):

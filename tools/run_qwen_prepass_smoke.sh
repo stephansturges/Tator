@@ -12,7 +12,7 @@ from pathlib import Path
 import requests
 
 
-parser = argparse.ArgumentParser(description="Run a Qwen agentic 10-image smoke test.")
+parser = argparse.ArgumentParser(description="Run a Qwen prepass 10-image smoke test.")
 parser.add_argument("--count", type=int, default=10, help="Number of images to sample.")
 parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling.")
 parser.add_argument("--dataset", default="qwen_dataset", help="Dataset id under uploads/qwen_runs/datasets.")
@@ -35,9 +35,9 @@ if len(images) < args.count:
     raise SystemExit(f"Not enough images ({len(images)}) for {args.count}-image smoke test.")
 
 selected = random.sample(images, args.count)
-out_path = Path(args.output or f"qwen_agentic_smoke_{args.count}img_seed{args.seed}.jsonl")
+out_path = Path(args.output or f"qwen_prepass_smoke_{args.count}img_seed{args.seed}.jsonl")
 
-api_url = f"{args.api_root.rstrip('/')}/qwen/agentic"
+api_url = f"{args.api_root.rstrip('/')}/qwen/prepass"
 unload_url = f"{args.api_root.rstrip('/')}/runtime/unload"
 
 requests.post(unload_url, timeout=None)
@@ -58,8 +58,6 @@ for idx, info in enumerate(selected, 1):
         "image_base64": image_base64,
         "model_id": args.model_id,
         "model_variant": args.variant,
-        "max_steps": 10,
-        "max_tool_calls": 18,
         "max_detections": 600,
         "max_new_tokens": 1200,
     }

@@ -12,7 +12,7 @@ import torch, clip, joblib, tiktoken
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, root_validator, Field
 from omegaconf import OmegaConf
@@ -3373,6 +3373,25 @@ def _strip_qwen_model_suffix(model_id: str) -> Optional[str]:
     return None
 
 
+def _caption_glossary_map(labelmap_glossary: Optional[str], labels: Sequence[str]) -> Dict[str, List[str]]:
+    if not labelmap_glossary:
+        return {}
+    return _parse_glossary_mapping(_normalize_labelmap_glossary(labelmap_glossary), list(labels))
+
+
+def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[str]]] = None) -> str:
+    label = str(label or "").strip()
+    if not label:
+        return ""
+    terms = (glossary_map or {}).get(label) or []
+    for term in terms:
+        if term and "_" not in term:
+            return str(term)
+    if "_" in label:
+        return label.replace("_", " ")
+    return label
+
+
 def _build_qwen_caption_prompt(
     user_prompt: str,
     label_hints: Sequence[QwenCaptionHint],
@@ -3450,34 +3469,22 @@ def _build_qwen_caption_prompt(
                 "Style guidance: use inspirations for tone/angle only. Rephrase, do not copy wording."
             )
     lines.append(f"Image size: {safe_width}x{safe_height} pixels.")
-    glossary_map: Dict[str, List[str]] = {}
-    if labelmap_glossary:
-        glossary_map = _parse_glossary_mapping(
-            _normalize_labelmap_glossary(labelmap_glossary),
-            list(counts.keys()) or [hint.label for hint in label_hints if hint.label],
-        )
-
-    def _caption_label(label: str) -> str:
-        label = str(label or "").strip()
-        if not label:
-            return ""
-        terms = glossary_map.get(label) or []
-        for term in terms:
-            if term and "_" not in term:
-                return str(term)
-        if "_" in label:
-            return label.replace("_", " ")
-        return label
+    glossary_map = _caption_glossary_map(
+        labelmap_glossary,
+        list(counts.keys()) or [hint.label for hint in label_hints if hint.label],
+    )
 
     # Build a forbidden token list for labelmap tags that should not appear verbatim.
     forbidden_labels: List[str] = []
     for lbl in sorted(set([hint.label for hint in label_hints if hint.label])):
-        preferred = _caption_label(lbl)
+        preferred = _caption_preferred_label(lbl, glossary_map)
         if "_" in lbl or (preferred and preferred.lower() != str(lbl).lower()):
             forbidden_labels.append(str(lbl))
 
     if include_counts and counts:
-        counts_text = ", ".join(f"{_caption_label(label)}: {count}" for label, count in counts.items())
+        counts_text = ", ".join(
+            f"{_caption_preferred_label(label, glossary_map)}: {count}" for label, count in counts.items()
+        )
         if restrict_to_labels:
             lines.append(f"COUNTS (use exactly): {counts_text}.")
             lines.append(
@@ -3488,7 +3495,7 @@ def _build_qwen_caption_prompt(
     elif counts:
         lines.append("Use the label hints to mention the main objects you see.")
     if counts and restrict_to_labels:
-        allowed = ", ".join(sorted(_caption_label(lbl) for lbl in counts.keys()))
+        allowed = ", ".join(sorted(_caption_preferred_label(lbl, glossary_map) for lbl in counts.keys()))
         if allowed:
             lines.append(
                 f"Only mention these classes if they appear: {allowed}. Do not invent other entity types."
@@ -3509,7 +3516,7 @@ def _build_qwen_caption_prompt(
                 lines.append(json.dumps(compact, separators=(",", ":")))
             lines.append("Use relative positions (e.g., top-left, center) when describing layout.")
         else:
-            labels_only = ", ".join(_caption_label(entry["label"]) for entry in selected)
+            labels_only = ", ".join(_caption_preferred_label(entry["label"], glossary_map) for entry in selected)
             lines.append(f"Labeled objects (one per box): {labels_only}.")
     if forbidden_labels:
         lines.append(
@@ -3573,7 +3580,11 @@ def _caption_starts_generic(text: str) -> bool:
     return any(lowered.startswith(prefix) for prefix in _CAPTION_GENERIC_OPENERS)
 
 
-def _caption_missing_labels(text: str, counts: Dict[str, int]) -> List[str]:
+def _caption_missing_labels(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> List[str]:
     if not text:
         return list(counts.keys())
     lowered = text.lower()
@@ -3581,7 +3592,13 @@ def _caption_missing_labels(text: str, counts: Dict[str, int]) -> List[str]:
     for label, count in counts.items():
         if count <= 0:
             continue
-        if label.lower() not in lowered:
+        label_terms = [str(label)]
+        if "_" in label:
+            label_terms.append(label.replace("_", " "))
+        if glossary_map and glossary_map.get(label):
+            label_terms.extend(glossary_map[label])
+        label_terms = [term.strip() for term in label_terms if term and term.strip()]
+        if not any(term.lower() in lowered for term in label_terms):
             missing.append(label)
     return missing
 
@@ -3591,12 +3608,13 @@ def _caption_needs_refine(
     counts: Dict[str, int],
     detailed_mode: bool,
     include_counts: bool,
+    glossary_map: Optional[Dict[str, List[str]]] = None,
 ) -> Tuple[bool, List[str]]:
     words = caption.split() if caption else []
     min_words = 12 if detailed_mode else 8
     if len(words) < min_words:
         return True, []
-    missing = _caption_missing_labels(caption, counts) if include_counts else []
+    missing = _caption_missing_labels(caption, counts, glossary_map) if include_counts else []
     if missing:
         return True, missing
     if _caption_starts_generic(caption) and detailed_mode:
@@ -3786,10 +3804,11 @@ def _run_qwen_caption_merge(
     if len(window_lines) == 1:
         return draft_caption
     merge_prompt = (
-        "Revise the draft caption so it includes distinct object details "
+        "Revise the draft caption so it includes all distinct object details "
         "from the window observations that are missing in the draft. "
-        "Do not invent new objects. You may use multiple sentences and preserve detail. "
-        "Preserve specific counts, actions, and notable attributes from the windows. "
+        "Do not invent new objects. Use multiple sentences if needed. "
+        "Preserve specific counts, actions, and notable attributes from the windows; "
+        "do not drop any concrete window detail unless it clearly conflicts with the full image. "
         "Do not mention labels, hints, or coordinates.\n"
         f"Draft caption: {draft_caption}\n"
         + "\n".join(window_lines)
@@ -5398,6 +5417,7 @@ class QwenPrepassRequest(BaseModel):
     image_name: Optional[str] = None
     model_id: Optional[str] = None
     model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
+    labelmap: Optional[List[str]] = None
     labelmap_glossary: Optional[str] = None
     detector_mode: Optional[Literal["yolo", "rfdetr"]] = "yolo"
     detector_id: Optional[str] = None
@@ -12817,9 +12837,11 @@ def _agent_run_deep_prepass_caption(
         )
     det_hint_summary = _agent_label_counts_summary(hint_items, limit=10)
     prepass_prompt = (
-        "Describe the image in 1-2 sentences. Use the detection hints as suggestions, "
-        "but mention other visible objects. Do not mention labels, hints, or coordinates. "
-        "Do not output labelmap tags (e.g., light_vehicle); use natural words like car or van."
+        "Write a detailed, multi-sentence caption. Use detection hints as suggestions, "
+        "but mention other visible objects. Preserve specific details you see (counts, actions, "
+        "notable attributes). Do not mention labels, hints, or coordinates. "
+        "Never output labelmap tags (e.g., light_vehicle); use natural words like car or van. "
+        "Avoid any token with underscores."
     )
     if det_hint_summary and det_hint_summary != "none":
         prepass_prompt = f"{prepass_prompt} Detection hints: {det_hint_summary}."
@@ -12829,9 +12851,9 @@ def _agent_run_deep_prepass_caption(
         caption_profile = "light"
     caption_variant = payload.prepass_caption_variant or payload.model_variant or "auto"
     caption_model_id = (payload.prepass_caption_model_id or model_id_override or "").strip() or None
-    caption_max_tokens = int(payload.prepass_caption_max_tokens or (128 if caption_profile == "light" else 512))
-    caption_mode = "full" if caption_profile == "light" else "windowed"
-    caption_all_windows = caption_mode == "windowed"
+    caption_max_tokens = int(payload.prepass_caption_max_tokens or (512 if caption_profile == "light" else 1024))
+    caption_mode = "windowed"
+    caption_all_windows = True
     include_coords = False
     caption_payload = QwenCaptionRequest(
         image_token=image_token,
@@ -13477,7 +13499,14 @@ def _run_prepass_annotation_qwen(
     _AGENT_ACTIVE_CLASSIFIER_BG_MARGIN = classifier_bg_margin if tighten_fp else None
     _AGENT_ACTIVE_SCORELESS_IOU = scoreless_iou if tighten_fp else None
     img_w, img_h = pil_img.size
-    labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
+    labelmap: List[str] = []
+    glossary = ""
+    if payload.labelmap:
+        labelmap = [str(x).strip() for x in payload.labelmap if str(x).strip()]
+        if labelmap:
+            glossary = _default_agent_glossary_for_labelmap(labelmap)
+    if not labelmap:
+        labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
     labelmap = labelmap or []
     warnings: List[str] = []
     if not labelmap:
@@ -14481,6 +14510,94 @@ SAM3_STORAGE_SCOPES = {"all", "checkpoints", "logs", "tensorboard", "dumps"}
 YOLO_MAX_LOG_LINES = 300
 
 
+def _prepass_recipe_dir(recipe_id: str, *, create: bool = False) -> Path:
+    safe = _sanitize_yolo_run_id(recipe_id)
+    path = PREPASS_RECIPE_ROOT / safe
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _prepass_recipe_meta_path(recipe_id: str) -> Path:
+    return _prepass_recipe_dir(recipe_id) / PREPASS_RECIPE_META
+
+
+def _prepass_recipe_assets_dir(recipe_id: str, *, create: bool = False) -> Path:
+    path = _prepass_recipe_dir(recipe_id, create=create) / PREPASS_RECIPE_ASSETS
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _sha256_path(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _copy_tree_filtered(src: Path, dest: Path, *, keep_files: Optional[set[str]] = None) -> List[Dict[str, Any]]:
+    copied: List[Dict[str, Any]] = []
+    if not src.exists():
+        return copied
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if item.is_dir():
+            sub_dest = dest / item.name
+            copied.extend(_copy_tree_filtered(item, sub_dest, keep_files=keep_files))
+            continue
+        if keep_files is not None and item.name not in keep_files:
+            continue
+        target = dest / item.name
+        shutil.copy2(item, target)
+        copied.append(
+            {
+                "path": str(target.relative_to(dest.parent)),
+                "size": target.stat().st_size,
+                "sha256": _sha256_path(target),
+            }
+        )
+    return copied
+
+
+def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
+    meta_path = recipe_dir / PREPASS_RECIPE_META
+    meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _load_prepass_recipe_meta(recipe_dir: Path) -> Dict[str, Any]:
+    meta_path = recipe_dir / PREPASS_RECIPE_META
+    if not meta_path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
+    return json.loads(meta_path.read_text())
+
+
+def _list_prepass_recipes() -> List[Dict[str, Any]]:
+    recipes: List[Dict[str, Any]] = []
+    for entry in PREPASS_RECIPE_ROOT.iterdir():
+        if not entry.is_dir():
+            continue
+        meta_path = entry / PREPASS_RECIPE_META
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        recipes.append(
+            {
+                "id": meta.get("id") or entry.name,
+                "name": meta.get("name") or entry.name,
+                "description": meta.get("description") or "",
+                "created_at": meta.get("created_at"),
+                "updated_at": meta.get("updated_at"),
+            }
+        )
+    recipes.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or 0, reverse=True)
+    return recipes
+
+
 @dataclass
 class QwenTrainingJob:
     job_id: str
@@ -14610,6 +14727,8 @@ class CalibrationJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -14628,8 +14747,36 @@ CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
 CALIBRATION_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
+PREPASS_RECIPE_ROOT = UPLOAD_ROOT / "prepass_recipes"
+PREPASS_RECIPE_ROOT.mkdir(parents=True, exist_ok=True)
+PREPASS_RECIPE_META = "recipe.json"
+PREPASS_RECIPE_ASSETS = "assets"
+PREPASS_RECIPE_SCHEMA_VERSION = 1
+PREPASS_RECIPE_EXPORT_ROOT = Path(
+    os.environ.get("PREPASS_RECIPE_EXPORT_ROOT", str(UPLOAD_ROOT / "prepass_recipe_exports"))
+)
+PREPASS_RECIPE_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
 PROMPT_HELPER_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+class PrepassRecipeRequest(BaseModel):
+    recipe_id: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    config: Dict[str, Any]
+    glossary: Optional[str] = None
+
+
+class PrepassRecipeResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    created_at: float
+    updated_at: float
+    config: Dict[str, Any]
+    glossary: Optional[str] = None
+    schema_version: int = PREPASS_RECIPE_SCHEMA_VERSION
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
@@ -15331,6 +15478,33 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 and (path / "train" / "annotations.jsonl").exists()
                 and (path / "val" / "annotations.jsonl").exists()
             )
+            if not yolo_ready:
+                try:
+                    coco_exists = (path / "train" / "_annotations.coco.json").exists() or (path / "val" / "_annotations.coco.json").exists()
+                    if not coco_exists and qwen_ready:
+                        _convert_qwen_dataset_to_coco(path)
+                        coco_exists = True
+                    if coco_exists:
+                        _convert_coco_dataset_to_yolo(path)
+                        labelmap_path = path / "labelmap.txt"
+                        if labelmap_path.exists():
+                            if train_images.exists() and train_labels.exists():
+                                yolo_images_dir = str(train_images)
+                                yolo_labels_dir = str(train_labels)
+                                yolo_layout = "split"
+                            elif root_images.exists() and root_labels.exists():
+                                yolo_images_dir = str(root_images)
+                                yolo_labels_dir = str(root_labels)
+                                yolo_layout = "flat"
+                            yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
+                            if yolo_ready and not meta.get("classes"):
+                                try:
+                                    with labelmap_path.open("r", encoding="utf-8") as handle:
+                                        meta["classes"] = [line.strip() for line in handle if line.strip()]
+                                except Exception:
+                                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to auto-convert COCO to YOLO for %s: %s", path, exc)
             dataset_format = "unknown"
             dataset_type = meta.get("type", "bbox")
             if yolo_ready:
@@ -35049,6 +35223,176 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     return sam3_meta
 
 
+def _convert_coco_dataset_to_yolo(dataset_root: Path) -> Dict[str, Any]:
+    dataset_root = dataset_root.resolve()
+    ann_paths: List[Tuple[str, Path, Path]] = []
+    for split in ("train", "val"):
+        ann_path = dataset_root / split / "_annotations.coco.json"
+        if not ann_path.exists():
+            continue
+        images_dir = ann_path.parent / "images"
+        if not images_dir.exists():
+            images_dir = ann_path.parent
+        ann_paths.append((split, ann_path, images_dir))
+    if not ann_paths:
+        ann_path, images_dir = _find_coco_split(dataset_root)
+        ann_paths = [("train", ann_path, images_dir)]
+
+    category_map: Dict[int, str] = {}
+    has_segmentation = False
+    for _, ann_path, _ in ann_paths:
+        try:
+            data = json.loads(ann_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+        for cat in data.get("categories", []) or []:
+            try:
+                cid = int(cat.get("id"))
+            except Exception:
+                continue
+            name = str(cat.get("name") or f"class_{cid}")
+            category_map.setdefault(cid, name)
+        if not category_map:
+            for ann in data.get("annotations", []) or []:
+                try:
+                    cid = int(ann.get("category_id"))
+                except Exception:
+                    continue
+                category_map.setdefault(cid, f"class_{cid}")
+        if not has_segmentation:
+            for ann in data.get("annotations", []) or []:
+                seg = ann.get("segmentation")
+                if isinstance(seg, list) and any(isinstance(poly, list) and len(poly) >= 6 for poly in seg):
+                    has_segmentation = True
+                    break
+
+    if not category_map:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_categories_missing")
+
+    sorted_ids = sorted(category_map.keys())
+    labelmap = [category_map[cid] for cid in sorted_ids]
+    labelmap_path = dataset_root / "labelmap.txt"
+    labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+    cat_id_to_idx = {cid: idx for idx, cid in enumerate(sorted_ids)}
+
+    def _resolve_image_path(file_name: str, images_dir: Path, split_name: str) -> Optional[Path]:
+        if not file_name:
+            return None
+        rel_path = Path(file_name)
+        candidates: List[Path] = []
+        if rel_path.is_absolute():
+            candidates.append(rel_path)
+        candidates.append(images_dir / rel_path)
+        candidates.append(images_dir / rel_path.name)
+        candidates.append(dataset_root / rel_path)
+        candidates.append(dataset_root / split_name / "images" / rel_path.name)
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        return None
+
+    def _label_relpath_for_image(file_name: str) -> Path:
+        rel_path = Path(file_name)
+        if rel_path.is_absolute():
+            rel_path = Path(rel_path.name)
+        if "images" in rel_path.parts:
+            idx = rel_path.parts.index("images")
+            rel_path = Path(*rel_path.parts[idx + 1 :])
+        return rel_path.with_suffix(".txt")
+
+    dataset_type = "seg" if has_segmentation else "bbox"
+    for split_name, ann_path, images_dir in ann_paths:
+        labels_dir = dataset_root / split_name / "labels"
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(ann_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+        images = data.get("images", []) or []
+        annotations = data.get("annotations", []) or []
+        ann_by_image: Dict[int, List[Dict[str, Any]]] = {}
+        for ann in annotations:
+            try:
+                img_id = int(ann.get("image_id"))
+            except Exception:
+                continue
+            ann_by_image.setdefault(img_id, []).append(ann)
+        for img in images:
+            try:
+                img_id = int(img.get("id"))
+            except Exception:
+                continue
+            file_name = str(img.get("file_name") or "")
+            img_path = _resolve_image_path(file_name, images_dir, split_name)
+            if img_path is None:
+                logger.warning("COCO->YOLO: missing image for %s in %s", file_name, dataset_root)
+                continue
+            width = img.get("width")
+            height = img.get("height")
+            if not width or not height:
+                try:
+                    with Image.open(img_path) as im:
+                        width, height = im.size
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("COCO->YOLO: failed to read image size for %s: %s", img_path, exc)
+                    continue
+            label_rel = _label_relpath_for_image(file_name)
+            label_path = labels_dir / label_rel
+            label_path.parent.mkdir(parents=True, exist_ok=True)
+            lines: List[str] = []
+            for ann in ann_by_image.get(img_id, []):
+                try:
+                    cat_id = int(ann.get("category_id"))
+                except Exception:
+                    continue
+                if cat_id not in cat_id_to_idx:
+                    continue
+                class_idx = cat_id_to_idx[cat_id]
+                bbox = ann.get("bbox") or []
+                if len(bbox) < 4:
+                    continue
+                x, y, w, h = map(float, bbox[:4])
+                if w <= 0 or h <= 0:
+                    continue
+                cx = (x + w / 2.0) / float(width)
+                cy = (y + h / 2.0) / float(height)
+                bw = w / float(width)
+                bh = h / float(height)
+                if dataset_type == "seg":
+                    seg = ann.get("segmentation")
+                    poly = None
+                    if isinstance(seg, list):
+                        for candidate in seg:
+                            if isinstance(candidate, list) and len(candidate) >= 6:
+                                poly = candidate
+                                break
+                    if poly is not None:
+                        coords: List[str] = []
+                        for idx in range(0, len(poly), 2):
+                            px = float(poly[idx]) / float(width)
+                            py = float(poly[idx + 1]) / float(height)
+                            coords.append(f"{max(0.0, min(1.0, px)):.6f}")
+                            coords.append(f"{max(0.0, min(1.0, py)):.6f}")
+                        if len(coords) >= 6:
+                            lines.append(f"{class_idx} " + " ".join(coords))
+                            continue
+                lines.append(f"{class_idx} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+            if lines:
+                label_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    meta = _load_sam3_dataset_metadata(dataset_root) or {}
+    meta.setdefault("id", dataset_root.name)
+    meta.setdefault("label", dataset_root.name)
+    meta.setdefault("source", meta.get("source") or "coco")
+    meta["classes"] = labelmap
+    meta["type"] = dataset_type
+    meta["dataset_root"] = str(dataset_root)
+    meta["signature"] = _compute_dir_signature(dataset_root)
+    meta["yolo_converted_at"] = time.time()
+    _persist_sam3_dataset_metadata(dataset_root, meta)
+    return meta
+
+
 def _list_sam3_datasets() -> List[Dict[str, Any]]:
     return _list_all_datasets()
 
@@ -39355,6 +39699,15 @@ def qwen_caption(payload: QwenCaptionRequest):
         restrict_to_labels = payload.restrict_to_labels if payload.restrict_to_labels is not None else True
         caption_all_windows = True if caption_mode == "windowed" else bool(payload.caption_all_windows)
         detailed_mode = caption_mode == "windowed"
+        glossary_map = _caption_glossary_map(
+            payload.labelmap_glossary,
+            [hint.label for hint in label_hints if hint.label],
+        )
+        allowed_labels_prompt = (
+            [_caption_preferred_label(label, glossary_map) for label in allowed_labels]
+            if allowed_labels
+            else []
+        )
         prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt(
             user_prompt,
             label_hints,
@@ -39447,6 +39800,15 @@ def qwen_caption(payload: QwenCaptionRequest):
                     if not window_hints and not caption_all_windows:
                         continue
                     window_allowed = _allowed_caption_labels(window_hints)
+                    window_glossary_map = _caption_glossary_map(
+                        payload.labelmap_glossary,
+                        [hint.label for hint in window_hints if hint.label],
+                    )
+                    window_allowed_prompt = (
+                        [_caption_preferred_label(label, window_glossary_map) for label in window_allowed]
+                        if window_allowed
+                        else []
+                    )
                     window_prompt, window_counts, _, _ = _build_qwen_caption_prompt(
                         user_prompt,
                         window_hints,
@@ -39462,16 +39824,17 @@ def qwen_caption(payload: QwenCaptionRequest):
                     window_prompt = (
                         f"Window region in full image: [{x0}, {y0}] to [{x0 + window_size}, {y0 + window_size}].\n"
                         "Focus only on this region.\n"
-                        "Write one complete sentence about this region only. No reasoning or preamble. "
+                        "Write 1-3 detailed sentences about this region only. No reasoning or preamble. "
                         "Do not mention labels, hints, counts, or coordinates. "
-                        "Do not output labelmap tags (e.g., light_vehicle); use natural words like car or van.\n"
+                        "Do not output labelmap tags (e.g., light_vehicle); use natural words like car or van. "
+                        "Avoid any token with underscores.\n"
                         f"{window_prompt}"
                     )
                     if glossary_line:
                         window_prompt = f"{window_prompt}\n{glossary_line}"
-                    if restrict_to_labels and window_allowed:
+                    if restrict_to_labels and window_allowed_prompt:
                         window_prompt = (
-                            f"{window_prompt}\nAllowed classes: {', '.join(window_allowed)}. "
+                            f"{window_prompt}\nAllowed classes: {', '.join(window_allowed_prompt)}. "
                             "Do not introduce any other entity types."
                         )
                     if window_is_thinking:
@@ -39498,7 +39861,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed if restrict_to_labels and window_allowed else None,
+                            allowed_labels=window_allowed_prompt if restrict_to_labels and window_allowed_prompt else None,
                             strict=True,
                             minimal_edit=True,
                         )
@@ -39513,7 +39876,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed if restrict_to_labels and window_allowed else None,
+                            allowed_labels=window_allowed_prompt if restrict_to_labels and window_allowed_prompt else None,
                             strict=True,
                             minimal_edit=True,
                         )
@@ -39528,7 +39891,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed if restrict_to_labels and window_allowed else None,
+                            allowed_labels=window_allowed_prompt if restrict_to_labels and window_allowed_prompt else None,
                             strict=True,
                             minimal_edit=True,
                         )
@@ -39538,13 +39901,14 @@ def qwen_caption(payload: QwenCaptionRequest):
                         window_counts,
                         detailed_mode=True,
                         include_counts=include_counts,
+                        glossary_map=window_glossary_map,
                     )
                     if needs_refine:
                         refine_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
                         allowed_note = ""
-                        if restrict_to_labels and window_allowed:
+                        if restrict_to_labels and window_allowed_prompt:
                             allowed_note = (
-                                f"Allowed classes: {', '.join(window_allowed)}. "
+                                f"Allowed classes: {', '.join(window_allowed_prompt)}. "
                                 "Do not introduce any other entity types."
                             )
                         elif not restrict_to_labels:
@@ -39560,7 +39924,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         refine_prompt = (
                             f"{refine_prompt}\n"
                             "Edit the draft with minimal changes. Do not introduce new objects or actions. "
-                            "Return only a single-sentence caption with no coordinates."
+                            "Return only a concise, complete caption (1-3 sentences) with no coordinates."
                         )
                         refine_system = (
                             "You are a concise captioning assistant. Return only the final caption in English."
@@ -39632,9 +39996,9 @@ def qwen_caption(payload: QwenCaptionRequest):
             draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
             draft_caption = _sanitize_qwen_caption(draft_caption)
             allowed_note = ""
-            if restrict_to_labels and allowed_labels:
+            if restrict_to_labels and allowed_labels_prompt:
                 allowed_note = (
-                    f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
+                    f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
                 )
             elif not restrict_to_labels:
                 allowed_note = "You may mention additional visible objects beyond the hints."
@@ -39684,7 +40048,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                     use_caption_cache,
                     model_id_override=cleanup_model,
                     runtime_override=get_runtime(cleanup_model),
-                    allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
+                    allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
                     strict=True,
                     minimal_edit=True,
                 )
@@ -39713,7 +40077,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
+                allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
                 strict=True,
                 minimal_edit=True,
             )
@@ -39728,7 +40092,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
+                allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
                 strict=True,
                 minimal_edit=True,
             )
@@ -39743,7 +40107,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels if restrict_to_labels and allowed_labels else None,
+                allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
                 strict=True,
                 minimal_edit=True,
             )
@@ -39753,13 +40117,14 @@ def qwen_caption(payload: QwenCaptionRequest):
             counts,
             detailed_mode=detailed_mode,
             include_counts=include_counts,
+            glossary_map=glossary_map,
         )
         if needs_refine:
             refine_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
             allowed_note = ""
-            if restrict_to_labels and allowed_labels:
+            if restrict_to_labels and allowed_labels_prompt:
                 allowed_note = (
-                    f"Allowed classes: {', '.join(allowed_labels)}. Do not introduce any other entity types."
+                    f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
                 )
             elif not restrict_to_labels:
                 allowed_note = "You may mention additional visible objects beyond the hints."
@@ -39890,6 +40255,339 @@ def get_calibration_job(job_id: str):
 def cancel_calibration_job(job_id: str):
     job = _cancel_calibration_job(job_id)
     return _serialize_calibration_job(job)
+
+
+@app.get("/prepass/recipes")
+def list_prepass_recipes():
+    return _list_prepass_recipes()
+
+
+@app.get("/prepass/recipes/{recipe_id}", response_model=PrepassRecipeResponse)
+def get_prepass_recipe(recipe_id: str):
+    recipe_dir = _prepass_recipe_dir(recipe_id)
+    meta = _load_prepass_recipe_meta(recipe_dir)
+    return PrepassRecipeResponse(
+        id=meta.get("id") or recipe_id,
+        name=meta.get("name") or recipe_id,
+        description=meta.get("description"),
+        created_at=float(meta.get("created_at") or time.time()),
+        updated_at=float(meta.get("updated_at") or time.time()),
+        config=meta.get("config") or {},
+        glossary=meta.get("glossary"),
+        schema_version=int(meta.get("schema_version") or PREPASS_RECIPE_SCHEMA_VERSION),
+    )
+
+
+@app.post("/prepass/recipes", response_model=PrepassRecipeResponse)
+def save_prepass_recipe(payload: PrepassRecipeRequest):
+    recipe_id = payload.recipe_id or uuid.uuid4().hex
+    recipe_dir = _prepass_recipe_dir(recipe_id, create=True)
+    now = time.time()
+    existing = {}
+    meta_path = recipe_dir / PREPASS_RECIPE_META
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+        except Exception:
+            existing = {}
+    created_at = float(existing.get("created_at") or now)
+    recipe_meta = {
+        "id": recipe_id,
+        "schema_version": PREPASS_RECIPE_SCHEMA_VERSION,
+        "name": payload.name.strip(),
+        "description": (payload.description or "").strip(),
+        "config": payload.config or {},
+        "glossary": _normalize_labelmap_glossary(payload.glossary),
+        "created_at": created_at,
+        "updated_at": now,
+    }
+    _write_prepass_recipe_meta(recipe_dir, recipe_meta)
+    return PrepassRecipeResponse(
+        id=recipe_id,
+        name=recipe_meta["name"],
+        description=recipe_meta.get("description"),
+        created_at=created_at,
+        updated_at=now,
+        config=recipe_meta["config"],
+        glossary=recipe_meta.get("glossary") or None,
+    )
+
+
+@app.delete("/prepass/recipes/{recipe_id}")
+def delete_prepass_recipe(recipe_id: str):
+    recipe_dir = _prepass_recipe_dir(recipe_id)
+    if not recipe_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
+    shutil.rmtree(recipe_dir, ignore_errors=True)
+    return {"status": "deleted", "id": recipe_id}
+
+
+def _collect_recipe_assets(recipe_meta: Dict[str, Any], temp_dir: Path) -> Dict[str, Any]:
+    assets: Dict[str, Any] = {"copied": [], "missing": []}
+    config = recipe_meta.get("config") or {}
+    glossary_text = recipe_meta.get("glossary") or ""
+    if glossary_text:
+        glossary_path = temp_dir / "glossary.json"
+        glossary_path.write_text(json.dumps({"glossary": glossary_text}, indent=2), encoding="utf-8")
+        assets["copied"].append(
+            {
+                "path": "glossary.json",
+                "size": glossary_path.stat().st_size,
+                "sha256": _sha256_path(glossary_path),
+            }
+        )
+
+    labelmap_lines: List[str] = []
+    if isinstance(config.get("labelmap"), list):
+        labelmap_lines = [str(x).strip() for x in config.get("labelmap") or [] if str(x).strip()]
+    if not labelmap_lines:
+        dataset_id = config.get("dataset_id")
+        if isinstance(dataset_id, str) and dataset_id.strip():
+            labelmap_lines, _ = _agent_load_labelmap_meta(dataset_id)
+    if not labelmap_lines and active_labelmap_path:
+        try:
+            labelmap_lines = _read_labelmap_lines(Path(active_labelmap_path))
+        except Exception:
+            labelmap_lines = []
+    if labelmap_lines:
+        labelmap_path = temp_dir / "labelmap.txt"
+        labelmap_path.write_text("\n".join(labelmap_lines) + "\n", encoding="utf-8")
+        assets["copied"].append(
+            {
+                "path": "labelmap.txt",
+                "size": labelmap_path.stat().st_size,
+                "sha256": _sha256_path(labelmap_path),
+            }
+        )
+
+    def _copy_run(root: Path, run_id: Optional[str], keep: Optional[set[str]], kind: str):
+        if not run_id:
+            return
+        run_dir = root / _sanitize_yolo_run_id(run_id)
+        if not run_dir.exists():
+            assets["missing"].append({"kind": kind, "id": run_id})
+            return
+        dest = temp_dir / "models" / kind / run_dir.name
+        assets["copied"].extend(_copy_tree_filtered(run_dir, dest, keep_files=keep))
+
+    _copy_run(YOLO_JOB_ROOT, config.get("yolo_id"), None, "yolo_runs")
+    _copy_run(RFDETR_JOB_ROOT, config.get("rfdetr_id"), RFDETR_KEEP_FILES, "rfdetr_runs")
+
+    classifier_id = config.get("classifier_id")
+    if classifier_id:
+        try:
+            classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        except HTTPException:
+            classifier_path = None
+        if classifier_path and classifier_path.exists():
+            dest = temp_dir / "models" / "classifiers"
+            dest.mkdir(parents=True, exist_ok=True)
+            target = dest / classifier_path.name
+            shutil.copy2(classifier_path, target)
+            assets["copied"].append(
+                {
+                    "path": str(target.relative_to(temp_dir)),
+                    "size": target.stat().st_size,
+                    "sha256": _sha256_path(target),
+                }
+            )
+        else:
+            assets["missing"].append({"kind": "classifier", "id": classifier_id})
+
+    job_id = config.get("ensemble_job_id")
+    if job_id:
+        job_dir = CALIBRATION_ROOT / _sanitize_yolo_run_id(job_id)
+        if job_dir.exists():
+            dest = temp_dir / "models" / "calibration_jobs" / job_dir.name
+            assets["copied"].extend(_copy_tree_filtered(job_dir, dest, keep_files=None))
+        else:
+            assets["missing"].append({"kind": "calibration_job", "id": job_id})
+
+    return assets
+
+
+@app.post("/prepass/recipes/{recipe_id}/export")
+def export_prepass_recipe(recipe_id: str):
+    recipe_dir = _prepass_recipe_dir(recipe_id)
+    meta = _load_prepass_recipe_meta(recipe_dir)
+    temp_dir = Path(
+        tempfile.mkdtemp(prefix=f"prepass_recipe_{recipe_id}_", dir=PREPASS_RECIPE_EXPORT_ROOT)
+    )
+    try:
+        meta_path = temp_dir / PREPASS_RECIPE_META
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        assets = _collect_recipe_assets(meta, temp_dir)
+        manifest = {
+            "schema_version": PREPASS_RECIPE_SCHEMA_VERSION,
+            "recipe_id": meta.get("id") or recipe_id,
+            "generated_at": time.time(),
+            "assets": assets,
+        }
+        manifest_path = temp_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        zip_path = temp_dir.with_suffix(".zip")
+        shutil.make_archive(zip_path.with_suffix("").as_posix(), "zip", temp_dir.as_posix())
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=f"prepass_recipe_{recipe_id}.zip",
+        )
+    finally:
+        # temp dir is left for FileResponse streaming; cleanup deferred by OS
+        pass
+
+
+def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
+    temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_"))
+    try:
+        extract_dir = temp_dir / "extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
+        meta_path = extract_dir / PREPASS_RECIPE_META
+        if not meta_path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_missing_meta")
+        meta = json.loads(meta_path.read_text())
+        config = meta.get("config") or {}
+        glossary = meta.get("glossary") or ""
+        labelmap_file = None
+        for candidate in (extract_dir / "labelmap.txt", extract_dir / "labelmaps" / "labelmap.txt"):
+            if candidate.exists():
+                labelmap_file = candidate
+                break
+        if labelmap_file and not isinstance(config.get("labelmap"), list):
+            try:
+                lines = _read_labelmap_lines(labelmap_file)
+            except Exception:
+                lines = []
+            if lines:
+                config["labelmap"] = lines
+
+        def _run_dir_matches(src: Path, dest: Path, keep_files: Optional[set[str]] = None) -> bool:
+            if not dest.exists() or not dest.is_dir():
+                return False
+            for item in src.iterdir():
+                if not item.is_file():
+                    continue
+                if keep_files is not None and item.name not in keep_files:
+                    continue
+                target = dest / item.name
+                if not target.exists():
+                    return False
+                if target.stat().st_size != item.stat().st_size:
+                    return False
+            return True
+
+        def _copy_run_assets(kind: str, root: Path, keep_files: Optional[set[str]] = None) -> Optional[str]:
+            src_root = extract_dir / "models" / kind
+            if not src_root.exists():
+                return None
+            for run_dir in src_root.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                existing = root / run_dir.name
+                if _run_dir_matches(run_dir, existing, keep_files=keep_files):
+                    return run_dir.name
+                new_id = uuid.uuid4().hex
+                dest = root / new_id
+                dest.mkdir(parents=True, exist_ok=True)
+                for item in run_dir.iterdir():
+                    if item.is_file():
+                        if keep_files is not None and item.name not in keep_files:
+                            continue
+                        shutil.copy2(item, dest / item.name)
+                return new_id
+            return None
+
+        yolo_id = _copy_run_assets("yolo_runs", YOLO_JOB_ROOT, keep_files=None)
+        rfdetr_id = _copy_run_assets("rfdetr_runs", RFDETR_JOB_ROOT, keep_files=RFDETR_KEEP_FILES)
+        if yolo_id:
+            config["yolo_id"] = yolo_id
+        if rfdetr_id:
+            config["rfdetr_id"] = rfdetr_id
+
+        classifier_root = extract_dir / "models" / "classifiers"
+        if classifier_root.exists():
+            classifier_root.mkdir(parents=True, exist_ok=True)
+            for item in classifier_root.iterdir():
+                if item.is_file():
+                    dest = (UPLOAD_ROOT / "classifiers") / item.name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if not dest.exists() or dest.stat().st_size != item.stat().st_size:
+                        shutil.copy2(item, dest)
+                    config["classifier_id"] = str(dest.relative_to(UPLOAD_ROOT / "classifiers"))
+                    break
+
+        calib_root = extract_dir / "models" / "calibration_jobs"
+        if calib_root.exists():
+            for job_dir in calib_root.iterdir():
+                if not job_dir.is_dir():
+                    continue
+                existing = CALIBRATION_ROOT / job_dir.name
+                if _run_dir_matches(job_dir, existing, keep_files=None):
+                    config["ensemble_job_id"] = job_dir.name
+                else:
+                    new_job = uuid.uuid4().hex
+                    dest = CALIBRATION_ROOT / new_job
+                    dest.mkdir(parents=True, exist_ok=True)
+                    for item in job_dir.iterdir():
+                        if item.is_file():
+                            shutil.copy2(item, dest / item.name)
+                    config["ensemble_job_id"] = new_job
+                break
+
+        recipe_id = uuid.uuid4().hex
+        recipe_dir = _prepass_recipe_dir(recipe_id, create=True)
+        now = time.time()
+        recipe_meta = {
+            "id": recipe_id,
+            "schema_version": PREPASS_RECIPE_SCHEMA_VERSION,
+            "name": meta.get("name") or f"Imported recipe {recipe_id[:8]}",
+            "description": meta.get("description") or "",
+            "config": config,
+            "glossary": _normalize_labelmap_glossary(glossary),
+            "created_at": now,
+            "updated_at": now,
+        }
+        _write_prepass_recipe_meta(recipe_dir, recipe_meta)
+        return PrepassRecipeResponse(
+            id=recipe_id,
+            name=recipe_meta["name"],
+            description=recipe_meta.get("description"),
+            created_at=now,
+            updated_at=now,
+            config=recipe_meta["config"],
+            glossary=recipe_meta.get("glossary") or None,
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.post("/prepass/recipes/import", response_model=PrepassRecipeResponse)
+def import_prepass_recipe(file: UploadFile = File(...)):  # noqa: B008
+    temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_"))
+    try:
+        zip_path = temp_dir / "upload.zip"
+        with zip_path.open("wb") as f:
+            shutil.copyfileobj(file.file, f)
+        return _import_prepass_recipe_from_zip(zip_path)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.post("/prepass/recipes/import-raw", response_model=PrepassRecipeResponse)
+async def import_prepass_recipe_raw(request: Request):
+    if "application/zip" not in (request.headers.get("content-type") or ""):
+        raise HTTPException(status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="prepass_recipe_invalid_media")
+    temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_raw_"))
+    try:
+        zip_path = temp_dir / "upload.zip"
+        with zip_path.open("wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+        return _import_prepass_recipe_from_zip(zip_path)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 @app.post("/sam3/text_prompt", response_model=Sam3TextPromptResponse)
 def sam3_text_prompt(payload: Sam3TextPrompt):

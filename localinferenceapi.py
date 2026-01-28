@@ -335,7 +335,7 @@ QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
 QWEN_TRUST_REMOTE_CODE = _env_bool("QWEN_TRUST_REMOTE_CODE", False)
 QWEN_CAPTION_CACHE_LIMIT = _env_int("QWEN_CAPTION_CACHE_LIMIT", 0)
 QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
-QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.1)
+QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
 
 # Rough VRAM estimates (GB) for Qwen3 training defaults (batch=1, default pixel budget).
 # These are approximate and should be treated as guidance, not a hard guarantee.
@@ -3383,6 +3383,7 @@ def _build_qwen_caption_prompt(
     max_boxes: int,
     detailed_mode: bool,
     restrict_to_labels: bool = True,
+    labelmap_glossary: Optional[str] = None,
 ) -> Tuple[str, Dict[str, int], int, bool]:
     safe_width = max(1, int(image_width))
     safe_height = max(1, int(image_height))
@@ -3449,8 +3450,34 @@ def _build_qwen_caption_prompt(
                 "Style guidance: use inspirations for tone/angle only. Rephrase, do not copy wording."
             )
     lines.append(f"Image size: {safe_width}x{safe_height} pixels.")
+    glossary_map: Dict[str, List[str]] = {}
+    if labelmap_glossary:
+        glossary_map = _parse_glossary_mapping(
+            _normalize_labelmap_glossary(labelmap_glossary),
+            list(counts.keys()) or [hint.label for hint in label_hints if hint.label],
+        )
+
+    def _caption_label(label: str) -> str:
+        label = str(label or "").strip()
+        if not label:
+            return ""
+        terms = glossary_map.get(label) or []
+        for term in terms:
+            if term and "_" not in term:
+                return str(term)
+        if "_" in label:
+            return label.replace("_", " ")
+        return label
+
+    # Build a forbidden token list for labelmap tags that should not appear verbatim.
+    forbidden_labels: List[str] = []
+    for lbl in sorted(set([hint.label for hint in label_hints if hint.label])):
+        preferred = _caption_label(lbl)
+        if "_" in lbl or (preferred and preferred.lower() != str(lbl).lower()):
+            forbidden_labels.append(str(lbl))
+
     if include_counts and counts:
-        counts_text = ", ".join(f"{label}: {count}" for label, count in counts.items())
+        counts_text = ", ".join(f"{_caption_label(label)}: {count}" for label, count in counts.items())
         if restrict_to_labels:
             lines.append(f"COUNTS (use exactly): {counts_text}.")
             lines.append(
@@ -3461,7 +3488,7 @@ def _build_qwen_caption_prompt(
     elif counts:
         lines.append("Use the label hints to mention the main objects you see.")
     if counts and restrict_to_labels:
-        allowed = ", ".join(sorted(counts.keys()))
+        allowed = ", ".join(sorted(_caption_label(lbl) for lbl in counts.keys()))
         if allowed:
             lines.append(
                 f"Only mention these classes if they appear: {allowed}. Do not invent other entity types."
@@ -3482,22 +3509,22 @@ def _build_qwen_caption_prompt(
                 lines.append(json.dumps(compact, separators=(",", ":")))
             lines.append("Use relative positions (e.g., top-left, center) when describing layout.")
         else:
-            labels_only = ", ".join(entry["label"] for entry in selected)
+            labels_only = ", ".join(_caption_label(entry["label"]) for entry in selected)
             lines.append(f"Labeled objects (one per box): {labels_only}.")
+    if forbidden_labels:
+        lines.append(
+            "Forbidden label tokens (do NOT output these exact strings): "
+            + ", ".join(forbidden_labels)
+            + ". Use natural synonyms instead."
+        )
     elif hints_payload and not include_counts:
         lines.append("Labels provided but box details omitted.")
     if truncated:
         lines.append("Note: Only a subset of boxes is shown; counts reflect all hints.")
-    if detailed_mode:
-        lines.append(
-            "Write a detailed caption. Use the image as truth and incorporate the label hints; "
-            "if hints conflict with the image, mention the uncertainty briefly."
-        )
-    else:
-        lines.append(
-            "Write a concise caption (1-2 sentences). Use the image as truth and incorporate the label hints; "
-            "if hints conflict with the image, mention the uncertainty briefly."
-        )
+    lines.append(
+        "Write a detailed caption. Use the image as truth and incorporate the label hints; "
+        "if hints conflict with the image, mention the uncertainty briefly."
+    )
     lines.append("Describe what the main objects are doing or how they are arranged when it is visible.")
     lines.append(
         "Be maximally descriptive: longer captions are acceptable when there is a lot to see. "
@@ -3740,8 +3767,66 @@ def _run_qwen_caption_cleanup(
     return _sanitize_qwen_caption(caption_text)
 
 
-def _resolve_qwen_window_size(requested: Optional[int], image_width: int, image_height: int) -> int:
-    base = requested if requested is not None else QWEN_WINDOW_DEFAULT_SIZE
+def _run_qwen_caption_merge(
+    draft_caption: str,
+    windowed_captions: Sequence[Tuple[int, int, int, str]],
+    *,
+    pil_img: Image.Image,
+    base_model_id: str,
+    runtime_resolver: Callable[[str], Tuple[Any, Any]],
+    max_new_tokens: int,
+    glossary_line: Optional[str] = None,
+) -> str:
+    if not draft_caption or not windowed_captions:
+        return draft_caption
+    window_lines = ["Window observations (do NOT invent objects):"]
+    for x0, y0, size, caption in windowed_captions:
+        if caption:
+            window_lines.append(f"- {caption}")
+    if len(window_lines) == 1:
+        return draft_caption
+    merge_prompt = (
+        "Revise the draft caption so it includes distinct object details "
+        "from the window observations that are missing in the draft. "
+        "Do not invent new objects. You may use multiple sentences and preserve detail. "
+        "Preserve specific counts, actions, and notable attributes from the windows. "
+        "Do not mention labels, hints, or coordinates.\n"
+        f"Draft caption: {draft_caption}\n"
+        + "\n".join(window_lines)
+    )
+    if glossary_line:
+        merge_prompt = f"{merge_prompt}\n{glossary_line}"
+    merge_system = (
+        "You are a caption editor. Return only the revised caption in English."
+    )
+    merge_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+    qwen_text, _, _ = _run_qwen_inference(
+        merge_prompt,
+        pil_img,
+        max_new_tokens=max_new_tokens,
+        system_prompt_override=merge_system,
+        runtime_override=runtime_resolver(merge_model),
+        decode_override={"do_sample": False},
+    )
+    merged, _ = _extract_caption_from_text(qwen_text, marker=None)
+    merged = _sanitize_qwen_caption(merged)
+    return merged or draft_caption
+
+
+def _resolve_qwen_window_size(
+    requested: Optional[int],
+    image_width: int,
+    image_height: int,
+    *,
+    overlap: Optional[float] = None,
+) -> int:
+    if requested is None:
+        overlap_val = _resolve_qwen_window_overlap(overlap)
+        base_dim = max(1, min(int(image_width), int(image_height)))
+        # 2x2 grid with overlap -> window = dim / (2 - overlap)
+        base = base_dim / max(1.0, 2.0 - overlap_val)
+    else:
+        base = requested
     try:
         base = int(base)
     except (TypeError, ValueError):
@@ -3755,12 +3840,20 @@ def _resolve_qwen_window_overlap(requested: Optional[float]) -> float:
         overlap = float(requested) if requested is not None else QWEN_WINDOW_DEFAULT_OVERLAP
     except (TypeError, ValueError):
         overlap = QWEN_WINDOW_DEFAULT_OVERLAP
-    return max(0.0, min(overlap, 0.1))
+    return max(0.0, min(overlap, 0.2))
 
 
-def _window_positions(total: int, window: int, overlap: float) -> List[int]:
+def _window_positions(
+    total: int,
+    window: int,
+    overlap: float,
+    *,
+    force_two: bool = False,
+) -> List[int]:
     if total <= window:
         return [0]
+    if force_two:
+        return [0, max(0, total - window)]
     step = max(1, int(round(window * (1.0 - overlap))))
     positions = list(range(0, max(1, total - window + 1), step))
     last = total - window
@@ -5195,7 +5288,7 @@ class QwenCaptionRequest(BaseModel):
     window_size: Optional[int] = None
     window_overlap: Optional[float] = None
     restrict_to_labels: Optional[bool] = True
-    caption_all_windows: Optional[bool] = False
+    caption_all_windows: Optional[bool] = True
     unload_others: Optional[bool] = False
     force_unload: Optional[bool] = None
     multi_model_cache: Optional[bool] = False
@@ -5205,6 +5298,7 @@ class QwenCaptionRequest(BaseModel):
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     presence_penalty: Optional[float] = None
+    labelmap_glossary: Optional[str] = None
 
     @root_validator(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
@@ -5282,6 +5376,9 @@ class QwenCaptionRequest(BaseModel):
                 values["window_overlap"] = None
         model_id = (values.get("model_id") or "").strip()
         values["model_id"] = model_id or None
+        glossary = values.get("labelmap_glossary")
+        if glossary is not None:
+            values["labelmap_glossary"] = str(glossary).strip() or None
         values["final_answer_only"] = bool(values.get("final_answer_only", True))
         values["two_stage_refine"] = bool(values.get("two_stage_refine", False))
         return values
@@ -5345,6 +5442,8 @@ class QwenPrepassRequest(BaseModel):
     overlay_dot_radius: Optional[int] = None
     tighten_fp: Optional[bool] = True
     detector_conf: Optional[float] = 0.45
+    detector_iou: Optional[float] = None
+    detector_merge_iou: Optional[float] = None
     sam3_score_thr: Optional[float] = 0.2
     sam3_mask_threshold: Optional[float] = 0.2
     classifier_min_prob: Optional[float] = 0.35
@@ -8080,6 +8179,58 @@ def _agent_filter_scoreless_detections(
     return filtered, removed
 
 
+def _resolve_classifier_batch_size() -> int:
+    raw = os.environ.get("AGENT_CLASSIFIER_BATCH_SIZE")
+    try:
+        if raw is not None and str(raw).strip():
+            return max(1, min(int(raw), 512))
+    except Exception:
+        pass
+    return 64
+
+
+def _predict_proba_batched(
+    crops: Sequence[Image.Image],
+    head: Dict[str, Any],
+    *,
+    batch_size: int,
+) -> Optional[np.ndarray]:
+    if not crops:
+        return None
+    results: List[np.ndarray] = []
+    idx = 0
+    bs = max(1, batch_size)
+    while idx < len(crops):
+        chunk = list(crops[idx : idx + bs])
+        feats = _encode_pil_batch_for_head(chunk, head=head, batch_size_override=bs)
+        if feats is None:
+            if bs > 1:
+                bs = max(1, bs // 2)
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                continue
+            return None
+        proba = _clip_head_predict_proba(feats, head)
+        if proba is None or proba.ndim != 2 or proba.shape[0] != len(chunk):
+            if bs > 1:
+                bs = max(1, bs // 2)
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                continue
+            return None
+        results.append(proba)
+        idx += len(chunk)
+    if not results:
+        return None
+    return np.vstack(results)
+
+
 def _agent_classifier_review(
     detections: List[Dict[str, Any]],
     *,
@@ -8106,6 +8257,9 @@ def _agent_classifier_review(
     margin = float(classifier_head.get("margin") or 0.0)
     background_margin = float(classifier_head.get("background_margin") or 0.0)
     accepted: List[Dict[str, Any]] = []
+
+    pending: List[Tuple[Dict[str, Any], int, Sequence[float]]] = []
+    crops: List[Image.Image] = []
     for det in detections:
         bbox = det.get("bbox_xyxy_px")
         label = str(det.get("label") or "").strip()
@@ -8122,42 +8276,46 @@ def _agent_classifier_review(
             continue
         x1, y1, x2, y2 = bbox[:4]
         crop = pil_img.crop((x1, y1, x2, y2))
-        feats = _encode_pil_batch_for_head([crop], head=classifier_head)
-        proba_arr = _clip_head_predict_proba(feats, classifier_head)
-        if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] < 1:
-            counts["classifier_errors"] += 1
-            det["classifier_accept"] = False
-            det["classifier_error"] = "predict_failed"
-            continue
-        row = proba_arr[0]
-        order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
-        best_idx = order[0] if order else None
-        best_label = classes[best_idx] if best_idx is not None else "unknown"
-        best_prob = float(row[best_idx]) if best_idx is not None else None
-        det["classifier_best"] = best_label
-        det["classifier_prob"] = best_prob
-        keep_mask = _clip_head_keep_mask(
-            proba_arr,
-            target_index=target_idx,
-            min_prob=min_prob,
-            margin=margin,
-            background_indices=bg_indices,
-            background_guard=True,
-            background_margin=background_margin,
-        )
-        accept = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
-        det["classifier_accept"] = accept
-        counts["classifier_checked"] += 1
-        summary_bbox = _agent_readable_format_bbox(bbox)
-        prob_text = f"{best_prob:.3f}" if isinstance(best_prob, float) else "n/a"
-        _agent_readable_write(
-            f"classifier check label={label} bbox={summary_bbox} "
-            f"best={best_label} prob={prob_text} accept={'yes' if accept else 'no'}"
-        )
-        if accept:
-            accepted.append(det)
-        else:
-            counts["classifier_rejected"] += 1
+        pending.append((det, target_idx, bbox[:4]))
+        crops.append(crop)
+
+    if pending:
+        proba_arr = _predict_proba_batched(crops, classifier_head, batch_size=_resolve_classifier_batch_size())
+        if proba_arr is None or proba_arr.ndim != 2:
+            for det, _target_idx, _bbox in pending:
+                counts["classifier_errors"] += 1
+                det["classifier_accept"] = False
+                det["classifier_error"] = "predict_failed"
+            return [], counts
+        for row, (det, target_idx, bbox) in zip(proba_arr, pending):
+            order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
+            best_idx = order[0] if order else None
+            best_label = classes[best_idx] if best_idx is not None else "unknown"
+            best_prob = float(row[best_idx]) if best_idx is not None else None
+            det["classifier_best"] = best_label
+            det["classifier_prob"] = best_prob
+            keep_mask = _clip_head_keep_mask(
+                row.reshape(1, -1),
+                target_index=target_idx,
+                min_prob=min_prob,
+                margin=margin,
+                background_indices=bg_indices,
+                background_guard=True,
+                background_margin=background_margin,
+            )
+            accept = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
+            det["classifier_accept"] = accept
+            counts["classifier_checked"] += 1
+            summary_bbox = _agent_readable_format_bbox(bbox)
+            prob_text = f"{best_prob:.3f}" if isinstance(best_prob, float) else "n/a"
+            _agent_readable_write(
+                f"classifier check label={det.get('label')} bbox={summary_bbox} "
+                f"best={best_label} prob={prob_text} accept={'yes' if accept else 'no'}"
+            )
+            if accept:
+                accepted.append(det)
+            else:
+                counts["classifier_rejected"] += 1
     return accepted, counts
 
 
@@ -8240,9 +8398,33 @@ def _agent_fuzzy_align_label(label: Optional[str], labelmap: Sequence[str]) -> O
         import difflib
     except Exception:
         return None
-    matches = difflib.get_close_matches(label_norm, list(norm_map.keys()), n=1, cutoff=0.7)
-    if matches:
-        return norm_map.get(matches[0])
+    # Fuzzy matching is deliberately strict to avoid re-mapping to the wrong class.
+    # Only allow near-exact matches with small edit distance and no ambiguity.
+    keys = list(norm_map.keys())
+    if not keys:
+        return None
+    best = None
+    best_score = 0.0
+    second = 0.0
+    for key in keys:
+        score = difflib.SequenceMatcher(None, label_norm, key).ratio()
+        if score > best_score:
+            second = best_score
+            best_score = score
+            best = key
+        elif score > second:
+            second = score
+    if best is None:
+        return None
+    if best_score < 0.92:
+        return None
+    if abs(len(best) - len(label_norm)) > 2:
+        return None
+    if best[0] != label_norm[0]:
+        return None
+    if second and abs(best_score - second) <= 0.02:
+        return None
+    return norm_map.get(best)
     return None
 
 
@@ -8260,6 +8442,8 @@ def _agent_sanitize_detection_items(
     label_index = {label: idx for idx, label in enumerate(labelmap)}
     cleaned: List[Dict[str, Any]] = []
     rejected = 0
+    pending: List[Dict[str, Any]] = []
+    pending_crops: List[Image.Image] = []
     for ann in items:
         label = str(ann.get("label") or ann.get("class_name") or "").strip()
         aligned = _agent_fuzzy_align_label(label, labelmap)
@@ -8291,26 +8475,30 @@ def _agent_sanitize_detection_items(
         if x2 <= x1 or y2 <= y1:
             rejected += 1
             continue
+        base_entry = {
+            "bbox_xyxy_px": [x1, y1, x2, y2],
+            "bbox_xywh_px": _agent_xyxy_to_xywh(x1, y1, x2, y2),
+            "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
+            "bbox_yolo": list(_xyxy_to_yolo_norm(img_w, img_h, x1, y1, x2, y2)),
+            "label": aligned,
+            "class_id": label_index[aligned],
+            "score": score,
+            "score_source": score_source,
+            "sam3_prompt_term": ann.get("sam3_prompt_term"),
+            "sam3_prompt_label": ann.get("sam3_prompt_label"),
+            "sam3_prompt_source": ann.get("sam3_prompt_source"),
+            "source": ann.get("source") or "agent",
+        }
+        source_list = ann.get("source_list")
+        if isinstance(source_list, (list, tuple)):
+            base_entry["source_list"] = [str(item) for item in source_list if item]
+
         if pil_img is not None and isinstance(classifier_head, dict):
             classes = [str(c) for c in list(classifier_head.get("classes") or [])]
             target_idx = _find_clip_head_target_index(classes, aligned)
             if target_idx is None:
                 rejected += 1
                 continue
-            crop = pil_img.crop((x1, y1, x2, y2))
-            feats = _encode_pil_batch_for_head([crop], head=classifier_head)
-            proba_arr = _clip_head_predict_proba(feats, classifier_head)
-            if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] < 1:
-                rejected += 1
-                continue
-            min_prob = float(classifier_head.get("min_prob") or 0.5)
-            margin = float(classifier_head.get("margin") or 0.0)
-            background_margin = float(classifier_head.get("background_margin") or 0.0)
-            row = proba_arr[0]
-            order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
-            best_idx = order[0] if order else None
-            best_label = classes[best_idx] if best_idx is not None else None
-            best_prob = float(row[best_idx]) if best_idx is not None else None
             source = str(score_source or ann.get("source") or "").strip().lower()
             strict_sources = {
                 "sam3_similarity",
@@ -8323,55 +8511,63 @@ def _agent_sanitize_detection_items(
             if not strict and source == "sam3_text":
                 if score is None or score < PREPASS_STRICT_SAM3_MIN_SCORE:
                     strict = True
+            min_prob = float(classifier_head.get("min_prob") or 0.5)
+            margin = float(classifier_head.get("margin") or 0.0)
+            background_margin = float(classifier_head.get("background_margin") or 0.0)
             if strict:
                 min_prob = max(min_prob, PREPASS_CLASSIFIER_STRICT_MIN_PROB)
                 margin = max(margin, PREPASS_CLASSIFIER_STRICT_MARGIN)
                 background_margin = max(background_margin, PREPASS_CLASSIFIER_STRICT_BG_MARGIN)
-            source_list = set()
-            raw_sources = ann.get("source_list")
-            if isinstance(raw_sources, (list, tuple)):
-                source_list.update(str(item) for item in raw_sources if item)
-            if source:
-                source_list.add(source)
-            detector_sources = {"yolo", "rfdetr", "sam3_text"}
-            has_detector = bool(source_list.intersection(detector_sources))
+            pending.append(
+                {
+                    "entry": base_entry,
+                    "target_idx": target_idx,
+                    "min_prob": min_prob,
+                    "margin": margin,
+                    "background_margin": background_margin,
+                }
+            )
+            pending_crops.append(pil_img.crop((x1, y1, x2, y2)))
+        else:
+            cleaned.append(base_entry)
+
+    if pending and pil_img is not None and isinstance(classifier_head, dict):
+        proba_arr = _predict_proba_batched(
+            pending_crops,
+            classifier_head,
+            batch_size=_resolve_classifier_batch_size(),
+        )
+        if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] != len(pending):
+            rejected += len(pending)
+            return cleaned, rejected
+        classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+        bg_indices = _clip_head_background_indices(classes)
+        for row, pending_entry in zip(proba_arr, pending):
+            entry = pending_entry["entry"]
+            target_idx = pending_entry["target_idx"]
+            min_prob = pending_entry["min_prob"]
+            margin = pending_entry["margin"]
+            background_margin = pending_entry["background_margin"]
+            order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
+            best_idx = order[0] if order else None
+            best_label = classes[best_idx] if best_idx is not None else None
+            best_prob = float(row[best_idx]) if best_idx is not None else None
             keep_mask = _clip_head_keep_mask(
-                proba_arr,
+                row.reshape(1, -1),
                 target_index=target_idx,
                 min_prob=min_prob,
                 margin=margin,
-                background_indices=_clip_head_background_indices(classes),
+                background_indices=bg_indices,
                 background_guard=True,
                 background_margin=background_margin,
             )
-            ann["classifier_best"] = best_label
-            ann["classifier_prob"] = best_prob
-            ann["classifier_accept"] = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
+            entry["classifier_best"] = best_label
+            entry["classifier_prob"] = best_prob
+            entry["classifier_accept"] = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
             if keep_mask is None or not bool(keep_mask[0]):
                 rejected += 1
                 continue
-        cleaned.append(
-            {
-                "bbox_xyxy_px": [x1, y1, x2, y2],
-                "bbox_xywh_px": _agent_xyxy_to_xywh(x1, y1, x2, y2),
-                "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
-                "bbox_yolo": list(_xyxy_to_yolo_norm(img_w, img_h, x1, y1, x2, y2)),
-                "label": aligned,
-                "class_id": label_index[aligned],
-                "score": score,
-                "score_source": score_source,
-                "sam3_prompt_term": ann.get("sam3_prompt_term"),
-                "sam3_prompt_label": ann.get("sam3_prompt_label"),
-                "sam3_prompt_source": ann.get("sam3_prompt_source"),
-                "classifier_best": ann.get("classifier_best"),
-                "classifier_prob": ann.get("classifier_prob"),
-                "classifier_accept": ann.get("classifier_accept"),
-                "source": ann.get("source") or "agent",
-            }
-        )
-        source_list = ann.get("source_list")
-        if isinstance(source_list, (list, tuple)) and cleaned:
-            cleaned[-1]["source_list"] = [str(item) for item in source_list if item]
+            cleaned.append(entry)
     return cleaned, rejected
 
 
@@ -8570,6 +8766,7 @@ def _agent_tool_run_detector(
     max_det: Optional[int] = None,
     iou: Optional[float] = None,
     merge_iou: Optional[float] = None,
+    expected_labelmap: Optional[Sequence[str]] = None,
     register: Optional[bool] = True,
 ) -> Dict[str, Any]:
     pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
@@ -8591,6 +8788,8 @@ def _agent_tool_run_detector(
     warnings: List[str] = []
     if mode_norm == "yolo":
         model, labelmap, task = _ensure_yolo_inference_runtime()
+        expected = list(expected_labelmap or (_AGENT_ACTIVE_LABELMAP or []))
+        _raise_on_labelmap_mismatch(expected=expected or None, actual=labelmap, context="yolo")
         conf_val = _clamp_conf_value(float(conf) if conf is not None else 0.25, warnings)
         iou_val = _clamp_iou_value(float(iou) if iou is not None else 0.45, warnings)
         max_det_val = _clamp_max_det_value(int(max_det) if max_det is not None else 300, warnings)
@@ -8607,7 +8806,14 @@ def _agent_tool_run_detector(
                 for tile, start in zip(slices, starts):
                     tile_offset_x = float(start[0]) + offset_x
                     tile_offset_y = float(start[1]) + offset_y
-                    results = model.predict(Image.fromarray(tile), conf=conf_val, iou=iou_val, max_det=max_det_val, verbose=False)
+                    with YOLO_INFER_LOCK:
+                        results = model.predict(
+                            Image.fromarray(tile),
+                            conf=conf_val,
+                            iou=iou_val,
+                            max_det=max_det_val,
+                            verbose=False,
+                        )
                     raw.extend(_yolo_extract_detections(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h))
                 raw = _merge_detections_nms(raw, merge_iou_val, max_det_val)
             except HTTPException as exc:
@@ -8617,7 +8823,14 @@ def _agent_tool_run_detector(
                     warnings.append(f"sahi_failed:{exc.detail}")
                 raw = []
         if not raw:
-            results = model.predict(crop_img, conf=conf_val, iou=iou_val, max_det=max_det_val, verbose=False)
+            with YOLO_INFER_LOCK:
+                results = model.predict(
+                    crop_img,
+                    conf=conf_val,
+                    iou=iou_val,
+                    max_det=max_det_val,
+                    verbose=False,
+                )
             raw = _yolo_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
         for det in raw:
             x1, y1, x2, y2 = _xywh_to_xyxy(det.get("bbox") or [])
@@ -8635,6 +8848,8 @@ def _agent_tool_run_detector(
             )
     else:
         model, labelmap, task = _ensure_rfdetr_inference_runtime()
+        expected = list(expected_labelmap or (_AGENT_ACTIVE_LABELMAP or []))
+        _raise_on_labelmap_mismatch(expected=expected or None, actual=labelmap, context="rfdetr")
         conf_val = _clamp_conf_value(float(conf) if conf is not None else 0.25, warnings)
         max_det_val = _clamp_max_det_value(int(max_det) if max_det is not None else 300, warnings)
         raw: List[Dict[str, Any]] = []
@@ -8651,11 +8866,17 @@ def _agent_tool_run_detector(
                     tile_offset_x = float(start[0]) + offset_x
                     tile_offset_y = float(start[1]) + offset_y
                     try:
-                        results = model.predict(Image.fromarray(tile), threshold=conf_val)
+                        with RFDETR_INFER_LOCK:
+                            results = model.predict(Image.fromarray(tile), threshold=conf_val)
                     except Exception as exc:  # noqa: BLE001
                         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
                     extracted, shifted = _rfdetr_extract_detections(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h)
                     if shifted:
+                        if expected:
+                            raise HTTPException(
+                                status_code=HTTP_412_PRECONDITION_FAILED,
+                                detail="detector_labelmap_shifted:rfdetr",
+                            )
                         warnings.append("rfdetr_labelmap_shifted")
                     raw.extend(extracted)
                 raw = _merge_detections_nms(raw, merge_iou_val, max_det_val)
@@ -8667,11 +8888,17 @@ def _agent_tool_run_detector(
                 raw = []
         if not raw:
             try:
-                results = model.predict(crop_img, threshold=conf_val)
+                with RFDETR_INFER_LOCK:
+                    results = model.predict(crop_img, threshold=conf_val)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
             raw, shifted = _rfdetr_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
             if shifted:
+                if expected:
+                    raise HTTPException(
+                        status_code=HTTP_412_PRECONDITION_FAILED,
+                        detail="detector_labelmap_shifted:rfdetr",
+                    )
                 warnings.append("rfdetr_labelmap_shifted")
         raw.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
         for det in raw[:max_det_val]:
@@ -11478,7 +11705,7 @@ def _agent_run_prepass(
     else:
         detector_modes = [payload.detector_mode or "yolo"]
     sahi_enabled = "sahi" in mode
-    detector_conf = payload.prepass_inspect_score
+    detector_conf = payload.detector_conf
     if detector_conf is None and _AGENT_ACTIVE_DETECTOR_CONF is not None:
         detector_conf = _AGENT_ACTIVE_DETECTOR_CONF
     for det_mode in detector_modes:
@@ -11783,7 +12010,7 @@ def _agent_run_prepass(
                 )
             )
         prepass_prompt = (
-            "Describe the image region in 1-2 sentences. "
+            "Describe the image region in detail. "
             "Use detector hints as suggestions, but also mention other visible objects. "
             "Do not mention labels, hints, or coordinates."
         )
@@ -11806,7 +12033,7 @@ def _agent_run_prepass(
             caption_max_tokens = int(payload.prepass_caption_max_tokens or 128)
             caption_max_tokens = max(32, min(256, caption_max_tokens))
             system_prompt = (
-                "You are a concise captioning assistant. Respond in English with exactly one sentence."
+                "You are a captioning assistant. Respond in English with a detailed sentence."
             )
             decode_override = {"do_sample": False}
             try:
@@ -11816,7 +12043,7 @@ def _agent_run_prepass(
                     else _ensure_qwen_ready()
                 )
                 full_prompt = (
-                    "Describe the full image in 1 short sentence. "
+                    "Describe the full image in detail. "
                     "Use detector hints as suggestions, but mention other visible objects. "
                     "Do not mention labels, hints, or coordinates."
                 )
@@ -11832,12 +12059,13 @@ def _agent_run_prepass(
                 )
                 caption_text, _ = _extract_caption_from_text(caption_raw, marker=None)
                 caption_text = _sanitize_qwen_caption(caption_text)
-                window_size = _resolve_qwen_window_size(None, pil_img.width, pil_img.height)
                 overlap = _resolve_qwen_window_overlap(None)
-                x_positions = _window_positions(pil_img.width, window_size, overlap)
-                y_positions = _window_positions(pil_img.height, window_size, overlap)
+                window_size = _resolve_qwen_window_size(None, pil_img.width, pil_img.height, overlap=overlap)
+                force_two = True
+                x_positions = _window_positions(pil_img.width, window_size, overlap, force_two=force_two)
+                y_positions = _window_positions(pil_img.height, window_size, overlap, force_two=force_two)
                 window_prompt = (
-                    "Describe this region in 1 short sentence. "
+                    "Describe this region in 1 detailed sentence. "
                     "Focus only on this region. "
                     "Do not mention labels, hints, or coordinates."
                 )
@@ -12028,11 +12256,11 @@ def _agent_run_prepass(
 
             if caption_is_bad(caption_text):
                 fallback_prompt = (
-                    "Write a concise, concrete caption (1-2 sentences) describing the visible scene. "
+                    "Write a detailed, concrete caption describing the visible scene. "
                     "Mention the main objects and layout. Do not mention labels or coordinates."
                 )
                 fallback_system = (
-                    "You are a concise captioning assistant. Use the image as truth. "
+                    "You are a captioning assistant. Use the image as truth. "
                     "Respond in English only. Return only the caption."
                 )
                 try:
@@ -12303,7 +12531,8 @@ def _agent_run_deep_prepass_part_a(
     full_cfg = {"enabled": False}
 
     detector_conf = payload.detector_conf
-    detector_iou = payload.iou
+    detector_iou = payload.detector_iou
+    detector_merge_iou = payload.detector_merge_iou
     max_det = None
 
     for mode in ("yolo", "rfdetr"):
@@ -12323,7 +12552,8 @@ def _agent_run_deep_prepass_part_a(
                 "sahi": run_sahi,
                 "max_det": max_det,
                 "iou": detector_iou,
-                "merge_iou": detector_iou,
+                "merge_iou": detector_merge_iou,
+                "expected_labelmap": labelmap or None,
             }
             if trace_readable:
                 if run_name == "sahi":
@@ -12344,7 +12574,8 @@ def _agent_run_deep_prepass_part_a(
                     sahi=run_sahi,
                     max_det=max_det,
                     iou=detector_iou,
-                    merge_iou=detector_iou,
+                    merge_iou=detector_merge_iou,
+                    expected_labelmap=labelmap or None,
                     register=False,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -12445,6 +12676,325 @@ def _agent_run_deep_prepass_part_a(
         "sam3_text_term_map": sam3_text_term_map,
         "image_size": {"width": img_w, "height": img_h},
     }
+
+
+def _agent_run_deep_prepass(
+    payload: QwenPrepassRequest,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    labelmap: List[str],
+    glossary: str,
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    part_a = _agent_run_deep_prepass_part_a(
+        payload,
+        pil_img=pil_img,
+        image_token=image_token,
+        labelmap=labelmap,
+        glossary=glossary,
+        trace_writer=trace_writer,
+        trace_full_writer=trace_full_writer,
+        trace_readable=trace_readable,
+    )
+    detections = list(part_a.get("detections") or [])
+    warnings.extend(list(part_a.get("warnings") or []))
+    if trace_readable:
+        trace_readable(f"deep prepass A: detections={len(detections)}")
+    cleanup_a = _agent_deep_prepass_cleanup(
+        payload,
+        detections=detections,
+        pil_img=pil_img,
+        labelmap=labelmap,
+    )
+    detections = list(cleanup_a.get("detections") or [])
+    removed = int(cleanup_a.get("removed") or 0)
+    scoreless_removed = int(cleanup_a.get("scoreless_removed") or 0)
+    rejected = int(cleanup_a.get("rejected") or 0)
+    if trace_readable:
+        trace_readable(
+            "deep prepass A cleanup: "
+            f"cleaned={len(detections)} removed={removed} "
+            f"scoreless_removed={scoreless_removed} rejected={rejected}"
+        )
+    added_similarity = 0
+    if payload.enable_sam3_similarity is not False and detections:
+        exemplars_by_label = _agent_select_similarity_exemplars(
+            payload,
+            detections=detections,
+            trace_readable=trace_readable,
+        )
+        similarity_detections: List[Dict[str, Any]] = []
+        if exemplars_by_label:
+            global_result = _agent_run_similarity_global(
+                payload,
+                pil_img=pil_img,
+                image_token=image_token,
+                exemplars_by_label=exemplars_by_label,
+                trace_writer=trace_writer,
+                trace_full_writer=trace_full_writer,
+                trace_readable=trace_readable,
+            )
+            similarity_detections.extend(list(global_result.get("detections") or []))
+            warnings.extend(list(global_result.get("warnings") or []))
+            if payload.similarity_window_extension:
+                window_result = _agent_run_similarity_expansion(
+                    payload,
+                    pil_img=pil_img,
+                    image_token=image_token,
+                    exemplars_by_label=exemplars_by_label,
+                    trace_writer=trace_writer,
+                    trace_full_writer=trace_full_writer,
+                    trace_readable=trace_readable,
+                )
+                similarity_detections.extend(list(window_result.get("detections") or []))
+                warnings.extend(list(window_result.get("warnings") or []))
+        added_similarity = len(similarity_detections)
+        if similarity_detections:
+            detections = detections + similarity_detections
+            cleanup_b = _agent_deep_prepass_cleanup(
+                payload,
+                detections=detections,
+                pil_img=pil_img,
+                labelmap=labelmap,
+            )
+            detections = list(cleanup_b.get("detections") or [])
+            removed_b = int(cleanup_b.get("removed") or 0)
+            scoreless_removed_b = int(cleanup_b.get("scoreless_removed") or 0)
+            rejected_b = int(cleanup_b.get("rejected") or 0)
+            if trace_readable:
+                trace_readable(
+                    "deep prepass B: "
+                    f"added_similarity={added_similarity} cleaned={len(detections)} "
+                    f"removed={removed_b} scoreless_removed={scoreless_removed_b} rejected={rejected_b}"
+                )
+    _agent_finalize_provenance(detections)
+    return {
+        "detections": detections,
+        "warnings": warnings,
+        "sam3_text_prompts": part_a.get("sam3_text_prompts") or {},
+        "sam3_text_term_map": part_a.get("sam3_text_term_map") or {},
+        "image_size": part_a.get("image_size") or {},
+    }
+
+
+def _agent_run_deep_prepass_caption(
+    payload: QwenPrepassRequest,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    detections: List[Dict[str, Any]],
+    model_id_override: Optional[str],
+    glossary: Optional[str] = None,
+    grid_for_log: Optional[Dict[str, Any]] = None,
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    if not payload.prepass_caption:
+        return "", []
+    caption_hints: List[QwenCaptionHint] = []
+    hint_items = list(detections or [])
+    hint_items.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
+    for det in hint_items[: min(len(hint_items), 160)]:
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        if not label:
+            continue
+        bbox = det.get("bbox_xyxy_px")
+        if not bbox and det.get("bbox_2d"):
+            bbox = _qwen_bbox_to_xyxy(pil_img.width, pil_img.height, det.get("bbox_2d") or [])
+        if not bbox or len(bbox) < 4:
+            continue
+        caption_hints.append(
+            QwenCaptionHint(
+                label=label,
+                bbox=[float(v) for v in bbox[:4]],
+                confidence=det.get("score"),
+            )
+        )
+    det_hint_summary = _agent_label_counts_summary(hint_items, limit=10)
+    prepass_prompt = (
+        "Describe the image in 1-2 sentences. Use the detection hints as suggestions, "
+        "but mention other visible objects. Do not mention labels, hints, or coordinates. "
+        "Do not output labelmap tags (e.g., light_vehicle); use natural words like car or van."
+    )
+    if det_hint_summary and det_hint_summary != "none":
+        prepass_prompt = f"{prepass_prompt} Detection hints: {det_hint_summary}."
+
+    caption_profile = (payload.prepass_caption_profile or "light").strip().lower()
+    if caption_profile not in {"light", "deep"}:
+        caption_profile = "light"
+    caption_variant = payload.prepass_caption_variant or payload.model_variant or "auto"
+    caption_model_id = (payload.prepass_caption_model_id or model_id_override or "").strip() or None
+    caption_max_tokens = int(payload.prepass_caption_max_tokens or (128 if caption_profile == "light" else 512))
+    caption_mode = "full" if caption_profile == "light" else "windowed"
+    caption_all_windows = caption_mode == "windowed"
+    include_coords = False
+    caption_payload = QwenCaptionRequest(
+        image_token=image_token,
+        user_prompt=prepass_prompt,
+        label_hints=caption_hints or None,
+        image_width=pil_img.width,
+        image_height=pil_img.height,
+        include_counts=True,
+        include_coords=include_coords,
+        max_boxes=min(len(caption_hints), 120),
+        max_new_tokens=caption_max_tokens,
+        model_variant=caption_variant,
+        model_id=caption_model_id,
+        final_answer_only=True,
+        two_stage_refine=caption_mode == "windowed",
+        caption_mode=caption_mode,
+        caption_all_windows=caption_all_windows,
+        restrict_to_labels=False,
+        fast_mode=True,
+        multi_model_cache=True,
+        labelmap_glossary=glossary,
+    )
+
+    def _is_cuda_oom(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "out of memory" in msg or ("cuda error" in msg and "memory" in msg)
+
+    windowed_captions: List[Tuple[int, int, int, str]] = []
+
+    def _window_hook(x0: int, y0: int, size: int, caption: str) -> None:
+        windowed_captions.append((x0, y0, size, caption))
+        if trace_readable:
+            cell = None
+            if grid_for_log:
+                bbox_2d = _xyxy_to_qwen_bbox(
+                    pil_img.width,
+                    pil_img.height,
+                    float(x0),
+                    float(y0),
+                    float(x0 + size),
+                    float(y0 + size),
+                )
+                cell = _agent_grid_cell_for_window_bbox(grid_for_log, bbox_2d)
+            cell_text = f" {cell}" if cell else ""
+            trace_readable(
+                f"prepass caption window{cell_text} "
+                f"[{x0},{y0},{x0 + size},{y0 + size}]: {caption}"
+            )
+        if trace_writer:
+            trace_writer(
+                {
+                    "type": "prepass_caption_window",
+                    "window": [int(x0), int(y0), int(size)],
+                    "grid_cell": _agent_grid_cell_for_window_bbox(
+                        grid_for_log, _xyxy_to_qwen_bbox(pil_img.width, pil_img.height, float(x0), float(y0), float(x0 + size), float(y0 + size))
+                    )
+                    if grid_for_log
+                    else None,
+                    "caption": caption,
+                    "ts": time.time(),
+                }
+            )
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_caption_window",
+                    "window": [int(x0), int(y0), int(size)],
+                    "grid_cell": _agent_grid_cell_for_window_bbox(
+                        grid_for_log, _xyxy_to_qwen_bbox(pil_img.width, pil_img.height, float(x0), float(y0), float(x0 + size), float(y0 + size))
+                    )
+                    if grid_for_log
+                    else None,
+                    "caption": caption,
+                    "ts": time.time(),
+                }
+            )
+
+    def _run_caption_with_hook(request: QwenCaptionRequest) -> QwenCaptionResponse:
+        token = None
+        if caption_mode == "windowed":
+            token = _CAPTION_WINDOW_HOOK.set(_window_hook)
+        try:
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_caption_call",
+                        "payload": {
+                            "model_id": request.model_id,
+                            "variant": request.model_variant,
+                            "caption_mode": request.caption_mode,
+                            "caption_all_windows": request.caption_all_windows,
+                            "restrict_to_labels": request.restrict_to_labels,
+                            "max_new_tokens": request.max_new_tokens,
+                            "hint_count": len(request.label_hints or []),
+                        },
+                        "ts": time.time(),
+                    }
+                )
+            return qwen_caption(request)
+        finally:
+            if token is not None:
+                _CAPTION_WINDOW_HOOK.reset(token)
+
+    try:
+        response = _run_caption_with_hook(caption_payload)
+    except Exception as exc:  # noqa: BLE001
+        if _is_cuda_oom(exc):
+            try:
+                _unload_non_qwen_runtimes()
+                response = _run_caption_with_hook(caption_payload)
+            except Exception as retry_exc:  # noqa: BLE001
+                detail = str(retry_exc)
+                raise HTTPException(
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"prepass_caption_failed:{detail}",
+                ) from retry_exc
+        else:
+            detail = str(exc)
+            raise HTTPException(
+                status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"prepass_caption_failed:{detail}",
+            ) from exc
+    caption_text = _sanitize_qwen_caption(response.caption or "")
+    if not caption_text:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="prepass_caption_failed:empty")
+    if trace_readable:
+        trace_readable(f"prepass caption summary: {caption_text}")
+    caption_entries: List[Dict[str, Any]] = []
+    if windowed_captions:
+        for x0, y0, size, caption in windowed_captions:
+            bbox_2d = _xyxy_to_qwen_bbox(
+                pil_img.width,
+                pil_img.height,
+                float(x0),
+                float(y0),
+                float(x0 + size),
+                float(y0 + size),
+            )
+            window_name = None
+            if grid_for_log:
+                window_name = _agent_grid_cell_for_window_bbox(grid_for_log, bbox_2d)
+            if not window_name:
+                window_name = f"window_{int(x0)}_{int(y0)}"
+            caption_entries.append(
+                {
+                    "window": window_name,
+                    "bbox_2d": list(bbox_2d),
+                    "caption": caption,
+                }
+            )
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_caption_result",
+                        "window": {"name": window_name, "bbox_2d": list(bbox_2d)},
+                        "caption": caption,
+                        "ts": time.time(),
+                    }
+                )
+            if trace_readable:
+                coords = _agent_readable_format_bbox(bbox_2d)
+                trace_readable(f"prepass caption {window_name} {coords}: {caption}")
+    return caption_text, caption_entries
 
 
 def _agent_deep_prepass_cleanup(
@@ -13079,9 +13629,11 @@ def _run_prepass_annotation_qwen(
         image_token=token,
         detections=deep_detections,
         model_id_override=model_id_override,
+        glossary=glossary,
         grid_for_log=grid_spec,
         trace_writer=_trace_write,
         trace_full_writer=_trace_write_full,
+        trace_readable=_trace_write_readable,
     )
     _AGENT_ACTIVE_OVERALL_CAPTION = caption_text
     _AGENT_ACTIVE_WINDOWED_CAPTIONS = caption_entries
@@ -13557,6 +14109,46 @@ def _apply_expected_labelmap_warnings(expected: Optional[List[str]], labelmap: L
         warnings.append("labelmap_missing")
     elif expected and labelmap and expected != labelmap:
         warnings.append("labelmap_mismatch")
+
+
+def _normalize_labelmap_entries(values: Sequence[str]) -> List[str]:
+    normalized: List[str] = []
+    for raw in values or []:
+        text = str(raw or "").strip()
+        if not text:
+            normalized.append("")
+            continue
+        norm = _normalize_class_name_for_match(text)
+        normalized.append(norm or text.lower())
+    return normalized
+
+
+def _labelmaps_match(expected: Sequence[str], actual: Sequence[str]) -> bool:
+    if not expected or not actual:
+        return True
+    exp_norm = _normalize_labelmap_entries(expected)
+    act_norm = _normalize_labelmap_entries(actual)
+    if len(exp_norm) != len(act_norm):
+        return False
+    for exp, act in zip(exp_norm, act_norm):
+        if exp != act:
+            return False
+    return True
+
+
+def _raise_on_labelmap_mismatch(
+    *,
+    expected: Optional[Sequence[str]],
+    actual: Optional[Sequence[str]],
+    context: str,
+) -> None:
+    if not expected or not actual:
+        return
+    if not _labelmaps_match(expected, actual):
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail=f"detector_labelmap_mismatch:{context}",
+            )
 
 
 def _clamp_conf_value(conf: float, warnings: List[str]) -> float:
@@ -16003,10 +16595,10 @@ def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
     active = _load_yolo_active()
     if not isinstance(active, dict):
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="yolo_active_missing")
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_active_missing")
     best_path = active.get("best_path")
     if not best_path:
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="yolo_active_missing")
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_active_missing")
     labelmap_path = active.get("labelmap_path")
     task = active.get("task")
     with YOLO_INFER_LOCK:
@@ -16030,10 +16622,10 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
     active = _load_rfdetr_active()
     if not isinstance(active, dict):
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="rfdetr_active_missing")
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing")
     best_path = active.get("best_path")
     if not best_path:
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="rfdetr_active_missing")
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing")
     labelmap_path = active.get("labelmap_path")
     task = active.get("task") or "detect"
     variant = active.get("variant")
@@ -18063,6 +18655,7 @@ def _clip_encode_pil_batch(
     device_override: Optional[str] = None,
     clip_model_override: Optional[str] = None,
     normalize: bool = True,
+    batch_size_override: Optional[int] = None,
 ) -> Optional[np.ndarray]:
     """Encode a batch of PIL crops with raw CLIP, returning (N, D) float32 normalized embeddings."""
     if not crops:
@@ -18082,12 +18675,18 @@ def _clip_encode_pil_batch(
         attempt_devices.append("cpu")
 
     batch_size = 64
-    try:
-        raw = os.environ.get("AGENT_CLIP_BATCH_SIZE")
-        if raw is not None and str(raw).strip():
-            batch_size = max(1, int(raw))
-    except Exception:
-        batch_size = 64
+    if batch_size_override is not None:
+        try:
+            batch_size = int(batch_size_override)
+        except (TypeError, ValueError):
+            batch_size = 64
+    else:
+        try:
+            raw = os.environ.get("AGENT_CLIP_BATCH_SIZE")
+            if raw is not None and str(raw).strip():
+                batch_size = max(1, int(raw))
+        except Exception:
+            batch_size = 64
     batch_size = max(1, min(int(batch_size), 512))
 
     last_error: Optional[BaseException] = None
@@ -18142,6 +18741,7 @@ def _dinov3_encode_pil_batch(
     device_override: Optional[str] = None,
     model_name_override: Optional[str] = None,
     normalize: bool = True,
+    batch_size_override: Optional[int] = None,
 ) -> Optional[np.ndarray]:
     if not crops:
         return None
@@ -18160,12 +18760,18 @@ def _dinov3_encode_pil_batch(
             attempt_devices.append("cpu")
 
     batch_size = 32
-    try:
-        raw = os.environ.get("AGENT_DINOV3_BATCH_SIZE")
-        if raw is not None and str(raw).strip():
-            batch_size = max(1, int(raw))
-    except Exception:
-        batch_size = 32
+    if batch_size_override is not None:
+        try:
+            batch_size = int(batch_size_override)
+        except (TypeError, ValueError):
+            batch_size = 32
+    else:
+        try:
+            raw = os.environ.get("AGENT_DINOV3_BATCH_SIZE")
+            if raw is not None and str(raw).strip():
+                batch_size = max(1, int(raw))
+        except Exception:
+            batch_size = 32
     batch_size = max(1, min(int(batch_size), 256))
 
     last_error: Optional[BaseException] = None
@@ -18222,6 +18828,7 @@ def _encode_pil_batch(
     encoder_model: Optional[str],
     device_override: Optional[str] = None,
     normalize: bool = True,
+    batch_size_override: Optional[int] = None,
 ) -> Optional[np.ndarray]:
     encoder_type_norm = str(encoder_type or "clip").strip().lower()
     if encoder_type_norm == "dinov3":
@@ -18230,12 +18837,14 @@ def _encode_pil_batch(
             device_override=device_override,
             model_name_override=encoder_model,
             normalize=normalize,
+            batch_size_override=batch_size_override,
         )
     return _clip_encode_pil_batch(
         crops,
         device_override=device_override,
         clip_model_override=encoder_model,
         normalize=normalize,
+        batch_size_override=batch_size_override,
     )
 
 
@@ -18276,6 +18885,7 @@ def _encode_pil_batch_for_head(
     *,
     head: Dict[str, Any],
     device_override: Optional[str] = None,
+    batch_size_override: Optional[int] = None,
 ) -> Optional[np.ndarray]:
     encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
     encoder_model = head.get("encoder_model")
@@ -18288,6 +18898,7 @@ def _encode_pil_batch_for_head(
         encoder_model=str(encoder_model) if encoder_model is not None else None,
         device_override=device_override,
         normalize=normalize,
+        batch_size_override=batch_size_override,
     )
     if feats is None:
         return None
@@ -18300,6 +18911,7 @@ def _encode_pil_batch_for_active(
     crops: Sequence[Image.Image],
     *,
     device_override: Optional[str] = None,
+    batch_size_override: Optional[int] = None,
 ) -> Optional[np.ndarray]:
     normalize = bool(active_head_normalize_embeddings)
     feats = _encode_pil_batch(
@@ -18308,6 +18920,7 @@ def _encode_pil_batch_for_active(
         encoder_model=active_encoder_model,
         device_override=device_override,
         normalize=normalize,
+        batch_size_override=batch_size_override,
     )
     if feats is None:
         return None
@@ -37413,7 +38026,7 @@ def set_rfdetr_active(payload: RfDetrActiveRequest):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
     best_path = _rfdetr_best_checkpoint(run_dir)
     if not best_path:
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="rfdetr_best_missing")
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_best_missing")
     meta = _rfdetr_load_run_meta(run_dir)
     config = meta.get("config") or {}
     dataset = config.get("dataset") or {}
@@ -37544,7 +38157,7 @@ def set_yolo_active(payload: YoloActiveRequest):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     best_path = run_dir / "best.pt"
     if not best_path.exists():
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_REQUIRED, detail="yolo_best_missing")
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_best_missing")
     meta = _yolo_load_run_meta(run_dir)
     config = meta.get("config") or {}
     dataset = config.get("dataset") or {}
@@ -37607,7 +38220,9 @@ def yolo_predict_region(payload: YoloRegionRequest):
         warnings.append("labelmap_missing")
     elif expected and labelmap and expected != labelmap:
         warnings.append("labelmap_mismatch")
-    results = model.predict(crop, conf=conf, iou=iou, max_det=max_det, verbose=False)
+    with YOLO_INFER_LOCK:
+        with YOLO_INFER_LOCK:
+            results = model.predict(crop, conf=conf, iou=iou, max_det=max_det, verbose=False)
     detections: List[YoloRegionDetection] = []
     if results:
         det_boxes = results[0].boxes
@@ -37687,7 +38302,8 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
         warnings.append("labelmap_mismatch")
     detections: List[RfDetrRegionDetection] = []
     try:
-        results = model.predict(crop, threshold=conf)
+        with RFDETR_INFER_LOCK:
+            results = model.predict(crop, threshold=conf)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
     if results is not None:
@@ -37827,7 +38443,8 @@ def yolo_predict_full(payload: YoloFullRequest):
     iou = _clamp_iou_value(float(payload.iou) if payload.iou is not None else 0.45, warnings)
     max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
-    results = model.predict(pil_img, conf=conf, iou=iou, max_det=max_det, verbose=False)
+    with YOLO_INFER_LOCK:
+        results = model.predict(pil_img, conf=conf, iou=iou, max_det=max_det, verbose=False)
     raw = _yolo_extract_detections(results, labelmap, 0.0, 0.0, img_w, img_h)
     detections = [YoloRegionDetection(**item) for item in raw]
     return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
@@ -37879,7 +38496,8 @@ def rfdetr_predict_full(payload: RfDetrFullRequest):
     max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
     try:
-        results = model.predict(pil_img, threshold=conf)
+        with RFDETR_INFER_LOCK:
+            results = model.predict(pil_img, threshold=conf)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
     raw, labelmap_shifted = _rfdetr_extract_detections(results, labelmap, 0.0, 0.0, img_w, img_h)
@@ -37915,7 +38533,8 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
         offset_x, offset_y = float(start[0]), float(start[1])
         crop = Image.fromarray(tile)
         try:
-            results = model.predict(crop, threshold=conf)
+            with RFDETR_INFER_LOCK:
+                results = model.predict(crop, threshold=conf)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
         extracted, shifted = _rfdetr_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
@@ -38734,7 +39353,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         image_height = payload.image_height or pil_img.height
         caption_mode = payload.caption_mode or "full"
         restrict_to_labels = payload.restrict_to_labels if payload.restrict_to_labels is not None else True
-        caption_all_windows = bool(payload.caption_all_windows)
+        caption_all_windows = True if caption_mode == "windowed" else bool(payload.caption_all_windows)
         detailed_mode = caption_mode == "windowed"
         prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt(
             user_prompt,
@@ -38746,7 +39365,17 @@ def qwen_caption(payload: QwenCaptionRequest):
             max_boxes,
             detailed_mode,
             restrict_to_labels=restrict_to_labels,
+            labelmap_glossary=payload.labelmap_glossary,
         )
+        glossary_line = ""
+        if payload.labelmap_glossary:
+            glossary_line = (
+                "Glossary (label synonyms): "
+                f"{payload.labelmap_glossary}. "
+                "Use glossary terms as optional synonym hints; do not copy the glossary verbatim. "
+                "Never output labelmap class names (especially tokens with underscores)."
+            )
+            prompt_text = f"{prompt_text}\n{glossary_line}"
         base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
         variant = payload.model_variant or "auto"
         model_id_override = payload.model_id or ""
@@ -38775,8 +39404,11 @@ def qwen_caption(payload: QwenCaptionRequest):
         max_new_tokens = min(max_new_tokens, 2000)
         refine_max_tokens = max_new_tokens
         system_prompt = (
-            "You are a concise captioning assistant. Use the image as truth. "
+            "You are a detailed captioning assistant. Use the image as truth. "
+            "Provide a rich, multi-sentence caption when there is a lot to see. "
             "Do not mention labels, hints, bounding boxes, coordinates, or that counts were provided. "
+            "Do not output labelmap tags (e.g., light_vehicle). Use natural words like car, van, SUV. "
+            "Avoid any label tokens that contain underscores. "
             "If the hints conflict with the image, mention the uncertainty briefly."
         )
         system_prompt = f"{system_prompt} Respond in English only."
@@ -38798,11 +39430,13 @@ def qwen_caption(payload: QwenCaptionRequest):
         windowed_captions: List[Tuple[int, int, int, str]] = []
         cleanup_count = 0
         refine_count = 0
+        merge_count = 0
         if caption_mode == "windowed":
-            window_size = _resolve_qwen_window_size(payload.window_size, image_width, image_height)
             overlap = _resolve_qwen_window_overlap(payload.window_overlap)
-            x_positions = _window_positions(image_width, window_size, overlap)
-            y_positions = _window_positions(image_height, window_size, overlap)
+            window_size = _resolve_qwen_window_size(None, image_width, image_height, overlap=overlap)
+            force_two = True
+            x_positions = _window_positions(image_width, window_size, overlap, force_two=force_two)
+            y_positions = _window_positions(image_height, window_size, overlap, force_two=force_two)
             grouped_hints = _group_hints_by_window(label_hints, x_positions, y_positions, window_size)
             window_model_id = desired_model_id
             window_base_model_id = window_model_id
@@ -38823,14 +39457,18 @@ def qwen_caption(payload: QwenCaptionRequest):
                         max_boxes,
                         detailed_mode=True,
                         restrict_to_labels=restrict_to_labels,
+                        labelmap_glossary=payload.labelmap_glossary,
                     )
                     window_prompt = (
                         f"Window region in full image: [{x0}, {y0}] to [{x0 + window_size}, {y0 + window_size}].\n"
                         "Focus only on this region.\n"
                         "Write one complete sentence about this region only. No reasoning or preamble. "
-                        "Do not mention labels, hints, counts, or coordinates.\n"
+                        "Do not mention labels, hints, counts, or coordinates. "
+                        "Do not output labelmap tags (e.g., light_vehicle); use natural words like car or van.\n"
                         f"{window_prompt}"
                     )
+                    if glossary_line:
+                        window_prompt = f"{window_prompt}\n{glossary_line}"
                     if restrict_to_labels and window_allowed:
                         window_prompt = (
                             f"{window_prompt}\nAllowed classes: {', '.join(window_allowed)}. "
@@ -38971,6 +39609,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                     window_lines.append(
                         "If window observations conflict, trust the full image. Avoid self-contradictions."
                     )
+                window_lines.append(
+                    "In the final caption, preserve specific details from the windows "
+                    "(e.g., people counts, actions, and notable objects). "
+                    "Do not compress away window details; longer captions are preferred."
+                )
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
             draft_prompt = (
@@ -39004,7 +39647,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 "Return only the final caption."
             )
             refine_system = (
-                "You are a concise captioning assistant. Use the image as truth. "
+                "You are a captioning assistant. Use the image as truth. "
                 "Return only the final caption. Respond in English only."
             )
             refine_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
@@ -39046,6 +39689,20 @@ def qwen_caption(payload: QwenCaptionRequest):
                     minimal_edit=True,
                 )
                 cleanup_count += 1
+        if caption_mode == "windowed" and windowed_captions and caption_text:
+            merge_tokens = min(refine_max_tokens, 256)
+            caption_text = _run_qwen_caption_merge(
+                caption_text,
+                windowed_captions,
+                pil_img=pil_img,
+                base_model_id=caption_base_model_id,
+                runtime_resolver=get_runtime,
+                max_new_tokens=merge_tokens,
+                glossary_line=glossary_line or None,
+            )
+            merge_count += 1
+            if final_only or is_thinking:
+                caption_text = _sanitize_qwen_caption(caption_text)
         if _caption_is_degenerate(caption_text):
             cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
             caption_text = _run_qwen_caption_cleanup(
@@ -39119,9 +39776,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
                 "Return only the final caption with no coordinates."
             )
-            refine_system = (
-                "You are a captioning assistant. Return only the final caption in English."
-            )
+            refine_system = "You are a captioning assistant. Return only the final caption in English."
             refine_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
@@ -39159,7 +39814,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         )
         word_count = len(caption_text.split()) if caption_text else 0
         logger.info(
-            "[qwen-caption] hints=%s used=%s truncated=%s variant=%s model=%s final_only=%s windows=%s cleanup=%s refine=%s words=%s",
+            "[qwen-caption] hints=%s used=%s truncated=%s variant=%s model=%s final_only=%s windows=%s cleanup=%s refine=%s merge=%s words=%s",
             len(payload.label_hints or []),
             used_boxes,
             truncated,
@@ -39169,6 +39824,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             len(windowed_captions) if caption_mode == "windowed" else 0,
             cleanup_count,
             refine_count,
+            merge_count,
             word_count,
         )
     except HTTPException:

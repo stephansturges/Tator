@@ -425,6 +425,27 @@ def run_tests(
                 ),
             )
         )
+        tests.append(
+            (
+                "qwen/prepass (minimal)",
+                lambda: _http_post_json(
+                    f"{base_url}/qwen/prepass",
+                    {
+                        "image_base64": img_b64,
+                        "image_name": image_name,
+                        "dataset_id": sam3_dataset_id,
+                        "prepass_only": True,
+                        "prepass_caption": False,
+                        "enable_yolo": False,
+                        "enable_rfdetr": False,
+                        "enable_sam3_text": False,
+                        "enable_sam3_similarity": False,
+                        "prepass_keep_all": True,
+                    },
+                    timeout=request_timeout,
+                ),
+            )
+        )
     for name, fn in tests:
         status, body, err = fn()
         ok = status is not None and 200 <= status < 300

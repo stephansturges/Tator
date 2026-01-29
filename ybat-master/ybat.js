@@ -2325,7 +2325,6 @@ const sam3TrainState = {
         extraPrompts: null,
         extraPromptsStatus: null,
         qwenMaxPrompts: null,
-        promptReasoning: null,
         promptMaxTokens: null,
         runButton: null,
         refreshButton: null,
@@ -22453,11 +22452,9 @@ function initQwenTrainingTab() {
 	        const simplifyEps = Number.isFinite(simplifyEpsRaw) ? Math.max(0, Math.min(1000, simplifyEpsRaw)) : 0.0;
 
 
-	        const promptReasoning =
-	            agentElements.promptReasoning && agentElements.promptReasoning.value ? agentElements.promptReasoning.value : "none";
-	        const promptMaxTokensRaw = readNumberInput(agentElements.promptMaxTokens, { integer: true });
-	        const promptMaxTokens = Number.isFinite(promptMaxTokensRaw) ? Math.max(16, Math.min(800, promptMaxTokensRaw)) : 160;
-	        const promptMaxPromptsRaw = readNumberInput(agentElements.qwenMaxPrompts, { integer: true });
+        const promptMaxTokensRaw = readNumberInput(agentElements.promptMaxTokens, { integer: true });
+        const promptMaxTokens = Number.isFinite(promptMaxTokensRaw) ? Math.max(16, Math.min(800, promptMaxTokensRaw)) : 160;
+        const promptMaxPromptsRaw = readNumberInput(agentElements.qwenMaxPrompts, { integer: true });
 	        const promptMaxPrompts = Number.isFinite(promptMaxPromptsRaw) ? Math.max(0, Math.min(50, promptMaxPromptsRaw)) : 0;
 
 	        const clipHeadPathRaw = agentElements.clipHeadSelect?.value || "";
@@ -22656,8 +22653,7 @@ function initQwenTrainingTab() {
 		            iou_threshold: iouThreshold,
 
 	            prompt_llm_max_prompts: promptMaxPrompts,
-	            prompt_reasoning: ["none", "low", "medium", "high"].includes(promptReasoning) ? promptReasoning : "none",
-	            prompt_max_new_tokens: promptMaxTokens,
+            prompt_max_new_tokens: promptMaxTokens,
 		            extra_prompts_by_class: extraPromptsByClass,
             clip_head_classifier_path: clipHeadClassifierPath,
             clip_head_min_prob: clipHeadMinProb,
@@ -22970,7 +22966,6 @@ function initQwenTrainingTab() {
 		        agentElements.extraPrompts = document.getElementById("agentExtraPrompts");
 		        agentElements.extraPromptsStatus = document.getElementById("agentExtraPromptsParseStatus");
 		        agentElements.qwenMaxPrompts = document.getElementById("agentQwenMaxPrompts");
-		        agentElements.promptReasoning = document.getElementById("agentPromptReasoning");
 		        agentElements.promptMaxTokens = document.getElementById("agentPromptMaxTokens");
 	        agentElements.cacheSize = document.getElementById("agentCacheSize");
 	        agentElements.purgeCacheBtn = document.getElementById("agentPurgeCacheBtn");

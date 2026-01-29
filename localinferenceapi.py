@@ -225,22 +225,6 @@ else:
     LocalQwenVLChatModel = None  # type: ignore[assignment]
     build_local_agent_tools = None  # type: ignore[assignment]
 
-# Optional text-only LLM for prompt expansion (preferred over Qwen when available).
-GPT_OSS_MODEL_ID = os.environ.get("PROMPT_LLM_MODEL_ID", "openai/gpt-oss-20b")
-GPT_OSS_PIPELINE = None
-GPT_OSS_PIPELINE_ERROR: Optional[Exception] = None
-_GPT_OSS_PIPELINE_LOCK = threading.Lock()
-
-# GPT-OSS uses the "Harmony" chat format. These are literal marker strings used when formatting
-# prompts; token ids (for stopping) are resolved from the pipeline tokenizer at runtime.
-_HARMONY_START = "<|start|>"
-_HARMONY_END = "<|end|>"
-_HARMONY_MESSAGE = "<|message|>"
-_HARMONY_CHANNEL = "<|channel|>"
-_HARMONY_RETURN = "<|return|>"
-_HARMONY_CALL = "<|call|>"
-_HARMONY_CONSTRAIN = "<|constrain|>"
-
 BASE64_IMAGE_MAX_BYTES = int(os.environ.get("IMAGE_MAX_BYTES", str(100 * 1024 * 1024)))
 BASE64_IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "4096"))
 
@@ -811,7 +795,6 @@ def _unload_non_qwen_runtimes() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to unload SAM predictors: %s", exc)
     _unload_sam3_text_runtime()
-    _unload_prompt_llm_runtime()
     _suspend_clip_backbone()
     _unload_dinov3_backbone()
     _unload_detector_inference()
@@ -4683,86 +4666,6 @@ def _generate_qwen_text(
     return decoded.strip()
 
 
-def _ensure_prompt_llm():
-    """Lazy-load the GPT-OSS text generation pipeline (preferred for prompt expansion)."""
-    global GPT_OSS_PIPELINE, GPT_OSS_PIPELINE_ERROR
-    if GPT_OSS_PIPELINE is not None:
-        return GPT_OSS_PIPELINE
-    if GPT_OSS_PIPELINE_ERROR is not None:
-        raise GPT_OSS_PIPELINE_ERROR
-    with _GPT_OSS_PIPELINE_LOCK:
-        if GPT_OSS_PIPELINE is not None:
-            return GPT_OSS_PIPELINE
-        if GPT_OSS_PIPELINE_ERROR is not None:
-            raise GPT_OSS_PIPELINE_ERROR
-        try:
-            from transformers import pipeline as hf_pipeline
-
-            GPT_OSS_PIPELINE = hf_pipeline(
-                "text-generation",
-                model=GPT_OSS_MODEL_ID,
-                torch_dtype="auto",
-                device_map="auto",
-            )
-            return GPT_OSS_PIPELINE
-        except Exception as exc:  # noqa: BLE001
-            GPT_OSS_PIPELINE_ERROR = exc
-            raise
-
-
-def _unload_prompt_llm_runtime() -> None:
-    """Release the prompt LLM pipeline (GPT-OSS) to free device memory."""
-    global GPT_OSS_PIPELINE
-    try:
-        del GPT_OSS_PIPELINE
-    except Exception:
-        pass
-    GPT_OSS_PIPELINE = None
-    try:
-        import gc
-
-        gc.collect()
-    except Exception:
-        pass
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-
-
-def _build_harmony_prompt(system_text: str, developer_text: str, user_text: str) -> str:
-    """Render a minimal Harmony prompt (system, developer, user, then assistant final-channel start)."""
-    return (
-        f"{_HARMONY_START}system{_HARMONY_MESSAGE}{system_text}{_HARMONY_END}"
-        f"{_HARMONY_START}developer{_HARMONY_MESSAGE}{developer_text}{_HARMONY_END}"
-        f"{_HARMONY_START}user{_HARMONY_MESSAGE}{user_text}{_HARMONY_END}"
-        f"{_HARMONY_START}assistant{_HARMONY_CHANNEL}final{_HARMONY_MESSAGE}"
-    )
-
-
-def _extract_harmony_final(text: str) -> Tuple[str, bool]:
-    """
-    Extract the final-channel assistant content from a Harmony-formatted completion.
-    Returns (content, valid) where valid indicates we found a properly marked final channel.
-    """
-    if not text:
-        return "", False
-    pattern = re.compile(
-        r"<\|start\|>assistant(?:<\|channel\|>(\w+))?<\|message\|>(.*?)(?:<\|return\|>|<\|end\|>|<\|call\|>|$)",
-        re.DOTALL,
-    )
-    matches = pattern.findall(text)
-    if not matches:
-        return text.strip(), False
-    # Prefer the last final-channel message.
-    finals = [m for m in matches if m[0] == "final"]
-    chosen = finals[-1] if finals else matches[-1]
-    content = chosen[1].strip()
-    valid = bool(finals)
-    return content, valid
-
-
 def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
     """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
     if not raw:
@@ -4798,109 +4701,21 @@ def _generate_prompt_text(
     prompt: str,
     *,
     max_new_tokens: int = 128,
-    reasoning: Literal["none", "low", "medium", "high"] = "high",
 ) -> str:
     """
     Text-only helper for prompt brainstorming/critique.
-    Uses the GPT-OSS pipeline; returns empty string on failure.
+    Uses Qwen (text-only) and returns empty string on failure.
     """
-    system_msg = (
-        "You are ChatGPT, a large language model trained by OpenAI.\n"
-        "Knowledge cutoff: 2024-06\n"
-        f"Current date: {time.strftime('%Y-%m-%d')}\n\n"
-        f"Reasoning: {reasoning}\n\n"
-        "# Valid channels: analysis, commentary, final. Channel must be included for every message."
-    )
-    developer_msg = (
-        "# Instructions\n"
-        "You generate short noun-phrase candidates for open-vocabulary detection. "
-        "Respond once, ONLY on the final channel, with a comma-separated list (no prose). "
-        "Do NOT emit analysis/commentary messages. "
-        "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no punctuation beyond commas, no quotes, no numbering, no JSON. "
-        "If no valid candidates, return an empty list."
-    )
-    user_msg = prompt
-    harmony_prompt = _build_harmony_prompt(system_msg, developer_msg, user_msg)
     try:
-        pipe = _ensure_prompt_llm()
-        tokenizer = getattr(pipe, "tokenizer", None)
-        stop_ids = None
-        pad_id = None
-        if tokenizer is not None:
-            stop_ids = []
-            unk_id = getattr(tokenizer, "unk_token_id", None)
-
-            def _maybe_add_stop_token(token_str: str) -> None:
-                nonlocal stop_ids
-                if not token_str:
-                    return
-                # Prefer direct vocab lookup for special tokens.
-                try:
-                    tok_id = tokenizer.convert_tokens_to_ids(token_str)
-                except Exception:
-                    tok_id = None
-                try:
-                    if tok_id is not None and int(tok_id) >= 0:
-                        if unk_id is None or int(tok_id) != int(unk_id):
-                            stop_ids.append(int(tok_id))
-                            return
-                except Exception:
-                    pass
-                # Fallback: only accept tokenizer.encode if it maps to a single token id.
-                try:
-                    ids = tokenizer.encode(token_str, add_special_tokens=False)
-                    if isinstance(ids, list) and len(ids) == 1 and isinstance(ids[0], int):
-                        stop_ids.append(int(ids[0]))
-                except Exception:
-                    return
-
-            _maybe_add_stop_token(_HARMONY_RETURN)
-            _maybe_add_stop_token(_HARMONY_CALL)
-            _maybe_add_stop_token(_HARMONY_END)
-            try:
-                if tokenizer.eos_token_id is not None:
-                    stop_ids.append(int(tokenizer.eos_token_id))
-            except Exception:
-                pass
-            stop_ids = sorted({int(s) for s in stop_ids if s is not None}) if stop_ids else None
-            if tokenizer.pad_token_id is not None:
-                pad_id = tokenizer.pad_token_id
-            elif tokenizer.eos_token_id is not None:
-                pad_id = tokenizer.eos_token_id
-        outputs = pipe(
-            harmony_prompt,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=0.0,
-            top_p=1.0,
-            eos_token_id=stop_ids,
-            pad_token_id=pad_id,
-            return_full_text=True,
+        helper_prompt = (
+            "You generate short noun-phrase candidates for open-vocabulary detection. "
+            "Respond with a comma-separated list only (no prose). "
+            "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no quotes, no JSON. "
+            "If no valid candidates, return an empty list.\n\n"
+            f"Task: {prompt}"
         )
-        if outputs:
-            gen = outputs[0].get("generated_text") or outputs[0].get("text") or ""
-            text = ""
-            if isinstance(gen, str):
-                text = gen
-            elif isinstance(gen, list):
-                # Some pipelines return list of dicts; fallback to stringify.
-                text = str(gen)
-            if text:
-                # If reasoning is enabled, require a well-formed final channel.
-                final, final_ok = _extract_harmony_final(text)
-                if reasoning != "none":
-                    if not final_ok or not final:
-                        return ""
-                    return final.strip()
-                # Reasoning disabled: be lenient. If final channel not found, try to strip any headers
-                # and grab the last assistant chunk.
-                candidate = final if final else text
-                # Strip any harmony markers or role prefixes.
-                candidate = re.sub(r"<\\|[^>]+?\\|>", " ", candidate)
-                candidate = re.sub(r"(?i)^(system|developer|user|assistant)\\s+final\\s+", " ", candidate)
-                candidate = re.sub(r"\\s+", " ", candidate).strip()
-                if candidate:
-                    return candidate
+        text = _generate_qwen_text(helper_prompt, max_new_tokens=max_new_tokens, use_system_prompt=False)
+        return text.strip()
     except Exception:
         pass
     return ""
@@ -31019,10 +30834,9 @@ class AgentMiningRequest(BaseModel):
     # Optional global cap on the total number of workers (after per-device expansion).
     max_workers: Optional[int] = Field(None, ge=1, le=256)
 
-    # Prompt mining (GPT-OSS).
+    # Prompt mining (Qwen).
     text_prompts_by_class: Optional[Dict[int, List[str]]] = None
     prompt_llm_max_prompts: int = Field(10, ge=0, le=50)
-    prompt_reasoning: Literal["none", "low", "medium", "high"] = "none"
     prompt_max_new_tokens: int = Field(160, ge=16, le=800)
     # Deprecated: hint text injected into prompts (no longer used).
     class_hints: Optional[Dict[str, str]] = None
@@ -31163,9 +30977,8 @@ def _expand_prompts_with_prompt_llm(
     max_new: int,
     log_fn: Optional[Callable[[str], None]] = None,
     max_new_tokens: int = 128,
-    reasoning: Literal["none", "low", "medium", "high"] = "none",
 ) -> List[str]:
-    """Use the configured prompt LLM (GPT-OSS) to brainstorm additional prompt variants for a class."""
+    """Use Qwen text-only generation to brainstorm additional prompt variants for a class."""
     cleaned_base = _sanitize_prompts(base_prompts)
     if max_new <= 0 or not cleaned_base:
         return []
@@ -31208,20 +31021,16 @@ def _expand_prompts_with_prompt_llm(
                         ]
                     )
                 prompt_text = "\n".join(prompt_lines)
-                text = _generate_prompt_text(
-                    prompt_text,
-                    max_new_tokens=max_new_tokens,
-                    reasoning=reasoning,
-                )
+                text = _generate_prompt_text(prompt_text, max_new_tokens=max_new_tokens)
                 last_text = text
                 if not text:
-                    _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) returned empty/invalid")
+                    _log(f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) returned empty/invalid")
                     continue
                 parsed = _parse_prompt_candidates(text, seen, remaining)
                 if parsed and len(parsed) > remaining:
                     parsed = parsed[:remaining]
                 _log(
-                    f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}"
+                    f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}"
                     "): "
                     f"{', '.join(parsed) if parsed else text}"
                 )
@@ -31231,12 +31040,12 @@ def _expand_prompts_with_prompt_llm(
                 dup_check = _parse_prompt_candidates(text, set(), remaining)
                 if dup_check:
                     _log(
-                        f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) "
+                        f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) "
                         "produced only duplicates; keeping existing list."
                     )
                     return []
-                _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) yielded no valid candidates")
-            _log(f"GPT-OSS brainstorm (class={class_name}, round {round_idx + 1}) failed after 3 attempts")
+                _log(f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) yielded no valid candidates")
+            _log(f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}) failed after 3 attempts")
             return []
 
         for round_idx in range(3):  # allow a few brainstorming rounds
@@ -31250,9 +31059,9 @@ def _expand_prompts_with_prompt_llm(
             if len(suggestions) >= max_new:
                 break
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Prompt recipe: GPT-OSS expansion failed for %s: %s", class_name, exc)
+        logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
         suggestions = []
-    # Final sanitize + dedupe. We intentionally avoid any Qwen-based refinement here so this
+    # Final sanitize + dedupe. We intentionally avoid extra model passes here so this
     # helper stays lightweight and doesn't contend with SAM3 for GPU memory.
     reviewed = _sanitize_prompts([*cleaned_base, *suggestions])
     reviewed_lower = {p.lower() for p in cleaned_base}
@@ -31269,7 +31078,7 @@ def _expand_prompts_with_prompt_llm(
     if not final_new:
         if log_fn:
             try:
-                log_fn(f"GPT-OSS prompts fell back to base for {class_name}")
+                log_fn(f"Qwen prompts fell back to base for {class_name}")
             except Exception:
                 pass
         return cleaned_base
@@ -33118,7 +32927,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             + (f" total_units/all_classes={total_units_all:.0f}" if total_units_all is not None else "")
         )
 
-        # Prompt mining (GPT-OSS) per class.
+        # Prompt mining (Qwen) per class.
         base_prompts_all: List[str] = []
         if payload.extra_prompts_by_class and isinstance(payload.extra_prompts_by_class, dict):
             raw_base = payload.extra_prompts_by_class.get("__base__")
@@ -33184,7 +32993,6 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     payload.prompt_llm_max_prompts,
                     log_fn=_log,
                     max_new_tokens=payload.prompt_max_new_tokens,
-                    reasoning=payload.prompt_reasoning,
                 )
             merged: List[str] = []
             seen = set()
@@ -33228,8 +33036,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             _log(f"Prompt list for {name}: {', '.join(prepared_prompts[cid])}")
 
         try:
-            _unload_prompt_llm_runtime()
-            _log("Prompt LLM unloaded to free memory before SAM3 mining")
+            _unload_qwen_runtime()
+            _log("Qwen prompt expansion runtime unloaded to free memory before SAM3 mining")
         except Exception:
             pass
         job.progress = max(job.progress, 0.07)
@@ -34713,7 +34521,6 @@ def prompt_helper_expand(payload: PromptRecipeExpandRequest):
         base_prompts,
         payload.max_new,
         max_new_tokens=payload.max_new_tokens if hasattr(payload, "max_new_tokens") else 128,
-        reasoning="high",
     )
     combined: List[str] = []
     seen = set()

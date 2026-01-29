@@ -21666,7 +21666,7 @@ function initQwenTrainingTab() {
         if (!agentElements.datasetSummary) return;
         const meta = getAgentSelectedDatasetMeta();
         if (!meta) {
-            agentElements.datasetSummary.textContent = "Pick a converted SAM3/Qwen dataset.";
+            agentElements.datasetSummary.textContent = "Pick a dataset from Dataset Manager (SAM3/Qwen‑ready only).";
             return;
         }
         const parts = [];

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API_ROOT="${API_ROOT:-http://127.0.0.1:8000}"
+INTERVAL="${INTERVAL:-1}"
+
+while true; do
+  printf "%-12s %-10s %-18s %-10s\n" "JOB" "PHASE" "PROGRESS" "STATUS"
+  curl -s "${API_ROOT}/calibration/jobs" | python3 -c 'import sys,json; data=json.load(sys.stdin); jobs=data.get("jobs", data);
+for job in jobs:
+    job_id=job.get("job_id","-");
+    phase=job.get("phase","-");
+    processed=job.get("processed",0);
+    total=job.get("total",0);
+    progress=(job.get("progress") or 0)*100;
+    status=job.get("status","-");
+    print(f"{job_id:<12} {phase:<10} {processed}/{total:<10} {progress:>6.2f}% {status}")'
+  sleep "$INTERVAL"
+done

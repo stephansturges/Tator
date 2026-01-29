@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import base64, colorsys, copy, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket, gc, queue
+import base64, colorsys, copy, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket, gc, queue, multiprocessing
 from array import array
 from contextvars import ContextVar
 from pathlib import Path
@@ -829,7 +829,23 @@ def _unload_inference_runtimes() -> None:
     _unload_qwen_runtime()
     if torch.cuda.is_available():
         try:
-            torch.cuda.empty_cache()
+            device_count = torch.cuda.device_count()
+            if device_count > 1:
+                current = torch.cuda.current_device()
+                for idx in range(device_count):
+                    try:
+                        torch.cuda.set_device(idx)
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                    except Exception:
+                        continue
+                try:
+                    torch.cuda.set_device(current)
+                except Exception:
+                    pass
+            else:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
         except Exception:  # noqa: BLE001
             pass
 
@@ -1228,6 +1244,18 @@ def _resolve_sam3_mining_devices() -> List[torch.device]:
     if not devices:
         devices = [torch.device("cpu")]
     return devices
+
+
+def _require_sam3_for_prepass(enable_text: bool, enable_similarity: bool) -> None:
+    if not (enable_text or enable_similarity):
+        return
+    if (
+        SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None
+        or build_sam3_image_model is None
+        or Sam3ImageProcessor is None
+    ):
+        detail = f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}"
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
 
 
 def _reset_sam3_runtime() -> None:
@@ -5028,6 +5056,7 @@ class PredictorSettings(BaseModel):
     gpu_total_mb: Optional[float] = None
     gpu_free_mb: Optional[float] = None
     gpu_compute_capability: Optional[str] = None
+    gpu_device_count: Optional[int] = None
 
 
 class PredictorSettingsUpdate(BaseModel):
@@ -5431,6 +5460,10 @@ class QwenPrepassRequest(BaseModel):
     sam_variant: Optional[str] = "sam3"
     enable_sam3_text: Optional[bool] = True
     sam3_text_synonym_budget: Optional[int] = 10
+    sam3_text_window_extension: Optional[bool] = True
+    sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
+    sam3_text_window_size: Optional[int] = None
+    sam3_text_window_overlap: Optional[float] = None
     enable_sam3_similarity: Optional[bool] = True
     similarity_min_exemplar_score: Optional[float] = 0.6
     similarity_mid_conf_low: Optional[float] = None
@@ -5456,8 +5489,8 @@ class QwenPrepassRequest(BaseModel):
     prepass_caption_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = None
     prepass_caption_max_tokens: Optional[int] = None
     use_detection_overlay: Optional[bool] = True
-    grid_cols: Optional[int] = None
-    grid_rows: Optional[int] = None
+    grid_cols: Optional[int] = 2
+    grid_rows: Optional[int] = 2
     grid_overlap_ratio: Optional[float] = None
     overlay_dot_radius: Optional[int] = None
     tighten_fp: Optional[bool] = True
@@ -5492,7 +5525,14 @@ class CalibrationRequest(BaseModel):
     base_fp_ratio: Optional[float] = 0.2
     relax_fp_ratio: Optional[float] = 0.2
     recall_floor: Optional[float] = 0.6
+    per_class_thresholds: Optional[bool] = True
+    threshold_steps: Optional[int] = 200
+    optimize_metric: Optional[str] = "f1"
     sam3_text_synonym_budget: Optional[int] = 10
+    sam3_text_window_extension: Optional[bool] = True
+    sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
+    sam3_text_window_size: Optional[int] = None
+    sam3_text_window_overlap: Optional[float] = None
     prepass_sam3_text_thr: Optional[float] = 0.2
     prepass_similarity_score: Optional[float] = 0.3
     sam3_score_thr: Optional[float] = 0.2
@@ -5507,7 +5547,9 @@ class CalibrationRequest(BaseModel):
     context_radius: Optional[float] = 0.075
     label_iou: Optional[float] = 0.9
     eval_iou: Optional[float] = 0.5
+    eval_iou_grid: Optional[str] = None
     dedupe_iou: Optional[float] = 0.75
+    dedupe_iou_grid: Optional[str] = None
     scoreless_iou: Optional[float] = 0.0
     model_hidden: Optional[str] = "256,128"
     model_dropout: Optional[float] = 0.1
@@ -9093,39 +9135,34 @@ def _agent_tool_zoom_and_detect(
 
 
 @_register_agent_tool("sam3_text")
-def _agent_tool_sam3_text(
-    image_base64: Optional[str] = None,
-    image_token: Optional[str] = None,
-    prompt: Optional[str] = None,
-    label: Optional[str] = None,
-    score_thr: Optional[float] = None,
-    mask_threshold: Optional[float] = None,
-    max_results: Optional[int] = None,
-    window: Optional[Any] = None,
-    window_bbox_2d: Optional[Sequence[float]] = None,
-    grid_cell: Optional[str] = None,
-    register: Optional[bool] = True,
-) -> Dict[str, Any]:
-    pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
-    img_w, img_h = pil_img.size
-    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
-    if window_xyxy is None and window_bbox_2d is not None:
-        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
-    crop_img = pil_img
+def _sam3_text_payloads_from_state(
+    *,
+    full_img: Image.Image,
+    crop_img: Image.Image,
+    prompt: str,
+    label: Optional[str],
+    score_thr: Optional[float],
+    mask_threshold: Optional[float],
+    max_results: Optional[int],
+    window_xyxy: Optional[Sequence[float]] = None,
+    processor_override: Optional[Any] = None,
+    state: Optional[Any] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[int]]:
+    img_w, img_h = full_img.size
     offset_x = 0.0
     offset_y = 0.0
     if window_xyxy:
-        x1, y1, x2, y2 = window_xyxy
-        crop_img = pil_img.crop((x1, y1, x2, y2))
-        offset_x, offset_y = x1, y1
+        offset_x, offset_y = float(window_xyxy[0]), float(window_xyxy[1])
     threshold_val = float(score_thr) if score_thr is not None else 0.2
     mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
     detections = _run_sam3_text_inference(
         crop_img,
-        (prompt or "").strip(),
+        prompt.strip(),
         threshold_val,
         mask_val,
         max_results,
+        processor_override=processor_override,
+        state=state,
     )
     aligned_label = _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or [])
     assigned_label = aligned_label or (label or "").strip() or None
@@ -9154,6 +9191,41 @@ def _agent_tool_sam3_text(
                 window=window_xyxy,
             )
         )
+    return payloads, assigned_label, class_id
+
+
+def _agent_tool_sam3_text(
+    image_base64: Optional[str] = None,
+    image_token: Optional[str] = None,
+    prompt: Optional[str] = None,
+    label: Optional[str] = None,
+    score_thr: Optional[float] = None,
+    mask_threshold: Optional[float] = None,
+    max_results: Optional[int] = None,
+    window: Optional[Any] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    grid_cell: Optional[str] = None,
+    register: Optional[bool] = True,
+) -> Dict[str, Any]:
+    pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
+    img_w, img_h = pil_img.size
+    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
+    if window_xyxy is None and window_bbox_2d is not None:
+        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+    crop_img = pil_img
+    if window_xyxy:
+        x1, y1, x2, y2 = window_xyxy
+        crop_img = pil_img.crop((x1, y1, x2, y2))
+    payloads, assigned_label, _ = _sam3_text_payloads_from_state(
+        full_img=pil_img,
+        crop_img=crop_img,
+        prompt=(prompt or "").strip(),
+        label=label,
+        score_thr=score_thr,
+        mask_threshold=mask_threshold,
+        max_results=max_results,
+        window_xyxy=window_xyxy,
+    )
     register_summary: Optional[Dict[str, Any]] = None
     if register:
         source_override = "sam3_text"
@@ -12633,6 +12705,37 @@ def _agent_run_deep_prepass_part_a(
         mask_thr = payload.sam3_mask_threshold
         if mask_thr is None and _AGENT_ACTIVE_SAM3_MASK_THR is not None:
             mask_thr = _AGENT_ACTIVE_SAM3_MASK_THR
+        windowed = payload.sam3_text_window_extension is not False
+        windows: List[Dict[str, Any]] = []
+        if windowed:
+            windows = _agent_sam3_text_windows(payload, pil_img=pil_img)
+        sam3_model, sam3_processor, _ = _ensure_sam3_text_runtime()
+        global_state = None
+        try:
+            global_state = sam3_processor.set_image(pil_img)
+        except Exception:
+            global_state = None
+        if windows:
+            for window in windows:
+                window_xyxy = None
+                if window.get("bbox_xyxy_px"):
+                    window_xyxy = window.get("bbox_xyxy_px")
+                elif window.get("bbox_2d") is not None:
+                    window_xyxy = _normalize_window_xyxy(
+                        {"bbox_2d": window.get("bbox_2d")}, img_w, img_h
+                    )
+                if not window_xyxy:
+                    continue
+                x1, y1, x2, y2 = window_xyxy
+                crop_img = pil_img.crop((x1, y1, x2, y2))
+                try:
+                    window_state = sam3_processor.set_image(crop_img)
+                except Exception:
+                    window_state = None
+                window["window_xyxy"] = window_xyxy
+                window["crop_img"] = crop_img
+                window["state"] = window_state
+        prompt_plan: List[Tuple[str, str, str]] = []
         for label in labels:
             base_terms = term_meta.get(label, {}).get("base_terms", [])
             expanded_terms = term_meta.get(label, {}).get("expanded_terms", [])
@@ -12647,6 +12750,33 @@ def _agent_run_deep_prepass_part_a(
                 elif prompt not in base_terms:
                     prompt_origin = "unknown"
                 sam3_text_prompts.setdefault(label, []).append(prompt)
+                prompt_plan.append((label, prompt, prompt_origin))
+
+        contexts: List[Dict[str, Any]] = [
+            {
+                "name": "full",
+                "grid_cell": None,
+                "window_xyxy": None,
+                "window_bbox_2d": None,
+                "crop_img": pil_img,
+                "state": global_state,
+            }
+        ]
+        for window in windows:
+            contexts.append(
+                {
+                    "name": window.get("name") or window.get("grid_cell") or "window",
+                    "grid_cell": window.get("grid_cell"),
+                    "window_xyxy": window.get("window_xyxy"),
+                    "window_bbox_2d": window.get("bbox_2d"),
+                    "crop_img": window.get("crop_img") or pil_img,
+                    "state": window.get("state"),
+                }
+            )
+
+        for ctx in contexts:
+            window_name = ctx.get("name") or "window"
+            for label, prompt, prompt_origin in prompt_plan:
                 args = {
                     "image_token": image_token,
                     "prompt": prompt,
@@ -12655,32 +12785,46 @@ def _agent_run_deep_prepass_part_a(
                     "mask_threshold": mask_thr,
                     "max_results": None,
                 }
+                if ctx.get("window_bbox_2d") is not None:
+                    args["window_bbox_2d"] = ctx.get("window_bbox_2d")
+                if ctx.get("grid_cell"):
+                    args["grid_cell"] = ctx.get("grid_cell")
                 _log_step("deep_prepass_tool_call", {"tool": "sam3_text", "args": args})
                 try:
-                    result = _agent_tool_sam3_text(
-                        image_token=image_token,
+                    dets, assigned_label, _ = _sam3_text_payloads_from_state(
+                        full_img=pil_img,
+                        crop_img=ctx.get("crop_img") or pil_img,
                         prompt=prompt,
                         label=label,
                         score_thr=score_thr,
                         mask_threshold=mask_thr,
                         max_results=None,
-                        register=False,
+                        window_xyxy=ctx.get("window_xyxy"),
+                        processor_override=sam3_processor,
+                        state=ctx.get("state"),
                     )
                 except Exception as exc:  # noqa: BLE001
-                    warnings.append(f"deep_prepass_sam3_text_failed:{label}:{exc}")
+                    if ctx.get("window_xyxy"):
+                        warnings.append(f"deep_prepass_sam3_text_failed:{label}:{window_name}:{exc}")
+                    else:
+                        warnings.append(f"deep_prepass_sam3_text_failed:{label}:{exc}")
                     continue
-                _log_step("deep_prepass_tool_result", {"tool": "sam3_text", "result": result})
-                dets = list(result.get("detections") or [])
+                _log_step("deep_prepass_tool_result", {"tool": "sam3_text", "result": {"detections": dets}})
                 for det in dets:
                     if not isinstance(det, dict):
                         continue
                     det["sam3_prompt_term"] = prompt
-                    det["sam3_prompt_label"] = label
+                    det["sam3_prompt_label"] = assigned_label or label
                     det["sam3_prompt_source"] = prompt_origin
                 if trace_readable:
-                    trace_readable(
-                        f"deep_prepass sam3_text label={label} prompt={prompt} detections={len(dets)}"
-                    )
+                    if ctx.get("window_xyxy"):
+                        trace_readable(
+                            f"deep_prepass sam3_text label={label} prompt={prompt} window={window_name} detections={len(dets)}"
+                        )
+                    else:
+                        trace_readable(
+                            f"deep_prepass sam3_text label={label} prompt={prompt} detections={len(dets)}"
+                        )
                 _agent_attach_provenance(
                     dets,
                     source="sam3_text",
@@ -13140,6 +13284,52 @@ def _agent_similarity_windows(
     return windows
 
 
+def _agent_sam3_text_windows(
+    payload: QwenPrepassRequest,
+    *,
+    pil_img: Image.Image,
+) -> List[Dict[str, Any]]:
+    img_w, img_h = pil_img.size
+    mode = (payload.sam3_text_window_mode or "grid").strip().lower()
+    windows: List[Dict[str, Any]] = []
+    if mode == "sahi":
+        slice_size = int(payload.sam3_text_window_size or payload.sahi_window_size or 640)
+        overlap = float(payload.sam3_text_window_overlap or payload.sahi_overlap_ratio or 0.2)
+        slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
+        for idx, start in enumerate(starts):
+            x1 = float(start[0])
+            y1 = float(start[1])
+            x2 = min(float(img_w), x1 + slice_size)
+            y2 = min(float(img_h), y1 + slice_size)
+            windows.append(
+                {
+                    "name": f"sahi_{idx}",
+                    "bbox_xyxy_px": [x1, y1, x2, y2],
+                    "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
+                }
+            )
+        return windows
+    grid_spec = _agent_grid_spec_for_payload(payload, img_w, img_h)
+    for cell in _agent_grid_cells(grid_spec):
+        xyxy = _agent_grid_cell_xyxy(
+            grid_spec,
+            cell,
+            overlap_ratio=payload.grid_overlap_ratio or PREPASS_GRID_OVERLAP_RATIO,
+        )
+        if not xyxy:
+            continue
+        x1, y1, x2, y2 = xyxy
+        windows.append(
+            {
+                "name": cell,
+                "grid_cell": cell,
+                "bbox_xyxy_px": [x1, y1, x2, y2],
+                "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
+            }
+        )
+    return windows
+
+
 def _agent_exemplars_for_window(
     exemplars: Sequence[Dict[str, Any]],
     *,
@@ -13346,6 +13536,7 @@ def _run_prepass_annotation_qwen(
     global QWEN_CAPTION_CACHE_LIMIT
     # Prepass-only mode is enforced; no agentic review loop is executed.
     payload = payload.copy(update={"prepass_only": True})
+    _require_sam3_for_prepass(bool(payload.enable_sam3_text), bool(payload.enable_sam3_similarity))
     if int(QWEN_CAPTION_CACHE_LIMIT or 0) < 1:
         QWEN_CAPTION_CACHE_LIMIT = 1
     pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, None)
@@ -13458,27 +13649,27 @@ def _run_prepass_annotation_qwen(
     tighten_fp = bool(payload.tighten_fp if payload.tighten_fp is not None else True)
     detector_conf = _agent_unit_float(
         payload.detector_conf,
-        PREPASS_TIGHT_DEFAULT_DETECTOR_CONF if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_DETECTOR_CONF,
     )
     sam3_score_thr = _agent_unit_float(
         payload.sam3_score_thr,
-        PREPASS_TIGHT_DEFAULT_SAM3_SCORE if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_SAM3_SCORE,
     )
     sam3_mask_thr = _agent_unit_float(
         payload.sam3_mask_threshold,
-        PREPASS_TIGHT_DEFAULT_SAM3_MASK if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_SAM3_MASK,
     )
     classifier_min_prob = _agent_unit_float(
         payload.classifier_min_prob,
-        PREPASS_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB,
     )
     classifier_margin = _agent_unit_float(
         payload.classifier_margin,
-        PREPASS_TIGHT_DEFAULT_CLASSIFIER_MARGIN if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_CLASSIFIER_MARGIN,
     )
     classifier_bg_margin = _agent_unit_float(
         payload.classifier_bg_margin,
-        PREPASS_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN if tighten_fp else None,
+        PREPASS_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN,
     )
     scoreless_iou = _agent_unit_float(
         payload.scoreless_iou,
@@ -13491,13 +13682,13 @@ def _run_prepass_annotation_qwen(
     _AGENT_TRACE_FULL_WRITER = _trace_write_full if full_trace_path else None
     _AGENT_TRACE_READABLE_WRITER = _trace_write_readable if readable_trace_path or latest_readable_path else None
     _AGENT_ACTIVE_TIGHTEN_FP = tighten_fp
-    _AGENT_ACTIVE_DETECTOR_CONF = detector_conf if tighten_fp else None
-    _AGENT_ACTIVE_SAM3_SCORE_THR = sam3_score_thr if tighten_fp else None
-    _AGENT_ACTIVE_SAM3_MASK_THR = sam3_mask_thr if tighten_fp else None
+    _AGENT_ACTIVE_DETECTOR_CONF = detector_conf
+    _AGENT_ACTIVE_SAM3_SCORE_THR = sam3_score_thr
+    _AGENT_ACTIVE_SAM3_MASK_THR = sam3_mask_thr
     _AGENT_ACTIVE_CLASSIFIER_MIN_PROB = classifier_min_prob if tighten_fp else None
     _AGENT_ACTIVE_CLASSIFIER_MARGIN = classifier_margin if tighten_fp else None
     _AGENT_ACTIVE_CLASSIFIER_BG_MARGIN = classifier_bg_margin if tighten_fp else None
-    _AGENT_ACTIVE_SCORELESS_IOU = scoreless_iou if tighten_fp else None
+    _AGENT_ACTIVE_SCORELESS_IOU = scoreless_iou if tighten_fp else 0.0
     img_w, img_h = pil_img.size
     labelmap: List[str] = []
     glossary = ""
@@ -13896,11 +14087,11 @@ qwen_prompt_config = DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True)
 
 class QwenTrainRequest(BaseModel):
     dataset_id: Optional[str] = None
-    dataset_root: Optional[str] = None
     run_name: Optional[str] = None
     model_id: Optional[str] = None
     training_mode: Optional[Literal["official_lora", "trl_qlora"]] = None
     system_prompt: Optional[str] = None
+    devices: Optional[str] = None
     batch_size: Optional[int] = None
     max_epochs: Optional[int] = None
     lr: Optional[float] = None
@@ -13924,8 +14115,8 @@ class QwenTrainRequest(BaseModel):
 
     @root_validator(skip_on_failure=True)
     def _validate_dataset_fields(cls, values):  # noqa: N805
-        if not (values.get("dataset_id") or values.get("dataset_root")):
-            raise ValueError("dataset_id_or_root_required")
+        if not values.get("dataset_id"):
+            raise ValueError("dataset_id_required")
         return values
 
 
@@ -14033,7 +14224,8 @@ class RfDetrActiveRequest(BaseModel):
 
 
 class YoloRegionRequest(BaseModel):
-    image_base64: str
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
     region: List[float]
     conf: Optional[float] = 0.25
     iou: Optional[float] = 0.45
@@ -14049,6 +14241,8 @@ class YoloRegionRequest(BaseModel):
         region = values.get("region")
         if not isinstance(region, list) or len(region) < 4:
             raise ValueError("region_required")
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_required")
         return values
 
 
@@ -14066,15 +14260,23 @@ class YoloRegionResponse(BaseModel):
 
 
 class YoloFullRequest(BaseModel):
-    image_base64: str
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
     conf: Optional[float] = 0.25
     iou: Optional[float] = 0.45
     max_det: Optional[int] = 300
     expected_labelmap: Optional[List[str]] = None
 
+    @root_validator(skip_on_failure=True)
+    def _validate_image(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_required")
+        return values
+
 
 class YoloWindowedRequest(BaseModel):
-    image_base64: str
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
     conf: Optional[float] = 0.25
     iou: Optional[float] = 0.45
     max_det: Optional[int] = 300
@@ -14083,9 +14285,16 @@ class YoloWindowedRequest(BaseModel):
     overlap: Optional[float] = 0.2
     merge_iou: Optional[float] = 0.5
 
+    @root_validator(skip_on_failure=True)
+    def _validate_image(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_required")
+        return values
+
 
 class RfDetrRegionRequest(BaseModel):
-    image_base64: str
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
     region: List[float]
     conf: Optional[float] = 0.25
     max_det: Optional[int] = 300
@@ -14100,6 +14309,8 @@ class RfDetrRegionRequest(BaseModel):
         region = values.get("region")
         if not isinstance(region, list) or len(region) < 4:
             raise ValueError("region_required")
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_required")
         return values
 
 
@@ -14117,20 +14328,34 @@ class RfDetrRegionResponse(BaseModel):
 
 
 class RfDetrFullRequest(BaseModel):
-    image_base64: str
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
     conf: Optional[float] = 0.25
     max_det: Optional[int] = 300
     expected_labelmap: Optional[List[str]] = None
 
+    @root_validator(skip_on_failure=True)
+    def _validate_image(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_required")
+        return values
+
 
 class RfDetrWindowedRequest(BaseModel):
-    image_base64: str
+    image_base64: Optional[str] = None
+    image_token: Optional[str] = None
     conf: Optional[float] = 0.25
     max_det: Optional[int] = 300
     expected_labelmap: Optional[List[str]] = None
     slice_size: Optional[int] = 640
     overlap: Optional[float] = 0.2
     merge_iou: Optional[float] = 0.5
+
+    @root_validator(skip_on_failure=True)
+    def _validate_image(cls, values):  # noqa: N805
+        if not values.get("image_base64") and not values.get("image_token"):
+            raise ValueError("image_required")
+        return values
 
 
 def _apply_expected_labelmap_warnings(expected: Optional[List[str]], labelmap: List[str], warnings: List[str]) -> None:
@@ -14561,6 +14786,39 @@ def _copy_tree_filtered(src: Path, dest: Path, *, keep_files: Optional[set[str]]
     return copied
 
 
+def _unique_prepass_recipe_name(name: str) -> Tuple[str, Optional[str]]:
+    cleaned = (name or "").strip() or "Imported recipe"
+    existing = {str(entry.get("name") or "").strip() for entry in _list_prepass_recipes()}
+    if cleaned not in existing:
+        return cleaned, None
+    base = cleaned
+    idx = 2
+    while f"{base} ({idx})" in existing:
+        idx += 1
+    return f"{base} ({idx})", base
+
+
+def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Path) -> None:
+    assets = manifest.get("assets") or {}
+    copied = assets.get("copied") or []
+    extract_root = extract_dir.resolve()
+    if not isinstance(copied, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+    for entry in copied:
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+        rel = entry.get("path")
+        if not isinstance(rel, str) or not rel:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+        target = (extract_root / rel).resolve()
+        if not _path_is_within_root(target, extract_root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid_path")
+        if not target.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing_asset")
+        if entry.get("sha256") and _sha256_path(target) != entry.get("sha256"):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_hash_mismatch")
+
+
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
     meta_path = recipe_dir / PREPASS_RECIPE_META
     meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -14752,6 +15010,8 @@ PREPASS_RECIPE_ROOT.mkdir(parents=True, exist_ok=True)
 PREPASS_RECIPE_META = "recipe.json"
 PREPASS_RECIPE_ASSETS = "assets"
 PREPASS_RECIPE_SCHEMA_VERSION = 1
+PREPASS_RECIPE_TMP_ROOT = UPLOAD_ROOT / "tmp_prepass_recipes"
+PREPASS_RECIPE_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 PREPASS_RECIPE_EXPORT_ROOT = Path(
     os.environ.get("PREPASS_RECIPE_EXPORT_ROOT", str(UPLOAD_ROOT / "prepass_recipe_exports"))
 )
@@ -14777,6 +15037,8 @@ class PrepassRecipeResponse(BaseModel):
     config: Dict[str, Any]
     glossary: Optional[str] = None
     schema_version: int = PREPASS_RECIPE_SCHEMA_VERSION
+    renamed_from: Optional[str] = None
+    notice: Optional[str] = None
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
@@ -28569,12 +28831,7 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str, job_logs: Optiona
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"qwen_training_unavailable:{QWEN_TRAINING_IMPORT_ERROR}",
         )
-    dataset_root: Optional[Path] = None
-    if payload.dataset_id:
-        dataset_root = _resolve_sam3_or_qwen_dataset(str(payload.dataset_id))
-    else:
-        dataset_root_value = payload.dataset_root or ""
-        dataset_root = Path(os.path.abspath(dataset_root_value))
+    dataset_root = _resolve_sam3_or_qwen_dataset(str(payload.dataset_id))
     if not dataset_root.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_not_found")
     qwen_meta = _load_qwen_dataset_metadata(dataset_root)
@@ -28622,6 +28879,14 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str, job_logs: Optiona
         "system_prompt": system_prompt,
         "training_mode": training_mode,
     }
+    if payload.devices is not None:
+        try:
+            device_ids = _parse_device_ids_string(payload.devices)
+        except ValueError as exc:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        if device_ids is not None:
+            _validate_cuda_device_ids(device_ids)
+            cfg_kwargs["devices"] = ",".join(str(device) for device in device_ids)
     defaults = {
         "batch_size": payload.batch_size,
         "max_epochs": payload.max_epochs,
@@ -29480,7 +29745,6 @@ def _build_qwen_dataset_from_yolo(dataset_root: Path, *, context_text: str = "",
                                 {"from": "gpt", "value": output_text},
                             ],
                         }
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                         count += 1
             tmp_path.replace(jsonl_path)
         finally:
@@ -31570,6 +31834,86 @@ def _calibration_update(job: CalibrationJob, **kwargs: Any) -> None:
     job.updated_at = time.time()
 
 
+def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(record, ensure_ascii=False))
+    tmp_path.replace(path)
+
+
+def _calibration_prepass_worker(
+    device_index: int,
+    tasks: List[Tuple[str, str]],
+    dataset_id: str,
+    labelmap: List[str],
+    glossary: str,
+    prepass_payload_dict: Dict[str, Any],
+    cancel_event: Optional[Any],
+    progress_queue: Optional[Any],
+) -> None:
+    # NOTE: This runs in a separate process; re-bind device prefs here.
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(device_index)
+    except Exception:
+        pass
+    try:
+        global SAM3_DEVICE_PREF
+        SAM3_DEVICE_PREF = f"cuda:{device_index}" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        pass
+    try:
+        prepass_payload = QwenPrepassRequest(**prepass_payload_dict)
+    except Exception:
+        return
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    for image_name, cache_path in tasks:
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        img_path = None
+        for split in ("val", "train"):
+            candidate = dataset_root / split / image_name
+            if candidate.exists():
+                img_path = candidate
+                break
+        if img_path is None:
+            if progress_queue is not None:
+                progress_queue.put(1)
+            continue
+        try:
+            with Image.open(img_path) as img:
+                pil_img = img.convert("RGB")
+        except Exception:
+            if progress_queue is not None:
+                progress_queue.put(1)
+            continue
+        try:
+            image_token = _calibration_cache_image(pil_img, prepass_payload.sam_variant)
+            result = _agent_run_deep_prepass(
+                prepass_payload,
+                pil_img=pil_img,
+                image_token=image_token,
+                labelmap=labelmap,
+                glossary=glossary,
+                trace_writer=None,
+                trace_full_writer=None,
+                trace_readable=None,
+            )
+            detections = list(result.get("detections") or [])
+            warnings = list(result.get("warnings") or [])
+            record = {
+                "image": image_name,
+                "dataset_id": dataset_id,
+                "detections": detections,
+                "warnings": warnings,
+            }
+            _calibration_write_record_atomic(Path(cache_path), record)
+        except Exception:
+            pass
+        if progress_queue is not None:
+            progress_queue.put(1)
+
+
 def _calibration_list_images(dataset_id: str) -> List[str]:
     dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
     images: List[str] = []
@@ -31628,6 +31972,8 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
     output_dir = CALIBRATION_ROOT / job.job_id
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
+        _require_sam3_for_prepass(True, True)
+        _prepare_for_training()
         labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
         if not labelmap:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="calibration_labelmap_missing")
@@ -31642,6 +31988,8 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
 
         prepass_path = output_dir / "prepass.jsonl"
         CALIBRATION_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        if not payload.classifier_id and not isinstance(active_classifier_head, dict):
+            raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="calibration_classifier_required")
         prepass_payload = QwenPrepassRequest(
             dataset_id=payload.dataset_id,
             enable_yolo=True,
@@ -31656,6 +32004,12 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
             sam3_text_synonym_budget=None
             if payload.sam3_text_synonym_budget is None
             else int(payload.sam3_text_synonym_budget),
+            sam3_text_window_extension=bool(payload.sam3_text_window_extension)
+            if payload.sam3_text_window_extension is not None
+            else True,
+            sam3_text_window_mode=payload.sam3_text_window_mode or "grid",
+            sam3_text_window_size=payload.sam3_text_window_size,
+            sam3_text_window_overlap=payload.sam3_text_window_overlap,
             prepass_sam3_text_thr=float(payload.prepass_sam3_text_thr or 0.2),
             prepass_similarity_score=float(payload.prepass_similarity_score or 0.3),
             similarity_min_exemplar_score=float(payload.similarity_min_exemplar_score or 0.6),
@@ -31673,54 +32027,149 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
         labelmap_hash = hashlib.sha1(",".join(labelmap).encode("utf-8")).hexdigest()
         glossary_hash = hashlib.sha1((glossary or "").encode("utf-8")).hexdigest()
         selected_hash = hashlib.sha1(json.dumps(selected, sort_keys=True).encode("utf-8")).hexdigest()
-        prepass_key = _calibration_hash_payload(
+        prepass_config = {
+            "sam3_text_synonym_budget": None
+            if payload.sam3_text_synonym_budget is None
+            else int(payload.sam3_text_synonym_budget),
+            "sam3_text_window_extension": payload.sam3_text_window_extension,
+            "sam3_text_window_mode": payload.sam3_text_window_mode,
+            "sam3_text_window_size": payload.sam3_text_window_size,
+            "sam3_text_window_overlap": payload.sam3_text_window_overlap,
+            "prepass_sam3_text_thr": float(payload.prepass_sam3_text_thr or 0.2),
+            "prepass_similarity_score": float(payload.prepass_similarity_score or 0.3),
+            "similarity_min_exemplar_score": float(payload.similarity_min_exemplar_score or 0.6),
+            "similarity_window_extension": bool(payload.similarity_window_extension),
+            "sam3_score_thr": float(payload.sam3_score_thr or 0.2),
+            "sam3_mask_threshold": float(payload.sam3_mask_threshold or 0.2),
+            "detector_conf": float(payload.detector_conf or 0.45),
+            "sahi_window_size": payload.sahi_window_size,
+            "sahi_overlap_ratio": payload.sahi_overlap_ratio,
+            "scoreless_iou": float(payload.scoreless_iou or 0.0),
+            "dedupe_iou": float(payload.dedupe_iou or 0.75),
+        }
+        prepass_config_key = _calibration_hash_payload(
             {
                 "dataset_id": payload.dataset_id,
-                "seed": seed,
-                "max_images": max_images,
-                "selected_hash": selected_hash,
                 "labelmap_hash": labelmap_hash,
                 "glossary_hash": glossary_hash,
-                "prepass": {
-                    "sam3_text_synonym_budget": None
-                    if payload.sam3_text_synonym_budget is None
-                    else int(payload.sam3_text_synonym_budget),
-                    "prepass_sam3_text_thr": float(payload.prepass_sam3_text_thr or 0.2),
-                    "prepass_similarity_score": float(payload.prepass_similarity_score or 0.3),
-                    "similarity_min_exemplar_score": float(payload.similarity_min_exemplar_score or 0.6),
-                    "similarity_window_extension": bool(payload.similarity_window_extension),
-                    "sam3_score_thr": float(payload.sam3_score_thr or 0.2),
-                    "sam3_mask_threshold": float(payload.sam3_mask_threshold or 0.2),
-                    "detector_conf": float(payload.detector_conf or 0.45),
-                    "sahi_window_size": payload.sahi_window_size,
-                    "sahi_overlap_ratio": payload.sahi_overlap_ratio,
-                    "scoreless_iou": float(payload.scoreless_iou or 0.0),
-                    "dedupe_iou": float(payload.dedupe_iou or 0.75),
-                },
+                "prepass": prepass_config,
             }
         )
-        prepass_cache_dir = CALIBRATION_CACHE_ROOT / "prepass" / prepass_key
-        prepass_cache_dir.mkdir(parents=True, exist_ok=True)
-        prepass_cache_path = prepass_cache_dir / "prepass.jsonl"
+        prepass_key = _calibration_hash_payload(
+            {
+                "prepass_config_key": prepass_config_key,
+                "selected_hash": selected_hash,
+            }
+        )
+        prepass_cache_dir = CALIBRATION_CACHE_ROOT / "prepass" / prepass_config_key
+        image_cache_dir = prepass_cache_dir / "images"
+        image_cache_dir.mkdir(parents=True, exist_ok=True)
+        
         prepass_cache_meta = prepass_cache_dir / "prepass.meta.json"
 
-        cached_prepass = False
-        if prepass_cache_path.exists() and prepass_cache_meta.exists():
-            try:
-                meta_obj = json.loads(prepass_cache_meta.read_text())
-                if meta_obj.get("complete") and int(meta_obj.get("count", 0)) == total:
-                    cached_prepass = True
-            except Exception:
-                cached_prepass = False
+        def _safe_image_cache_name(image_name: str) -> str:
+            safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_name)
+            if safe != image_name:
+                suffix = hashlib.sha1(image_name.encode("utf-8")).hexdigest()[:8]
+                safe = f"{safe}_{suffix}"
+            return safe
 
-        if cached_prepass:
-            _calibration_update(job, message="Using cached prepass…", phase="prepass", processed=total, progress=1.0)
-            _calibration_safe_link(prepass_cache_path, prepass_path)
-        else:
+        def _cache_path_for_image(image_name: str) -> Path:
+            return image_cache_dir / f"{_safe_image_cache_name(image_name)}.json"
+
+        def _load_cached_record(image_name: str) -> Optional[Dict[str, Any]]:
+            path = _cache_path_for_image(image_name)
+            if not path.exists():
+                return None
+            try:
+                return json.loads(path.read_text())
+            except Exception:
+                return None
+
+        def _write_cached_record(image_name: str, record: Dict[str, Any]) -> None:
+            path = _cache_path_for_image(image_name)
+            _calibration_write_record_atomic(path, record)
+
+        cached_records: Dict[str, Dict[str, Any]] = {}
+        for image_name in selected:
+            cached = _load_cached_record(image_name)
+            if cached:
+                cached_records[image_name] = cached
+
+        processed = len(cached_records)
+        if processed:
+            _calibration_update(
+                job,
+                message="Using cached prepass (partial)…",
+                phase="prepass",
+                processed=processed,
+                progress=processed / total if total else 1.0,
+            )
+
+        if processed < total:
             _calibration_update(job, message="Running deep prepass…", phase="prepass")
-            tmp_path = prepass_cache_path.with_suffix(".jsonl.tmp")
-            with tmp_path.open("w", encoding="utf-8") as handle:
-                for idx, image_name in enumerate(selected):
+            remaining = [image_name for image_name in selected if image_name not in cached_records]
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1 and remaining:
+                _unload_inference_runtimes()
+                devices = list(range(torch.cuda.device_count()))
+                worker_count = min(len(devices), len(remaining))
+                tasks = [
+                    (image_name, str(_cache_path_for_image(image_name)))
+                    for image_name in remaining
+                ]
+                buckets: List[List[Tuple[str, str]]] = [[] for _ in range(worker_count)]
+                for idx, task in enumerate(tasks):
+                    buckets[idx % worker_count].append(task)
+                ctx = multiprocessing.get_context("spawn")
+                mp_cancel = ctx.Event()
+                progress_queue = ctx.Queue()
+                workers = []
+                prepass_payload_dict = prepass_payload.dict()
+                for worker_idx in range(worker_count):
+                    device_index = devices[worker_idx]
+                    bucket = buckets[worker_idx]
+                    if not bucket:
+                        continue
+                    proc = ctx.Process(
+                        target=_calibration_prepass_worker,
+                        args=(
+                            device_index,
+                            bucket,
+                            payload.dataset_id,
+                            labelmap,
+                            glossary,
+                            prepass_payload_dict,
+                            mp_cancel,
+                            progress_queue,
+                        ),
+                        daemon=True,
+                    )
+                    proc.start()
+                    workers.append(proc)
+                processed_local = 0
+                while any(proc.is_alive() for proc in workers):
+                    if job.cancel_event.is_set():
+                        mp_cancel.set()
+                    try:
+                        inc = progress_queue.get(timeout=1.0)
+                        if isinstance(inc, int):
+                            processed_local += inc
+                            processed = len(cached_records) + processed_local
+                            progress = processed / total if total else 1.0
+                            _calibration_update(job, processed=processed, progress=progress)
+                    except queue.Empty:
+                        pass
+                    if mp_cancel.is_set():
+                        break
+                for proc in workers:
+                    proc.join(timeout=5)
+                if mp_cancel.is_set():
+                    for proc in workers:
+                        if proc.is_alive():
+                            proc.terminate()
+                    raise RuntimeError("cancelled")
+            else:
+                for image_name in remaining:
                     if job.cancel_event.is_set():
                         raise RuntimeError("cancelled")
                     img_path = None
@@ -31747,38 +32196,38 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
                     )
                     detections = list(result.get("detections") or [])
                     warnings = list(result.get("warnings") or [])
-                    handle.write(
-                        json.dumps(
-                            {
-                                "image": image_name,
-                                "dataset_id": payload.dataset_id,
-                                "detections": detections,
-                                "warnings": warnings,
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n"
-                    )
-                    processed = idx + 1
+                    record = {
+                        "image": image_name,
+                        "dataset_id": payload.dataset_id,
+                        "detections": detections,
+                        "warnings": warnings,
+                    }
+                    _write_cached_record(image_name, record)
+                    cached_records[image_name] = record
+                    processed += 1
                     progress = processed / total if total else 1.0
                     _calibration_update(job, processed=processed, progress=progress)
-            tmp_path.replace(prepass_cache_path)
-            prepass_cache_meta.write_text(
-                json.dumps(
-                    {
-                        "complete": True,
-                        "count": total,
-                        "dataset_id": payload.dataset_id,
-                        "selected_images": selected,
-                        "selected_hash": selected_hash,
-                        "labelmap_hash": labelmap_hash,
-                        "glossary_hash": glossary_hash,
-                        "prepass_key": prepass_key,
-                    },
-                    indent=2,
-                )
+
+        with prepass_path.open("w", encoding="utf-8") as handle:
+            for image_name in selected:
+                record = cached_records.get(image_name) or _load_cached_record(image_name)
+                if not record:
+                    continue
+
+        prepass_cache_meta.write_text(
+            json.dumps(
+                {
+                    "dataset_id": payload.dataset_id,
+                    "labelmap_hash": labelmap_hash,
+                    "glossary_hash": glossary_hash,
+                    "prepass_config": prepass_config,
+                    "cached_images": len(list(image_cache_dir.glob("*.json"))),
+                    "updated_at": time.time(),
+                    "config_key": prepass_config_key,
+                },
+                indent=2,
             )
-            _calibration_safe_link(prepass_cache_path, prepass_path)
+        )
 
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
@@ -31922,29 +32371,32 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
                 "cuda",
             ],
         )
-        _run_step(
-            "calibrate",
-            "Calibrating thresholds…",
-            [
-                sys.executable,
-                str(root_dir / "tools" / "calibrate_ensemble_threshold.py"),
-                "--model",
-                str(Path(str(model_prefix) + ".pt")),
-                "--data",
-                str(labeled_path),
-                "--meta",
-                str(meta_path),
-                "--target-fp-ratio",
-                str(float(payload.base_fp_ratio or 0.1)),
-                "--min-recall",
-                str(float(payload.recall_floor or 0.6)),
-                "--steps",
-                "200",
-                "--per-class",
-                "--optimize",
-                "f1",
-            ],
-        )
+        optimize_metric = (payload.optimize_metric or "f1").strip().lower()
+        if optimize_metric not in {"f1", "recall"}:
+            optimize_metric = "f1"
+        steps_val = int(payload.threshold_steps or 200)
+        steps_val = max(20, min(1000, steps_val))
+        calibrate_cmd = [
+            sys.executable,
+            str(root_dir / "tools" / "calibrate_ensemble_threshold.py"),
+            "--model",
+            str(Path(str(model_prefix) + ".pt")),
+            "--data",
+            str(labeled_path),
+            "--meta",
+            str(meta_path),
+            "--target-fp-ratio",
+            str(float(payload.base_fp_ratio or 0.1)),
+            "--min-recall",
+            str(float(payload.recall_floor or 0.6)),
+            "--steps",
+            str(steps_val),
+            "--optimize",
+            optimize_metric,
+        ]
+        if payload.per_class_thresholds is not False:
+            calibrate_cmd.append("--per-class")
+        _run_step("calibrate", "Calibrating thresholds…", calibrate_cmd)
         _run_step(
             "relax",
             "Relaxing thresholds…",
@@ -31964,7 +32416,8 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
         _calibration_update(job, phase="eval", message="Evaluating model…")
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
-        iou_grid = "0.5,0.6,0.7,0.75,0.8,0.85,0.9"
+        iou_grid = payload.eval_iou_grid or "0.5,0.6,0.7,0.75,0.8,0.85,0.9"
+        dedupe_grid = payload.dedupe_iou_grid or iou_grid
         eval_cmd = [
             sys.executable,
             str(root_dir / "tools" / "eval_ensemble_mlp_dedupe.py"),
@@ -31983,7 +32436,7 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
             "--dedupe-iou",
             str(float(payload.dedupe_iou or 0.1)),
             "--dedupe-iou-grid",
-            iou_grid,
+            dedupe_grid,
             "--scoreless-iou",
             str(float(payload.scoreless_iou or 0.0)),
             "--use-val-split",
@@ -34665,6 +35118,37 @@ def _normalize_device_list(devices: Optional[List[Any]]) -> List[int]:
     return [value for value in cleaned if value >= 0]
 
 
+def _parse_device_ids_string(raw: Optional[str]) -> Optional[List[int]]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return []
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if not parts:
+        return []
+    ids: List[int] = []
+    for part in parts:
+        if not part.isdigit():
+            raise ValueError(f"invalid_device_token:{part}")
+        ids.append(int(part))
+    return ids
+
+
+def _validate_cuda_device_ids(device_ids: Sequence[int]) -> None:
+    if not device_ids:
+        return
+    if not torch.cuda.is_available():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_devices_unavailable")
+    max_id = torch.cuda.device_count() - 1
+    invalid = [device for device in device_ids if device < 0 or device > max_id]
+    if invalid:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"qwen_invalid_devices:available=0-{max_id}",
+        )
+
+
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("", 0))
@@ -36953,7 +37437,7 @@ def predict_base64(payload: Base64Payload):
     if not _active_encoder_ready():
         return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable") # messy ... returning the error message int as str. Crap logic needs cleanup
 
-    pil_img, _ = _decode_image_base64(payload.image_base64)
+    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
     feats_np = _encode_pil_batch_for_active([pil_img])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
         return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable")
@@ -37215,6 +37699,88 @@ def delete_clip_classifier(rel_path: str = Query(...)):
     except Exception:
         pass
     return {"status": "deleted", "rel_path": rel_path}
+
+
+@app.post("/clip/classifiers/rename")
+def rename_clip_classifier(
+    rel_path: str = Form(...),
+    new_name: str = Form(...),
+):
+    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    if classifier_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    raw = str(new_name or "").strip()
+    if not raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_new_name_required")
+    # Strip any directory components; only allow file names.
+    raw_name = Path(raw).name
+    if not raw_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_new_name_invalid")
+    current_suffix = classifier_path.suffix
+    target_name = raw_name
+    if not Path(target_name).suffix:
+        target_name = f"{target_name}{current_suffix}"
+    target_suffix = Path(target_name).suffix.lower()
+    if target_suffix not in CLASSIFIER_ALLOWED_EXTS:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_extension_not_allowed")
+
+    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
+    parent = classifier_path.parent.resolve()
+    if not _path_is_within_root(parent, classifiers_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
+    target_path = (parent / target_name).resolve()
+    if not _path_is_within_root(target_path, classifiers_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
+
+    if target_path == classifier_path:
+        return {"status": "unchanged", "rel_path": str(classifier_path.relative_to(classifiers_root))}
+
+    if target_path.exists():
+        stem = target_path.stem
+        suffix = target_path.suffix
+        for idx in range(1, 1000):
+            candidate = (parent / f"{stem}_{idx}{suffix}").resolve()
+            if not candidate.exists():
+                target_path = candidate
+                break
+        else:
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="classifier_rename_conflict")
+
+    try:
+        classifier_path.rename(target_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    old_meta = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    new_meta = Path(os.path.splitext(str(target_path))[0] + ".meta.pkl")
+    try:
+        if old_meta.exists():
+            if new_meta.exists():
+                try:
+                    new_meta.unlink()
+                except Exception:
+                    pass
+            old_meta.replace(new_meta)
+    except Exception:
+        pass
+
+    try:
+        global active_classifier_path
+        if active_classifier_path and Path(active_classifier_path).resolve() == classifier_path.resolve():
+            active_classifier_path = str(target_path)
+    except Exception:
+        pass
+
+    return {
+        "status": "renamed",
+        "old_rel_path": str(classifier_path.relative_to(classifiers_root)),
+        "new_rel_path": str(target_path.relative_to(classifiers_root)),
+        "old_path": str(classifier_path),
+        "new_path": str(target_path),
+        "new_name": target_path.name,
+    }
 
 
 @app.get("/clip/labelmaps/download")
@@ -37965,6 +38531,8 @@ def _build_sam3_config(
     cfg.paths.val_ann_file = str(val_ann)
     run_name = _safe_run_name(payload.run_name, f"sam3_run_{job_id}")
     exp_dir = Path(payload.experiment_log_dir) if payload.experiment_log_dir else (SAM3_JOB_ROOT / run_name)
+    if exp_dir.exists():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
     cfg.paths.experiment_log_dir = str(exp_dir.resolve())
     cfg.paths.bpe_path = str(SAM3_BPE_PATH)
     cfg.launcher.experiment_log_dir = cfg.paths.experiment_log_dir
@@ -38524,7 +39092,7 @@ def yolo_predict_region(payload: YoloRegionRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_region_detect_requires_bbox")
-    pil_img, _ = _decode_image_base64(payload.image_base64)
+    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
     img_w, img_h = pil_img.size
     full_w = int(payload.full_width) if payload.full_width else img_w
     full_h = int(payload.full_height) if payload.full_height else img_h
@@ -38608,7 +39176,7 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_region_detect_requires_bbox")
-    pil_img, _ = _decode_image_base64(payload.image_base64)
+    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
     img_w, img_h = pil_img.size
     full_w = int(payload.full_width) if payload.full_width else img_w
     full_h = int(payload.full_height) if payload.full_height else img_h
@@ -38772,6 +39340,28 @@ def _rfdetr_extract_detections(
     return detections, labelmap_shifted
 
 
+def _resolve_detector_image(
+    image_base64: Optional[str],
+    image_token: Optional[str],
+) -> Tuple[Image.Image, np.ndarray, str]:
+    if image_token:
+        for variant in ("sam1", "sam3"):
+            cached = _fetch_preloaded_image(image_token, variant)
+            if cached is not None:
+                pil_img = Image.fromarray(cached)
+                return pil_img, cached, image_token
+        if image_base64:
+            pil_img, np_img = _decode_image_base64(image_base64)
+            token = hashlib.md5(np_img.tobytes()).hexdigest()
+            _store_preloaded_image(token, np_img, "sam1")
+            return pil_img, np_img, token
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
+    pil_img, np_img = _decode_image_base64(image_base64)
+    token = hashlib.md5(np_img.tobytes()).hexdigest()
+    _store_preloaded_image(token, np_img, "sam1")
+    return pil_img, np_img, token
+
+
 @app.post("/yolo/predict_full", response_model=YoloRegionResponse)
 def yolo_predict_full(payload: YoloFullRequest):
     model, labelmap, task = _ensure_yolo_inference_runtime()
@@ -38780,7 +39370,7 @@ def yolo_predict_full(payload: YoloFullRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_full_detect_requires_bbox")
-    pil_img, _ = _decode_image_base64(payload.image_base64)
+    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
     img_w, img_h = pil_img.size
     warnings: List[str] = []
     conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
@@ -38802,7 +39392,7 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_windowed_detect_requires_bbox")
-    pil_img, _ = _decode_image_base64(payload.image_base64)
+    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
     img_w, img_h = pil_img.size
     warnings: List[str] = []
     conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
@@ -38833,7 +39423,7 @@ def rfdetr_predict_full(payload: RfDetrFullRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_full_detect_requires_bbox")
-    pil_img, _ = _decode_image_base64(payload.image_base64)
+    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
     img_w, img_h = pil_img.size
     warnings: List[str] = []
     conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
@@ -38860,7 +39450,7 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_windowed_detect_requires_bbox")
-    pil_img, _ = _decode_image_base64(payload.image_base64)
+    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
     img_w, img_h = pil_img.size
     warnings: List[str] = []
     conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
@@ -39065,8 +39655,8 @@ def create_qwen_training_job(payload: QwenTrainRequest):
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"qwen_training_unavailable:{QWEN_TRAINING_IMPORT_ERROR}",
         )
-    if not payload.dataset_root:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_root_required")
+    if not payload.dataset_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_id_required")
     job_id = uuid.uuid4().hex
     prep_logs: List[str] = []
     config = _build_qwen_config(payload, job_id, prep_logs)
@@ -39077,7 +39667,7 @@ def create_qwen_training_job(payload: QwenTrainRequest):
         job_id[:8],
         getattr(payload, "accelerator", None) or config_dict.get("accelerator"),
         getattr(payload, "devices", None) or config_dict.get("devices"),
-        payload.dataset_root,
+        payload.dataset_id,
     )
     with QWEN_TRAINING_JOBS_LOCK:
         QWEN_TRAINING_JOBS[job_id] = job
@@ -39437,6 +40027,7 @@ def _predictor_settings_payload() -> PredictorSettings:
     gpu_total_mb = None
     gpu_free_mb = None
     gpu_cc = None
+    gpu_count = None
     if torch.cuda.is_available():
         try:
             free_bytes, total_bytes = torch.cuda.mem_get_info()
@@ -39444,9 +40035,11 @@ def _predictor_settings_payload() -> PredictorSettings:
             gpu_free_mb = _bytes_to_mb(int(free_bytes))
             major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
             gpu_cc = f"{major}.{minor}"
+            gpu_count = torch.cuda.device_count()
         except Exception:
             gpu_total_mb = None
             gpu_free_mb = None
+            gpu_count = None
     vm = psutil.virtual_memory()
     process = psutil.Process(os.getpid())
     process_mb = _bytes_to_mb(process.memory_info().rss)
@@ -39466,6 +40059,7 @@ def _predictor_settings_payload() -> PredictorSettings:
         gpu_total_mb=gpu_total_mb,
         gpu_free_mb=gpu_free_mb,
         gpu_compute_capability=gpu_cc,
+        gpu_device_count=gpu_count,
     )
 
 
@@ -40373,6 +40967,34 @@ def _collect_recipe_assets(recipe_meta: Dict[str, Any], temp_dir: Path) -> Dict[
     _copy_run(YOLO_JOB_ROOT, config.get("yolo_id"), None, "yolo_runs")
     _copy_run(RFDETR_JOB_ROOT, config.get("rfdetr_id"), RFDETR_KEEP_FILES, "rfdetr_runs")
 
+    copied_qwen_ids: set[str] = set()
+
+    def _copy_qwen_run(model_id: Optional[str]) -> None:
+        if not model_id:
+            return
+        if model_id in copied_qwen_ids:
+            return
+        entry = _get_qwen_model_entry(str(model_id))
+        if not entry:
+            assets["missing"].append({"kind": "qwen_model", "id": model_id})
+            return
+        raw_path = entry.get("path")
+        if not raw_path:
+            assets["missing"].append({"kind": "qwen_model", "id": model_id})
+            return
+        run_path = Path(str(raw_path)).resolve()
+        if run_path.name == "latest":
+            run_path = run_path.parent
+        if not run_path.exists():
+            assets["missing"].append({"kind": "qwen_model", "id": model_id})
+            return
+        dest = temp_dir / "models" / "qwen_runs" / run_path.name
+        assets["copied"].extend(_copy_tree_filtered(run_path, dest, keep_files=None))
+        copied_qwen_ids.add(model_id)
+
+    _copy_qwen_run(config.get("model_id"))
+    _copy_qwen_run(config.get("prepass_caption_model_id"))
+
     classifier_id = config.get("classifier_id")
     if classifier_id:
         try:
@@ -40414,9 +41036,15 @@ def export_prepass_recipe(recipe_id: str):
         tempfile.mkdtemp(prefix=f"prepass_recipe_{recipe_id}_", dir=PREPASS_RECIPE_EXPORT_ROOT)
     )
     try:
+        meta_copy = json.loads(json.dumps(meta))
+        config_copy = meta_copy.get("config") or {}
+        if isinstance(config_copy, dict) and "dataset_id" in config_copy:
+            config_copy = dict(config_copy)
+            config_copy.pop("dataset_id", None)
+            meta_copy["config"] = config_copy
         meta_path = temp_dir / PREPASS_RECIPE_META
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        assets = _collect_recipe_assets(meta, temp_dir)
+        meta_path.write_text(json.dumps(meta_copy, indent=2), encoding="utf-8")
+        assets = _collect_recipe_assets(meta_copy, temp_dir)
         manifest = {
             "schema_version": PREPASS_RECIPE_SCHEMA_VERSION,
             "recipe_id": meta.get("id") or recipe_id,
@@ -40444,11 +41072,19 @@ def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
         extract_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(extract_dir)
+        manifest_path = extract_dir / "manifest.json"
+        if not manifest_path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_missing_manifest")
+        manifest = json.loads(manifest_path.read_text())
         meta_path = extract_dir / PREPASS_RECIPE_META
         if not meta_path.exists():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_missing_meta")
         meta = json.loads(meta_path.read_text())
+        _validate_prepass_recipe_manifest(manifest, extract_dir)
         config = meta.get("config") or {}
+        if isinstance(config, dict):
+            config = dict(config)
+            config.pop("dataset_id", None)
         glossary = meta.get("glossary") or ""
         labelmap_file = None
         for candidate in (extract_dir / "labelmap.txt", extract_dir / "labelmaps" / "labelmap.txt"):
@@ -40506,6 +41142,43 @@ def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
         if rfdetr_id:
             config["rfdetr_id"] = rfdetr_id
 
+        qwen_id_map: Dict[str, str] = {}
+        qwen_root = extract_dir / "models" / "qwen_runs"
+        if qwen_root.exists():
+            for run_dir in qwen_root.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                meta_file = run_dir / QWEN_METADATA_FILENAME
+                meta_payload: Dict[str, Any] = {}
+                if meta_file.exists():
+                    try:
+                        meta_payload = json.loads(meta_file.read_text())
+                    except Exception:
+                        meta_payload = {}
+                old_id = str(meta_payload.get("id") or run_dir.name)
+                new_id = uuid.uuid4().hex
+                dest = QWEN_JOB_ROOT / new_id
+                dest.mkdir(parents=True, exist_ok=True)
+                for item in run_dir.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, dest / item.name)
+                # Update metadata id to match new run id if we can.
+                meta_dest = dest / QWEN_METADATA_FILENAME
+                if meta_dest.exists():
+                    try:
+                        payload = json.loads(meta_dest.read_text())
+                    except Exception:
+                        payload = {}
+                    payload["id"] = new_id
+                    meta_dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                qwen_id_map[old_id] = new_id
+
+        if qwen_id_map:
+            for key in ("model_id", "prepass_caption_model_id"):
+                val = config.get(key)
+                if isinstance(val, str) and val in qwen_id_map:
+                    config[key] = qwen_id_map[val]
+
         classifier_root = extract_dir / "models" / "classifiers"
         if classifier_root.exists():
             classifier_root.mkdir(parents=True, exist_ok=True)
@@ -40536,13 +41209,18 @@ def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
                     config["ensemble_job_id"] = new_job
                 break
 
+        original_name = meta.get("name") or f"Imported recipe {uuid.uuid4().hex[:8]}"
+        unique_name, renamed_from = _unique_prepass_recipe_name(original_name)
+        notice = None
+        if renamed_from:
+            notice = f"Recipe name '{renamed_from}' already exists. Imported as '{unique_name}'."
         recipe_id = uuid.uuid4().hex
         recipe_dir = _prepass_recipe_dir(recipe_id, create=True)
         now = time.time()
         recipe_meta = {
             "id": recipe_id,
             "schema_version": PREPASS_RECIPE_SCHEMA_VERSION,
-            "name": meta.get("name") or f"Imported recipe {recipe_id[:8]}",
+            "name": unique_name,
             "description": meta.get("description") or "",
             "config": config,
             "glossary": _normalize_labelmap_glossary(glossary),
@@ -40558,6 +41236,8 @@ def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
             updated_at=now,
             config=recipe_meta["config"],
             glossary=recipe_meta.get("glossary") or None,
+            renamed_from=renamed_from,
+            notice=notice,
         )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

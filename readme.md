@@ -187,18 +187,14 @@ Calibration workflow + caching
 - Intermediate prepass + feature + label caches are stored under `uploads/calibration_cache/` and keyed by the payload hash.
 - You can poll a running job via `GET /qwen/calibration/jobs/{job_id}` to track progress.
 
-Calibration benchmark (IoU=0.50, qwen_dataset, cal_8180972c, validation split)
-| Pipeline | Precision | Recall | F1 |
-| --- | --- | --- | --- |
-| YOLO‑supported clusters (source_list contains yolo) | 0.769 | 0.532 | 0.629 |
-| RF‑DETR‑supported clusters (source_list contains rfdetr) | 0.712 | 0.562 | 0.628 |
-| YOLO + RF‑DETR (dedupe on source_list union) | 0.663 | 0.635 | 0.649 |
-| **Prepass + XGBoost (context)** | **0.850** | **0.799** | **0.824** |
-
-Calibration benchmark (IoU=0.50, qwen_dataset, 2000‑image baseline)
-| Pipeline | Precision | Recall | F1 |
-| --- | --- | --- | --- |
-| **Prepass + XGBoost (context)** | **0.844** | **0.688** | **0.758** |
+Calibration benchmark (IoU=0.50, qwen_dataset, validation split)
+| Dataset size | Windowed SAM3 text | Windowed SAM3 similarity | Pipeline | Precision | Recall | F1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4000 | no | no | YOLO‑supported clusters (source_list contains yolo) | 0.769 | 0.532 | 0.629 |
+| 4000 | no | no | RF‑DETR‑supported clusters (source_list contains rfdetr) | 0.712 | 0.562 | 0.628 |
+| 4000 | no | no | YOLO + RF‑DETR (dedupe on source_list union) | 0.663 | 0.635 | 0.649 |
+| 4000 | no | no | **Prepass + XGBoost (context)** | **0.850** | **0.799** | **0.824** |
+| 2000 | no | no | **Prepass + XGBoost (context)** | **0.844** | **0.688** | **0.758** |
 
 Notes:
 - The detector baselines above are derived from **prepass clusters** using `source_list` membership (i.e., clusters that had detector support). This is more faithful than filtering by `score_source` alone, which only keeps clusters whose primary score came from a detector.

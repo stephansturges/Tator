@@ -3513,7 +3513,7 @@ const sam3TrainState = {
         if (!qwenDatasetState.items.length) {
             const option = document.createElement("option");
             option.value = "";
-            option.textContent = "No cached datasets";
+            option.textContent = "No datasets found (use Dataset Manager to upload)";
             select.appendChild(option);
             select.disabled = true;
 		        } else {
@@ -4777,10 +4777,10 @@ function ensureAutomationAvailable(actionLabel) {
     async function handleQwenDatasetDelete() {
         const entry = getSelectedQwenDataset();
         if (!entry) {
-            setQwenTrainMessage("Select a cached dataset to delete.", "warn");
+            setQwenTrainMessage("Select a dataset from Dataset Manager to delete.", "warn");
             return;
         }
-        if (!window.confirm(`Delete cached dataset "${entry.label}"? This cannot be undone.`)) {
+        if (!window.confirm(`Delete dataset "${entry.label}"? This cannot be undone.`)) {
             return;
         }
         try {
@@ -4791,7 +4791,7 @@ function ensureAutomationAvailable(actionLabel) {
                 const detail = await resp.text();
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
-            setQwenTrainMessage(`Deleted cached dataset "${entry.label}".`, "success");
+            setQwenTrainMessage(`Deleted dataset "${entry.label}".`, "success");
             qwenDatasetState.selectedId = null;
             await loadQwenDatasetList(true);
         } catch (error) {
@@ -10192,7 +10192,7 @@ function initQwenTrainingTab() {
         refreshQwenSplitCache();
 	        if (qwenTrainElements.datasetRefresh) {
 	            qwenTrainElements.datasetRefresh.addEventListener("click", () => {
-	                loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh cached datasets", error));
+	                loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh datasets", error));
 	            });
 	        }
 	        if (qwenTrainElements.chartSmoothing) {
@@ -10204,7 +10204,7 @@ function initQwenTrainingTab() {
                 updateQwenLossChart(qwenTrainState.lastJobSnapshot);
             });
         }
-        loadQwenDatasetList().catch((error) => console.error("Failed to load cached datasets", error));
+        loadQwenDatasetList().catch((error) => console.error("Failed to load datasets", error));
         setQwenDatasetModeState();
     }
 
@@ -11323,7 +11323,7 @@ function initQwenTrainingTab() {
         const usingNativeImages = Boolean(trainingState.nativeImagesPath);
         const usingNativeLabels = Boolean(trainingState.nativeLabelsPath);
         if (!usingNativeImages || !usingNativeLabels) {
-            throw new Error("Select a cached dataset (or upload the current labeling dataset) before training.");
+            throw new Error("Select a dataset from Dataset Manager (or upload the current labeling dataset) before training.");
         }
         const formData = new FormData();
         formData.append("images_path_native", trainingState.nativeImagesPath);
@@ -12122,7 +12122,7 @@ function initQwenTrainingTab() {
                 trainingState.imagesFolderName = null;
                 trainingState.labelsFolderName = null;
                 if (trainingElements.datasetSummary) {
-                    trainingElements.datasetSummary.textContent = "Pick a cached dataset or upload the current labeling dataset.";
+                    trainingElements.datasetSummary.textContent = "Pick a dataset from Dataset Manager or upload the current labeling dataset.";
                 }
                 updateTrainingStartAvailability();
                 return;
@@ -12140,7 +12140,7 @@ function initQwenTrainingTab() {
             if (trainingElements.datasetSummary) {
                 trainingElements.datasetSummary.textContent = `Using dataset: ${item.label || item.id}`;
             }
-            setTrainingMessage(`Using cached dataset ${item.label || item.id}`, "success");
+            setTrainingMessage(`Using dataset ${item.label || item.id} (Dataset Manager)`, "success");
             updateTrainingStartAvailability();
         };
 
@@ -12184,7 +12184,7 @@ function initQwenTrainingTab() {
                 updateTrainingStartAvailability();
             } catch (err) {
                 console.error("Failed to refresh datasets", err);
-                setTrainingMessage(`Unable to load cached datasets: ${err.message || err}`, "error");
+                setTrainingMessage(`Unable to load datasets: ${err.message || err}`, "error");
             }
         };
 

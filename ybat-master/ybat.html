@@ -986,9 +986,9 @@
                                 </select>
                                 <button type="button" class="training-button secondary" id="trainDatasetRefresh">Refresh</button>
                             </div>
-                            <div class="training-help" id="trainDatasetSummary">Choose a cached YOLO dataset (bbox or seg). Use Dataset Management to upload datasets.</div>
+                            <div class="training-help" id="trainDatasetSummary">Choose a dataset from Dataset Manager (YOLO bbox/seg or COCO). Use Dataset Manager to upload or save the current labeling set.</div>
                             <div class="training-help" id="trainDatasetWarning" style="color:#b45309; margin-top:4px; display:none;">
-                                Select or upload a cached dataset to enable training.
+                                Select a dataset from Dataset Manager (or upload the current labeling set) to enable training.
                             </div>
                         </div>
                         <div class="training-field">
@@ -1501,7 +1501,7 @@
                 <div class="training-wrapper two-col">
                     <section class="training-form-section">
                         <h2>Train SAM3 (text-promptable by default)</h2>
-                        <p class="training-help">Pick a cached dataset (Qwen uploads or YOLO folders). By default we keep the SAM3 segmentation head so the resulting checkpoint works with text prompting; masks are only required if you opt in below.</p>
+                        <p class="training-help">Pick a dataset from Dataset Manager. By default we keep the SAM3 segmentation head so the resulting checkpoint works with text prompting; masks are only required if you opt in below.</p>
                         <div class="training-field">
                             <label>Dataset</label>
                             <div class="sam3-dataset-row">
@@ -2967,7 +2967,7 @@
 	                        <div class="training-card__body dataset-manager">
 	                                <div class="training-subsection">
 	                                    <div class="training-subsection__title">Upload current labeling session</div>
-	                                    <div class="training-help">Packages the images + labels you have loaded in the labeling tab and uploads them as a YOLO / YOLO-seg dataset (train split) so you can reuse it for CLIP, Qwen, and SAM3 flows.</div>
+                                    <div class="training-help">Packages the images + labels you have loaded in the labeling tab and uploads them as a YOLO / YOLO-seg dataset (train split) so it appears in Dataset Manager for reuse in CLIP, Qwen, and SAM3 flows.</div>
 	                                    <div class="training-grid">
 	                                        <div>
 	                                            <label for="datasetUploadCurrentName">Dataset name (optional)</label>
@@ -3015,7 +3015,7 @@
                         <div class="training-card">
                             <div class="training-card__header">
                                 <div class="training-card__title">Datasets on disk</div>
-                                <div class="training-help">All cached datasets discovered on disk. Use the refresh button after adding or removing datasets manually.</div>
+                                    <div class="training-help">All datasets discovered on disk (via Dataset Manager uploads or manual drops into <code>uploads/datasets</code>). Use refresh after manual changes.</div>
                             </div>
                             <div class="training-card__body">
                                 <div class="training-actions">

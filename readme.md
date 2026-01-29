@@ -6,6 +6,8 @@ Tator is a single‑machine annotation stack with a browser UI and a FastAPI bac
 
 We previously experimented with agentic annotation loops and removed them. Qwen is now used **only** for captioning and for optional glossary expansion used by SAM3 text prompting.
 
+**Vision:** Tator is for teams who already have an object‑detection dataset (or need to grow one) and want to scale annotation without compromising quality. The goal is to combine strong human‑in‑the‑loop tools with deterministic automation so you can prelabel quickly, then review and correct with confidence.
+
 ---
 
 ## What you get

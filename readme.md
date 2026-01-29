@@ -91,6 +91,7 @@ Key notes:
 Notes:
 - Detector baselines above are derived from **prepass clusters** using `source_list` membership (more faithful than `score_source` alone).
 - IoU=0.50 is used for calibration selection (recall‑friendly for prelabeling). For stricter downstream evaluation, use IoU=0.75 or higher.
+- **Windowed cost**: enabling 2×2 windowed SAM3 text+similarity increased throughput from ~20 s/img to ~31 s/img (≈+55%) on dual A6000s in our qwen_dataset runs. Expect variation by GPU/model.
 
 ---
 

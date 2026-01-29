@@ -225,6 +225,7 @@ training.txr
 logs/
 lightning_logs/
 *.log
+*.swp
 PCS.txt
 crashlog.txt
 fuzz_long.log
@@ -262,7 +263,21 @@ AGENTS.md
 # Local vendor clones / docs / screenshots
 Qwen3-VL/
 rf-detr/
+Qwen-Agent/
+SAM3-UNet/
+sahi/
 qwen30vltraining.txt
 qwen3_upgrade_brief.txt
 qwencaptioning.txt
 scrn.png
+
+# Root-level scratch artifacts (do not track)
+/*.txt
+!requirements.txt
+!requirements-dev.txt
+prepass_*
+qwen_agentic_*
+
+# Local scratch/docs (never commit)
+docs/_local/
+tools/calibration_presets/

@@ -193,6 +193,11 @@ Calibration benchmark (IoU=0.50, qwen_dataset, cal_8180972c, validation split)
 | YOLO‑supported clusters (source_list contains yolo) | 0.769 | 0.532 | 0.629 |
 | RF‑DETR‑supported clusters (source_list contains rfdetr) | 0.712 | 0.562 | 0.628 |
 | YOLO + RF‑DETR (dedupe on source_list union) | 0.663 | 0.635 | 0.649 |
+| **Prepass + XGBoost (context)** | **0.850** | **0.799** | **0.824** |
+
+Calibration benchmark (IoU=0.50, qwen_dataset, 2000‑image baseline)
+| Pipeline | Precision | Recall | F1 |
+| --- | --- | --- | --- |
 | **Prepass + XGBoost (context)** | **0.844** | **0.688** | **0.758** |
 
 Notes:

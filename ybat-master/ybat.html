@@ -267,7 +267,7 @@
                                         <strong>Caption current image</strong>
                                         <span id="qwenCaptionStatus" class="qwen-caption-status"></span>
                                     </div>
-                                    <label for="qwenCaptionDataset">Caption dataset</label>
+                                    <label for="qwenCaptionDataset">Caption dataset (Dataset Manager)</label>
                                     <div class="qwen-caption-row">
                                         <select id="qwenCaptionDataset"></select>
                                         <button type="button" id="qwenCaptionDatasetRefresh" class="training-button secondary">Refresh</button>
@@ -396,7 +396,7 @@
                                 </div>
                                                                 <div class="qwen-prepass">
                                     <div class="qwen-caption__header">
-                                        <strong>Deep prelabeling (Inference)</strong>
+                                        <strong>Prepass (inference)</strong>
                                         <span id="prepassStatus" class="qwen-caption-status"></span>
                                     </div>
                                     <div class="training-help">Apply a saved prepass recipe to the current image or the next batch.</div>
@@ -534,16 +534,16 @@
             <div class="tab-panel" id="tabPrepassBuilder" data-tab-panel="prepass-builder">
                 <div class="container">
                     <div class="left">
-                        <h2>Deep prelabeling (Prepass Builder)</h2>
+                        <h2>Prepass Builder</h2>
                         <div class="training-help">Build, calibrate, and export prepass recipes. Use the Label Images tab to apply recipes.</div>
                         <div class="training-help" style="margin-top:8px; border-left:3px solid #4a5568; padding-left:10px;">
                             <strong>How this works:</strong> The prepass runs a deterministic pipeline (detectors → SAM3 text → dedupe → SAM3 similarity → dedupe → optional calibration).
-                            Use this panel to define a reusable recipe, then apply it in the Label Images tab. The defaults are tuned for recall; calibration or classifier gating
+                            Use this panel to define a reusable recipe, then apply it in the Label Images tab. Defaults favor recall; calibration or classifier tightening handles precision.
                             handles precision later. If you are unsure, keep defaults and only change one knob at a time.
                         </div>
 <div class="qwen-prepass">
                                     <div class="qwen-caption__header">
-                                        <strong>Deep prelabeling (Qwen)</strong>
+                                        <strong>Prepass (detectors + SAM3)</strong>
                                         <span id="qwenAgentStatus" class="qwen-caption-status"></span>
                                     </div>
                                                                         <div class="training-help">Save and reuse prepass recipes across sessions or share them with teammates.</div>
@@ -574,7 +574,7 @@
                                             </div>
                                         </div>
                                     </div>
-<div class="training-help">Runs a deep prepass (detectors + SAM3 + dedupe + optional calibration). Uses the current labelmap or a selected dataset.</div>
+<div class="training-help">Runs a prepass (detectors + SAM3 + dedupe + optional calibration). Uses the current labelmap or a selected dataset.</div>
                                     <details class="training-help" style="margin-bottom: 10px;">
                                         <summary><strong>Prepass flow + defaults</strong></summary>
                                         <div style="margin-top: 6px;">
@@ -722,7 +722,7 @@
                                             <input type="number" id="qwenAgentScorelessIou" min="0" max="1" step="0.05" value="0.0" />
                                         </div>
                                     </div>
-                                    <div class="training-help">Deep prepass (deterministic)</div>
+                                    <div class="training-help">Prepass (deterministic)</div>
                                     <div class="qwen-caption-grid">
                                         <div>
                                             <label for="qwenAgentEnableYolo">Enable YOLO<span class="help-icon" title="Run YOLO in full-frame plus SAHI windowed mode during prepass. Disable to save time if YOLO is not trained for this dataset.">?</span></label>

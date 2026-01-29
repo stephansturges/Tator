@@ -2142,7 +2142,7 @@
         │
         ├─ Build prompt list per class
         │    - class name + your extra prompts
-        │    - optional GPT prompt expansion
+        │    - optional Qwen prompt expansion
         │    - base prompts (e.g., “object”, “small object”)
         │
         ├─ Text-candidate eval (sample, text-only)
@@ -2644,28 +2644,18 @@
 		                                <input type="text" id="agentClasses" placeholder="blank = all" />
 		                            </div>
 		                            <div>
-		                                <label for="agentQwenMaxPrompts">Extra text prompts/class<span class="help-icon" title="Ask GPT-OSS for additional words to try for each class (in addition to the class name).&#10;0 = only use the class name; higher values try more alternative phrases.">?</span></label>
+                                <label for="agentQwenMaxPrompts">Extra text prompts/class<span class="help-icon" title="Ask Qwen for additional words to try for each class (in addition to the class name).&#10;0 = only use the class name; higher values try more alternative phrases.">?</span></label>
 		                                <input type="number" id="agentQwenMaxPrompts" min="0" max="20" value="0" title="0 = only use the class name; higher values try more alternative phrases." />
 		                            </div>
 		                            <div>
-		                                <label for="agentPromptReasoning">GPT-OSS reasoning<span class="help-icon" title="Controls how much the model “thinks” before proposing extra words.&#10;Higher can be slower and less stable.&#10;We recommend “none” for now.">?</span></label>
-		                                <select id="agentPromptReasoning" title="How much GPT-OSS “thinks” before proposing extra words. Higher uses more time and can be less stable.">
-		                                    <option value="none" selected>none (fastest)</option>
-	                                    <option value="low">low</option>
-	                                    <option value="medium">medium</option>
-	                                    <option value="high">high</option>
-	                                </select>
-	                                <div class="training-help" style="color: #b91c1c;">Only “none” is stable right now.</div>
-		                            </div>
-		                            <div>
-		                                <label for="agentPromptMaxTokens">GPT-OSS max tokens<span class="help-icon" title="Maximum length of the model output when proposing extra prompts.&#10;Higher can be slower and use more GPU memory.&#10;If you see truncated lists, increase this.">?</span></label>
-		                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Maximum length of GPT-OSS output when proposing extra words." />
+                                <label for="agentPromptMaxTokens">Qwen max tokens<span class="help-icon" title="Maximum length of the model output when proposing extra prompts.&#10;Higher can be slower and use more GPU memory.&#10;If you see truncated lists, increase this.">?</span></label>
+                                <input type="number" id="agentPromptMaxTokens" min="16" max="400" value="160" title="Maximum length of Qwen output when proposing extra words." />
 		                            </div>
 		                        </div>
 				                        <div class="training-field">
-				                            <label for="agentExtraPrompts">Extra prompts (optional)<span class="help-icon" title="Optional JSON dict of extra prompts to try.&#10;Keys: class names.&#10;Values: lists of strings.&#10;Special key “__base__” applies to all classes.&#10;These are appended to GPT-OSS suggestions.">?</span></label>
+                                <label for="agentExtraPrompts">Extra prompts (optional)<span class="help-icon" title="Optional JSON dict of extra prompts to try.&#10;Keys: class names.&#10;Values: lists of strings.&#10;Special key “__base__” applies to all classes.&#10;These are appended to Qwen suggestions.">?</span></label>
 				                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"__base__": ["object", "small object"], "light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Special key &quot;__base__&quot; applies to all classes. Example: {&quot;__base__&quot;: [&quot;object&quot;, &quot;small object&quot;], &quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;]}"></textarea>
-				                            <div class="training-help">Optional extra words/phrases to try. They are appended to GPT-OSS suggestions. Use &quot;__base__&quot; to add prompts for all classes.</div>
+                                <div class="training-help">Optional extra words/phrases to try. They are appended to Qwen suggestions. Use &quot;__base__&quot; to add prompts for all classes.</div>
 				                            <div class="training-help" id="agentExtraPromptsParseStatus" aria-live="polite"></div>
 				                        </div>
                         <div class="training-actions">
@@ -2729,8 +2719,8 @@
 			                                    <li><strong>Recipe cleanliness</strong>: target precision for CLIP tuning.</li>
 			                                    <li><strong>Manual head min prob / margin</strong>: used when auto‑tune is off.</li>
 			                                    <li><strong>Class IDs</strong>: optional subset of classes to mine.</li>
-			                                    <li><strong>Extra text prompts/class</strong>: GPT-OSS prompt expansion count.</li>
-			                                    <li><strong>GPT‑OSS reasoning / max tokens</strong>: prompt generator settings.</li>
+                                        <li><strong>Extra text prompts/class</strong>: Qwen prompt expansion count.</li>
+                                        <li><strong>Qwen max tokens</strong>: prompt generator output length cap.</li>
 			                                    <li><strong>Extra prompts JSON</strong>: user-provided prompts by class.</li>
 			                                </ul>
 			                            </div>

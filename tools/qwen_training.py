@@ -125,6 +125,7 @@ class QwenTrainingConfig:
     training_mode: str = "official_lora"  # official_lora | trl_qlora
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     run_name: Optional[str] = None
+    devices: Optional[str] = None
     batch_size: int = 1
     max_epochs: int = 3
     lr: float = 2e-4
@@ -632,6 +633,10 @@ def train_qwen_model(
     cancel_cb: Optional[CancelCallback] = None,
     metrics_cb: Optional[TelemetryCallback] = None,
 ) -> QwenTrainingResult:
+    if config.devices:
+        cleaned = ",".join(part.strip() for part in str(config.devices).split(",") if part.strip())
+        if cleaned:
+            os.environ["CUDA_VISIBLE_DEVICES"] = cleaned
     if config.training_mode == "trl_qlora":
         return _train_trl_qlora(config, progress_cb, cancel_cb, metrics_cb)
     return _train_official_lora(config, progress_cb, cancel_cb, metrics_cb)

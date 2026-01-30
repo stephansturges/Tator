@@ -1771,6 +1771,11 @@ const AUTOMATION_LOCKED_TABS = new Set([
         includeClip: null,
         includeAgent: null,
     };
+    const installCheckElements = {
+        runButton: null,
+        status: null,
+        log: null,
+    };
 
     const trainingElements = {
         encoderTypeSelect: null,
@@ -1942,6 +1947,31 @@ const AUTOMATION_LOCKED_TABS = new Set([
         runSummary: null,
     };
 
+    const yoloHeadGraftElements = {
+        baseRunSelect: null,
+        baseRunRefresh: null,
+        baseSummary: null,
+        datasetSelect: null,
+        datasetRefresh: null,
+        datasetSummary: null,
+        runNameInput: null,
+        epochsInput: null,
+        imgSizeInput: null,
+        batchInput: null,
+        workersInput: null,
+        devicesInput: null,
+        seedInput: null,
+        exportOnnx: null,
+        startButton: null,
+        dryRunButton: null,
+        cancelButton: null,
+        progressFill: null,
+        statusText: null,
+        message: null,
+        log: null,
+        history: null,
+    };
+
     const rfdetrTrainElements = {
         datasetSelect: null,
         datasetRefresh: null,
@@ -2065,6 +2095,14 @@ const RFDETR_TOS_STORAGE_KEY = "rfdetrTrainingTosAccepted";
         variants: [],
         lastHeadType: "standard",
         autoScratchForced: false,
+    };
+
+    const yoloHeadGraftState = {
+        activeJobId: null,
+        pollHandle: null,
+        lastJobSnapshot: null,
+        baseRunId: null,
+        datasetId: null,
     };
 
     const rfdetrTrainState = {
@@ -2394,6 +2432,9 @@ const sam3TrainState = {
         uploadCurrentBtn: null,
         uploadCurrentName: null,
         uploadCurrentContext: null,
+        uploadCurrentSplit: null,
+        uploadCurrentValPercent: null,
+        uploadCurrentValSeed: null,
         uploadCurrentSummary: null,
         refreshBtn: null,
         list: null,
@@ -2585,11 +2626,25 @@ const sam3TrainState = {
 	                    if (entry.train_count) counts.push(`train ${entry.train_count}`);
 	                    if (entry.val_count) counts.push(`val ${entry.val_count}`);
 	                    if (counts.length) parts.push(counts.join(" / "));
-	                    meta.textContent = parts.join(" • ") || "Dataset ready";
-	                    item.appendChild(header);
-	                    item.appendChild(meta);
-	                    container.appendChild(item);
-	                });
+                    meta.textContent = parts.join(" • ") || "Dataset ready";
+                    item.appendChild(header);
+                    item.appendChild(meta);
+                    if (entry.context) {
+                        const contextLine = document.createElement("div");
+                        contextLine.className = "training-help";
+                        contextLine.textContent = `Context: ${entry.context}`;
+                        item.appendChild(contextLine);
+                    }
+                    if (entry.glossary_preview || entry.glossary_present) {
+                        const glossaryLine = document.createElement("div");
+                        glossaryLine.className = "training-help";
+                        glossaryLine.textContent = entry.glossary_preview
+                            ? `Glossary: ${entry.glossary_preview}`
+                            : "Glossary: (present, no preview)";
+                        item.appendChild(glossaryLine);
+                    }
+                    container.appendChild(item);
+                });
             }
         }
         renderSegBuilderDatasets(datasetManagerState.datasets);
@@ -2637,6 +2692,11 @@ const sam3TrainState = {
         const bits = [];
         if (entry.type) bits.push(entry.type.toUpperCase());
         if (entry.image_count) bits.push(`${entry.image_count} img`);
+        if (entry.glossary_preview) {
+            bits.push(`Glossary: ${entry.glossary_preview}`);
+        } else if (entry.glossary_present) {
+            bits.push("Glossary: present");
+        }
         datasetManagerElements.glossaryDatasetSummary.textContent = bits.length ? bits.join(" • ") : "Dataset selected.";
     }
 
@@ -3026,30 +3086,54 @@ const sam3TrainState = {
 	        }
 	    }
 
-		    async function uploadCurrentDatasetToCache() {
-		        try {
-		            const validation = validateGeometryForSave();
-		            if (!validation.ok) {
+    function mulberry32(seed) {
+        let t = Number(seed) || 0;
+        return () => {
+            t += 0x6D2B79F5;
+            let r = Math.imul(t ^ (t >>> 15), t | 1);
+            r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+            return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
+    function seededShuffle(items, seed) {
+        const rng = mulberry32(seed);
+        const arr = Array.from(items);
+        for (let i = arr.length - 1; i > 0; i -= 1) {
+            const j = Math.floor(rng() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
+        }
+        return arr;
+    }
+
+    async function uploadCurrentDatasetToCache() {
+        try {
+            const validation = validateGeometryForSave();
+            if (!validation.ok) {
 		                setDatasetUploadMessage(validation.message || "Dataset geometry invalid.", "warn");
 		                return;
 		            }
-		            const imageKeys = Object.keys(images || {});
-		            if (!imageKeys.length) {
-		                setDatasetUploadMessage("Load images in the labeling tab first.", "warn");
-		                return;
-		            }
+            const imageKeys = Object.keys(images || {});
+            if (!imageKeys.length) {
+                setDatasetUploadMessage("Load images in the labeling tab first.", "warn");
+                return;
+            }
 		            const classNames = Object.keys(classes || {});
 		            if (!classNames.length) {
 		                setDatasetUploadMessage("Load a labelmap in the labeling tab first.", "warn");
 		                return;
 		            }
-		            setDatasetUploadMessage("Packaging current dataset as YOLO zip…", "info");
-		            const runNameRaw = datasetManagerElements.uploadCurrentName?.value?.trim() || "";
-		            const contextText = datasetManagerElements.uploadCurrentContext?.value?.trim() || "";
-		            const runName = runNameRaw || "labeling_session";
-		            const zip = new JSZip();
-		            const folderName = sanitizeDatasetFilename(runName) || "labeling_session";
-		            const root = zip.folder(folderName);
+            setDatasetUploadMessage("Packaging current dataset as YOLO zip…", "info");
+            const runNameRaw = datasetManagerElements.uploadCurrentName?.value?.trim() || "";
+            const contextText = datasetManagerElements.uploadCurrentContext?.value?.trim() || "";
+            const wantSplit = Boolean(datasetManagerElements.uploadCurrentSplit?.checked);
+            const valPercentRaw = parseFloat(datasetManagerElements.uploadCurrentValPercent?.value || "");
+            const valPercent = Number.isFinite(valPercentRaw) ? Math.max(1, Math.min(50, valPercentRaw)) : 10;
+            const valSeed = parseInt(datasetManagerElements.uploadCurrentValSeed?.value || "", 10) || 42;
+            const runName = runNameRaw || "labeling_session";
+            const zip = new JSZip();
+            const folderName = sanitizeDatasetFilename(runName) || "labeling_session";
+            const root = zip.folder(folderName);
 		            const labelmapEntries = Object.keys(classes || {}).map((name) => ({
 		                name,
 		                idx: Number(classes[name]),
@@ -3059,29 +3143,42 @@ const sam3TrainState = {
 		                throw new Error("Labelmap is empty.");
 		            }
 		            const maxIdx = labelmapEntries[labelmapEntries.length - 1].idx;
-		            if (labelmapEntries[0].idx !== 0 || maxIdx !== labelmapEntries.length - 1) {
-		                throw new Error("Labelmap indices must be contiguous starting at 0.");
-		            }
-		            root.file("labelmap.txt", labelmapEntries.map((entry) => entry.name).join("\n"));
-		            const usedNames = new Map();
-		            for (const imageKey of imageKeys) {
-		                const imageRecord = images[imageKey];
-		                if (!imageRecord || !imageRecord.meta) {
-		                    throw new Error(`Missing original file for ${imageKey}. Re-import the images and try again.`);
-		                }
-		                await ensureImageDimensions(imageRecord);
-		                const baseName = imageRecord.meta.name || imageKey;
-		                const safeName = makeUniqueFilename(baseName, usedNames);
-		                root.file(`train/images/${safeName}`, imageRecord.meta);
-		                const labelNameParts = safeName.split(".");
-		                if (labelNameParts.length > 1) {
-		                    labelNameParts[labelNameParts.length - 1] = "txt";
-		                } else {
-		                    labelNameParts.push("txt");
-		                }
-		                const labelRel = labelNameParts.join(".");
-		                const result = [];
-		                const buckets = bboxes[imageKey] || {};
+            if (labelmapEntries[0].idx !== 0 || maxIdx !== labelmapEntries.length - 1) {
+                throw new Error("Labelmap indices must be contiguous starting at 0.");
+            }
+            root.file("labelmap.txt", labelmapEntries.map((entry) => entry.name).join("\n"));
+            const usedNames = new Map();
+            let trainKeys = imageKeys;
+            let valSet = null;
+            if (wantSplit && imageKeys.length > 1) {
+                const shuffled = seededShuffle(imageKeys, valSeed);
+                let valCount = Math.floor(shuffled.length * (valPercent / 100));
+                if (valCount <= 0) valCount = 1;
+                if (valCount >= shuffled.length) valCount = shuffled.length - 1;
+                const valKeys = shuffled.slice(0, valCount);
+                trainKeys = shuffled.slice(valCount);
+                valSet = new Set(valKeys);
+            }
+            const trainSet = new Set(trainKeys);
+            for (const imageKey of imageKeys) {
+                const imageRecord = images[imageKey];
+                if (!imageRecord || !imageRecord.meta) {
+                    throw new Error(`Missing original file for ${imageKey}. Re-import the images and try again.`);
+                }
+                await ensureImageDimensions(imageRecord);
+                const baseName = imageRecord.meta.name || imageKey;
+                const safeName = makeUniqueFilename(baseName, usedNames);
+                const splitName = valSet && valSet.has(imageKey) ? "val" : "train";
+                root.file(`${splitName}/images/${safeName}`, imageRecord.meta);
+                const labelNameParts = safeName.split(".");
+                if (labelNameParts.length > 1) {
+                    labelNameParts[labelNameParts.length - 1] = "txt";
+                } else {
+                    labelNameParts.push("txt");
+                }
+                const labelRel = labelNameParts.join(".");
+                const result = [];
+                const buckets = bboxes[imageKey] || {};
 		                for (const className of Object.keys(buckets)) {
 		                    const bucket = buckets[className] || [];
 		                    const classIdx = classes[className];
@@ -3105,11 +3202,11 @@ const sam3TrainState = {
 		                        }
 		                    });
 		                }
-		                root.file(`train/labels/${labelRel}`, result.join("\n"));
-		            }
-		            const blob = await zip.generateAsync({ type: "blob" });
-		            const formData = new FormData();
-		            formData.append("file", blob, `${folderName}.zip`);
+                root.file(`${splitName}/labels/${labelRel}`, result.join("\n"));
+            }
+            const blob = await zip.generateAsync({ type: "blob" });
+            const formData = new FormData();
+            formData.append("file", blob, `${folderName}.zip`);
 		            formData.append("dataset_id", runName);
 		            formData.append("dataset_type", datasetType === "seg" ? "seg" : "bbox");
 		            if (contextText) {
@@ -3123,9 +3220,10 @@ const sam3TrainState = {
 		            const data = detail ? JSON.parse(detail) : {};
 		            const label = data?.label || data?.id || runName;
 		            setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
-		            if (datasetManagerElements.uploadCurrentSummary) {
-		                datasetManagerElements.uploadCurrentSummary.textContent = `Saved as ${label}`;
-		            }
+            if (datasetManagerElements.uploadCurrentSummary) {
+                const splitNote = wantSplit && valSet ? ` (train ${trainKeys.length} / val ${valSet.size})` : "";
+                datasetManagerElements.uploadCurrentSummary.textContent = `Saved as ${label}${splitNote}`;
+            }
 		            await refreshDatasetList();
 		            return data;
 	        } catch (err) {
@@ -3144,9 +3242,12 @@ const sam3TrainState = {
         datasetManagerElements.uploadType = document.getElementById("datasetUploadType");
 	        datasetManagerElements.uploadBtn = document.getElementById("datasetUploadBtn");
 	        datasetManagerElements.uploadMessage = document.getElementById("datasetUploadMessage");
-	        datasetManagerElements.uploadCurrentBtn = document.getElementById("datasetUploadCurrentBtn");
-	        datasetManagerElements.uploadCurrentName = document.getElementById("datasetUploadCurrentName");
-	        datasetManagerElements.uploadCurrentContext = document.getElementById("datasetUploadCurrentContext");
+        datasetManagerElements.uploadCurrentBtn = document.getElementById("datasetUploadCurrentBtn");
+        datasetManagerElements.uploadCurrentName = document.getElementById("datasetUploadCurrentName");
+        datasetManagerElements.uploadCurrentContext = document.getElementById("datasetUploadCurrentContext");
+        datasetManagerElements.uploadCurrentSplit = document.getElementById("datasetUploadCurrentSplit");
+        datasetManagerElements.uploadCurrentValPercent = document.getElementById("datasetUploadCurrentValPercent");
+        datasetManagerElements.uploadCurrentValSeed = document.getElementById("datasetUploadCurrentValSeed");
         datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
         datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
         datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
@@ -3630,6 +3731,7 @@ const sam3TrainState = {
         }
         updateYoloDatasetSummary();
         updateYoloTrainStartAvailability(getSelectedYoloDataset());
+        populateYoloHeadGraftDatasetSelect();
     }
 
     async function loadYoloDatasetList(force = false) {
@@ -3790,6 +3892,103 @@ function updateRfDetrTrainStartAvailability(entry) {
         yoloTrainElements.runSummary.textContent = `${datasetLabel} • created ${created}${activeTag} • ${artifactText}`;
     }
 
+    function populateYoloHeadGraftBaseSelect() {
+        const select = yoloHeadGraftElements.baseRunSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!yoloRunState.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No YOLO runs available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            yoloRunState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.run_id || "";
+                const label = entry.run_name || entry.run_id;
+                const activeTag = entry.is_active ? " (active)" : "";
+                option.textContent = `${label}${activeTag}`;
+                select.appendChild(option);
+            });
+            if (!yoloHeadGraftState.baseRunId || !yoloRunState.items.some((entry) => entry.run_id === yoloHeadGraftState.baseRunId)) {
+                yoloHeadGraftState.baseRunId = yoloRunState.items[0].run_id;
+            }
+            select.disabled = false;
+            select.value = yoloHeadGraftState.baseRunId;
+        }
+        updateYoloHeadGraftBaseSummary();
+    }
+
+    async function updateYoloHeadGraftBaseSummary() {
+        const summaryEl = yoloHeadGraftElements.baseSummary;
+        if (!summaryEl) {
+            return;
+        }
+        const runId = yoloHeadGraftState.baseRunId;
+        if (!runId) {
+            summaryEl.textContent = "Select a base run to graft onto.";
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/runs/${encodeURIComponent(runId)}/summary`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const data = await resp.json();
+            const labelmapCount = Array.isArray(data?.labelmap) ? data.labelmap.length : 0;
+            const variant = data?.variant || "unknown";
+            summaryEl.textContent = `Base run ${runId} • variant ${variant} • ${labelmapCount} classes`;
+        } catch (error) {
+            summaryEl.textContent = `Unable to load base run summary: ${error.message || error}`;
+        }
+    }
+
+    function populateYoloHeadGraftDatasetSelect() {
+        const select = yoloHeadGraftElements.datasetSelect;
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        if (!yoloDatasetState.items.length) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No datasets available";
+            select.appendChild(option);
+            select.disabled = true;
+        } else {
+            yoloDatasetState.items.forEach((entry) => {
+                const option = document.createElement("option");
+                option.value = entry.id;
+                const status = entry.yolo_ready ? "YOLO ready" : "needs YOLO";
+                option.textContent = `${entry.label || entry.id} (${entry.image_count || 0} images, ${status})`;
+                select.appendChild(option);
+            });
+            if (!yoloHeadGraftState.datasetId || !yoloDatasetState.items.some((entry) => entry.id === yoloHeadGraftState.datasetId)) {
+                yoloHeadGraftState.datasetId = yoloDatasetState.items[0].id;
+            }
+            select.disabled = false;
+            select.value = yoloHeadGraftState.datasetId;
+        }
+        updateYoloHeadGraftDatasetSummary();
+    }
+
+    function updateYoloHeadGraftDatasetSummary() {
+        const summaryEl = yoloHeadGraftElements.datasetSummary;
+        if (!summaryEl) {
+            return;
+        }
+        const entry = yoloDatasetState.items.find((item) => item.id === yoloHeadGraftState.datasetId);
+        if (entry) {
+            const yoloStatus = entry.yolo_ready ? "YOLO ready" : "needs YOLO conversion";
+            summaryEl.textContent = `Dataset "${entry.label || entry.id}" (${entry.image_count || 0} images, ${yoloStatus})`;
+            return;
+        }
+        summaryEl.textContent = "Select a YOLO-ready dataset that contains only new classes.";
+    }
+
     function populateYoloRunSelect() {
         const select = yoloTrainElements.runSelect;
         if (!select) {
@@ -3823,6 +4022,7 @@ function updateRfDetrTrainStartAvailability(entry) {
             select.value = yoloRunState.selectedId;
         }
         updateYoloRunSummary();
+        populateYoloHeadGraftBaseSelect();
     }
 
     function getSelectedRfDetrRun() {
@@ -4314,6 +4514,250 @@ function updateRfDetrTrainStartAvailability(entry) {
         yoloTrainElements.message.classList.remove("error", "warn", "success");
         if (variant) {
             yoloTrainElements.message.classList.add(variant);
+        }
+    }
+
+    function setYoloHeadGraftMessage(text, variant = null) {
+        if (!yoloHeadGraftElements.message) {
+            return;
+        }
+        yoloHeadGraftElements.message.textContent = text || "";
+        yoloHeadGraftElements.message.classList.remove("error", "warn", "success");
+        if (variant) {
+            yoloHeadGraftElements.message.classList.add(variant);
+        }
+    }
+
+    function buildYoloHeadGraftPayload() {
+        return {
+            base_run_id: yoloHeadGraftState.baseRunId || null,
+            dataset_id: yoloHeadGraftState.datasetId || null,
+            run_name: yoloHeadGraftElements.runNameInput?.value?.trim() || null,
+            epochs: parseInt(yoloHeadGraftElements.epochsInput?.value || "", 10) || null,
+            img_size: parseInt(yoloHeadGraftElements.imgSizeInput?.value || "", 10) || null,
+            batch: parseInt(yoloHeadGraftElements.batchInput?.value || "", 10) || null,
+            workers: parseInt(yoloHeadGraftElements.workersInput?.value || "", 10) || null,
+            seed: parseInt(yoloHeadGraftElements.seedInput?.value || "", 10) || null,
+            devices: parseYoloDevices(yoloHeadGraftElements.devicesInput?.value || ""),
+            export_onnx: Boolean(yoloHeadGraftElements.exportOnnx?.checked),
+            accept_tos: Boolean(yoloTrainElements.acceptTos?.checked),
+        };
+    }
+
+    async function handleStartYoloHeadGraft() {
+        if (!yoloHeadGraftState.baseRunId) {
+            setYoloHeadGraftMessage("Select a base run first.", "warn");
+            return;
+        }
+        if (!yoloHeadGraftState.datasetId) {
+            setYoloHeadGraftMessage("Select a dataset with new classes.", "warn");
+            return;
+        }
+        if (yoloTrainElements.acceptTos && !yoloTrainElements.acceptTos.checked) {
+            setYoloHeadGraftMessage("Accept the Ultralytics terms to run head grafting.", "warn");
+            return;
+        }
+        const payload = buildYoloHeadGraftPayload();
+        setYoloHeadGraftMessage("Starting head graft…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            yoloHeadGraftState.activeJobId = data.job_id;
+            pollYoloHeadGraftJob(data.job_id, { force: true });
+            refreshYoloHeadGraftHistory();
+        } catch (error) {
+            setYoloHeadGraftMessage(error.message || "Failed to start head graft", "error");
+        }
+    }
+
+    async function handleDryRunYoloHeadGraft() {
+        if (!yoloHeadGraftState.baseRunId || !yoloHeadGraftState.datasetId) {
+            setYoloHeadGraftMessage("Select a base run and dataset before running a dry check.", "warn");
+            return;
+        }
+        if (yoloTrainElements.acceptTos && !yoloTrainElements.acceptTos.checked) {
+            setYoloHeadGraftMessage("Accept the Ultralytics terms to run head grafting.", "warn");
+            return;
+        }
+        const payload = {
+            base_run_id: yoloHeadGraftState.baseRunId,
+            dataset_id: yoloHeadGraftState.datasetId,
+        };
+        setYoloHeadGraftMessage("Running head graft dry check…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/head_graft/dry_run`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            if (data.ok) {
+                setYoloHeadGraftMessage(
+                    `Dry run OK: base=${data.base_label_count} new=${data.new_label_count} (${data.base_variant || "variant?"})`,
+                    "success",
+                );
+            } else {
+                const overlap = (data.overlap || []).join(", ");
+                const detail = overlap ? `Overlap: ${overlap}` : data.error || "Dry run failed";
+                setYoloHeadGraftMessage(`Dry run failed: ${detail}`, "warn");
+            }
+        } catch (error) {
+            setYoloHeadGraftMessage(error.message || "Dry run failed", "error");
+        }
+    }
+
+    async function pollYoloHeadGraftJob(jobId, { force = false } = {}) {
+        if (!jobId) {
+            return;
+        }
+        if (!force && yoloHeadGraftState.lastJobSnapshot?.job_id === jobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs/${encodeURIComponent(jobId)}`);
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const data = await resp.json();
+            yoloHeadGraftState.lastJobSnapshot = data;
+            updateYoloHeadGraftUI(data);
+            if (data.status && ["running", "queued", "cancelling"].includes(data.status)) {
+                scheduleYoloHeadGraftPoll(jobId);
+            }
+        } catch (error) {
+            setYoloHeadGraftMessage(error.message || "Failed to load head graft status", "error");
+        }
+    }
+
+    function scheduleYoloHeadGraftPoll(jobId, delayMs = 5000) {
+        if (yoloHeadGraftState.pollHandle) {
+            clearTimeout(yoloHeadGraftState.pollHandle);
+        }
+        yoloHeadGraftState.pollHandle = setTimeout(() => {
+            pollYoloHeadGraftJob(jobId).catch((err) => console.error("Head graft poll failed", err));
+        }, delayMs);
+    }
+
+    function updateYoloHeadGraftUI(job) {
+        if (!job) {
+            return;
+        }
+        if (yoloHeadGraftElements.progressFill) {
+            yoloHeadGraftElements.progressFill.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+        }
+        if (yoloHeadGraftElements.statusText) {
+            yoloHeadGraftElements.statusText.textContent = job.message || job.status || "Running";
+        }
+        if (yoloHeadGraftElements.log) {
+            yoloHeadGraftElements.log.textContent = (job.logs || [])
+                .map((entry) => entry.message || "")
+                .filter((line) => line)
+                .join("\n");
+        }
+        if (yoloHeadGraftElements.cancelButton) {
+            yoloHeadGraftElements.cancelButton.disabled = !["running", "queued", "cancelling"].includes(job.status);
+        }
+    }
+
+    async function refreshYoloHeadGraftHistory() {
+        if (!yoloHeadGraftElements.history) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const jobs = await resp.json();
+            yoloHeadGraftElements.history.innerHTML = "";
+            if (!Array.isArray(jobs) || !jobs.length) {
+                const empty = document.createElement("div");
+                empty.className = "training-history-item";
+                empty.textContent = "No head graft jobs yet.";
+                yoloHeadGraftElements.history.appendChild(empty);
+                return;
+            }
+            jobs.forEach((job) => {
+                const item = document.createElement("div");
+                item.className = "training-history-item";
+                const label = job?.config?.run_name || job.job_id;
+                const status = job.status || "unknown";
+                const created = job.created_at ? new Date(job.created_at * 1000).toLocaleString() : "";
+                const left = document.createElement("div");
+                left.innerHTML = `<strong>${escapeHtml(label)}</strong><div class="training-help">${escapeHtml(status)} • ${escapeHtml(created)}</div>`;
+                const right = document.createElement("div");
+                const viewBtn = document.createElement("button");
+                viewBtn.type = "button";
+                viewBtn.className = "training-button";
+                viewBtn.textContent = "View";
+                viewBtn.addEventListener("click", () => {
+                    yoloHeadGraftState.activeJobId = job.job_id;
+                    pollYoloHeadGraftJob(job.job_id, { force: true }).catch((err) => console.error("Head graft poll failed", err));
+                });
+                right.appendChild(viewBtn);
+                if (job.status === "succeeded") {
+                    const downloadBtn = document.createElement("button");
+                    downloadBtn.type = "button";
+                    downloadBtn.className = "training-button secondary";
+                    downloadBtn.textContent = "Download bundle";
+                    downloadBtn.addEventListener("click", () => {
+                        downloadYoloHeadGraftBundle(job).catch((err) => console.error("Head graft bundle download failed", err));
+                    });
+                    right.appendChild(downloadBtn);
+                }
+                item.append(left, right);
+                yoloHeadGraftElements.history.appendChild(item);
+            });
+        } catch (error) {
+            yoloHeadGraftElements.history.textContent = `Unable to load history: ${error.message || error}`;
+        }
+    }
+
+    function updateYoloHeadGraftTosState() {
+        const accepted = Boolean(yoloTrainElements.acceptTos?.checked);
+        if (yoloHeadGraftElements.startButton) {
+            yoloHeadGraftElements.startButton.disabled = !accepted;
+        }
+        if (yoloHeadGraftElements.dryRunButton) {
+            yoloHeadGraftElements.dryRunButton.disabled = !accepted;
+        }
+    }
+
+    async function downloadYoloHeadGraftBundle(job) {
+        if (!job || !job.job_id) {
+            setYoloHeadGraftMessage("Select a head graft job first.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs/${encodeURIComponent(job.job_id)}/bundle`);
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            const filename = `${job?.config?.run_name || job.job_id}_head_graft_bundle.zip`;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            setYoloHeadGraftMessage(error.message || "Failed to download head graft bundle", "error");
         }
     }
 
@@ -10397,6 +10841,22 @@ function initQwenTrainingTab() {
         }
     }
 
+    async function cancelYoloHeadGraftJob() {
+        if (!yoloHeadGraftState.activeJobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs/${yoloHeadGraftState.activeJobId}/cancel`, { method: "POST" });
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            setYoloHeadGraftMessage("Cancellation requested", "warn");
+        } catch (error) {
+            console.error("Cancel head graft failed", error);
+            setYoloHeadGraftMessage(error.message || "Failed to cancel head graft", "error");
+        }
+    }
+
     function initYoloTrainingTab() {
         if (yoloTrainElements.datasetSelect) {
             return;
@@ -10448,6 +10908,28 @@ function initQwenTrainingTab() {
         yoloTrainElements.runDownload = document.getElementById("yoloRunDownload");
         yoloTrainElements.runDelete = document.getElementById("yoloRunDelete");
         yoloTrainElements.runSummary = document.getElementById("yoloRunSummary");
+        yoloHeadGraftElements.baseRunSelect = document.getElementById("yoloHeadGraftBaseRun");
+        yoloHeadGraftElements.baseRunRefresh = document.getElementById("yoloHeadGraftBaseRefresh");
+        yoloHeadGraftElements.baseSummary = document.getElementById("yoloHeadGraftBaseSummary");
+        yoloHeadGraftElements.datasetSelect = document.getElementById("yoloHeadGraftDataset");
+        yoloHeadGraftElements.datasetRefresh = document.getElementById("yoloHeadGraftDatasetRefresh");
+        yoloHeadGraftElements.datasetSummary = document.getElementById("yoloHeadGraftDatasetSummary");
+        yoloHeadGraftElements.runNameInput = document.getElementById("yoloHeadGraftRunName");
+        yoloHeadGraftElements.epochsInput = document.getElementById("yoloHeadGraftEpochs");
+        yoloHeadGraftElements.imgSizeInput = document.getElementById("yoloHeadGraftImgSize");
+        yoloHeadGraftElements.batchInput = document.getElementById("yoloHeadGraftBatch");
+        yoloHeadGraftElements.workersInput = document.getElementById("yoloHeadGraftWorkers");
+        yoloHeadGraftElements.devicesInput = document.getElementById("yoloHeadGraftDevices");
+        yoloHeadGraftElements.seedInput = document.getElementById("yoloHeadGraftSeed");
+        yoloHeadGraftElements.exportOnnx = document.getElementById("yoloHeadGraftExportOnnx");
+        yoloHeadGraftElements.startButton = document.getElementById("yoloHeadGraftStart");
+        yoloHeadGraftElements.dryRunButton = document.getElementById("yoloHeadGraftDryRun");
+        yoloHeadGraftElements.cancelButton = document.getElementById("yoloHeadGraftCancel");
+        yoloHeadGraftElements.progressFill = document.getElementById("yoloHeadGraftProgressFill");
+        yoloHeadGraftElements.statusText = document.getElementById("yoloHeadGraftStatusText");
+        yoloHeadGraftElements.message = document.getElementById("yoloHeadGraftMessage");
+        yoloHeadGraftElements.log = document.getElementById("yoloHeadGraftLog");
+        yoloHeadGraftElements.history = document.getElementById("yoloHeadGraftHistory");
         if (yoloTrainElements.startButton) {
             yoloTrainElements.startButton.addEventListener("click", () => {
                 handleStartYoloTraining().catch((error) => console.error("YOLO training start failed", error));
@@ -10505,6 +10987,61 @@ function initQwenTrainingTab() {
                 deleteYoloRun().catch((error) => console.error("Failed to delete YOLO run", error));
             });
         }
+        if (yoloHeadGraftElements.baseRunSelect) {
+            yoloHeadGraftElements.baseRunSelect.addEventListener("change", () => {
+                yoloHeadGraftState.baseRunId = yoloHeadGraftElements.baseRunSelect.value || null;
+                updateYoloHeadGraftBaseSummary();
+            });
+        }
+        if (yoloHeadGraftElements.baseRunRefresh) {
+            yoloHeadGraftElements.baseRunRefresh.addEventListener("click", () => {
+                loadYoloRunList(true).catch((error) => console.error("Failed to refresh YOLO runs", error));
+            });
+        }
+        if (yoloHeadGraftElements.datasetSelect) {
+            yoloHeadGraftElements.datasetSelect.addEventListener("change", () => {
+                yoloHeadGraftState.datasetId = yoloHeadGraftElements.datasetSelect.value || null;
+                updateYoloHeadGraftDatasetSummary();
+            });
+        }
+        if (yoloHeadGraftElements.datasetRefresh) {
+            yoloHeadGraftElements.datasetRefresh.addEventListener("click", () => {
+                loadYoloDatasetList(true).catch((error) => console.error("Failed to refresh YOLO datasets", error));
+            });
+        }
+        if (yoloHeadGraftElements.startButton) {
+            yoloHeadGraftElements.startButton.addEventListener("click", () => {
+                handleStartYoloHeadGraft().catch((error) => console.error("Head graft start failed", error));
+            });
+        }
+        if (yoloHeadGraftElements.dryRunButton) {
+            yoloHeadGraftElements.dryRunButton.addEventListener("click", () => {
+                handleDryRunYoloHeadGraft().catch((error) => console.error("Head graft dry run failed", error));
+            });
+        }
+        if (yoloHeadGraftElements.cancelButton) {
+            yoloHeadGraftElements.cancelButton.addEventListener("click", () => {
+                cancelYoloHeadGraftJob().catch((error) => console.error("Head graft cancel failed", error));
+            });
+            yoloHeadGraftElements.cancelButton.disabled = true;
+        }
+        if (yoloHeadGraftElements.devicesInput) {
+            yoloHeadGraftElements.devicesInput.addEventListener("input", () => {
+                validateTrainingDeviceIds(
+                    yoloHeadGraftElements.devicesInput.value,
+                    null,
+                    false,
+                    "YOLO head graft device IDs",
+                    setYoloHeadGraftMessage,
+                );
+            });
+        }
+        if (yoloTrainElements.acceptTos) {
+            yoloTrainElements.acceptTos.addEventListener("change", () => {
+                updateYoloHeadGraftTosState();
+            });
+        }
+        updateYoloHeadGraftTosState();
         if (yoloTrainElements.datasetSelect) {
             yoloTrainElements.datasetSelect.addEventListener("change", () => {
                 yoloDatasetState.selectedId = yoloTrainElements.datasetSelect.value || null;
@@ -10568,6 +11105,7 @@ function initQwenTrainingTab() {
         updateYoloDatasetSummary();
         updateYoloTrainStartAvailability(getSelectedYoloDataset());
         updateYoloVariantSummary();
+        refreshYoloHeadGraftHistory().catch((error) => console.error("Failed to load head graft history", error));
     }
 
     function renderRfDetrTrainingHistoryItem(container, job) {
@@ -13769,13 +14307,16 @@ function initQwenTrainingTab() {
         qwenSettingsElements.trustRemoteCode = document.getElementById("qwenTrustRemoteCode");
         qwenSettingsElements.applyButton = document.getElementById("qwenSettingsApply");
         qwenSettingsElements.status = document.getElementById("qwenSettingsStatus");
-    backendFuzzerElements.runButton = document.getElementById("runBackendFuzzer");
-    backendFuzzerElements.status = document.getElementById("backendFuzzerStatus");
-    backendFuzzerElements.log = document.getElementById("backendFuzzerLog");
-    backendFuzzerElements.includeQwen = document.getElementById("fuzzerIncludeQwen");
-    backendFuzzerElements.includeSam3 = document.getElementById("fuzzerIncludeSam3");
-    backendFuzzerElements.includeClip = document.getElementById("fuzzerIncludeClip");
-    backendFuzzerElements.includeAgent = document.getElementById("fuzzerIncludeAgent");
+        installCheckElements.runButton = document.getElementById("runInstallCheck");
+        installCheckElements.status = document.getElementById("installCheckStatus");
+        installCheckElements.log = document.getElementById("installCheckLog");
+        backendFuzzerElements.runButton = document.getElementById("runBackendFuzzer");
+        backendFuzzerElements.status = document.getElementById("backendFuzzerStatus");
+        backendFuzzerElements.log = document.getElementById("backendFuzzerLog");
+        backendFuzzerElements.includeQwen = document.getElementById("fuzzerIncludeQwen");
+        backendFuzzerElements.includeSam3 = document.getElementById("fuzzerIncludeSam3");
+        backendFuzzerElements.includeClip = document.getElementById("fuzzerIncludeClip");
+        backendFuzzerElements.includeAgent = document.getElementById("fuzzerIncludeAgent");
         if (settingsElements.apiInput) {
             settingsElements.apiInput.value = API_ROOT;
         }
@@ -13789,6 +14330,11 @@ function initQwenTrainingTab() {
         if (qwenSettingsElements.applyButton) {
             qwenSettingsElements.applyButton.addEventListener("click", () => {
                 applyQwenSettings().catch((err) => console.error("Failed to apply Qwen settings", err));
+            });
+        }
+        if (installCheckElements.runButton) {
+            installCheckElements.runButton.addEventListener("click", () => {
+                runInstallCheck().catch((err) => console.error("Install check failed", err));
             });
         }
         if (backendFuzzerElements.runButton) {
@@ -13870,6 +14416,167 @@ function initQwenTrainingTab() {
         }
     }
 
+    async function runInstallCheck() {
+        if (!installCheckElements.runButton || !installCheckElements.status || !installCheckElements.log) {
+            return;
+        }
+        installCheckElements.runButton.disabled = true;
+        installCheckElements.status.textContent = "Running install check…";
+        installCheckElements.log.textContent = "";
+        const tests = [];
+        const addLog = (line) => {
+            installCheckElements.log.textContent += `${line}\n`;
+        };
+        const addTest = (name, fn) => tests.push({ name, fn });
+        addTest("API connection", async () => {
+            await testApiRootCandidate(API_ROOT);
+        });
+        let datasetList = [];
+        addTest("Datasets list", async () => {
+            const resp = await fetch(`${API_ROOT}/datasets`);
+            if (!resp.ok) throw new Error(await resp.text());
+            datasetList = await resp.json();
+        });
+        addTest("Glossary library list", async () => {
+            const resp = await fetch(`${API_ROOT}/glossaries`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Dataset glossary (sample)", async () => {
+            const first = Array.isArray(datasetList) ? datasetList[0] : null;
+            const datasetId = first?.id || first?.dataset_id;
+            if (!datasetId) {
+                addLog("• Dataset glossary skipped (no datasets found)");
+                return;
+            }
+            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Dataset integrity (sample)", async () => {
+            const first = Array.isArray(datasetList) ? datasetList[0] : null;
+            const datasetId = first?.id || first?.dataset_id;
+            if (!datasetId) {
+                addLog("• Dataset integrity skipped (no datasets found)");
+                return;
+            }
+            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/check`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Qwen status", async () => {
+            const resp = await fetch(`${API_ROOT}/qwen/status`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Qwen models list", async () => {
+            const resp = await fetch(`${API_ROOT}/qwen/models`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Qwen datasets list", async () => {
+            const resp = await fetch(`${API_ROOT}/qwen/datasets`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Qwen train jobs", async () => {
+            const resp = await fetch(`${API_ROOT}/qwen/train/jobs`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("SAM3 models list", async () => {
+            const resp = await fetch(`${API_ROOT}/sam3/models/available`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("SAM3 datasets list", async () => {
+            const resp = await fetch(`${API_ROOT}/sam3/datasets`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("SAM3 prompt helper presets", async () => {
+            const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/presets`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("SAM3 train jobs", async () => {
+            const resp = await fetch(`${API_ROOT}/sam3/train/jobs`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("CLIP backbones list", async () => {
+            const resp = await fetch(`${API_ROOT}/clip/backbones`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("CLIP classifiers list", async () => {
+            const resp = await fetch(`${API_ROOT}/clip/classifiers`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("CLIP labelmaps list", async () => {
+            const resp = await fetch(`${API_ROOT}/clip/labelmaps`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("CLIP active model", async () => {
+            const resp = await fetch(`${API_ROOT}/clip/active_model`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("CLIP train jobs", async () => {
+            const resp = await fetch(`${API_ROOT}/clip/train`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Detector variants (YOLO)", async () => {
+            const resp = await fetch(`${API_ROOT}/yolo/variants`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Detector variants (RF-DETR)", async () => {
+            const resp = await fetch(`${API_ROOT}/rfdetr/variants`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Detector defaults", async () => {
+            const resp = await fetch(`${API_ROOT}/detectors/default`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("YOLO active model", async () => {
+            const resp = await fetch(`${API_ROOT}/yolo/active`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("RF-DETR active model", async () => {
+            const resp = await fetch(`${API_ROOT}/rfdetr/active`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("YOLO train jobs", async () => {
+            const resp = await fetch(`${API_ROOT}/yolo/train/jobs`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("RF-DETR train jobs", async () => {
+            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Calibration jobs list", async () => {
+            const resp = await fetch(`${API_ROOT}/calibration/jobs`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Predictor settings", async () => {
+            const resp = await fetch(`${API_ROOT}/predictor_settings`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("System health summary", async () => {
+            const resp = await fetch(`${API_ROOT}/system/health_summary`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("GPU status", async () => {
+            const resp = await fetch(`${API_ROOT}/system/gpu`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Storage write check", async () => {
+            const resp = await fetch(`${API_ROOT}/system/storage_check`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        let failures = 0;
+        for (const test of tests) {
+            addLog(`▶ ${test.name}`);
+            try {
+                await test.fn();
+                addLog(`✔ ${test.name}`);
+            } catch (err) {
+                failures += 1;
+                addLog(`✖ ${test.name}: ${err?.message || err}`);
+            }
+        }
+        installCheckElements.status.textContent = failures === 0 ? "Install check complete: all tests passed" : `Install check complete: ${failures} failed`;
+        installCheckElements.status.className = failures === 0 ? "settings-status success" : "settings-status warn";
+        installCheckElements.runButton.disabled = false;
+    }
+
     async function runBackendFuzzer() {
         if (!backendFuzzerElements.runButton || !backendFuzzerElements.status || !backendFuzzerElements.log) {
             return;
@@ -13904,9 +14611,61 @@ function initQwenTrainingTab() {
         addTest("Settings ping", async () => {
             await testApiRootCandidate(API_ROOT);
         });
+        addTest("Datasets list", async () => {
+            const resp = await fetch(`${API_ROOT}/datasets`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Detector defaults", async () => {
+            const resp = await fetch(`${API_ROOT}/detectors/default`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Detector variants (YOLO)", async () => {
+            const resp = await fetch(`${API_ROOT}/yolo/variants`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        addTest("Detector variants (RF-DETR)", async () => {
+            const resp = await fetch(`${API_ROOT}/rfdetr/variants`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
         if (includeClip) {
             addTest("CLIP backbones list", async () => {
                 const resp = await fetch(`${API_ROOT}/clip/backbones`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+            addTest("CLIP classifiers list", async () => {
+                const resp = await fetch(`${API_ROOT}/clip/classifiers`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+            addTest("CLIP labelmaps list", async () => {
+                const resp = await fetch(`${API_ROOT}/clip/labelmaps`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+        }
+        addTest("Glossary library list", async () => {
+            const resp = await fetch(`${API_ROOT}/glossaries`);
+            if (!resp.ok) throw new Error(await resp.text());
+        });
+        if (includeQwen) {
+            addTest("Qwen status", async () => {
+                const resp = await fetch(`${API_ROOT}/qwen/status`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+            addTest("Qwen models list", async () => {
+                const resp = await fetch(`${API_ROOT}/qwen/models`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+        }
+        if (includeSam3) {
+            addTest("SAM3 models list", async () => {
+                const resp = await fetch(`${API_ROOT}/sam3/models/available`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+            addTest("SAM3 datasets list", async () => {
+                const resp = await fetch(`${API_ROOT}/sam3/datasets`);
+                if (!resp.ok) throw new Error(await resp.text());
+            });
+            addTest("SAM3 prompt helper presets", async () => {
+                const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/presets`);
                 if (!resp.ok) throw new Error(await resp.text());
             });
         }

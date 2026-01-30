@@ -14000,6 +14000,39 @@ class YoloTrainRequest(BaseModel):
         return values
 
 
+class YoloHeadGraftRequest(BaseModel):
+    base_run_id: str
+    dataset_id: Optional[str] = None
+    dataset_root: Optional[str] = None
+    run_name: Optional[str] = None
+    epochs: Optional[int] = None
+    img_size: Optional[int] = None
+    batch: Optional[int] = None
+    workers: Optional[int] = None
+    devices: Optional[List[int]] = None
+    seed: Optional[int] = None
+    export_onnx: Optional[bool] = None
+    accept_tos: Optional[bool] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_dataset_fields(cls, values):  # noqa: N805
+        if not (values.get("dataset_id") or values.get("dataset_root")):
+            raise ValueError("dataset_id_or_root_required")
+        return values
+
+
+class YoloHeadGraftDryRunRequest(BaseModel):
+    base_run_id: str
+    dataset_id: Optional[str] = None
+    dataset_root: Optional[str] = None
+
+    @root_validator(skip_on_failure=True)
+    def _validate_dataset_fields(cls, values):  # noqa: N805
+        if not (values.get("dataset_id") or values.get("dataset_root")):
+            raise ValueError("dataset_id_or_root_required")
+        return values
+
+
 class RfDetrTrainRequest(BaseModel):
     dataset_id: Optional[str] = None
     dataset_root: Optional[str] = None
@@ -14464,6 +14497,7 @@ YOLO_KEEP_FILES = {
     "metrics.json",
     "metrics_series.json",
     "labelmap.txt",
+    "head_graft_audit.jsonl",
     YOLO_RUN_META_NAME,
 }
 
@@ -14548,6 +14582,7 @@ SAM3_MAX_LOG_LINES = 500
 SAM3_MAX_METRIC_POINTS = 2000
 SAM3_STORAGE_SCOPES = {"all", "checkpoints", "logs", "tensorboard", "dumps"}
 YOLO_MAX_LOG_LINES = 300
+YOLO_HEAD_GRAFT_PATCHED = False
 
 
 def _prepass_recipe_dir(recipe_id: str, *, create: bool = False) -> Path:
@@ -14722,6 +14757,22 @@ class YoloTrainingJob:
 
 
 @dataclass
+class YoloHeadGraftJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    config: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    thread_ident: Optional[int] = None
+
+
+@dataclass
 class RfDetrTrainingJob:
     job_id: str
     status: str = "queued"
@@ -14808,6 +14859,8 @@ SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
 SAM3_TRAINING_JOBS_LOCK = threading.Lock()
 YOLO_TRAINING_JOBS: Dict[str, YoloTrainingJob] = {}
 YOLO_TRAINING_JOBS_LOCK = threading.Lock()
+YOLO_HEAD_GRAFT_JOBS: Dict[str, YoloHeadGraftJob] = {}
+YOLO_HEAD_GRAFT_JOBS_LOCK = threading.Lock()
 RFDETR_TRAINING_JOBS: Dict[str, RfDetrTrainingJob] = {}
 RFDETR_TRAINING_JOBS_LOCK = threading.Lock()
 SEGMENTATION_BUILD_JOBS: Dict[str, SegmentationBuildJob] = {}
@@ -15174,6 +15227,21 @@ def _serialize_yolo_job(job: YoloTrainingJob) -> Dict[str, Any]:
     }
 
 
+def _serialize_yolo_head_graft_job(job: YoloHeadGraftJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "config": job.config,
+        "logs": job.logs,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
 def _yolo_job_update(
     job: YoloTrainingJob,
     *,
@@ -15206,6 +15274,98 @@ def _yolo_job_log(job: YoloTrainingJob, message: str) -> None:
         logger.info("[yolo-train %s] %s", job.job_id[:8], message)
     except Exception:
         pass
+
+
+def _yolo_head_graft_job_update(
+    job: YoloHeadGraftJob,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
+    previous_status = job.status
+    if status is not None:
+        job.status = status
+    if message is not None:
+        job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
+    if status is not None and status != previous_status:
+        _yolo_head_graft_audit(
+            job,
+            f"status:{previous_status}->{status}",
+            event="status",
+            extra={"from": previous_status, "to": status},
+        )
+    if error is not None:
+        _yolo_head_graft_audit(job, f"error:{error}", level="error", event="error")
+
+
+def _yolo_head_graft_job_log(job: YoloHeadGraftJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > YOLO_MAX_LOG_LINES:
+        job.logs[:] = job.logs[-YOLO_MAX_LOG_LINES:]
+    job.updated_at = time.time()
+    try:
+        logger.info("[yolo-graft %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+    _yolo_head_graft_audit(job, message, level="info")
+
+
+def _yolo_head_graft_audit(
+    job: YoloHeadGraftJob,
+    message: str,
+    *,
+    level: str = "info",
+    event: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        run_dir_value = (job.config or {}).get("paths", {}).get("run_dir")
+        if not run_dir_value:
+            return
+        run_dir = Path(run_dir_value)
+        if not run_dir.exists():
+            return
+        payload = {
+            "timestamp": time.time(),
+            "level": level,
+            "event": event or "log",
+            "message": message,
+        }
+        if extra:
+            payload["extra"] = extra
+        audit_path = run_dir / "head_graft_audit.jsonl"
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def _yolo_head_graft_force_stop(job: YoloHeadGraftJob) -> bool:
+    ident = job.thread_ident
+    if not ident:
+        return False
+    try:
+        import ctypes
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), ctypes.py_object(SystemExit))
+        if res == 0:
+            return False
+        if res > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), None)
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def _yolo_job_append_metric(job: YoloTrainingJob, metric: Dict[str, Any]) -> None:
@@ -15593,6 +15753,15 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 yolo_seg_ready = _yolo_labels_have_polygons(Path(yolo_labels_dir))
                 if yolo_seg_ready and dataset_type != "seg":
                     dataset_type = "seg"
+            labelmap = list(meta.get("classes") or [])
+            if not labelmap and labelmap_path.exists():
+                try:
+                    with labelmap_path.open("r", encoding="utf-8") as handle:
+                        labelmap = [line.strip() for line in handle if line.strip()]
+                except Exception:
+                    labelmap = []
+            glossary_text = _load_dataset_glossary(path)
+            glossary_preview = _glossary_preview(glossary_text, labelmap)
             signature = meta.get("signature") or ""
             caption_count, caption_dir_present = _count_caption_labels(path)
             image_total = meta.get("image_count")
@@ -15633,6 +15802,8 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
                 "caption_dir": caption_dir_present,
                 "caption_percent": caption_percent,
                 "caption_total": image_total,
+                "glossary_present": bool(str(glossary_text or "").strip()),
+                "glossary_preview": glossary_preview,
             }
             existing = seen.get(key)
             if existing is not None:
@@ -16466,6 +16637,25 @@ def _yolo_load_labelmap(labelmap_path: Path) -> List[str]:
         return []
 
 
+def _yolo_load_run_labelmap(run_dir: Path) -> List[str]:
+    labelmap_path = run_dir / "labelmap.txt"
+    labels = _yolo_load_labelmap(labelmap_path)
+    if labels:
+        return labels
+    data_yaml = run_dir / "data.yaml"
+    if data_yaml.exists():
+        try:
+            payload = yaml.safe_load(data_yaml.read_text())
+            names = payload.get("names") if isinstance(payload, dict) else None
+            if isinstance(names, dict):
+                return [names[k] for k in sorted(names.keys())]
+            if isinstance(names, list):
+                return [str(x) for x in names]
+        except Exception:
+            pass
+    return []
+
+
 def _validate_yolo_label_ids(labels_dir: Path, label_count: int) -> None:
     if label_count <= 0:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_empty")
@@ -16823,6 +17013,316 @@ def _yolo_p2_scale(model_id: str) -> Optional[str]:
     return None
 
 
+class ConcatHead(torch.nn.Module):
+    """Concatenation layer for YOLOv8 Detect heads (head-grafting)."""
+
+    def __init__(self, nc1: int = 80, nc2: int = 1, ch: Tuple[int, ...] = ()):
+        super().__init__()
+        self.nc1 = int(nc1)
+        self.nc2 = int(nc2)
+
+    def forward(self, x):
+        # x is a list of length 2 (Detect outputs)
+        if isinstance(x[0], tuple):
+            preds1 = x[0][0]
+            preds2 = x[1][0]
+        elif isinstance(x[0], list):
+            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
+        else:
+            preds1 = x[0]
+            preds2 = x[1]
+
+        preds = torch.cat((preds1[:, :4, :], preds2[:, :4, :]), dim=2)
+
+        shape = list(preds1.shape)
+        shape[-1] = preds1.shape[-1] + preds2.shape[-1]
+        preds1_extended = torch.zeros(shape, device=preds1.device, dtype=preds1.dtype)
+        preds1_extended[..., : preds1.shape[-1]] = preds1
+
+        shape = list(preds2.shape)
+        shape[-1] = preds1.shape[-1] + preds2.shape[-1]
+        preds2_extended = torch.zeros(shape, device=preds2.device, dtype=preds2.dtype)
+        preds2_extended[..., preds2.shape[-1] :] = preds2
+
+        preds = torch.cat((preds, preds1_extended[:, 4:, :]), dim=1)
+        preds = torch.cat((preds, preds2_extended[:, 4:, :]), dim=1)
+
+        if isinstance(x[0], tuple):
+            return (preds, x[0][1])
+        return preds
+
+
+def _patch_ultralytics_for_head_grafting() -> None:
+    global YOLO_HEAD_GRAFT_PATCHED
+    if YOLO_HEAD_GRAFT_PATCHED:
+        return
+    try:
+        import ultralytics  # type: ignore
+        from ultralytics.nn import tasks as yolo_tasks  # type: ignore
+        from ultralytics.nn import modules as yolo_modules  # type: ignore
+    except Exception:
+        return
+    try:
+        version = getattr(ultralytics, "__version__", "")
+        if version and not version.startswith("8."):
+            logger.warning("Ultralytics %s not in supported 8.x range for head grafting", version)
+    except Exception:
+        pass
+    try:
+        if not hasattr(yolo_modules, "ConcatHead"):
+            yolo_modules.ConcatHead = ConcatHead
+        if hasattr(yolo_modules, "__all__") and "ConcatHead" not in yolo_modules.__all__:
+            yolo_modules.__all__ = tuple(list(yolo_modules.__all__) + ["ConcatHead"])
+        if not hasattr(yolo_tasks, "ConcatHead"):
+            yolo_tasks.ConcatHead = ConcatHead
+    except Exception:
+        return
+
+    original_parse_model = yolo_tasks.parse_model
+
+    def parse_model_patched(d, ch, verbose=True):
+        import ast
+        import contextlib
+        legacy = True
+        max_channels = float("inf")
+        nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
+        depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
+        scale = d.get("scale")
+        if scales:
+            if not scale:
+                scale = next(iter(scales.keys()))
+                yolo_tasks.LOGGER.warning(f"no model scale passed. Assuming scale='{scale}'.")
+            depth, width, max_channels = scales[scale]
+
+        if act:
+            yolo_tasks.Conv.default_act = eval(act)
+            if verbose:
+                yolo_tasks.LOGGER.info(f"{yolo_tasks.colorstr('activation:')} {act}")
+
+        if verbose:
+            yolo_tasks.LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
+        ch = [ch]
+        layers, save, c2 = [], [], ch[-1]
+        def _opt(name: str):
+            return getattr(yolo_tasks, name, None)
+
+        base_modules = {
+            _opt("Classify"),
+            _opt("Conv"),
+            _opt("ConvTranspose"),
+            _opt("GhostConv"),
+            _opt("Bottleneck"),
+            _opt("GhostBottleneck"),
+            _opt("SPP"),
+            _opt("SPPF"),
+            _opt("C2fPSA"),
+            _opt("C2PSA"),
+            _opt("DWConv"),
+            _opt("Focus"),
+            _opt("BottleneckCSP"),
+            _opt("C1"),
+            _opt("C2"),
+            _opt("C2f"),
+            _opt("C3k2"),
+            _opt("RepNCSPELAN4"),
+            _opt("ELAN1"),
+            _opt("ADown"),
+            _opt("AConv"),
+            _opt("SPPELAN"),
+            _opt("C2fAttn"),
+            _opt("C3"),
+            _opt("C3TR"),
+            _opt("C3Ghost"),
+            _opt("C3x"),
+            _opt("RepC3"),
+            _opt("PSA"),
+            _opt("SCDown"),
+            _opt("C2fCIB"),
+            _opt("A2C2f"),
+            torch.nn.ConvTranspose2d,
+            _opt("DWConvTranspose2d"),
+        }
+        base_modules = frozenset(x for x in base_modules if x is not None)
+
+        repeat_modules = {
+            _opt("BottleneckCSP"),
+            _opt("C1"),
+            _opt("C2"),
+            _opt("C2f"),
+            _opt("C3k2"),
+            _opt("C2fAttn"),
+            _opt("C3"),
+            _opt("C3TR"),
+            _opt("C3Ghost"),
+            _opt("C3x"),
+            _opt("RepC3"),
+            _opt("C2fPSA"),
+            _opt("C2fCIB"),
+            _opt("C2PSA"),
+            _opt("A2C2f"),
+        }
+        repeat_modules = frozenset(x for x in repeat_modules if x is not None)
+
+        detect_modules = [
+            _opt("Detect"),
+            _opt("WorldDetect"),
+            _opt("YOLOEDetect"),
+            _opt("Segment"),
+            _opt("YOLOESegment"),
+            _opt("Pose"),
+            _opt("OBB"),
+            _opt("ImagePoolingAttn"),
+            _opt("v10Detect"),
+        ]
+        detect_modules = [m for m in detect_modules if m is not None]
+        for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):
+            m_name = m
+            m = (
+                getattr(torch.nn, m[3:])
+                if "nn." in m
+                else getattr(__import__("torchvision").ops, m[16:])
+                if "torchvision.ops." in m
+                else getattr(yolo_tasks, m)
+            )
+            if m is None:
+                raise KeyError(f"module_not_found:{m_name}")
+            for j, a in enumerate(args):
+                if isinstance(a, str):
+                    with contextlib.suppress(ValueError):
+                        args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
+            n = n_ = max(round(n * depth), 1) if n > 1 else n
+            if m in base_modules:
+                c1, c2 = ch[f], args[0]
+                if c2 != nc:
+                    c2 = yolo_tasks.make_divisible(min(c2, max_channels) * width, 8)
+                if _opt("C2fAttn") is not None and m is _opt("C2fAttn"):
+                    args[1] = yolo_tasks.make_divisible(min(args[1], max_channels // 2) * width, 8)
+                    args[2] = int(max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2])
+                args = [c1, c2, *args[1:]]
+                if m in repeat_modules:
+                    args.insert(2, n)
+                    n = 1
+                if _opt("C3k2") is not None and m is _opt("C3k2"):
+                    legacy = False
+                    if scale in "mlx":
+                        args[3] = True
+                if _opt("A2C2f") is not None and m is _opt("A2C2f"):
+                    legacy = False
+                    if scale in "lx":
+                        args.extend((True, 1.2))
+                if _opt("C2fCIB") is not None and m is _opt("C2fCIB"):
+                    legacy = False
+            elif _opt("AIFI") is not None and m is _opt("AIFI"):
+                args = [ch[f], *args]
+            elif m in frozenset({x for x in [_opt("HGStem"), _opt("HGBlock")] if x is not None}):
+                c1, cm, c2 = ch[f], args[0], args[1]
+                args = [c1, cm, c2, *args[2:]]
+                if _opt("HGBlock") is not None and m is _opt("HGBlock"):
+                    args.insert(4, n)
+                    n = 1
+            elif _opt("ResNetLayer") is not None and m is _opt("ResNetLayer"):
+                c2 = args[1] if args[3] else args[1] * 4
+            elif m is torch.nn.BatchNorm2d:
+                args = [ch[f]]
+            elif _opt("Concat") is not None and m is _opt("Concat"):
+                c2 = sum(ch[x] for x in f)
+            elif m is ConcatHead:
+                c2 = ch[f[-1]] if isinstance(f, list) else ch[f]
+            elif m in frozenset(detect_modules):
+                args.append([ch[x] for x in f])
+                seg_cls = _opt("Segment")
+                yoloe_seg_cls = _opt("YOLOESegment")
+                if (seg_cls is not None and m is seg_cls) or (yoloe_seg_cls is not None and m is yoloe_seg_cls):
+                    args[2] = yolo_tasks.make_divisible(min(args[2], max_channels) * width, 8)
+                detect_like = {x for x in [_opt("Detect"), _opt("YOLOEDetect"), _opt("Segment"), _opt("YOLOESegment"), _opt("Pose"), _opt("OBB")] if x is not None}
+                if m in detect_like:
+                    m.legacy = legacy
+            elif _opt("RTDETRDecoder") is not None and m is _opt("RTDETRDecoder"):
+                args.insert(1, [ch[x] for x in f])
+            elif _opt("CBLinear") is not None and m is _opt("CBLinear"):
+                c2 = args[0]
+                c1 = ch[f]
+                args = [c1, c2, *args[1:]]
+            elif _opt("CBFuse") is not None and m is _opt("CBFuse"):
+                c2 = ch[f[-1]]
+            elif m in frozenset({x for x in [_opt("TorchVision"), _opt("Index")] if x is not None}):
+                c2 = args[0]
+                c1 = ch[f]
+                args = [*args[1:]]
+            else:
+                c2 = ch[f]
+
+            m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
+            t = str(m)[8:-2].replace("__main__.", "")
+            m_.np = sum(x.numel() for x in m_.parameters())
+            m_.i, m_.f, m_.type = i, f, t
+            if verbose:
+                yolo_tasks.LOGGER.info(f"{i:>3}{f!s:>20}{n_:>3}{m_.np:10.0f}  {t:<45}{args!s:<30}")
+            save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)
+            layers.append(m_)
+            if i == 0:
+                ch = []
+            ch.append(c2)
+        return torch.nn.Sequential(*layers), sorted(save)
+
+    def base_apply_patched(self, fn):
+        self = torch.nn.Module._apply(self, fn)
+        for m in self.model:
+            if isinstance(m, yolo_tasks.Detect):
+                m.stride = fn(m.stride)
+                m.anchors = fn(m.anchors)
+                m.strides = fn(m.strides)
+        return self
+
+    def detection_init_patched(self, cfg="yolo11n.yaml", ch=3, nc=None, verbose=True):
+        yolo_tasks.BaseModel.__init__(self)
+        self.yaml = cfg if isinstance(cfg, dict) else yolo_tasks.yaml_model_load(cfg)
+        if self.yaml["backbone"][0][2] == "Silence":
+            yolo_tasks.LOGGER.warning(
+                "YOLOv9 `Silence` module is deprecated in favor of torch.nn.Identity. "
+                "Please delete local *.pt file and re-download the latest model checkpoint."
+            )
+            self.yaml["backbone"][0][2] = "nn.Identity"
+        self.yaml["channels"] = ch
+        if nc and nc != self.yaml["nc"]:
+            yolo_tasks.LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
+            self.yaml["nc"] = nc
+        self.model, self.save = yolo_tasks.parse_model(yolo_tasks.deepcopy(self.yaml), ch=ch, verbose=verbose)
+        self.names = {i: f"{i}" for i in range(self.yaml["nc"])}
+        self.inplace = self.yaml.get("inplace", True)
+        self.end2end = getattr(self.model[-1], "end2end", False)
+
+        for m in self.model:
+            if isinstance(m, yolo_tasks.Detect):
+                s = 256
+                m.inplace = self.inplace
+
+                def _forward(x):
+                    if self.end2end:
+                        return self.forward(x)["one2many"]
+                    return self.forward(x)[0] if isinstance(m, (yolo_tasks.Segment, yolo_tasks.YOLOESegment, yolo_tasks.Pose, yolo_tasks.OBB)) else self.forward(x)
+
+                self.model.eval()
+                m.training = True
+                m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])
+                self.stride = m.stride
+                self.model.train()
+                m.bias_init()
+            else:
+                self.stride = torch.Tensor([32])
+
+        yolo_tasks.initialize_weights(self)
+        if verbose:
+            self.info()
+            yolo_tasks.LOGGER.info("")
+
+    yolo_tasks.parse_model = parse_model_patched
+    yolo_tasks.BaseModel._apply = base_apply_patched
+    yolo_tasks.DetectionModel.__init__ = detection_init_patched
+    YOLO_HEAD_GRAFT_PATCHED = True
+
+
+
 def _yolo_resolve_model_source(
     variant: Optional[str],
     task: str,
@@ -16842,6 +17342,91 @@ def _yolo_resolve_model_source(
     return "weights", f"{model_id}.pt"
 
 
+def _yolo_variant_base_yaml(variant: str, task: str, *, run_dir: Optional[Path] = None) -> Path:
+    try:
+        import ultralytics  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"yolo_unavailable:{exc}") from exc
+    model_id = (variant or "yolov8n").strip()
+    p2_scale = _yolo_p2_scale(model_id)
+    base_cfg_dir = Path(ultralytics.__file__).resolve().parent / "cfg" / "models" / "v8"
+    if p2_scale:
+        base_cfg = base_cfg_dir / "yolov8-p2.yaml"
+        cfg_payload = yaml.safe_load(base_cfg.read_text())
+        cfg_payload["scale"] = p2_scale
+        target_dir = run_dir or Path(tempfile.mkdtemp(prefix="yolo_p2_cfg_", dir=str(UPLOAD_ROOT)))
+        target = target_dir / f"yolov8{p2_scale}-p2.yaml"
+        target.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
+        return target
+    suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
+    base_cfg = base_cfg_dir / f"{model_id}{suffix}.yaml"
+    if not base_cfg.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_variant_yaml_missing")
+    return base_cfg
+
+
+def _yolo_write_variant_yaml(run_dir: Path, variant: str, task: str, nc: int) -> Path:
+    base_cfg = _yolo_variant_base_yaml(variant, task, run_dir=run_dir)
+    cfg_payload = yaml.safe_load(base_cfg.read_text())
+    cfg_payload["nc"] = int(nc)
+    target = run_dir / f"{Path(base_cfg).stem}_nc{nc}.yaml"
+    target.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
+    return target
+
+
+def _yolo_write_head_graft_yaml(run_dir: Path, variant: str, base_nc: int, new_nc: int) -> Path:
+    base_cfg = _yolo_variant_base_yaml(variant, "detect", run_dir=run_dir)
+    cfg_payload = yaml.safe_load(base_cfg.read_text())
+    head = cfg_payload.get("head") or []
+    detect_idx = None
+    for idx, entry in enumerate(head):
+        if len(entry) >= 3 and entry[2] == "Detect":
+            detect_idx = idx
+            break
+    if detect_idx is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_detect_layer_missing")
+    detect_entry = list(head[detect_idx])
+    detect_args = list(detect_entry[3]) if isinstance(detect_entry[3], list) else [detect_entry[3]]
+    if detect_args:
+        detect_args[0] = int(base_nc)
+    else:
+        detect_args = [int(base_nc)]
+    detect_entry[3] = detect_args
+    head[detect_idx] = detect_entry
+    new_detect_args = list(detect_args)
+    new_detect_args[0] = int(new_nc)
+    new_detect = [detect_entry[0], detect_entry[1], "Detect", new_detect_args]
+    head.append(new_detect)
+    head.append([[-2, -1], 1, "ConcatHead", [int(base_nc), int(new_nc)]])
+    cfg_payload["head"] = head
+    cfg_payload["nc"] = int(base_nc + new_nc)
+    target = run_dir / f"{Path(base_cfg).stem}_2xhead.yaml"
+    target.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
+    return target
+
+
+def _yolo_find_detect_modules(model: Any) -> List[Any]:
+    try:
+        from ultralytics.nn.tasks import Detect  # type: ignore
+    except Exception:
+        return []
+    modules: List[Any] = []
+    for m in getattr(model, "model", []):
+        if isinstance(m, Detect):
+            modules.append(m)
+    return modules
+
+
+def _yolo_detect_layer_index(model: Any) -> int:
+    detects = _yolo_find_detect_modules(model)
+    if not detects:
+        return max(0, len(getattr(model, "model", [])) - 1)
+    for idx, m in enumerate(getattr(model, "model", [])):
+        if m is detects[0]:
+            return idx
+    return max(0, len(getattr(model, "model", [])) - 1)
+
+
 def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
     active = _load_yolo_active()
@@ -16859,6 +17444,7 @@ def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
             from ultralytics import YOLO  # type: ignore
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"yolo_unavailable:{exc}") from exc
+        _patch_ultralytics_for_head_grafting()
         model = YOLO(best_path)
         labelmap = _yolo_load_labelmap(Path(labelmap_path)) if labelmap_path else []
         resolved_task = task or getattr(model, "task", None)
@@ -29749,6 +30335,29 @@ def _load_dataset_glossary(dataset_root: Path) -> str:
     return _normalize_labelmap_glossary(raw)
 
 
+def _glossary_preview(glossary_text: str, labelmap: Sequence[str], *, max_chars: int = 140, max_labels: int = 3) -> str:
+    text = str(glossary_text or "").strip()
+    if not text:
+        return ""
+    mapping = _parse_glossary_mapping(text, labelmap)
+    if not mapping:
+        return ""
+    parts: List[str] = []
+    for label in labelmap:
+        terms = mapping.get(label)
+        if not terms:
+            continue
+        sample = ", ".join(terms[:3])
+        parts.append(f"{label}: {sample}")
+        if len(parts) >= max_labels:
+            break
+    preview = "; ".join(parts)
+    preview = preview.strip()
+    if len(preview) > max_chars:
+        preview = preview[: max_chars - 3].rstrip() + "..."
+    return preview
+
+
 def _persist_dataset_glossary(dataset_root: Path, glossary_text: str) -> None:
     updated = False
     sam_meta = _load_sam3_dataset_metadata(dataset_root)
@@ -29777,6 +30386,69 @@ def _normalize_glossary_name(name: str) -> str:
 
 def _glossary_key(name: str) -> str:
     return _normalize_glossary_name(name).lower()
+
+
+def _find_any_file(root: Path) -> Optional[Path]:
+    if not root.exists() or not root.is_dir():
+        return None
+    try:
+        for entry in root.iterdir():
+            if entry.is_file():
+                return entry
+    except Exception:
+        return None
+    return None
+
+
+def _count_dir_files(root: Path) -> Optional[int]:
+    if not root.exists() or not root.is_dir():
+        return None
+    try:
+        return sum(1 for entry in root.iterdir() if entry.is_file())
+    except Exception:
+        return None
+
+
+def _dataset_integrity_report(dataset_root: Path) -> Dict[str, Any]:
+    report: Dict[str, Any] = {
+        "dataset_root": str(dataset_root),
+        "type": "unknown",
+        "ok": True,
+        "issues": [],
+    }
+    annotations_path = dataset_root / "train" / "annotations.jsonl"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    if annotations_path.exists():
+        report["type"] = "qwen"
+        if not train_images.exists():
+            report["issues"].append("missing_train_images")
+        if not annotations_path.is_file() or annotations_path.stat().st_size == 0:
+            report["issues"].append("missing_annotations")
+        if train_images.exists():
+            if not _find_any_file(train_images):
+                report["issues"].append("no_images_found")
+        report["image_count"] = _count_dir_files(train_images)
+        report["annotation_bytes"] = annotations_path.stat().st_size if annotations_path.exists() else None
+        labelmap = _load_qwen_labelmap(dataset_root)
+        if not labelmap:
+            report["issues"].append("missing_labelmap")
+    elif train_images.exists() and train_labels.exists():
+        report["type"] = "yolo"
+        if not _find_any_file(train_images):
+            report["issues"].append("no_images_found")
+        if not _find_any_file(train_labels):
+            report["issues"].append("no_labels_found")
+        report["image_count"] = _count_dir_files(train_images)
+        report["label_count"] = _count_dir_files(train_labels)
+        labelmap = _discover_yolo_labelmap(dataset_root)
+        if not labelmap:
+            report["issues"].append("missing_labelmap")
+    else:
+        report["issues"].append("dataset_layout_unrecognized")
+    if report["issues"]:
+        report["ok"] = False
+    return report
 
 
 def _load_glossary_library() -> List[Dict[str, Any]]:
@@ -29858,6 +30530,12 @@ def get_dataset_glossary(dataset_id: str):
         if labelmap:
             glossary = _default_agent_glossary_for_labelmap(labelmap)
     return {"dataset_id": dataset_id, "glossary": glossary}
+
+
+@app.get("/datasets/{dataset_id}/check")
+def check_dataset_integrity(dataset_id: str):
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    return _dataset_integrity_report(dataset_root)
 
 
 @app.post("/datasets/{dataset_id}/glossary")
@@ -32022,6 +32700,7 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
                 record = cached_records.get(image_name) or _load_cached_record(image_name)
                 if not record:
                     continue
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         prepass_cache_meta.write_text(
             json.dumps(
@@ -36583,6 +37262,277 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
     thread.start()
 
 
+def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
+    def worker() -> None:
+        job.thread_ident = threading.get_ident()
+        run_dir = _yolo_run_dir(job.job_id, create=True)
+        config = dict(job.config or {})
+        if run_dir:
+            config.setdefault("paths", {})["run_dir"] = str(run_dir)
+            job.config = config
+        base_run_id = str(config.get("base_run_id") or "").strip()
+        if not base_run_id:
+            _yolo_head_graft_job_update(job, status="failed", message="Base YOLO run missing", error="yolo_base_missing")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        if job.cancel_event.is_set():
+            _yolo_head_graft_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        base_run_dir = _yolo_run_dir(base_run_id, create=False)
+        base_best = base_run_dir / "best.pt"
+        if not base_best.exists():
+            _yolo_head_graft_job_update(job, status="failed", message="Base run is missing best.pt", error="yolo_base_missing_best")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        base_meta = _yolo_load_run_meta(base_run_dir)
+        base_cfg = base_meta.get("config") or {}
+        base_task = str(base_cfg.get("task") or "detect").lower()
+        if base_task != "detect":
+            _yolo_head_graft_job_update(job, status="failed", message="Base run is not detect", error="yolo_base_not_detect")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        base_variant = config.get("variant") or base_cfg.get("variant")
+        if not base_variant:
+            _yolo_head_graft_job_update(
+                job,
+                status="failed",
+                message="Base run missing variant (cannot infer architecture)",
+                error="yolo_base_variant_missing",
+            )
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        base_labelmap = _yolo_load_run_labelmap(base_run_dir)
+        if not base_labelmap:
+            _yolo_head_graft_job_update(job, status="failed", message="Base labelmap missing", error="yolo_base_labelmap_missing")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        try:
+            dataset_payload = YoloTrainRequest(dataset_id=config.get("dataset_id"), dataset_root=config.get("dataset_root"))
+            dataset_info = _resolve_yolo_training_dataset(dataset_payload)
+        except Exception as exc:  # noqa: BLE001
+            _yolo_head_graft_job_update(job, status="failed", message="Dataset not ready", error=str(exc))
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        if not dataset_info.get("yolo_ready"):
+            _yolo_head_graft_job_update(job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        dataset_task = str(dataset_info.get("task") or "detect").lower()
+        if dataset_task != "detect":
+            _yolo_head_graft_job_update(job, status="failed", message="Head grafting only supports detect datasets", error="yolo_graft_detect_only")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        new_labelmap = _yolo_load_labelmap(Path(dataset_info.get("yolo_labelmap_path") or ""))
+        if not new_labelmap:
+            _yolo_head_graft_job_update(job, status="failed", message="New labelmap missing", error="yolo_new_labelmap_missing")
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        base_norm = {_normalize_class_name_for_match(n) for n in base_labelmap if n}
+        new_norm = {_normalize_class_name_for_match(n) for n in new_labelmap if n}
+        overlap = base_norm.intersection(new_norm)
+        if overlap:
+            _yolo_head_graft_job_update(
+                job,
+                status="failed",
+                message="Base and new class lists overlap",
+                error="yolo_labelmap_overlap",
+            )
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        try:
+            _prepare_for_training()
+            _patch_ultralytics_for_head_grafting()
+            import ultralytics  # type: ignore
+            from ultralytics import YOLO  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            _yolo_head_graft_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        version = getattr(ultralytics, "__version__", "")
+        if version and not version.startswith("8."):
+            _yolo_head_graft_job_update(
+                job,
+                status="failed",
+                message=f"Ultralytics {version} unsupported for head grafting",
+                error="yolo_graft_ultralytics_version",
+            )
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            return
+        _yolo_head_graft_job_update(job, status="running", message="Preparing head graft", progress=0.0)
+        _yolo_head_graft_job_log(job, f"Base run: {base_run_id}")
+        _yolo_head_graft_job_log(job, f"Variant: {base_variant}")
+        _yolo_head_graft_audit(
+            job,
+            "head_graft_start",
+            event="start",
+            extra={"base_run_id": base_run_id, "variant": base_variant, "dataset_id": config.get("dataset_id")},
+        )
+        data_yaml = _yolo_write_data_yaml(run_dir, Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or ""), dataset_info.get("yolo_layout"), dataset_info.get("yolo_labelmap_path"))
+        nc_new = len(new_labelmap)
+        nc_base = len(base_labelmap)
+        head_yaml = _yolo_write_variant_yaml(run_dir, base_variant, "detect", nc_new)
+        device_arg = _yolo_device_arg(config.get("devices"))
+        train_kwargs = {
+            "data": str(data_yaml),
+            "task": "detect",
+            "epochs": config.get("epochs"),
+            "imgsz": config.get("img_size"),
+            "batch": config.get("batch"),
+            "workers": config.get("workers"),
+            "seed": config.get("seed"),
+            "device": device_arg,
+            "project": str(run_dir),
+            "name": "head",
+            "exist_ok": True,
+        }
+        train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
+        try:
+            model = YOLO(str(head_yaml)).load(str(base_best))
+            detect_idx = _yolo_detect_layer_index(model.model)
+
+            def _freeze_bn(trainer):
+                for idx, layer in enumerate(trainer.model.model):
+                    if idx >= detect_idx:
+                        continue
+                    for sub in layer.modules():
+                        if isinstance(sub, torch.nn.BatchNorm2d):
+                            sub.eval()
+                            sub.track_running_stats = False
+
+            def _cancel_guard(trainer):
+                if job.cancel_event.is_set():
+                    trainer.stop = True
+                    _yolo_head_graft_job_log(job, "Cancellation requested; stopping after current step")
+
+            model.add_callback("on_train_epoch_start", _freeze_bn)
+            model.add_callback("on_pretrain_routine_start", _freeze_bn)
+            model.add_callback("on_train_epoch_start", _cancel_guard)
+            model.add_callback("on_train_epoch_end", _cancel_guard)
+            train_kwargs["freeze"] = detect_idx
+            _yolo_head_graft_job_log(job, f"Training new head (freeze < layer {detect_idx})")
+            model.train(**train_kwargs)
+            train_dir = run_dir / "head"
+            new_best = train_dir / "weights" / "best.pt"
+            if not new_best.exists():
+                raise RuntimeError("new_head_best_missing")
+            if job.cancel_event.is_set():
+                _yolo_head_graft_job_update(job, status="cancelled", message="Head training cancelled", progress=job.progress)
+                _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+                _finalize_training_environment()
+                return
+        except Exception as exc:  # noqa: BLE001
+            _yolo_head_graft_job_update(job, status="failed", message="Head training failed", error=str(exc))
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _finalize_training_environment()
+            return
+        _yolo_head_graft_job_update(job, message="Merging heads", progress=0.7)
+        merged_yaml = _yolo_write_head_graft_yaml(run_dir, base_variant, nc_base, nc_new)
+        try:
+            merged = YOLO(str(merged_yaml)).load(str(base_best))
+            new_model = YOLO(str(new_best))
+            new_detects = _yolo_find_detect_modules(new_model.model)
+            merged_detects = _yolo_find_detect_modules(merged.model)
+            if len(new_detects) < 1 or len(merged_detects) < 2:
+                raise RuntimeError("detect_module_missing")
+            merged_detects[1].load_state_dict(new_detects[0].state_dict(), strict=False)
+            merged_labelmap = list(base_labelmap) + list(new_labelmap)
+            labelmap_path = run_dir / "labelmap.txt"
+            labelmap_path.write_text("\n".join(merged_labelmap) + "\n")
+            merged_names = {idx: name for idx, name in enumerate(merged_labelmap)}
+            merged.model.names = merged_names
+            try:
+                merged.names = merged_names
+            except Exception:
+                pass
+            merged.ckpt = {"model": merged.model}
+            merged.save(str(run_dir / "best.pt"))
+            # Sanity check inference shape / class index bounds
+            sanity_errors: List[str] = []
+            try:
+                images_root = Path(dataset_info.get("yolo_images_dir") or "")
+                if images_root.exists():
+                    image_paths = sorted(list(images_root.glob("*")))[:3]
+                    if image_paths:
+                        merged.model.eval()
+                        for image_path in image_paths:
+                            try:
+                                preds = merged.predict(str(image_path), verbose=False)
+                            except Exception as exc:  # noqa: BLE001
+                                sanity_errors.append(f"predict_failed:{image_path.name}:{exc}")
+                                continue
+                            for pred in preds or []:
+                                boxes = getattr(pred, "boxes", None)
+                                if boxes is None:
+                                    continue
+                                cls = getattr(boxes, "cls", None)
+                                if cls is None:
+                                    continue
+                                try:
+                                    max_cls = int(cls.max().item()) if hasattr(cls, "max") else int(max(cls))
+                                except Exception:
+                                    max_cls = None
+                                if max_cls is not None and max_cls >= len(merged_labelmap):
+                                    sanity_errors.append(f"class_index_out_of_range:{image_path.name}:{max_cls}")
+                    else:
+                        sanity_errors.append("sanity_images_missing")
+                else:
+                    sanity_errors.append("sanity_images_missing")
+            except Exception as exc:  # noqa: BLE001
+                sanity_errors.append(f"sanity_check_failed:{exc}")
+            if sanity_errors:
+                _yolo_head_graft_audit(job, "sanity_check_failed", event="sanity", level="warn", extra={"errors": sanity_errors})
+            else:
+                _yolo_head_graft_audit(job, "sanity_check_ok", event="sanity")
+            export_path = None
+            if config.get("export_onnx"):
+                _yolo_head_graft_audit(
+                    job,
+                    "onnx_export_requested",
+                    event="export",
+                    level="warn",
+                    extra={"note": "ConcatHead ONNX export may fail depending on runtime support."},
+                )
+                try:
+                    export_path = merged.export(format="onnx")
+                except Exception as exc:  # noqa: BLE001
+                    _yolo_head_graft_job_log(job, f"ONNX export failed: {exc}")
+            result_payload = {
+                "run_dir": str(run_dir),
+                "best_path": str(run_dir / "best.pt"),
+                "labelmap_path": str(labelmap_path),
+                "export_path": str(export_path) if export_path else None,
+                "merged_yaml": str(merged_yaml),
+            }
+            _yolo_prune_run_dir(run_dir)
+            _yolo_head_graft_job_update(job, status="succeeded", message="Head graft complete", progress=1.0, result=result_payload)
+            _yolo_write_run_meta(
+                run_dir,
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                    "result": job.result,
+                    "head_graft": {
+                        "base_run_id": base_run_id,
+                        "base_labelmap": base_labelmap,
+                        "new_labelmap": new_labelmap,
+                        "variant": base_variant,
+                    },
+                },
+            )
+            _yolo_head_graft_audit(job, "head_graft_complete", event="complete", extra={"result": result_payload})
+        except Exception as exc:  # noqa: BLE001
+            _yolo_head_graft_job_update(job, status="failed", message="Head merge failed", error=str(exc))
+            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+        finally:
+            _finalize_training_environment()
+
+    thread = threading.Thread(target=worker, name=f"yolo-graft-{job.job_id}", daemon=True)
+    thread.start()
+
+
 def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
     def worker() -> None:
         run_dir = _rfdetr_run_dir(job.job_id, create=True)
@@ -38649,6 +39599,113 @@ def cancel_yolo_training_job(job_id: str):
     return {"status": job.status}
 
 
+@app.post("/yolo/head_graft/jobs")
+def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
+    if not payload.accept_tos:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_tos_required")
+    job_id = uuid.uuid4().hex
+    if payload.run_name:
+        safe_id = _sanitize_yolo_run_id(payload.run_name)
+        if safe_id:
+            job_id = safe_id
+    run_dir = _yolo_run_dir(job_id, create=False)
+    if run_dir.exists():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="yolo_run_exists")
+    config = payload.dict(exclude_none=True)
+    job = YoloHeadGraftJob(job_id=job_id, config=config, message="Queued (head graft not started)")
+    with YOLO_HEAD_GRAFT_JOBS_LOCK:
+        YOLO_HEAD_GRAFT_JOBS[job_id] = job
+        _yolo_head_graft_job_log(job, job.message)
+    run_dir = _yolo_run_dir(job_id, create=True)
+    _yolo_write_run_meta(
+        run_dir,
+        {"job_id": job_id, "status": job.status, "message": job.message, "config": job.config},
+    )
+    _start_yolo_head_graft_worker(job)
+    return _serialize_yolo_head_graft_job(job)
+
+
+@app.post("/yolo/head_graft/dry_run")
+def yolo_head_graft_dry_run(payload: YoloHeadGraftDryRunRequest):
+    base_run_id = str(payload.base_run_id or "").strip()
+    if not base_run_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_base_missing")
+    base_run_dir = _yolo_run_dir(base_run_id, create=False)
+    if not base_run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_base_missing")
+    base_meta = _yolo_load_run_meta(base_run_dir)
+    base_cfg = base_meta.get("config") or {}
+    base_task = str(base_cfg.get("task") or "detect").lower()
+    base_variant = base_cfg.get("variant")
+    base_labelmap = _yolo_load_run_labelmap(base_run_dir)
+    dataset_payload = YoloTrainRequest(dataset_id=payload.dataset_id, dataset_root=payload.dataset_root)
+    dataset_info = _resolve_yolo_training_dataset(dataset_payload)
+    if not dataset_info.get("yolo_ready"):
+        return {
+            "ok": False,
+            "error": "yolo_not_ready",
+            "base_run_id": base_run_id,
+            "base_task": base_task,
+            "base_variant": base_variant,
+        }
+    dataset_task = str(dataset_info.get("task") or "detect").lower()
+    new_labelmap = _yolo_load_labelmap(Path(dataset_info.get("yolo_labelmap_path") or ""))
+    base_norm = {_normalize_class_name_for_match(n) for n in base_labelmap if n}
+    new_norm = {_normalize_class_name_for_match(n) for n in new_labelmap if n}
+    overlap = sorted(base_norm.intersection(new_norm))
+    ok = base_task == "detect" and dataset_task == "detect" and not overlap and bool(base_labelmap) and bool(new_labelmap)
+    return {
+        "ok": ok,
+        "base_run_id": base_run_id,
+        "base_task": base_task,
+        "base_variant": base_variant,
+        "base_label_count": len(base_labelmap),
+        "new_label_count": len(new_labelmap),
+        "overlap": overlap,
+        "dataset_id": dataset_info.get("id") or dataset_info.get("dataset_id"),
+        "yolo_ready": dataset_info.get("yolo_ready"),
+        "dataset_task": dataset_task,
+    }
+
+
+@app.get("/yolo/head_graft/jobs")
+def list_yolo_head_graft_jobs():
+    _prune_job_registry(YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK)
+    with YOLO_HEAD_GRAFT_JOBS_LOCK:
+        jobs = sorted(YOLO_HEAD_GRAFT_JOBS.values(), key=lambda job: job.created_at, reverse=True)
+    return [_serialize_yolo_head_graft_job(job) for job in jobs]
+
+
+@app.get("/yolo/head_graft/jobs/{job_id}")
+def get_yolo_head_graft_job(job_id: str):
+    _prune_job_registry(YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK)
+    with YOLO_HEAD_GRAFT_JOBS_LOCK:
+        job = YOLO_HEAD_GRAFT_JOBS.get(job_id)
+    if job:
+        return _serialize_yolo_head_graft_job(job)
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
+
+
+@app.post("/yolo/head_graft/jobs/{job_id}/cancel")
+def cancel_yolo_head_graft_job(job_id: str):
+    with YOLO_HEAD_GRAFT_JOBS_LOCK:
+        job = YOLO_HEAD_GRAFT_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
+        if job.status in {"succeeded", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        if job.cancel_event.is_set():
+            return {"status": job.status}
+        job.cancel_event.set()
+        stopped = False
+        if job.status in {"running", "queued"}:
+            stopped = _yolo_head_graft_force_stop(job)
+        next_status = "cancelled" if stopped else (job.status if job.status not in {"running", "queued"} else "cancelling")
+        _yolo_head_graft_job_update(job, status=next_status, message="Cancellation requested ...")
+        _yolo_head_graft_audit(job, "cancel_requested", event="cancel", extra={"forced": stopped})
+    return {"status": job.status}
+
+
 @app.post("/rfdetr/train/jobs")
 def create_rfdetr_training_job(payload: RfDetrTrainRequest):
     if not payload.accept_tos:
@@ -38888,6 +39945,8 @@ def set_yolo_active(payload: YoloActiveRequest):
         "task": config.get("task"),
         "variant": config.get("variant"),
     }
+    if meta.get("head_graft"):
+        active_payload["head_graft"] = meta.get("head_graft")
     return _save_yolo_active(active_payload)
 
 
@@ -39298,12 +40357,40 @@ def download_yolo_run(run_id: str):
     safe_name = _sanitize_yolo_run_id(run_name)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for filename in sorted(YOLO_KEEP_FILES):
+        keep_files = set(YOLO_KEEP_FILES)
+        if meta.get("head_graft"):
+            for yaml_path in run_dir.glob("*.yaml"):
+                keep_files.add(yaml_path.name)
+        for filename in sorted(keep_files):
             path = run_dir / filename
             if path.exists():
                 zf.write(path, arcname=filename)
     buffer.seek(0)
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}.zip"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+@app.get("/yolo/head_graft/jobs/{job_id}/bundle")
+def download_yolo_head_graft_bundle(job_id: str):
+    run_dir = _yolo_run_dir(job_id, create=False)
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    meta = _yolo_load_run_meta(run_dir)
+    if not meta.get("head_graft"):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_head_graft_not_found")
+    run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or job_id
+    safe_name = _sanitize_yolo_run_id(run_name)
+    required = {"best.pt", "labelmap.txt", "head_graft_audit.jsonl", YOLO_RUN_META_NAME}
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename in sorted(required):
+            path = run_dir / filename
+            if path.exists():
+                zf.write(path, arcname=filename)
+        for yaml_path in sorted(run_dir.glob("*.yaml")):
+            zf.write(yaml_path, arcname=yaml_path.name)
+    buffer.seek(0)
+    headers = {"Content-Disposition": f'attachment; filename="{safe_name}_head_graft_bundle.zip"'}
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
@@ -39885,6 +40972,127 @@ def update_predictor_settings(payload: PredictorSettingsUpdate):
     normalized = max(min_cap, min(max_cap, requested))
     predictor_manager.set_capacity(normalized)
     return _predictor_settings_payload()
+
+
+def _gpu_status_payload() -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"available": False, "device_count": 0, "devices": []}
+    if not torch.cuda.is_available():
+        return payload
+    devices: List[Dict[str, Any]] = []
+    try:
+        device_count = torch.cuda.device_count()
+        payload["available"] = True
+        payload["device_count"] = device_count
+        for idx in range(device_count):
+            props = torch.cuda.get_device_properties(idx)
+            device_info: Dict[str, Any] = {
+                "index": idx,
+                "name": props.name,
+                "total_mb": _bytes_to_mb(int(props.total_memory)),
+                "compute_capability": f"{props.major}.{props.minor}",
+            }
+            try:
+                free_bytes, total_bytes = torch.cuda.mem_get_info(idx)
+                device_info["free_mb"] = _bytes_to_mb(int(free_bytes))
+                device_info["total_mb"] = _bytes_to_mb(int(total_bytes))
+            except Exception:
+                device_info["free_mb"] = None
+            devices.append(device_info)
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = str(exc)
+    payload["devices"] = devices
+    return payload
+
+
+@app.get("/system/gpu")
+def get_system_gpu():
+    return _gpu_status_payload()
+
+
+def _storage_check_payload() -> Dict[str, Any]:
+    roots = {
+        "uploads": UPLOAD_ROOT,
+        "dataset_registry": DATASET_REGISTRY_ROOT,
+        "sam3_datasets": SAM3_DATASET_ROOT,
+        "qwen_datasets": QWEN_DATASET_ROOT,
+        "sam3_runs": SAM3_JOB_ROOT,
+        "qwen_runs": QWEN_JOB_ROOT,
+        "yolo_runs": YOLO_JOB_ROOT,
+        "rfdetr_runs": RFDETR_JOB_ROOT,
+        "calibration_jobs": CALIBRATION_ROOT,
+        "calibration_cache": CALIBRATION_CACHE_ROOT,
+        "prepass_recipes": PREPASS_RECIPE_ROOT,
+        "clip_uploads": CLIP_DATASET_UPLOAD_ROOT,
+        "dataset_uploads": DATASET_UPLOAD_ROOT,
+    }
+    results: List[Dict[str, Any]] = []
+    ok = True
+    for name, root in roots.items():
+        entry = {"name": name, "path": str(root), "ok": True, "error": None}
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            test_path = root / f".write_test_{uuid.uuid4().hex}"
+            test_path.write_text("ok", encoding="utf-8")
+            test_path.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            entry["ok"] = False
+            entry["error"] = str(exc)
+            ok = False
+        results.append(entry)
+    return {"ok": ok, "roots": results}
+
+
+@app.get("/system/storage_check")
+def system_storage_check():
+    return _storage_check_payload()
+
+
+def _system_health_summary() -> Dict[str, Any]:
+    storage = _storage_check_payload()
+    gpu = _gpu_status_payload()
+    summary: Dict[str, Any] = {
+        "ok": bool(storage.get("ok", False)),
+        "gpu": gpu,
+        "storage": storage,
+        "datasets": {},
+        "models": {},
+        "errors": [],
+    }
+    try:
+        datasets = _list_all_datasets(prefer_registry=True)
+        summary["datasets"] = {"count": len(datasets)}
+    except Exception as exc:  # noqa: BLE001
+        summary["datasets"] = {"count": None}
+        summary["errors"].append(f"datasets_list_failed:{exc}")
+        summary["ok"] = False
+    try:
+        summary["models"]["qwen"] = qwen_status()
+    except Exception as exc:  # noqa: BLE001
+        summary["errors"].append(f"qwen_status_failed:{exc}")
+        summary["ok"] = False
+    try:
+        summary["models"]["sam3_runs"] = len(_list_sam3_runs("sam3"))
+    except Exception as exc:  # noqa: BLE001
+        summary["errors"].append(f"sam3_runs_failed:{exc}")
+        summary["ok"] = False
+    try:
+        summary["models"]["qwen_models"] = len(_list_qwen_model_entries())
+    except Exception as exc:  # noqa: BLE001
+        summary["errors"].append(f"qwen_models_failed:{exc}")
+        summary["ok"] = False
+    try:
+        summary["models"]["clip_classifiers"] = len(_list_clip_classifiers())
+    except Exception as exc:  # noqa: BLE001
+        summary["errors"].append(f"clip_classifiers_failed:{exc}")
+        summary["ok"] = False
+    summary["models"]["yolo_variants"] = len(YOLO_VARIANTS)
+    summary["models"]["rfdetr_variants"] = len(RFDETR_VARIANTS)
+    return summary
+
+
+@app.get("/system/health_summary")
+def system_health_summary():
+    return _system_health_summary()
 
 
 @app.get("/qwen/status")

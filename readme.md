@@ -29,6 +29,7 @@ We previously experimented with agentic annotation loops and removed them. Qwen 
 - **YOLOv8 training** and **RF‑DETR training** with saved‑run management.
 - **SAM3 training** from the UI (device selection + run management).
 - **Qwen captioning** with windowed mode and guardrails.
+- **YOLO head grafting (experimental)** to add new classes without retraining the base backbone.
 
 ---
 
@@ -77,7 +78,7 @@ Key notes:
 ### Calibration workflow + caching
 - Jobs stored under `uploads/calibration_jobs/<job_id>/`.
 - Intermediate prepass/features/labels cached under `uploads/calibration_cache/` keyed by payload hash.
-- Poll status via `GET /qwen/calibration/jobs/{job_id}`.
+- Poll status via `GET /calibration/jobs/{job_id}`.
 
 ### Calibration benchmark (IoU=0.50, qwen_dataset, validation split)
 | Dataset size | Windowed SAM3 text | Windowed SAM3 similarity | Pipeline | Precision | Recall | F1 |
@@ -87,6 +88,7 @@ Key notes:
 | 4000 | no | no | YOLO + RF‑DETR (dedupe on source_list union) | 0.663 | 0.635 | 0.649 |
 | 4000 | no | no | **Prepass + XGBoost (context)** | **0.850** | **0.799** | **0.824** |
 | 2000 | no | no | **Prepass + XGBoost (context)** | **0.844** | **0.688** | **0.758** |
+| 2000 | yes (2×2) | yes (2×2) | **Prepass + XGBoost (context)** | **0.737** | **0.485** | **0.585** |
 
 Notes:
 - Detector baselines above are derived from **prepass clusters** using `source_list` membership (more faithful than `score_source` alone).
@@ -102,6 +104,7 @@ Notes:
 - **Glossary library**: dataset glossaries + named glossary library + optional Qwen expansion.
 - **Captioning**: Qwen captioning with windowed 2×2 tiles and detail‑preserving merge.
 - **Training**: CLIP/DINOv3 heads, YOLOv8, RF‑DETR, SAM3.
+- **Experimental**: YOLO head grafting (add new classes onto an existing YOLO run).
 - **Run management**: download/delete/rename for trained classifiers and detectors.
 
 ---
@@ -131,6 +134,7 @@ Tator integrates several upstream tools. You are responsible for reviewing and c
 - Python 3.10+ (3.11 recommended).
 - Optional NVIDIA GPU with CUDA for faster CLIP/SAM/Qwen.
 - Model weights (SAM1 required, SAM3 optional).
+- If you use YOLO training/head‑grafting, you must comply with the Ultralytics license/TOS.
 
 ### Quick start
 1. **Create env**
@@ -181,8 +185,10 @@ Tator integrates several upstream tools. You are responsible for reviewing and c
 
 ## Dataset management & glossaries
 - Upload datasets in **Datasets** tab (YOLO preferred). COCO is auto‑converted to YOLO to preserve label order.
+- Uploading the current labeling session can optionally create a **train/val split** (seeded shuffle).
 - Each dataset has a **canonical glossary** for SAM3 text prompts.
 - A **glossary library** (named glossaries) is available for reuse across datasets.
+- Optional **dataset context** is stored with the dataset and used in Qwen captioning/term expansion prompts.
 
 ---
 
@@ -192,6 +198,36 @@ Tator integrates several upstream tools. You are responsible for reviewing and c
 - Labelmap tokens are explicitly discouraged in final captions; natural language is preferred.
 
 ---
+
+## Experimental: YOLOv8 head grafting
+Head grafting lets you train a new detection head for <em>new classes</em> and merge it into an existing YOLOv8
+run without retraining the backbone. This is useful when you want to expand a labelmap incrementally.
+
+**Requirements**
+- Base run must be **YOLO detect** (not segmentation) and already trained.
+- New dataset must be **YOLO‑ready** and contain **only new classes**.
+- Base and new labelmaps must be **disjoint** (no overlapping class names).
+- Works with standard YOLOv8 and YOLOv8‑P2 variants.
+
+**How it works**
+1. Create a YOLOv8 head model for the new dataset (`nc = new classes`).
+2. Load base weights, freeze backbone, and train only the new head.
+3. Build a merged model with two Detect heads + a ConcatHead.
+4. Append the new labelmap to the base labelmap (base classes remain intact).
+
+**Outputs**
+- `best.pt` with merged weights.
+- `labelmap.txt` with base classes followed by new classes.
+- Optional ONNX export.
+- `head_graft_audit.jsonl` with a per‑step audit trail.
+- “Head‑graft bundle” download includes `best.pt`, `labelmap.txt`, merged YAML, audit log, and `run.json`.
+
+**Notes**
+- This flow patches Ultralytics at runtime to add `ConcatHead`. Treat as experimental.
+- The merged model’s class order is deterministic: base classes first, new classes last.
+- Launch from the **Train YOLO** tab → **YOLO Head Grafting (experimental)** panel.
+ - Inference automatically loads the runtime patch when a grafted YOLO run is activated.
+
 
 ## Optional: SAM3 setup
 SAM3 support is optional but recommended for text prompting + similarity.

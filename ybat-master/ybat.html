@@ -1930,6 +1930,101 @@
                             </div>
                             <div class="training-help" id="yoloRunSummary">No runs yet.</div>
                         </div>
+                        <div class="training-history">
+                            <div class="storage-header">
+                                <h3>YOLO Head Grafting (experimental)</h3>
+                            </div>
+                            <div class="training-help">
+                                Train a new head for additional classes, then graft it onto an existing YOLO run. The base labelmap and the new dataset
+                                labelmap must be disjoint. The merged model keeps base classes untouched and adds new classes at the end of the labelmap.
+                            </div>
+                            <div class="training-help" style="margin-top: 6px;">
+                                Requires accepting the Ultralytics terms (checkbox in the YOLO training section).
+                            </div>
+                            <div class="training-help" style="margin-top: 8px;">
+                                <ul style="margin: 0 0 0 18px; padding: 0;">
+                                    <li>Supports YOLOv8 + YOLOv8‑P2 detect runs only (segmentation is not supported).</li>
+                                    <li>Base run must already be trained. The new dataset must be YOLO‑ready and contain <em>only new classes</em>.</li>
+                                    <li>Head grafting freezes the backbone, trains a new head, then merges heads into a single model.</li>
+                                    <li>The merged labelmap appends new classes after the base classes. Class names must not overlap.</li>
+                                    <li>This uses an Ultralytics runtime patch (ConcatHead). Treat as experimental.</li>
+                                </ul>
+                            </div>
+                            <div class="training-field">
+                                <label>Base YOLO run</label>
+                                <div class="sam3-dataset-row">
+                                    <select id="yoloHeadGraftBaseRun"></select>
+                                    <button type="button" class="training-button" id="yoloHeadGraftBaseRefresh">Refresh</button>
+                                </div>
+                                <div class="training-help" id="yoloHeadGraftBaseSummary">Select a base run to graft onto.</div>
+                            </div>
+                            <div class="training-field">
+                                <label>New classes dataset</label>
+                                <div class="sam3-dataset-row">
+                                    <select id="yoloHeadGraftDataset"></select>
+                                    <button type="button" class="training-button" id="yoloHeadGraftDatasetRefresh">Refresh</button>
+                                </div>
+                                <div class="training-help" id="yoloHeadGraftDatasetSummary">Select a YOLO-ready dataset that contains only new classes.</div>
+                            </div>
+                            <div class="training-field">
+                                <label for="yoloHeadGraftRunName">Run name (optional)</label>
+                                <input type="text" id="yoloHeadGraftRunName" placeholder="yolo_graft_2026-01-29" />
+                                <div class="training-help">If provided, the name is sanitized into the run ID. Duplicates are rejected.</div>
+                            </div>
+                            <div class="training-grid">
+                                <div>
+                                    <label for="yoloHeadGraftEpochs">Epochs</label>
+                                    <input type="number" id="yoloHeadGraftEpochs" min="1" value="50" />
+                                </div>
+                                <div>
+                                    <label for="yoloHeadGraftImgSize">Image size</label>
+                                    <input type="number" id="yoloHeadGraftImgSize" min="256" step="32" value="640" />
+                                </div>
+                                <div>
+                                    <label for="yoloHeadGraftBatch">Batch</label>
+                                    <input type="number" id="yoloHeadGraftBatch" min="1" value="16" />
+                                </div>
+                                <div>
+                                    <label for="yoloHeadGraftWorkers">Workers</label>
+                                    <input type="number" id="yoloHeadGraftWorkers" min="0" value="4" />
+                                </div>
+                                <div>
+                                    <label for="yoloHeadGraftDevices">Devices (comma-separated)</label>
+                                    <input type="text" id="yoloHeadGraftDevices" placeholder="0,1" />
+                                    <div class="training-help">Leave blank to use the default GPU allocation.</div>
+                                </div>
+                                <div>
+                                    <label for="yoloHeadGraftSeed">Seed</label>
+                                    <input type="number" id="yoloHeadGraftSeed" value="42" />
+                                </div>
+                            </div>
+                            <div class="checkbox-row">
+                                <label>
+                                    <input type="checkbox" id="yoloHeadGraftExportOnnx" />
+                                    Export merged model to ONNX
+                                    <span class="help-icon" title="ConcatHead export depends on the ONNX runtime; exports may fail for some Ultralytics builds.">?</span>
+                                </label>
+                            </div>
+                            <div class="training-actions">
+                                <button type="button" class="training-button" id="yoloHeadGraftStart">Start head graft</button>
+                                <button type="button" class="training-button" id="yoloHeadGraftDryRun">Dry run check</button>
+                                <button type="button" class="training-button training-button-danger" id="yoloHeadGraftCancel" disabled>Cancel</button>
+                            </div>
+                            <div class="training-help">Dry run validates base run, dataset readiness, and labelmap overlap without training or GPU usage.</div>
+                            <div class="training-message" id="yoloHeadGraftMessage" role="status"></div>
+                            <div class="training-progress" id="yoloHeadGraftProgressBar">
+                                <div class="training-progress-fill" id="yoloHeadGraftProgressFill"></div>
+                            </div>
+                            <div class="training-status-text" id="yoloHeadGraftStatusText">Idle</div>
+                            <div class="training-logs">
+                                <h3>Logs</h3>
+                                <pre id="yoloHeadGraftLog"></pre>
+                            </div>
+                            <div class="training-history">
+                                <h3>Recent head graft jobs</h3>
+                                <div id="yoloHeadGraftHistory"></div>
+                            </div>
+                        </div>
                     </section>
                 </div>
             </div>
@@ -2966,8 +3061,8 @@
                             </div>
 	                        <div class="training-card__body dataset-manager">
 	                                <div class="training-subsection">
-	                                    <div class="training-subsection__title">Upload current labeling session</div>
-                                    <div class="training-help">Packages the images + labels you have loaded in the labeling tab and uploads them as a YOLO / YOLO-seg dataset (train split) so it appears in Dataset Manager for reuse in CLIP, Qwen, and SAM3 flows.</div>
+                                <div class="training-subsection__title">Upload current labeling session</div>
+                                    <div class="training-help">Packages the images + labels you have loaded in the labeling tab and uploads them as a YOLO / YOLO-seg dataset (train split unless you opt into a validation split) so it appears in Dataset Manager for reuse in CLIP, Qwen, and SAM3 flows.</div>
 	                                    <div class="training-grid">
 	                                        <div>
 	                                            <label for="datasetUploadCurrentName">Dataset name (optional)</label>
@@ -2978,6 +3073,23 @@
 	                                            <input type="text" id="datasetUploadCurrentContext" placeholder="Optional: used for Qwen instruction text" />
 	                                        </div>
 	                                    </div>
+                                        <div class="training-grid">
+                                            <div>
+                                                <label class="checkbox-label">
+                                                    <input type="checkbox" id="datasetUploadCurrentSplit" />
+                                                    Create validation split
+                                                </label>
+                                                <div class="training-help">Splits the current labeling set into train/val before upload (seeded shuffle).</div>
+                                            </div>
+                                            <div>
+                                                <label for="datasetUploadCurrentValPercent">Val percent</label>
+                                                <input type="number" id="datasetUploadCurrentValPercent" min="1" max="50" step="1" value="10" />
+                                            </div>
+                                            <div>
+                                                <label for="datasetUploadCurrentValSeed">Val seed</label>
+                                                <input type="number" id="datasetUploadCurrentValSeed" value="42" />
+                                            </div>
+                                        </div>
 	                                    <div class="training-actions">
 	                                        <button type="button" id="datasetUploadCurrentBtn" class="training-button">Save as YOLO dataset</button>
 	                                        <div id="datasetUploadCurrentSummary" class="training-help"></div>
@@ -2987,7 +3099,7 @@
                                     <div class="training-subsection__title">Upload YOLO/YOLO-seg zip</div>
                                     <label for="datasetUploadFile">Zip file (root: labelmap.txt + images + labels)</label>
                                     <div class="training-help">
-                                        Expect exactly: labelmap.txt (class names, one per line) at the root, plus images/ and labels/ in YOLO format. If you already have train/val splits, include them; otherwise a single images/labels pair is fine.
+                                        Expect exactly: labelmap.txt (class names, one per line) at the root, plus images/ and labels/ in YOLO format. If you already have train/val splits, include them; otherwise a single images/labels pair is fine. labelmap.txt is required (data.yaml alone is not enough).
                                     </div>
                                     <input type="file" id="datasetUploadFile" accept=".zip" />
                                     <div class="training-grid">
@@ -3004,6 +3116,7 @@
                                             </select>
                                         </div>
                                     </div>
+                                    <div class="training-help">Dataset type is advisory; we’ll still validate the label files and adjust to segmentation if polygon labels are detected.</div>
                                     <div class="training-actions">
                                         <button type="button" id="datasetUploadBtn" class="training-button">Upload dataset</button>
                                         <button type="button" id="datasetListRefresh" class="training-button training-button--ghost">Refresh list</button>
@@ -3015,7 +3128,7 @@
                         <div class="training-card">
                             <div class="training-card__header">
                                 <div class="training-card__title">Datasets on disk</div>
-                                    <div class="training-help">All datasets discovered on disk (via Dataset Manager uploads or manual drops into <code>uploads/datasets</code>). Use refresh after manual changes.</div>
+                                    <div class="training-help">All datasets discovered on disk (Dataset Manager uploads, Qwen builds, SAM3 conversions, or manual drops into <code>uploads/datasets</code>). Use refresh after manual changes.</div>
                             </div>
                             <div class="training-card__body">
                                 <div class="training-actions">
@@ -3028,7 +3141,7 @@
                     <div class="training-card">
                         <div class="training-card__header">
                             <div class="training-card__title">Glossary Library</div>
-                            <div class="training-help">Manage canonical dataset glossaries and named glossaries for prepass runs.</div>
+                            <div class="training-help">Manage canonical dataset glossaries and named glossaries for prepass runs. Glossaries are used for SAM3 text prompts and optional Qwen term expansion.</div>
                         </div>
                         <div class="training-card__body">
                             <div class="training-subsection">
@@ -3366,8 +3479,16 @@
                     <div id="settingsStatus" class="settings-status" role="status" aria-live="polite"></div>
                     <p class="settings-help">Tip: when tunnelling to a remote GPU box (e.g. <code>ssh -L 8000:127.0.0.1:8000 user@gpu-host</code>), set the URL to <code>http://localhost:8000</code> so the browser routes through the tunnel.</p>
                     <div class="training-divider"></div>
+                    <h3>Install Check</h3>
+                    <p class="settings-help">Runs lightweight checks to confirm the backend, datasets, detectors, SAM3, CLIP, and Qwen endpoints are reachable. This does not run inference and is safe to use while GPUs are busy.</p>
+                    <div class="settings-actions">
+                        <button type="button" id="runInstallCheck" class="training-button">Run install check (recommended)</button>
+                    </div>
+                    <div id="installCheckStatus" class="settings-status" role="status" aria-live="polite"></div>
+                    <pre id="installCheckLog" class="training-log" style="max-height: 220px; overflow-y: auto;"></pre>
+                    <div class="training-divider"></div>
                     <h3>Backend Fuzzer</h3>
-                    <p class="settings-help">Runs a quick smoke test with random data against key API endpoints (SAM/Qwen). Useful to sanity-check that the backend is alive and models are loaded. Tests may fail if weights are missing.</p>
+                    <p class="settings-help">Runs a quick smoke test with random data against key API endpoints (SAM/Qwen). This performs small inference calls and may fail if weights are missing.</p>
                     <div class="training-grid">
                             <label><input type="checkbox" id="fuzzerIncludeQwen" checked /> Include Qwen tests</label>
                             <label><input type="checkbox" id="fuzzerIncludeSam3" /> Include SAM3 tests</label>

@@ -1614,3 +1614,46 @@ def _import_prepass_recipe_from_zip_impl(
         }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _export_prepass_recipe_impl(
+    recipe_id: str,
+    *,
+    prepass_recipe_meta: str,
+    prepass_schema_version: int,
+    prepass_recipe_export_root: Path,
+    prepass_recipe_root: Path,
+    sanitize_run_id_fn,
+    load_meta_fn,
+    collect_assets_fn,
+) -> Path:
+    recipe_dir = _prepass_recipe_dir_impl(
+        recipe_id,
+        create=False,
+        recipes_root=prepass_recipe_root,
+        sanitize_id_fn=sanitize_run_id_fn,
+    )
+    meta = load_meta_fn(recipe_dir)
+    temp_dir = Path(
+        tempfile.mkdtemp(prefix=f"prepass_recipe_{recipe_id}_", dir=prepass_recipe_export_root)
+    )
+    meta_copy = json.loads(json.dumps(meta))
+    config_copy = meta_copy.get("config") or {}
+    if isinstance(config_copy, dict) and "dataset_id" in config_copy:
+        config_copy = dict(config_copy)
+        config_copy.pop("dataset_id", None)
+        meta_copy["config"] = config_copy
+    meta_path = temp_dir / prepass_recipe_meta
+    meta_path.write_text(json.dumps(meta_copy, indent=2), encoding="utf-8")
+    assets = collect_assets_fn(meta_copy, temp_dir)
+    manifest = {
+        "schema_version": prepass_schema_version,
+        "recipe_id": meta.get("id") or recipe_id,
+        "generated_at": time.time(),
+        "assets": assets,
+    }
+    manifest_path = temp_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    zip_path = temp_dir.with_suffix(".zip")
+    shutil.make_archive(zip_path.with_suffix("").as_posix(), "zip", temp_dir.as_posix())
+    return zip_path

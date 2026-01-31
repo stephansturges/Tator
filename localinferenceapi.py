@@ -125,6 +125,7 @@ from services.prepass_recipes import (
     _list_prepass_recipes_impl as _list_prepass_recipes_impl,
     _collect_recipe_assets_impl as _collect_recipe_assets_impl,
     _import_prepass_recipe_from_zip_impl as _import_prepass_recipe_from_zip_impl,
+    _export_prepass_recipe_impl as _export_prepass_recipe_impl,
 )
 from services.agent_cascades import (
     _persist_agent_cascade_impl as _persist_agent_cascade_impl,
@@ -21655,39 +21656,21 @@ def _collect_recipe_assets(recipe_meta: Dict[str, Any], temp_dir: Path) -> Dict[
 
 @app.post("/prepass/recipes/{recipe_id}/export")
 def export_prepass_recipe(recipe_id: str):
-    recipe_dir = _prepass_recipe_dir(recipe_id)
-    meta = _load_prepass_recipe_meta(recipe_dir)
-    temp_dir = Path(
-        tempfile.mkdtemp(prefix=f"prepass_recipe_{recipe_id}_", dir=PREPASS_RECIPE_EXPORT_ROOT)
+    zip_path = _export_prepass_recipe_impl(
+        recipe_id,
+        prepass_recipe_meta=PREPASS_RECIPE_META,
+        prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
+        prepass_recipe_export_root=PREPASS_RECIPE_EXPORT_ROOT,
+        prepass_recipe_root=PREPASS_RECIPE_ROOT,
+        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        load_meta_fn=_load_prepass_recipe_meta,
+        collect_assets_fn=_collect_recipe_assets,
     )
-    try:
-        meta_copy = json.loads(json.dumps(meta))
-        config_copy = meta_copy.get("config") or {}
-        if isinstance(config_copy, dict) and "dataset_id" in config_copy:
-            config_copy = dict(config_copy)
-            config_copy.pop("dataset_id", None)
-            meta_copy["config"] = config_copy
-        meta_path = temp_dir / PREPASS_RECIPE_META
-        meta_path.write_text(json.dumps(meta_copy, indent=2), encoding="utf-8")
-        assets = _collect_recipe_assets(meta_copy, temp_dir)
-        manifest = {
-            "schema_version": PREPASS_RECIPE_SCHEMA_VERSION,
-            "recipe_id": meta.get("id") or recipe_id,
-            "generated_at": time.time(),
-            "assets": assets,
-        }
-        manifest_path = temp_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        zip_path = temp_dir.with_suffix(".zip")
-        shutil.make_archive(zip_path.with_suffix("").as_posix(), "zip", temp_dir.as_posix())
-        return FileResponse(
-            path=str(zip_path),
-            media_type="application/zip",
-            filename=f"prepass_recipe_{recipe_id}.zip",
-        )
-    finally:
-        # temp dir is left for FileResponse streaming; cleanup deferred by OS
-        pass
+    return FileResponse(
+        path=str(zip_path),
+        media_type="application/zip",
+        filename=f"prepass_recipe_{recipe_id}.zip",
+    )
 
 
 def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:

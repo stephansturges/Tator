@@ -162,6 +162,7 @@ from services.detector_jobs import (
 )
 from services.qwen_jobs import (
     _log_qwen_get_request_impl as _log_qwen_get_request_impl,
+    _qwen_job_append_metric_impl as _qwen_job_append_metric_impl,
     _qwen_job_log_impl as _qwen_job_log_impl,
     _qwen_job_update_impl as _qwen_job_update_impl,
     _serialize_qwen_job_impl as _serialize_qwen_job_impl,
@@ -10824,11 +10825,7 @@ def _qwen_job_append_metric(job: QwenTrainingJob, metric: Dict[str, Any]) -> Non
     if not metric:
         return
     sanitized = {str(key): _coerce_metric_value(val) for key, val in metric.items()}
-    job.metrics.append(sanitized)
-    limit = MAX_QWEN_METRIC_POINTS
-    if isinstance(limit, int) and limit > 0 and len(job.metrics) > limit:
-        job.metrics[:] = job.metrics[-limit:]
-    job.updated_at = time.time()
+    _qwen_job_append_metric_impl(job, sanitized, max_points=MAX_QWEN_METRIC_POINTS)
 
 
 def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:

@@ -49,7 +49,7 @@ from utils.io import (
     _atomic_write_json,
     _read_csv_last_row,
 )
-from utils.image import _load_image_size
+from utils.image import _load_image_size, _slice_image_sahi
 from utils.labels import (
     _read_labelmap_lines,
     _load_labelmap_file,
@@ -139,6 +139,7 @@ from utils.coords import (
     _window_bbox_2d_to_full_xyxy,
     _window_local_bbox_2d_to_full_xyxy,
     _window_local_xyxy_to_full_xyxy,
+    _resolve_agent_bbox_xyxy,
     _agent_round_bbox_2d,
     _agent_clip_xyxy,
     _agent_expand_window_xyxy,
@@ -179,6 +180,11 @@ from services.readable import (
     _agent_readable_tool_result_summary,
     _agent_readable_line,
     _agent_readable_candidates_summary,
+)
+from services.prepass_windows import (
+    _agent_similarity_windows,
+    _agent_sam3_text_windows,
+    _agent_exemplars_for_window,
 )
 from collections import OrderedDict
 try:
@@ -7315,39 +7321,6 @@ def _agent_resolve_image(
     return resolve_image_payload(image_base64, image_token, sam_variant)
 
 
-def _resolve_agent_bbox_xyxy(
-    ann: Dict[str, Any],
-    img_w: int,
-    img_h: int,
-    *,
-    window_bbox_2d: Optional[Sequence[float]] = None,
-) -> Optional[Tuple[float, float, float, float]]:
-    bbox_space = str(ann.get("bbox_space") or "full").strip().lower()
-    if bbox_space == "window":
-        window_xyxy = _window_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d)
-        if window_xyxy is None:
-            return None
-        if "bbox_2d" in ann:
-            return _window_local_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d, ann.get("bbox_2d"))
-        if "bbox_xyxy_px" in ann:
-            coords = ann.get("bbox_xyxy_px")
-            if isinstance(coords, (list, tuple)) and len(coords) >= 4:
-                return _window_local_xyxy_to_full_xyxy(window_xyxy, coords)
-            return None
-        return None
-    if "bbox_xyxy_px" in ann:
-        try:
-            coords = ann.get("bbox_xyxy_px")
-            if isinstance(coords, (list, tuple)) and len(coords) >= 4:
-                return tuple(map(float, coords[:4]))  # type: ignore[return-value]
-            return None
-        except Exception:
-            return None
-    if "bbox_2d" in ann:
-        return _qwen_bbox_to_xyxy(img_w, img_h, ann.get("bbox_2d") or [])
-    return None
-
-
 def _agent_det_payload(
     img_w: int,
     img_h: int,
@@ -10562,7 +10535,11 @@ def _agent_run_deep_prepass_part_a(
         windowed = payload.sam3_text_window_extension is not False
         windows: List[Dict[str, Any]] = []
         if windowed:
-            windows = _agent_sam3_text_windows(payload, pil_img=pil_img)
+            windows = _agent_sam3_text_windows(
+                payload,
+                pil_img=pil_img,
+                grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
+            )
         sam3_model, sam3_processor, _ = _ensure_sam3_text_runtime()
         global_state = None
         try:
@@ -11096,121 +11073,6 @@ def _agent_select_similarity_exemplars(
     return selections
 
 
-def _agent_similarity_windows(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-) -> List[Dict[str, Any]]:
-    img_w, img_h = pil_img.size
-    mode = (payload.similarity_window_mode or "grid").strip().lower()
-    windows: List[Dict[str, Any]] = []
-    if mode == "sahi":
-        slice_size = int(payload.similarity_window_size or payload.sahi_window_size or 640)
-        overlap = float(payload.similarity_window_overlap or payload.sahi_overlap_ratio or 0.2)
-        slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
-        for idx, start in enumerate(starts):
-            x1 = float(start[0])
-            y1 = float(start[1])
-            x2 = min(float(img_w), x1 + slice_size)
-            y2 = min(float(img_h), y1 + slice_size)
-            windows.append(
-                {
-                    "name": f"sahi_{idx}",
-                    "bbox_xyxy_px": [x1, y1, x2, y2],
-                    "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
-                }
-            )
-        return windows
-    grid_spec = _agent_grid_spec_for_payload(payload, img_w, img_h)
-    for cell in _agent_grid_cells(grid_spec):
-        xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=payload.grid_overlap_ratio or PREPASS_GRID_OVERLAP_RATIO)
-        if not xyxy:
-            continue
-        x1, y1, x2, y2 = xyxy
-        windows.append(
-            {
-                "name": cell,
-                "grid_cell": cell,
-                "bbox_xyxy_px": [x1, y1, x2, y2],
-                "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
-            }
-        )
-    return windows
-
-
-def _agent_sam3_text_windows(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-) -> List[Dict[str, Any]]:
-    img_w, img_h = pil_img.size
-    mode = (payload.sam3_text_window_mode or "grid").strip().lower()
-    windows: List[Dict[str, Any]] = []
-    if mode == "sahi":
-        slice_size = int(payload.sam3_text_window_size or payload.sahi_window_size or 640)
-        overlap = float(payload.sam3_text_window_overlap or payload.sahi_overlap_ratio or 0.2)
-        slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
-        for idx, start in enumerate(starts):
-            x1 = float(start[0])
-            y1 = float(start[1])
-            x2 = min(float(img_w), x1 + slice_size)
-            y2 = min(float(img_h), y1 + slice_size)
-            windows.append(
-                {
-                    "name": f"sahi_{idx}",
-                    "bbox_xyxy_px": [x1, y1, x2, y2],
-                    "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
-                }
-            )
-        return windows
-    grid_spec = _agent_grid_spec_for_payload(payload, img_w, img_h)
-    for cell in _agent_grid_cells(grid_spec):
-        xyxy = _agent_grid_cell_xyxy(
-            grid_spec,
-            cell,
-            overlap_ratio=payload.grid_overlap_ratio or PREPASS_GRID_OVERLAP_RATIO,
-        )
-        if not xyxy:
-            continue
-        x1, y1, x2, y2 = xyxy
-        windows.append(
-            {
-                "name": cell,
-                "grid_cell": cell,
-                "bbox_xyxy_px": [x1, y1, x2, y2],
-                "bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)),
-            }
-        )
-    return windows
-
-
-def _agent_exemplars_for_window(
-    exemplars: Sequence[Dict[str, Any]],
-    *,
-    img_w: int,
-    img_h: int,
-    window_xyxy: Sequence[float],
-) -> List[Dict[str, Any]]:
-    if not exemplars:
-        return []
-    if not window_xyxy or len(window_xyxy) < 4:
-        return list(exemplars)
-    wx1, wy1, wx2, wy2 = window_xyxy
-    filtered: List[Dict[str, Any]] = []
-    for det in exemplars:
-        if not isinstance(det, dict):
-            continue
-        xyxy = _resolve_agent_bbox_xyxy(det, img_w, img_h)
-        if xyxy is None:
-            continue
-        x1, y1, x2, y2 = xyxy
-        cx = (x1 + x2) / 2.0
-        cy = (y1 + y2) / 2.0
-        if wx1 <= cx <= wx2 and wy1 <= cy <= wy2:
-            filtered.append(det)
-    return filtered
-
-
 def _agent_run_similarity_global(
     payload: QwenPrepassRequest,
     *,
@@ -11293,7 +11155,11 @@ def _agent_run_similarity_expansion(
     img_w, img_h = pil_img.size
     detections: List[Dict[str, Any]] = []
     warnings: List[str] = []
-    windows = _agent_similarity_windows(payload, pil_img=pil_img)
+    windows = _agent_similarity_windows(
+        payload,
+        pil_img=pil_img,
+        grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
+    )
     score_thr = payload.prepass_similarity_score
     mask_thr = payload.sam3_mask_threshold
 
@@ -12390,25 +12256,6 @@ def _merge_detections_nms(
         return merged[:max_det]
     return merged
 
-
-def _slice_image_sahi(pil_img: Image.Image, slice_size: int, overlap: float) -> Tuple[List[np.ndarray], List[Tuple[int, int]]]:
-    try:
-        from sahi.slicing import slice_image  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"sahi_unavailable:{exc}") from exc
-    array = np.array(pil_img)
-    result = slice_image(
-        image=array,
-        slice_height=slice_size,
-        slice_width=slice_size,
-        overlap_height_ratio=overlap,
-        overlap_width_ratio=overlap,
-    )
-    slices = getattr(result, "images", None)
-    starts = getattr(result, "starting_pixels", None)
-    if slices is None or starts is None:
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="sahi_slice_failed")
-    return slices, starts
 
 class Sam3ModelActivateRequest(BaseModel):
     checkpoint_path: Optional[str] = None

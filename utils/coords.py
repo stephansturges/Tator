@@ -101,6 +101,39 @@ def _window_local_xyxy_to_full_xyxy(
     return x1 + wx1, y1 + wy1, x2 + wx1, y2 + wy1
 
 
+def _resolve_agent_bbox_xyxy(
+    ann: Dict[str, Any],
+    img_w: int,
+    img_h: int,
+    *,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+) -> Optional[Tuple[float, float, float, float]]:
+    bbox_space = str(ann.get("bbox_space") or "full").strip().lower()
+    if bbox_space == "window":
+        window_xyxy = _window_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d)
+        if window_xyxy is None:
+            return None
+        if "bbox_2d" in ann:
+            return _window_local_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d, ann.get("bbox_2d"))
+        if "bbox_xyxy_px" in ann:
+            coords = ann.get("bbox_xyxy_px")
+            if isinstance(coords, (list, tuple)) and len(coords) >= 4:
+                return _window_local_xyxy_to_full_xyxy(window_xyxy, coords)
+            return None
+        return None
+    if "bbox_xyxy_px" in ann:
+        try:
+            coords = ann.get("bbox_xyxy_px")
+            if isinstance(coords, (list, tuple)) and len(coords) >= 4:
+                return tuple(map(float, coords[:4]))  # type: ignore[return-value]
+            return None
+        except Exception:
+            return None
+    if "bbox_2d" in ann:
+        return _qwen_bbox_to_xyxy(img_w, img_h, ann.get("bbox_2d") or [])
+    return None
+
+
 def _agent_iou_xyxy(box_a: Sequence[float], box_b: Sequence[float]) -> float:
     try:
         ax1, ay1, ax2, ay2 = [float(v) for v in box_a[:4]]

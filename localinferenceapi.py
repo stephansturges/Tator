@@ -82,6 +82,13 @@ from utils.datasets import _iter_yolo_images
 from services.prepass_config import _normalize_recipe_thresholds
 from services.prepass_recipes import _write_prepass_recipe_meta, _load_prepass_recipe_meta
 from services.datasets import _load_dataset_glossary
+from services.glossary_library import (
+    _normalize_glossary_name,
+    _glossary_key,
+    _load_glossary_library,
+    _persist_glossary_library,
+    _find_glossary_entry,
+)
 from utils.coords import (
     _xyxy_to_qwen_bbox,
     _qwen_bbox_to_xyxy,
@@ -30172,35 +30179,6 @@ def _dataset_integrity_report(dataset_root: Path) -> Dict[str, Any]:
         report["ok"] = False
     return report
 
-
-def _load_glossary_library() -> List[Dict[str, Any]]:
-    if not GLOSSARY_LIBRARY_PATH.exists():
-        return []
-    try:
-        with GLOSSARY_LIBRARY_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception:
-        return []
-    entries = data.get("glossaries") if isinstance(data, dict) else data
-    return list(entries) if isinstance(entries, list) else []
-
-
-def _persist_glossary_library(entries: List[Dict[str, Any]]) -> None:
-    payload = {"glossaries": entries}
-    tmp_path = GLOSSARY_LIBRARY_PATH.with_suffix(".tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=True)
-    tmp_path.replace(GLOSSARY_LIBRARY_PATH)
-
-
-def _find_glossary_entry(entries: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
-    key = _glossary_key(name)
-    if not key:
-        return None
-    for entry in entries:
-        if _glossary_key(entry.get("name")) == key:
-            return entry
-    return None
 
 
 def _upsert_glossary_entry(name: str, glossary_text: str) -> Dict[str, Any]:

@@ -325,6 +325,7 @@ from services.calibration_metrics import (
     _estimate_agent_global_optimizer_image_evals_impl as _estimate_agent_global_optimizer_image_evals_impl,
     _build_steps_recipe_step_list_from_selected_stats_impl as _build_steps_recipe_step_list_from_selected_stats_impl,
     _collect_clip_prefilter_crops_impl as _collect_clip_prefilter_crops_impl,
+    _normalize_steps_for_head_tuning_impl as _normalize_steps_for_head_tuning_impl,
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
@@ -18484,70 +18485,10 @@ def _normalize_steps_for_head_tuning(
     *,
     payload: "AgentMiningRequest",
 ) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for step in steps or []:
-        if not isinstance(step, dict):
-            continue
-        if step.get("enabled") is False:
-            continue
-        prompt = str(step.get("prompt") or "").strip()
-        if not prompt:
-            continue
-
-        try:
-            seed_thr = float(step.get("seed_threshold") if step.get("seed_threshold") is not None else payload.seed_threshold)
-        except Exception:
-            seed_thr = float(payload.seed_threshold)
-        seed_thr = max(0.0, min(1.0, float(seed_thr)))
-
-        try:
-            expand_thr = float(
-                step.get("expand_threshold") if step.get("expand_threshold") is not None else payload.expand_threshold
-            )
-        except Exception:
-            expand_thr = float(payload.expand_threshold)
-        expand_thr = max(0.0, min(1.0, float(expand_thr)))
-
-        try:
-            max_seeds = int(
-                step.get("max_visual_seeds")
-                if step.get("max_visual_seeds") is not None
-                else getattr(payload, "steps_max_visual_seeds_per_step", 0)
-            )
-        except Exception:
-            max_seeds = int(getattr(payload, "steps_max_visual_seeds_per_step", 0) or 0)
-        max_seeds = max(0, int(max_seeds))
-
-        try:
-            seed_iou = float(step.get("seed_dedupe_iou") if step.get("seed_dedupe_iou") is not None else payload.seed_dedupe_iou)
-        except Exception:
-            seed_iou = float(payload.seed_dedupe_iou)
-        seed_iou = max(0.0, min(1.0, float(seed_iou)))
-
-        try:
-            out_iou = float(step.get("dedupe_iou") if step.get("dedupe_iou") is not None else payload.dedupe_iou)
-        except Exception:
-            out_iou = float(payload.dedupe_iou)
-        out_iou = max(0.0, min(1.0, float(out_iou)))
-
-        try:
-            max_results = int(step.get("max_results") if step.get("max_results") is not None else payload.max_results)
-        except Exception:
-            max_results = int(payload.max_results)
-        max_results = max(1, int(max_results))
-
-        out.append(
-            {
-                "prompt": prompt,
-                "seed_threshold": float(seed_thr),
-                "expand_threshold": float(expand_thr),
-                "max_visual_seeds": int(max_seeds),
-                "seed_dedupe_iou": float(seed_iou),
-                "dedupe_iou": float(out_iou),
-                "max_results": int(max_results),
-            }
-        )
-    return out
+    return _normalize_steps_for_head_tuning_impl(
+        steps,
+        payload=payload,
+    )
 
 
 def _tune_clip_head_for_selected_steps_image_first(

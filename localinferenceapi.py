@@ -150,6 +150,8 @@ from utils.coords import (
     _agent_expand_window_xyxy,
     _agent_xyxy_to_xywh,
     _yolo_to_xyxy,
+    _xyxy_to_yolo_norm,
+    _agent_det_payload,
     _agent_iou_xyxy,
 )
 from utils.overlay import (
@@ -7307,38 +7309,6 @@ def _agent_resolve_image(
             pil_img = Image.fromarray(cached)
             return pil_img, cached, image_token
     return resolve_image_payload(image_base64, image_token, sam_variant)
-
-
-def _agent_det_payload(
-    img_w: int,
-    img_h: int,
-    xyxy: Tuple[float, float, float, float],
-    *,
-    label: Optional[str],
-    class_id: Optional[int],
-    score: Optional[float],
-    source: str,
-    window: Optional[Tuple[float, float, float, float]] = None,
-) -> Dict[str, Any]:
-    x1, y1, x2, y2 = xyxy
-    bbox_xywh = _agent_xyxy_to_xywh(x1, y1, x2, y2)
-    bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, x1, y1, x2, y2)
-    payload = {
-        "bbox_2d": list(bbox_2d),
-        "bbox_xyxy_px": [float(x1), float(y1), float(x2), float(y2)],
-        "bbox_xywh_px": bbox_xywh,
-        "bbox_yolo": list(_xyxy_to_yolo_norm(img_w, img_h, x1, y1, x2, y2)),
-        "label": label,
-        "class_id": class_id,
-        "score": score,
-        "score_source": source if score is not None else "unknown",
-        "source": source,
-        "bbox_space": "full",
-    }
-    if window:
-        payload["window_xyxy_px"] = [float(v) for v in window]
-        payload["window_bbox_2d"] = list(_xyxy_to_qwen_bbox(img_w, img_h, *window))
-    return payload
 
 
 @_register_agent_tool("run_detector")
@@ -28374,16 +28344,6 @@ def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict
 def _xywh_to_xyxy(bbox: Sequence[float]) -> Tuple[float, float, float, float]:
     x, y, w, h = map(float, bbox[:4])
     return x, y, x + w, y + h
-
-
-def _xyxy_to_yolo_norm(width: int, height: int, x1: float, y1: float, x2: float, y2: float) -> Tuple[float, float, float, float]:
-    w = max(0.0, x2 - x1)
-    h = max(0.0, y2 - y1)
-    cx = (x1 + x2) / 2.0
-    cy = (y1 + y2) / 2.0
-    if width <= 0 or height <= 0:
-        return 0.0, 0.0, 0.0, 0.0
-    return cx / float(width), cy / float(height), w / float(width), h / float(height)
 
 
 def _coord_roundtrip_smoke() -> None:

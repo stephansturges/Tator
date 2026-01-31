@@ -241,6 +241,7 @@ from services.calibration_helpers import (
     _calibration_safe_link as _calibration_safe_link_impl,
     _calibration_write_record_atomic as _calibration_write_record_atomic_impl,
     _calibration_update as _calibration_update_impl,
+    _calibration_cache_image as _calibration_cache_image_impl,
 )
 from collections import OrderedDict
 try:
@@ -29488,10 +29489,12 @@ def _calibration_sample_images(images: List[str], *, max_images: int, seed: int)
 
 
 def _calibration_cache_image(pil_img: Image.Image, sam_variant: Optional[str]) -> str:
-    np_img = np.ascontiguousarray(np.array(pil_img.convert("RGB")))
-    token = hashlib.md5(np_img.tobytes()).hexdigest()
-    _store_preloaded_image(token, np_img, _default_variant(sam_variant))
-    return token
+    return _calibration_cache_image_impl(
+        pil_img,
+        sam_variant,
+        store_preloaded_fn=_store_preloaded_image,
+        default_variant_fn=_default_variant,
+    )
 
 
 def _calibration_hash_payload(payload: Dict[str, Any]) -> str:

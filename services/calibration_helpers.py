@@ -9,6 +9,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+import numpy as np
+from PIL import Image
+
 
 def _calibration_sample_images(images: List[str], *, max_images: int, seed: int) -> List[str]:
     if max_images <= 0 or len(images) <= max_images:
@@ -76,3 +79,16 @@ def _calibration_update(job: Any, **kwargs: Any) -> None:
     for key, value in kwargs.items():
         setattr(job, key, value)
     job.updated_at = time.time()
+
+
+def _calibration_cache_image(
+    pil_img: Image.Image,
+    sam_variant: Any,
+    *,
+    store_preloaded_fn: Callable[[str, Any, Any], None],
+    default_variant_fn: Callable[[Any], Any],
+) -> str:
+    np_img = np.ascontiguousarray(np.array(pil_img.convert("RGB")))
+    token = hashlib.md5(np_img.tobytes()).hexdigest()
+    store_preloaded_fn(token, np_img, default_variant_fn(sam_variant))
+    return token

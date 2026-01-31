@@ -51,7 +51,15 @@ from utils.io import (
 )
 from utils.image import _load_image_size
 from utils.labels import _read_labelmap_lines, _load_labelmap_file
-from utils.parsing import _coerce_int, _coerce_float, _normalise_optional_path, _parse_bool, _safe_run_name
+from utils.parsing import (
+    _coerce_int,
+    _coerce_float,
+    _normalise_optional_path,
+    _parse_bool,
+    _safe_run_name,
+    _normalize_device_list,
+    _parse_device_ids_string,
+)
 from utils.glossary import (
     _glossary_label_key,
     _extract_glossary_synonyms,
@@ -35510,35 +35518,6 @@ def _rfdetr_prepare_dataset(dataset_root: Path, run_dir: Path, coco_train: str, 
     _rfdetr_remap_coco_ids(Path(coco_val), val_dest)
     _rfdetr_remap_coco_ids(Path(coco_val), test_dest)
     return dataset_dir
-
-
-def _normalize_device_list(devices: Optional[List[Any]]) -> List[int]:
-    if not devices:
-        return []
-    cleaned: List[int] = []
-    for value in devices:
-        try:
-            cleaned.append(int(value))
-        except Exception:
-            continue
-    return [value for value in cleaned if value >= 0]
-
-
-def _parse_device_ids_string(raw: Optional[str]) -> Optional[List[int]]:
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return []
-    parts = [part.strip() for part in text.split(",") if part.strip()]
-    if not parts:
-        return []
-    ids: List[int] = []
-    for part in parts:
-        if not part.isdigit():
-            raise ValueError(f"invalid_device_token:{part}")
-        ids.append(int(part))
-    return ids
 
 
 def _validate_cuda_device_ids(device_ids: Sequence[int]) -> None:

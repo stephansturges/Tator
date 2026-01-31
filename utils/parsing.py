@@ -50,3 +50,32 @@ def _parse_bool(value: Optional[str]) -> bool:
 def _safe_run_name(desired: Optional[str], fallback: str) -> str:
     name = desired or fallback
     return re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("_") or fallback
+
+
+def _normalize_device_list(devices: Optional[list[Any]]) -> list[int]:
+    if not devices:
+        return []
+    cleaned: list[int] = []
+    for value in devices:
+        try:
+            cleaned.append(int(value))
+        except Exception:
+            continue
+    return [value for value in cleaned if value >= 0]
+
+
+def _parse_device_ids_string(raw: Optional[str]) -> Optional[list[int]]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return []
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if not parts:
+        return []
+    ids: list[int] = []
+    for part in parts:
+        if not part.isdigit():
+            raise ValueError(f"invalid_device_token:{part}")
+        ids.append(int(part))
+    return ids

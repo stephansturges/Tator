@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple, List
 
 from utils.glossary import _normalize_labelmap_glossary
 
@@ -266,6 +267,47 @@ def _dataset_integrity_report_impl(
     if report["issues"]:
         report["ok"] = False
     return report
+
+
+def _compute_labelmap_hash_impl(categories: List[Dict[str, Any]]) -> Tuple[str, List[str]]:
+    names: List[Tuple[int, str]] = []
+    for idx, cat in enumerate(categories):
+        try:
+            cid = int(cat.get("id", idx))
+        except Exception:
+            cid = idx
+        names.append((cid, str(cat.get("name", f"class_{cid}"))))
+    names.sort(key=lambda c: c[0])
+    labels = [name for _, name in names]
+    try:
+        digest = hashlib.sha256("|".join(labels).encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        digest = "unknown"
+    return digest, labels
+
+
+def _compute_dataset_signature_impl(
+    dataset_id: str,
+    dataset_root: Path,
+    images: Dict[int, Dict[str, Any]],
+    categories: List[Dict[str, Any]],
+) -> str:
+    """
+    Create a location-agnostic signature for portability:
+    - dataset_id
+    - counts of images/categories
+    - hashes of category names (sorted)
+    - hashes of image file names (sorted)
+    """
+    try:
+        cat_names = [str(c.get("name", f"class_{idx}")) for idx, c in enumerate(categories)]
+        cat_hash = hashlib.sha256("|".join(sorted(cat_names)).encode("utf-8")).hexdigest()[:12]
+        file_names = [Path(info.get("file_name") or "").name for info in images.values() if info.get("file_name")]
+        file_hash = hashlib.sha256("|".join(sorted(file_names)).encode("utf-8")).hexdigest()[:12]
+        payload = f"{dataset_id}|{len(images)}|{len(categories)}|{cat_hash}|{file_hash}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return "unknown"
 
 
 def _resolve_yolo_training_dataset_impl(

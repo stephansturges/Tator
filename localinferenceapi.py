@@ -144,6 +144,7 @@ from services.prompt_helper_presets import (
     _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
 )
 from services.prompt_helper import _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl
+from services.classifier_jobs import _serialize_clip_job_impl as _serialize_clip_job_impl
 from services.qwen_jobs import _serialize_qwen_job_impl as _serialize_qwen_job_impl
 from services.segmentation import _serialize_seg_job_impl as _serialize_seg_job_impl
 from services.datasets import (
@@ -10564,18 +10565,7 @@ def _qwen_job_update(
 
 
 def _serialize_job(job: ClipTrainingJob) -> Dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "artifacts": job.artifacts,
-        "error": job.error,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-    }
+    return _serialize_clip_job_impl(job)
 
 
 def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:

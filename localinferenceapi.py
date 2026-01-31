@@ -200,6 +200,8 @@ from services.datasets import (
     _compute_labelmap_hash_impl as _compute_labelmap_hash_impl,
     _compute_dataset_signature_impl as _compute_dataset_signature_impl,
     _purge_dataset_artifacts_impl as _purge_dataset_artifacts_impl,
+    _ensure_qwen_dataset_signature_impl as _ensure_qwen_dataset_signature_impl,
+    _find_qwen_dataset_by_signature_impl as _find_qwen_dataset_by_signature_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
     _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
     _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
@@ -10799,28 +10801,21 @@ def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:
 
 
 def _ensure_qwen_dataset_signature(dataset_dir: Path, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
-    signature = metadata.get("signature")
-    if signature:
-        return metadata, str(signature)
-    signature = _compute_dir_signature(dataset_dir)
-    metadata["signature"] = signature
-    _persist_qwen_dataset_metadata(dataset_dir, metadata)
-    return metadata, signature
+    return _ensure_qwen_dataset_signature_impl(
+        dataset_dir,
+        metadata,
+        compute_dir_signature_fn=_compute_dir_signature,
+        persist_metadata_fn=_persist_qwen_dataset_metadata,
+    )
 
 
 def _find_qwen_dataset_by_signature(signature: str) -> Optional[Path]:
-    if not signature:
-        return None
-    for path in QWEN_DATASET_ROOT.iterdir():
-        if not path.is_dir():
-            continue
-        meta = _load_qwen_dataset_metadata(path)
-        if not meta:
-            continue
-        _, sig = _ensure_qwen_dataset_signature(path, meta)
-        if sig == signature:
-            return path
-    return None
+    return _find_qwen_dataset_by_signature_impl(
+        signature,
+        dataset_root=QWEN_DATASET_ROOT,
+        load_metadata_fn=_load_qwen_dataset_metadata,
+        ensure_signature_fn=_ensure_qwen_dataset_signature,
+    )
 
 
 def _load_registry_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:

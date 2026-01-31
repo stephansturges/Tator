@@ -28,6 +28,43 @@ def _load_dataset_glossary(dataset_root: Path, *, load_sam3_meta, load_qwen_meta
     return _normalize_labelmap_glossary(raw)
 
 
+def _ensure_qwen_dataset_signature_impl(
+    dataset_dir: Path,
+    metadata: Dict[str, Any],
+    *,
+    compute_dir_signature_fn,
+    persist_metadata_fn,
+) -> Tuple[Dict[str, Any], str]:
+    signature = metadata.get("signature")
+    if signature:
+        return metadata, str(signature)
+    signature = compute_dir_signature_fn(dataset_dir)
+    metadata["signature"] = signature
+    persist_metadata_fn(dataset_dir, metadata)
+    return metadata, signature
+
+
+def _find_qwen_dataset_by_signature_impl(
+    signature: str,
+    *,
+    dataset_root: Path,
+    load_metadata_fn,
+    ensure_signature_fn,
+) -> Optional[Path]:
+    if not signature:
+        return None
+    for path in dataset_root.iterdir():
+        if not path.is_dir():
+            continue
+        meta = load_metadata_fn(path)
+        if not meta:
+            continue
+        _, sig = ensure_signature_fn(path, meta)
+        if sig == signature:
+            return path
+    return None
+
+
 def _agent_load_labelmap_meta(
     dataset_id: Optional[str],
     *,

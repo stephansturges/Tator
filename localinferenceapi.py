@@ -143,6 +143,7 @@ from services.prompt_helper_presets import (
     _load_prompt_helper_preset_impl as _load_prompt_helper_preset_impl,
     _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
 )
+from services.prompt_helper import _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl
 from services.datasets import (
     _load_dataset_glossary,
     _load_qwen_labelmap,
@@ -13061,20 +13062,7 @@ def _build_prompt_recipe(
 
 
 def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "message": job.message,
-        "progress": job.progress,
-        "total_steps": job.total_steps,
-        "completed_steps": job.completed_steps,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-        "request": job.request,
-        "result": job.result,
-        "logs": job.logs,
-        "error": job.error,
-    }
+    return _serialize_prompt_helper_job_impl(job)
 
 
 def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:

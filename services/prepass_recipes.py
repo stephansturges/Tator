@@ -10,6 +10,7 @@ import time
 import uuid
 import zipfile
 import hashlib
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal, List, Tuple
 
@@ -1410,3 +1411,206 @@ def _collect_recipe_assets_impl(
             assets["missing"].append({"kind": "calibration_job", "id": job_id})
 
     return assets
+
+
+def _import_prepass_recipe_from_zip_impl(
+    zip_path: Path,
+    *,
+    prepass_recipe_meta: str,
+    prepass_schema_version: int,
+    prepass_recipe_root: Path,
+    prepass_tmp_root: Path,
+    yolo_job_root: Path,
+    rfdetr_job_root: Path,
+    rfdetr_keep_files: Optional[set[str]],
+    qwen_job_root: Path,
+    qwen_metadata_filename: str,
+    upload_root: Path,
+    calibration_root: Path,
+    read_labelmap_lines_fn,
+    validate_manifest_fn,
+    unique_name_fn,
+    normalize_glossary_fn,
+    write_meta_fn,
+    sanitize_run_id_fn,
+) -> Dict[str, Any]:
+    temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_"))
+    try:
+        extract_dir = temp_dir / "extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
+        manifest_path = extract_dir / "manifest.json"
+        if not manifest_path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_missing_manifest")
+        manifest = json.loads(manifest_path.read_text())
+        meta_path = extract_dir / prepass_recipe_meta
+        if not meta_path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_missing_meta")
+        meta = json.loads(meta_path.read_text())
+        validate_manifest_fn(manifest, extract_dir)
+        config = meta.get("config") or {}
+        if isinstance(config, dict):
+            config = dict(config)
+            config.pop("dataset_id", None)
+        glossary = meta.get("glossary") or ""
+        labelmap_file = None
+        for candidate in (extract_dir / "labelmap.txt", extract_dir / "labelmaps" / "labelmap.txt"):
+            if candidate.exists():
+                labelmap_file = candidate
+                break
+        if labelmap_file and not isinstance(config.get("labelmap"), list):
+            try:
+                lines = read_labelmap_lines_fn(labelmap_file)
+            except Exception:
+                lines = []
+            if lines:
+                config["labelmap"] = lines
+
+        def _run_dir_matches(src: Path, dest: Path, keep_files: Optional[set[str]] = None) -> bool:
+            if not dest.exists() or not dest.is_dir():
+                return False
+            for item in src.iterdir():
+                if not item.is_file():
+                    continue
+                if keep_files is not None and item.name not in keep_files:
+                    continue
+                target = dest / item.name
+                if not target.exists():
+                    return False
+                if target.stat().st_size != item.stat().st_size:
+                    return False
+            return True
+
+        def _copy_run_assets(kind: str, root: Path, keep_files: Optional[set[str]] = None) -> Optional[str]:
+            src_root = extract_dir / "models" / kind
+            if not src_root.exists():
+                return None
+            for run_dir in src_root.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                existing = root / run_dir.name
+                if _run_dir_matches(run_dir, existing, keep_files=keep_files):
+                    return run_dir.name
+                new_id = uuid.uuid4().hex
+                dest = root / new_id
+                dest.mkdir(parents=True, exist_ok=True)
+                for item in run_dir.iterdir():
+                    if item.is_file():
+                        if keep_files is not None and item.name not in keep_files:
+                            continue
+                        shutil.copy2(item, dest / item.name)
+                return new_id
+            return None
+
+        yolo_id = _copy_run_assets("yolo_runs", yolo_job_root, keep_files=None)
+        rfdetr_id = _copy_run_assets("rfdetr_runs", rfdetr_job_root, keep_files=rfdetr_keep_files)
+        if yolo_id:
+            config["yolo_id"] = yolo_id
+        if rfdetr_id:
+            config["rfdetr_id"] = rfdetr_id
+
+        qwen_id_map: Dict[str, str] = {}
+        qwen_root = extract_dir / "models" / "qwen_runs"
+        if qwen_root.exists():
+            for run_dir in qwen_root.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                meta_file = run_dir / qwen_metadata_filename
+                meta_payload: Dict[str, Any] = {}
+                if meta_file.exists():
+                    try:
+                        meta_payload = json.loads(meta_file.read_text())
+                    except Exception:
+                        meta_payload = {}
+                old_id = str(meta_payload.get("id") or run_dir.name)
+                new_id = uuid.uuid4().hex
+                dest = qwen_job_root / new_id
+                dest.mkdir(parents=True, exist_ok=True)
+                for item in run_dir.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, dest / item.name)
+                # Update metadata id to match new run id if we can.
+                meta_dest = dest / qwen_metadata_filename
+                if meta_dest.exists():
+                    try:
+                        payload = json.loads(meta_dest.read_text())
+                    except Exception:
+                        payload = {}
+                    payload["id"] = new_id
+                    meta_dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                qwen_id_map[old_id] = new_id
+
+        if qwen_id_map:
+            for key in ("model_id", "prepass_caption_model_id"):
+                val = config.get(key)
+                if isinstance(val, str) and val in qwen_id_map:
+                    config[key] = qwen_id_map[val]
+
+        classifier_root = extract_dir / "models" / "classifiers"
+        if classifier_root.exists():
+            classifier_root.mkdir(parents=True, exist_ok=True)
+            for item in classifier_root.iterdir():
+                if item.is_file():
+                    dest = (upload_root / "classifiers") / item.name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if not dest.exists() or dest.stat().st_size != item.stat().st_size:
+                        shutil.copy2(item, dest)
+                    config["classifier_id"] = str(dest.relative_to(upload_root / "classifiers"))
+                    break
+
+        calib_root = extract_dir / "models" / "calibration_jobs"
+        if calib_root.exists():
+            for job_dir in calib_root.iterdir():
+                if not job_dir.is_dir():
+                    continue
+                existing = calibration_root / job_dir.name
+                if _run_dir_matches(job_dir, existing, keep_files=None):
+                    config["ensemble_job_id"] = job_dir.name
+                else:
+                    new_job = uuid.uuid4().hex
+                    dest = calibration_root / new_job
+                    dest.mkdir(parents=True, exist_ok=True)
+                    for item in job_dir.iterdir():
+                        if item.is_file():
+                            shutil.copy2(item, dest / item.name)
+                    config["ensemble_job_id"] = new_job
+                break
+
+        original_name = meta.get("name") or f"Imported recipe {uuid.uuid4().hex[:8]}"
+        unique_name, renamed_from = unique_name_fn(original_name)
+        notice = None
+        if renamed_from:
+            notice = f"Recipe name '{renamed_from}' already exists. Imported as '{unique_name}'."
+        recipe_id = uuid.uuid4().hex
+        recipe_dir = _prepass_recipe_dir_impl(
+            recipe_id,
+            create=True,
+            recipes_root=prepass_recipe_root,
+            sanitize_id_fn=sanitize_run_id_fn,
+        )
+        now = time.time()
+        recipe_meta = {
+            "id": recipe_id,
+            "schema_version": prepass_schema_version,
+            "name": unique_name,
+            "description": meta.get("description") or "",
+            "config": config,
+            "glossary": normalize_glossary_fn(glossary),
+            "created_at": now,
+            "updated_at": now,
+        }
+        write_meta_fn(recipe_dir, recipe_meta)
+        return {
+            "id": recipe_id,
+            "name": recipe_meta["name"],
+            "description": recipe_meta.get("description"),
+            "created_at": now,
+            "updated_at": now,
+            "config": recipe_meta["config"],
+            "glossary": recipe_meta.get("glossary") or None,
+            "renamed_from": renamed_from,
+            "notice": notice,
+        }
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

@@ -163,6 +163,7 @@ from services.datasets import (
     _purge_dataset_artifacts_impl as _purge_dataset_artifacts_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
     _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
+    _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -15375,12 +15376,7 @@ def _extract_qwen_detections_from_payload(payload: Dict[str, Any]) -> List[Dict[
 
 
 def _discover_yolo_labelmap(dataset_root: Path) -> List[str]:
-    for name in ("labelmap.txt", "classes.txt", "labels.txt"):
-        candidate = dataset_root / name
-        classes = _load_labelmap_file(candidate)
-        if classes:
-            return classes
-    return []
+    return _discover_yolo_labelmap_impl(dataset_root, load_labelmap_file_fn=_load_labelmap_file)
 
 
 def _coco_info_block(dataset_id: str) -> Dict[str, Any]:

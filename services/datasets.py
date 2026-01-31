@@ -154,6 +154,19 @@ def _collect_labels_from_qwen_jsonl_impl(
     return sorted(labels)
 
 
+def _discover_yolo_labelmap_impl(
+    dataset_root: Path,
+    *,
+    load_labelmap_file_fn,
+) -> List[str]:
+    for name in ("labelmap.txt", "classes.txt", "labels.txt"):
+        candidate = dataset_root / name
+        classes = load_labelmap_file_fn(candidate)
+        if classes:
+            return classes
+    return []
+
+
 def _detect_yolo_layout_impl(dataset_root: Path) -> dict:
     labelmap_path = dataset_root / "labelmap.txt"
     train_images = dataset_root / "train" / "images"

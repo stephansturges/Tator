@@ -150,7 +150,10 @@ from services.detector_jobs import (
     _serialize_yolo_head_graft_job_impl as _serialize_yolo_head_graft_job_impl,
     _serialize_yolo_job_impl as _serialize_yolo_job_impl,
 )
-from services.qwen_jobs import _serialize_qwen_job_impl as _serialize_qwen_job_impl
+from services.qwen_jobs import (
+    _log_qwen_get_request_impl as _log_qwen_get_request_impl,
+    _serialize_qwen_job_impl as _serialize_qwen_job_impl,
+)
 from services.sam3_jobs import _serialize_sam3_job_impl as _serialize_sam3_job_impl
 from services.segmentation import _serialize_seg_job_impl as _serialize_seg_job_impl
 from services.datasets import (
@@ -10867,28 +10870,7 @@ def _serialize_seg_job(job: SegmentationBuildJob) -> Dict[str, Any]:
 
 
 def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> None:
-    try:
-        if not jobs:
-            logger.info("[qwen-train] GET %s -> 0 jobs", endpoint)
-            return
-        for job in jobs:
-            config = job.config or {}
-            tracked_fields = {
-                "accelerator": config.get("accelerator"),
-                "devices": config.get("devices"),
-                "batch_size": config.get("batch_size"),
-                "accumulate_grad_batches": config.get("accumulate_grad_batches"),
-            }
-            logger.info(
-                "[qwen-train %s] GET %s -> status=%s message=%s config=%s",
-                job.job_id[:8],
-                endpoint,
-                job.status,
-                job.message,
-                json.dumps(tracked_fields, ensure_ascii=False),
-            )
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to log Qwen GET request for %s", endpoint)
+    _log_qwen_get_request_impl(endpoint, jobs, logger)
 
 
 def _coerce_metric_value(value: Any) -> Any:

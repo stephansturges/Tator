@@ -115,7 +115,12 @@ from services.prepass import (
     _agent_compact_tool_result,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
-from services.context_store import _context_store, _context_chunk
+from services.context_store import (
+    _context_store,
+    _context_chunk,
+    _agent_context_store as _agent_context_store_impl,
+    _agent_context_chunk as _agent_context_chunk_impl,
+)
 from services.tile_context import _cluster_owner_cell, _tile_clusters, _tile_cluster_payload, _tile_caption_hint
 from services.prepass_grid import (
     _agent_grid_col_label,
@@ -6625,7 +6630,7 @@ def _agent_context_store(
     kind: str,
     max_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return _context_store(
+    return _agent_context_store_impl(
         payload,
         kind=kind,
         max_bytes=int(max_bytes or PREPASS_CONTEXT_CHUNK_BYTES),
@@ -6640,7 +6645,7 @@ def _agent_context_chunk(
     chunk_index: int,
     kind: str,
 ) -> Dict[str, Any]:
-    return _context_chunk(
+    return _agent_context_chunk_impl(
         handle,
         chunk_index=chunk_index,
         kind=kind,

@@ -65,3 +65,37 @@ def _context_chunk(
         "payload_chunk": chunks[idx],
         "byte_size": entry.get("byte_size"),
     }
+
+
+def _agent_context_store(
+    payload: Dict[str, Any],
+    *,
+    kind: str,
+    max_bytes: Optional[int],
+    tile_store: Dict[str, Dict[str, Any]],
+    global_store: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    return _context_store(
+        payload,
+        kind=kind,
+        max_bytes=max_bytes,
+        tile_store=tile_store,
+        global_store=global_store,
+    )
+
+
+def _agent_context_chunk(
+    handle: str,
+    *,
+    chunk_index: int,
+    kind: str,
+    tile_store: Dict[str, Dict[str, Any]],
+    global_store: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    return _context_chunk(
+        handle,
+        chunk_index=chunk_index,
+        kind=kind,
+        tile_store=tile_store,
+        global_store=global_store,
+    )

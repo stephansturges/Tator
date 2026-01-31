@@ -248,6 +248,7 @@ from services.classifier import (
     _save_clip_head_artifacts_impl as _save_clip_head_artifacts_impl,
     _load_clip_head_artifacts_impl as _load_clip_head_artifacts_impl,
     _resolve_clip_head_background_settings_impl as _resolve_clip_head_background_settings_impl,
+    _infer_clip_model_from_embedding_dim_impl as _infer_clip_model_from_embedding_dim_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -1263,18 +1264,7 @@ SUPPORTED_CLIP_MODELS = [
 DEFAULT_CLIP_MODEL = SUPPORTED_CLIP_MODELS[0]
 
 def _infer_clip_model_from_embedding_dim(embedding_dim: Optional[int], *, active_name: Optional[str] = None) -> Optional[str]:
-    try:
-        emb = int(embedding_dim or 0)
-    except Exception:
-        return None
-    if emb == 768:
-        return "ViT-L/14"
-    if emb == 512:
-        active = str(active_name or "").strip()
-        if active in {"ViT-B/32", "ViT-B/16"}:
-            return active
-        return "ViT-B/32"
-    return None
+    return _infer_clip_model_from_embedding_dim_impl(embedding_dim, active_name=active_name)
 
 clip_model = None
 clip_preprocess = None

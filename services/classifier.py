@@ -954,3 +954,20 @@ def _resolve_clip_head_background_settings_impl(payload: Any) -> Tuple[bool, boo
     guard_seed = bool(guard and apply_mode in {"seed", "both"})
     guard_final = bool(guard and apply_mode in {"final", "both"})
     return guard_seed, guard_final, float(margin_val), apply_mode
+
+
+def _infer_clip_model_from_embedding_dim_impl(
+    embedding_dim: Optional[int], *, active_name: Optional[str] = None
+) -> Optional[str]:
+    try:
+        emb = int(embedding_dim or 0)
+    except Exception:
+        return None
+    if emb == 768:
+        return "ViT-L/14"
+    if emb == 512:
+        active = str(active_name or "").strip()
+        if active in {"ViT-B/32", "ViT-B/16"}:
+            return active
+        return "ViT-B/32"
+    return None

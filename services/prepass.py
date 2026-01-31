@@ -906,6 +906,959 @@ def _agent_run_deep_prepass_caption_impl(
     return caption_text, caption_entries
 
 
+def _agent_run_prepass_impl(
+    payload: Any,
+    *,
+    pil_img: Any,
+    image_token: str,
+    labelmap: List[str],
+    glossary: str,
+    as_tool_messages: bool,
+    trace_writer: Optional[Any],
+    trace_full_writer: Optional[Any],
+    model_id_override: Optional[str],
+    agent_message_cls: Any,
+    content_item_cls: Any,
+    agent_trace_event_cls: Any,
+    grid_spec_for_payload_fn: Any,
+    readable_detection_line_fn: Any,
+    readable_write_fn: Any,
+    tool_run_detector_fn: Any,
+    generate_sam3_synonyms_fn: Any,
+    generate_text_fn: Any,
+    extract_json_fn: Any,
+    default_synonyms: Any,
+    label_key_fn: Any,
+    sam3_prompt_variants_fn: Any,
+    tool_sam3_text_fn: Any,
+    tool_sam3_similarity_fn: Any,
+    quadrant_windows_fn: Any,
+    tool_look_and_inspect_fn: Any,
+    tool_qwen_infer_fn: Any,
+    qwen_bbox_to_xyxy_fn: Any,
+    resolve_window_overlap_fn: Any,
+    resolve_window_size_fn: Any,
+    window_positions_fn: Any,
+    run_qwen_inference_fn: Any,
+    extract_caption_fn: Any,
+    sanitize_caption_fn: Any,
+    caption_is_degenerate_fn: Any,
+    caption_needs_completion_fn: Any,
+    caption_has_meta_fn: Any,
+    qwen_caption_fn: Any,
+    caption_request_cls: Any,
+    qwen_caption_cleanup_fn: Any,
+    resolve_qwen_variant_fn: Any,
+    unload_qwen_fn: Any,
+    det_source_summary_fn: Any,
+    det_label_counts_fn: Any,
+    detection_has_source_fn: Any,
+    source_counts_fn: Any,
+    format_source_counts_fn: Any,
+    merge_prepass_fn: Any,
+    compact_tool_result_fn: Any,
+    active_detector_conf: Optional[float],
+    active_sam3_score_thr: Optional[float],
+    active_sam3_mask_thr: Optional[float],
+    trace_readable_enabled: bool,
+) -> Tuple[
+    List[Any],
+    List[Dict[str, Any]],
+    List[str],
+    List[Any],
+    bool,
+    bool,
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    Optional[str],
+    List[Dict[str, Any]],
+]:
+    img_w, img_h = pil_img.size
+    mode = (getattr(payload, "prepass_mode", None) or "").strip().lower()
+    if not mode or mode in {"none", "off", "false"}:
+        return [], [], [], [], False, False, None, None, None, None, []
+    prepass_messages: List[Any] = []
+    prepass_records: List[Dict[str, Any]] = []
+    prepass_detections: List[Dict[str, Any]] = []
+    prepass_warnings: List[str] = []
+    prepass_trace: List[Any] = []
+    prepass_has_detector = False
+    prepass_has_inspect = False
+    qwen_failed = False
+    step_id = 0
+    max_items = int(getattr(payload, "prepass_inspect_topk", None)) if getattr(payload, "prepass_inspect_topk", None) is not None else 0
+    caption_summary: Optional[str] = None
+    caption_text: Optional[str] = None
+    caption_entries: List[Dict[str, Any]] = []
+    sam3_text_prompts: Dict[str, List[str]] = {}
+    sam3_text_term_map: Dict[str, Dict[str, List[str]]] = {}
+    sam3_text_summary: Optional[str] = None
+    prepass_source_summary: Optional[str] = None
+    grid_for_log: Optional[Dict[str, Any]] = None
+    if getattr(payload, "use_detection_overlay", True) is not False:
+        grid_for_log = grid_spec_for_payload_fn(payload, img_w, img_h)
+
+    def add_tool_result(name: str, result: Dict[str, Any], summary: str) -> None:
+        nonlocal step_id
+        step_id += 1
+        prepass_trace.append(
+            agent_trace_event_cls(
+                step_id=step_id,
+                phase="tool_call",
+                tool_name=name,
+                summary="prepass_tool_call",
+                timestamp=time.time(),
+            )
+        )
+        if trace_writer:
+            trace_writer(
+                {
+                    "type": "prepass_tool_call",
+                    "tool": name,
+                    "summary": summary,
+                    "ts": time.time(),
+                }
+            )
+        step_id += 1
+        compact = compact_tool_result_fn(result, max_items=max_items)
+        if as_tool_messages:
+            prepass_messages.append(
+                agent_message_cls(
+                    role="function",
+                    name=name,
+                    content=[content_item_cls(text=json.dumps(compact, ensure_ascii=False))],
+                )
+            )
+        else:
+            prepass_records.append({"tool": name, "result": compact})
+        prepass_trace.append(
+            agent_trace_event_cls(
+                step_id=step_id,
+                phase="tool_result",
+                tool_name=name,
+                summary=summary,
+                timestamp=time.time(),
+            )
+        )
+        if trace_writer:
+            trace_writer(
+                {
+                    "type": "prepass_tool_result",
+                    "tool": name,
+                    "summary": summary,
+                    "result": result,
+                    "ts": time.time(),
+                }
+            )
+        if trace_readable_enabled:
+            count = None
+            count_key = None
+            if isinstance(result, dict):
+                for key in ("detections", "candidates", "annotations"):
+                    items = result.get(key)
+                    if isinstance(items, list):
+                        count = len(items)
+                        count_key = key
+                        break
+            pretty_summary = summary.replace("prepass_", "prepass ")
+            line = f"{pretty_summary}"
+            if count is not None and count_key:
+                line = f"{line} -> {count} {count_key}"
+            readable_write_fn(line)
+            if isinstance(result, dict) and count_key:
+                items = result.get(count_key)
+                if isinstance(items, list) and items:
+                    for item in items:
+                        if isinstance(item, dict):
+                            detail = readable_detection_line_fn(
+                                item,
+                                grid=grid_for_log,
+                                img_w=img_w,
+                                img_h=img_h,
+                            )
+                            readable_write_fn(f"{pretty_summary} item: {detail}")
+        if isinstance(result.get("detections"), list):
+            prepass_detections.extend(result.get("detections") or [])
+
+    detector_modes: List[str] = []
+    if "ensemble" in mode:
+        detector_modes = ["yolo", "rfdetr"]
+    else:
+        detector_modes = [getattr(payload, "detector_mode", None) or "yolo"]
+    sahi_enabled = "sahi" in mode
+    detector_conf = getattr(payload, "detector_conf", None)
+    if detector_conf is None and active_detector_conf is not None:
+        detector_conf = active_detector_conf
+    for det_mode in detector_modes:
+        det_args = {
+            "image_token": image_token,
+            "detector_id": getattr(payload, "detector_id", None)
+            if det_mode == (getattr(payload, "detector_mode", None) or "yolo")
+            else None,
+            "mode": det_mode,
+            "conf": detector_conf,
+            "sahi": {"enabled": True} if sahi_enabled else None,
+        }
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_tool_call",
+                    "tool": "run_detector",
+                    "args": det_args,
+                    "ts": time.time(),
+                }
+            )
+        try:
+            det_result = tool_run_detector_fn(
+                image_token=det_args["image_token"],
+                detector_id=det_args["detector_id"],
+                mode=det_args["mode"],
+                conf=det_args["conf"],
+                sahi=det_args["sahi"],
+                register=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            prepass_warnings.append(f"prepass_detector_failed:{det_mode}:{exc}")
+            continue
+        det_result = {**det_result, "detector_mode": det_mode}
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_tool_result",
+                    "tool": "run_detector",
+                    "result": det_result,
+                    "ts": time.time(),
+                }
+            )
+        add_tool_result("run_detector", det_result, f"prepass_detector:{det_mode}")
+        prepass_has_detector = True
+
+    if "sam3_text" in mode and labelmap:
+        labels = [lbl for lbl in labelmap if str(lbl).strip()]
+        if labels:
+            prompt_budget = 10 if getattr(payload, "sam3_text_synonym_budget", None) is None else int(getattr(payload, "sam3_text_synonym_budget", None))
+            synonym_map, term_meta = generate_sam3_synonyms_fn(
+                labels,
+                glossary or "",
+                max_synonyms=prompt_budget,
+                generate_text_fn=generate_text_fn,
+                extract_json_fn=extract_json_fn,
+                default_synonyms=default_synonyms,
+                label_key_fn=label_key_fn,
+            )
+            sam3_text_term_map = term_meta
+            score_thr = getattr(payload, "prepass_sam3_text_thr", None)
+            if score_thr is None and active_sam3_score_thr is not None:
+                score_thr = active_sam3_score_thr
+            mask_thr = getattr(payload, "sam3_mask_threshold", None)
+            if mask_thr is None and active_sam3_mask_thr is not None:
+                mask_thr = active_sam3_mask_thr
+            max_results = None
+            for label in labels:
+                base_terms = term_meta.get(label, {}).get("base_terms", [])
+                expanded_terms = term_meta.get(label, {}).get("expanded_terms", [])
+                max_prompts = max(2, len(synonym_map.get(label, [])) + 2)
+                prompts = sam3_prompt_variants_fn(
+                    label,
+                    synonym_map,
+                    max_prompts=max_prompts,
+                    default_synonyms=default_synonyms,
+                    label_key_fn=label_key_fn,
+                )
+                if not prompts:
+                    prompts = [str(label).replace("_", " ").strip() or str(label).strip()]
+                for prompt in prompts:
+                    prompt_origin = "base"
+                    if prompt in expanded_terms:
+                        prompt_origin = "expanded"
+                    elif prompt not in base_terms:
+                        prompt_origin = "unknown"
+                    sam3_text_prompts.setdefault(label, []).append(prompt)
+                    sam3_args = {
+                        "image_token": image_token,
+                        "prompt": prompt,
+                        "label": label,
+                        "score_thr": score_thr,
+                        "mask_threshold": mask_thr,
+                        "max_results": max_results,
+                    }
+                    if trace_full_writer:
+                        trace_full_writer(
+                            {
+                                "type": "prepass_tool_call",
+                                "tool": "sam3_text",
+                                "args": sam3_args,
+                                "ts": time.time(),
+                            }
+                        )
+                    try:
+                        sam3_result = tool_sam3_text_fn(
+                            image_token=sam3_args["image_token"],
+                            prompt=sam3_args["prompt"],
+                            label=sam3_args["label"],
+                            score_thr=sam3_args["score_thr"],
+                            mask_threshold=sam3_args["mask_threshold"],
+                            max_results=sam3_args["max_results"],
+                            register=False,
+                        )
+                        dets = sam3_result.get("detections") if isinstance(sam3_result, dict) else None
+                        if isinstance(dets, list):
+                            for det in dets:
+                                if not isinstance(det, dict):
+                                    continue
+                                det["sam3_prompt_term"] = prompt
+                                det["sam3_prompt_label"] = label
+                                det["sam3_prompt_source"] = prompt_origin
+                        if trace_full_writer:
+                            trace_full_writer(
+                                {
+                                    "type": "prepass_tool_result",
+                                    "tool": "sam3_text",
+                                    "result": sam3_result,
+                                    "ts": time.time(),
+                                }
+                            )
+                        summary = f"prepass_sam3_text:{label} prompt={prompt}"
+                        add_tool_result("sam3_text", sam3_result, summary)
+                    except Exception as exc:  # noqa: BLE001
+                        prepass_warnings.append(f"prepass_sam3_text_failed:{label}:{exc}")
+
+    if "similarity" in mode and prepass_detections:
+        per_class = int(getattr(payload, "prepass_similarity_per_class", None) or 2)
+        if getattr(payload, "prepass_similarity_score", None) is not None:
+            score_thr = float(getattr(payload, "prepass_similarity_score", None))
+        elif active_sam3_score_thr is not None:
+            score_thr = float(active_sam3_score_thr)
+        else:
+            score_thr = 0.2
+        by_label: Dict[str, List[Dict[str, Any]]] = {}
+        for det in prepass_detections:
+            label = str(det.get("label") or det.get("class_name") or "unknown")
+            by_label.setdefault(label, []).append(det)
+        any_similarity = False
+        for label, dets in by_label.items():
+            dets.sort(key=lambda d: float(d.get("score") or 0.0), reverse=True)
+            exemplar_boxes: List[Dict[str, Any]] = []
+            for det in dets[:per_class]:
+                if float(det.get("score") or 0.0) < score_thr:
+                    continue
+                bbox_2d = det.get("bbox_2d")
+                if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) >= 4:
+                    exemplar_boxes.append({"bbox_2d": list(bbox_2d), "bbox_space": "full"})
+            if not exemplar_boxes:
+                continue
+            any_similarity = True
+            try:
+                sim_args = {
+                    "image_token": image_token,
+                    "exemplar_boxes": exemplar_boxes,
+                    "label": label,
+                    "bbox_labels": [True for _ in exemplar_boxes],
+                    "score_thr": getattr(payload, "prepass_similarity_score", None),
+                }
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_tool_call",
+                            "tool": "sam3_similarity",
+                            "args": sim_args,
+                            "ts": time.time(),
+                        }
+                    )
+                sim_result = tool_sam3_similarity_fn(
+                    image_token=sim_args["image_token"],
+                    exemplar_boxes=sim_args["exemplar_boxes"],
+                    label=sim_args["label"],
+                    bbox_labels=sim_args["bbox_labels"],
+                    score_thr=sim_args["score_thr"],
+                    register=False,
+                )
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_tool_result",
+                            "tool": "sam3_similarity",
+                            "result": sim_result,
+                            "ts": time.time(),
+                        }
+                    )
+                add_tool_result("sam3_similarity", sim_result, f"prepass_sam3_similarity:{label}")
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_sam3_similarity_failed:{label}:{exc}")
+        if not any_similarity:
+            prepass_warnings.append("prepass_similarity_no_exemplars")
+
+    if "inspect" in mode and getattr(payload, "prepass_inspect_quadrants", True) is not False:
+        windows = quadrant_windows_fn(0.1)
+        for window in windows:
+            inspect_args = {
+                "image_token": image_token,
+                "window_bbox_2d": window.get("bbox_2d"),
+                "labelmap": labelmap,
+                "labelmap_glossary": glossary,
+                "max_objects": getattr(payload, "prepass_inspect_topk", None),
+            }
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_tool_call",
+                        "tool": "look_and_inspect",
+                        "args": inspect_args,
+                        "ts": time.time(),
+                    }
+                )
+            try:
+                inspect_result = tool_look_and_inspect_fn(
+                    image_token=inspect_args["image_token"],
+                    window_bbox_2d=inspect_args["window_bbox_2d"],
+                    labelmap=inspect_args["labelmap"],
+                    labelmap_glossary=inspect_args["labelmap_glossary"],
+                    max_objects=inspect_args["max_objects"],
+                    register=False,
+                    include_caption=False,
+                )
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_tool_result",
+                            "tool": "look_and_inspect",
+                            "result": inspect_result,
+                            "ts": time.time(),
+                        }
+                    )
+                add_tool_result("look_and_inspect", inspect_result, f"prepass_inspect:{window.get('name')}")
+                prepass_has_inspect = True
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_inspect_failed:{window.get('name')}:{exc}")
+                qwen_failed = True
+
+    if "qwen" in mode and labelmap:
+        try:
+            max_results = int(getattr(payload, "prepass_inspect_topk", None) or 12)
+            if max_results > 30:
+                max_results = 30
+            qwen_args = {
+                "image_token": image_token,
+                "items": labelmap,
+                "prompt_type": "bbox",
+                "max_results": max_results,
+                "max_new_tokens": 512,
+                "extra_context": glossary,
+            }
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_tool_call",
+                        "tool": "qwen_infer",
+                        "args": qwen_args,
+                        "ts": time.time(),
+                    }
+                )
+            qwen_result = tool_qwen_infer_fn(
+                image_token=qwen_args["image_token"],
+                items=qwen_args["items"],
+                prompt_type=qwen_args["prompt_type"],
+                max_results=qwen_args["max_results"],
+                max_new_tokens=qwen_args["max_new_tokens"],
+                extra_context=qwen_args["extra_context"],
+                register=False,
+            )
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_tool_result",
+                        "tool": "qwen_infer",
+                        "result": qwen_result,
+                        "ts": time.time(),
+                    }
+                )
+            add_tool_result("qwen_infer", qwen_result, "prepass_qwen_infer")
+        except Exception as exc:  # noqa: BLE001
+            prepass_warnings.append(f"prepass_qwen_infer_failed:{exc}")
+            qwen_failed = True
+
+    if getattr(payload, "prepass_caption", False):
+        det_hint_sources = {"yolo", "rfdetr"}
+        det_hint_items = [det for det in prepass_detections if detection_has_source_fn(det, det_hint_sources)]
+        det_hint_items.sort(key=lambda d: float(d.get("score") or 0.0), reverse=True)
+        det_hint_summary = det_label_counts_fn(det_hint_items, limit=10)
+        hint_limit = min(len(det_hint_items), 120)
+        caption_hints: List[Any] = []
+        for det in det_hint_items[:hint_limit]:
+            label = str(det.get("label") or det.get("class_name") or "").strip()
+            bbox = det.get("bbox_xyxy_px") or None
+            if not bbox and det.get("bbox_2d"):
+                bbox = qwen_bbox_to_xyxy_fn(
+                    pil_img.width,
+                    pil_img.height,
+                    det.get("bbox_2d"),
+                )
+            if not label or not bbox or len(bbox) != 4:
+                continue
+            caption_hints.append(
+                {
+                    "label": label,
+                    "bbox": [float(v) for v in bbox],
+                    "confidence": det.get("score"),
+                }
+            )
+        prepass_prompt = (
+            "Describe the image region in detail. "
+            "Use detector hints as suggestions, but also mention other visible objects. "
+            "Do not mention labels, hints, or coordinates."
+        )
+        if det_hint_summary and det_hint_summary != "none":
+            prepass_prompt = f"{prepass_prompt} Detector hints: {det_hint_summary}."
+        caption_profile = (getattr(payload, "prepass_caption_profile", None) or "light").strip().lower()
+        if caption_profile not in {"light", "deep"}:
+            caption_profile = "light"
+
+        caption_text = ""
+        windowed_captions: List[Tuple[int, int, int, str]] = []
+
+        if caption_profile == "light":
+            caption_model_id = getattr(payload, "prepass_caption_model_id", None) or model_id_override
+            caption_max_tokens = int(getattr(payload, "prepass_caption_max_tokens", None) or 256)
+            system_prompt = (
+                "You are a captioning assistant. Respond in English with a detailed sentence."
+            )
+            decode_override = {"do_sample": False}
+            try:
+                runtime = (
+                    _ensure_qwen_ready_for_caption(caption_model_id)
+                    if caption_model_id
+                    else _ensure_qwen_ready()
+                )
+                full_prompt = (
+                    "Describe the full image in detail. "
+                    "Use detector hints as suggestions, but mention other visible objects. "
+                    "Do not mention labels, hints, or coordinates."
+                )
+                if det_hint_summary and det_hint_summary != "none":
+                    full_prompt = f"{full_prompt} Detector hints: {det_hint_summary}."
+                caption_raw, _, _ = run_qwen_inference_fn(
+                    full_prompt,
+                    pil_img,
+                    max_new_tokens=caption_max_tokens,
+                    system_prompt_override=system_prompt,
+                    runtime_override=runtime,
+                    decode_override=decode_override,
+                )
+                caption_text, _ = extract_caption_fn(caption_raw, marker=None)
+                caption_text = sanitize_caption_fn(caption_text)
+                overlap = resolve_window_overlap_fn(None)
+                window_size = resolve_window_size_fn(None, pil_img.width, pil_img.height, overlap=overlap)
+                force_two = True
+                x_positions = window_positions_fn(pil_img.width, window_size, overlap, force_two=force_two)
+                y_positions = window_positions_fn(pil_img.height, window_size, overlap, force_two=force_two)
+                window_prompt = (
+                    "Describe this region in 1 detailed sentence. "
+                    "Focus only on this region. "
+                    "Do not mention labels, hints, or coordinates."
+                )
+                for y0 in y_positions:
+                    for x0 in x_positions:
+                        window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
+                        window_raw, _, _ = run_qwen_inference_fn(
+                            window_prompt,
+                            window_img,
+                            max_new_tokens=caption_max_tokens,
+                            system_prompt_override=system_prompt,
+                            runtime_override=runtime,
+                            decode_override=decode_override,
+                        )
+                        window_caption, _ = extract_caption_fn(window_raw, marker=None)
+                        window_caption = sanitize_caption_fn(window_caption)
+                        if window_caption:
+                            windowed_captions.append((x0, y0, window_size, window_caption))
+                            cell = None
+                            if grid_for_log:
+                                bbox_2d = xyxy_to_bbox_fn(
+                                    img_w,
+                                    img_h,
+                                    float(x0),
+                                    float(y0),
+                                    float(x0 + window_size),
+                                    float(y0 + window_size),
+                                )
+                                cell = grid_cell_for_window_bbox_fn(grid_for_log, bbox_2d)
+                            cell_text = f" {cell}" if cell else ""
+                            readable_write_fn(
+                                f"prepass caption window{cell_text} "
+                                f"[{x0},{y0},{x0 + window_size},{y0 + window_size}]: {window_caption}"
+                            )
+                            if trace_writer:
+                                trace_writer(
+                                    {
+                                        "type": "prepass_caption_window",
+                                        "window": [int(x0), int(y0), int(window_size)],
+                                        "grid_cell": cell,
+                                        "caption": window_caption,
+                                        "ts": time.time(),
+                                    }
+                                )
+                            if trace_full_writer:
+                                trace_full_writer(
+                                    {
+                                        "type": "prepass_caption_window",
+                                        "window": [int(x0), int(y0), int(window_size)],
+                                        "grid_cell": cell,
+                                        "caption": window_caption,
+                                        "ts": time.time(),
+                                    }
+                                )
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_caption_failed:light:{exc}")
+                qwen_failed = True
+                caption_text = ""
+                windowed_captions = []
+        if caption_profile != "light":
+            caption_variant = getattr(payload, "prepass_caption_variant", None) or getattr(payload, "model_variant", None) or "auto"
+            caption_model_id = (getattr(payload, "prepass_caption_model_id", None) or model_id_override or "").strip() or None
+            caption_max_tokens = int(getattr(payload, "prepass_caption_max_tokens", None) or 512)
+            caption_payload = caption_request_cls(
+                image_token=image_token,
+                user_prompt=prepass_prompt,
+                label_hints=caption_hints or None,
+                image_width=pil_img.width,
+                image_height=pil_img.height,
+                include_counts=False,
+                include_coords=True,
+                max_boxes=min(len(caption_hints), 120),
+                max_new_tokens=caption_max_tokens,
+                model_variant=caption_variant,
+                model_id=caption_model_id,
+                final_answer_only=True,
+                two_stage_refine=True,
+                caption_mode="windowed",
+                caption_all_windows=True,
+                restrict_to_labels=False,
+                fast_mode=True,
+                multi_model_cache=True,
+            )
+            caption_base_model_id = (
+                caption_model_id
+                or model_id_override
+                or getattr(getattr(payload, "active_qwen_metadata", None), "model_id", None)
+                or None
+            )
+            caption_max_tokens = int(caption_payload.max_new_tokens or 512)
+
+            def run_caption_attempt(request: Any) -> Tuple[str, List[Tuple[int, int, int, str]]]:
+                attempt_windows: List[Tuple[int, int, int, str]] = []
+
+                def _window_hook(x0: int, y0: int, size: int, caption: str) -> None:
+                    attempt_windows.append((x0, y0, size, caption))
+                    if not trace_readable_enabled or not caption:
+                        return
+                    cell = None
+                    if grid_for_log:
+                        bbox_2d = xyxy_to_bbox_fn(
+                            img_w,
+                            img_h,
+                            float(x0),
+                            float(y0),
+                            float(x0 + size),
+                            float(y0 + size),
+                        )
+                        cell = grid_cell_for_window_bbox_fn(grid_for_log, bbox_2d)
+                    cell_text = f" {cell}" if cell else ""
+                    readable_write_fn(
+                        f"prepass caption window{cell_text} "
+                        f"[{x0},{y0},{x0 + size},{y0 + size}]: {caption}"
+                    )
+                    if trace_writer:
+                        trace_writer(
+                            {
+                                "type": "prepass_caption_window",
+                                "window": [int(x0), int(y0), int(size)],
+                                "grid_cell": cell,
+                                "caption": caption,
+                                "ts": time.time(),
+                            }
+                        )
+                    if trace_full_writer:
+                        trace_full_writer(
+                            {
+                                "type": "prepass_caption_window",
+                                "window": [int(x0), int(y0), int(size)],
+                                "grid_cell": cell,
+                                "caption": caption,
+                                "ts": time.time(),
+                            }
+                        )
+
+                token = caption_window_hook.set(_window_hook)
+                try:
+                    if trace_full_writer:
+                        trace_full_writer(
+                            {
+                                "type": "prepass_caption_call",
+                                "payload": {
+                                    "model_id": request.model_id,
+                                    "variant": request.model_variant,
+                                    "caption_mode": request.caption_mode,
+                                    "caption_all_windows": request.caption_all_windows,
+                                    "restrict_to_labels": request.restrict_to_labels,
+                                    "max_new_tokens": request.max_new_tokens,
+                                    "hint_count": len(request.label_hints or []),
+                                },
+                                "ts": time.time(),
+                            }
+                        )
+                    response = qwen_caption_fn(request)
+                    return response.caption or "", attempt_windows
+                finally:
+                    caption_window_hook.reset(token)
+
+            def caption_is_bad(text: str) -> bool:
+                return (
+                    not text
+                    or caption_is_degenerate_fn(text)
+                    or caption_needs_completion_fn(text)
+                    or caption_has_meta_fn(text)
+                )
+
+            try:
+                caption_text, windowed_captions = run_caption_attempt(caption_payload)
+            except Exception as exc:  # noqa: BLE001
+                prepass_warnings.append(f"prepass_caption_failed:primary:{exc}")
+                qwen_failed = True
+                caption_text = ""
+                windowed_captions = []
+
+            if caption_is_bad(caption_text):
+                fallback_payload = caption_payload.copy(
+                    update={
+                        "model_variant": "Instruct",
+                        "use_sampling": False,
+                        "two_stage_refine": True,
+                    }
+                )
+                try:
+                    caption_text, windowed_captions = run_caption_attempt(fallback_payload)
+                except Exception as exc:  # noqa: BLE001
+                    prepass_warnings.append(f"prepass_caption_failed:fallback:{exc}")
+                    qwen_failed = True
+
+            if caption_is_bad(caption_text):
+                fallback_prompt = (
+                    "Write a detailed, concrete caption describing the visible scene. "
+                    "Mention the main objects and layout. Do not mention labels or coordinates."
+                )
+                fallback_system = (
+                    "You are a captioning assistant. Use the image as truth. "
+                    "Respond in English only. Return only the caption."
+                )
+                try:
+                    fallback_raw, _, _ = run_qwen_inference_fn(
+                        fallback_prompt,
+                        pil_img,
+                        max_new_tokens=caption_max_tokens,
+                        system_prompt_override=fallback_system,
+                        model_id_override=resolve_qwen_variant_fn(caption_base_model_id, "Instruct"),
+                        decode_override={"do_sample": False},
+                    )
+                    caption_text, _ = extract_caption_fn(fallback_raw, marker=None)
+                    caption_text = sanitize_caption_fn(caption_text)
+                except Exception as exc:  # noqa: BLE001
+                    prepass_warnings.append(f"prepass_caption_failed:direct:{exc}")
+                    qwen_failed = True
+
+            if caption_is_bad(caption_text):
+                caption_text = qwen_caption_cleanup_fn(
+                    caption_text or "Describe the image.",
+                    pil_img,
+                    caption_max_tokens,
+                    caption_base_model_id,
+                    use_caption_cache=True,
+                    model_id_override=resolve_qwen_variant_fn(caption_base_model_id, "Instruct"),
+                    runtime_override=None,
+                    allowed_labels=None,
+                    strict=True,
+                    minimal_edit=False,
+                )
+
+        if trace_readable_enabled and caption_text:
+            readable_write_fn(f"prepass caption summary: {caption_text}")
+
+        if windowed_captions:
+            for x0, y0, size, caption in windowed_captions:
+                bbox_2d = xyxy_to_bbox_fn(
+                    pil_img.width,
+                    pil_img.height,
+                    float(x0),
+                    float(y0),
+                    float(x0 + size),
+                    float(y0 + size),
+                )
+                x_center = x0 + size / 2.0
+                y_center = y0 + size / 2.0
+                horiz = "left" if x_center < pil_img.width / 3.0 else "right" if x_center > pil_img.width * 2 / 3.0 else "center"
+                vert = "top" if y_center < pil_img.height / 3.0 else "bottom" if y_center > pil_img.height * 2 / 3.0 else "middle"
+                name = f"{vert}_{horiz}"
+                entry = {
+                    "window": name,
+                    "bbox_2d": list(bbox_2d),
+                    "caption": caption,
+                }
+                caption_entries.append(entry)
+                if trace_full_writer:
+                    trace_full_writer(
+                        {
+                            "type": "prepass_caption_result",
+                            "window": {"name": name, "bbox_2d": list(bbox_2d)},
+                            "caption": caption,
+                            "ts": time.time(),
+                        }
+                    )
+                if trace_readable_enabled:
+                    coords = readable_format_bbox_fn(bbox_2d)
+                    readable_write_fn(f"prepass caption {name} {coords}: {caption}")
+
+        caption_lines: List[str] = []
+        if caption_text:
+            caption_lines.append(f"Refined caption (Qwen VLM): {caption_text}")
+        if caption_entries:
+            caption_lines.append("Windowed captions (Qwen VLM). Use as hints for hidden objects:")
+            for entry in caption_entries:
+                coords = readable_format_bbox_fn(entry.get("bbox_2d"))
+                name = entry.get("window") or "window"
+                caption_lines.append(f"- {name} {coords}: {entry.get('caption')}")
+        caption_summary = "\n".join(caption_lines) if caption_lines else "none"
+        prepass_messages.append(
+            agent_message_cls(
+                role="user",
+                content=[content_item_cls(text=caption_summary)],
+            )
+        )
+        step_id += 1
+        prepass_trace.append(
+            agent_trace_event_cls(
+                step_id=step_id,
+                phase="intent",
+                summary="prepass_caption",
+                windows=caption_entries,
+                timestamp=time.time(),
+            )
+        )
+        if trace_writer:
+            trace_writer({"type": "prepass_caption", "windows": caption_entries, "ts": time.time()})
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_caption",
+                    "caption": caption_text,
+                    "windows": caption_entries,
+                    "ts": time.time(),
+                }
+            )
+
+    if sam3_text_prompts:
+        summary_parts = []
+        for label in sorted(sam3_text_prompts.keys()):
+            prompts = [p for p in sam3_text_prompts[label] if str(p).strip()]
+            unique = []
+            seen = set()
+            for prompt in prompts:
+                key = str(prompt).strip().lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(str(prompt).strip())
+            if unique:
+                summary_parts.append(f"{label}: {', '.join(unique[:8])}")
+        if summary_parts:
+            sam3_text_summary = "; ".join(summary_parts)
+            prepass_messages.append(
+                agent_message_cls(
+                    role="user",
+                    content=[
+                        content_item_cls(
+                            text=(
+                                "Prepass sam3_text prompts used (label -> prompts). "
+                                "Use these as hints; you may add new synonyms:\n"
+                                f"{sam3_text_summary}"
+                            )
+                        )
+                    ],
+                )
+            )
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_sam3_text_summary",
+                        "summary": sam3_text_summary,
+                        "ts": time.time(),
+                    }
+                )
+            if trace_readable_enabled:
+                readable_write_fn(f"prepass sam3_text prompts: {sam3_text_summary}")
+
+    if prepass_detections:
+        raw_counts = source_counts_fn(prepass_detections)
+        merged, removed = merge_prepass_fn(prepass_detections, iou_thr=0.85)
+        merged_counts = source_counts_fn(merged)
+        prepass_detections = merged
+        prepass_source_summary = (
+            f"raw_sources({format_source_counts_fn(raw_counts) }); "
+            f"dedup_iou>=0.85 removed={removed} kept={len(merged)}; "
+            f"merged_sources({format_source_counts_fn(merged_counts) })"
+        )
+        if trace_readable_enabled:
+            readable_write_fn(f"prepass dedup: {prepass_source_summary}")
+        prepass_messages.append(
+            agent_message_cls(
+                role="user",
+                content=[
+                    content_item_cls(
+                        text=(
+                            "Prepass detection sources: "
+                            f"{prepass_source_summary}. "
+                            "Caption hints use detector sources only (yolo/rfdetr); "
+                            "SAM3 detections are supplemental and may overlap."
+                        )
+                    )
+                ],
+            )
+        )
+
+    if prepass_records and not as_tool_messages:
+        prepass_messages.append(
+            agent_message_cls(
+                role="user",
+                content=[
+                    content_item_cls(
+                        text=(
+                            "Prepass tool results are available via list_candidates and tool calls; "
+                            "they are not embedded here to keep prompts compact."
+                        )
+                    )
+                ],
+            )
+        )
+    if qwen_failed:
+        try:
+            unload_qwen_fn()
+        except Exception:
+            pass
+    return (
+        prepass_messages,
+        prepass_detections,
+        prepass_warnings,
+        prepass_trace,
+        prepass_has_detector,
+        prepass_has_inspect,
+        caption_summary,
+        sam3_text_summary,
+        prepass_source_summary,
+        caption_text,
+        caption_entries,
+    )
+
+
+
 def _agent_select_similarity_exemplars(
     min_score: float,
     *,

@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
+import re
 import shutil
+import time
+import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal, List
 
 from fastapi import HTTPException
-from starlette.status import HTTP_404_NOT_FOUND
+from starlette.status import (
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+    HTTP_412_PRECONDITION_FAILED,
+    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    HTTP_500_INTERNAL_SERVER_ERROR,
+)
 import math
 from PIL import Image
 
@@ -164,6 +176,54 @@ def _validate_agent_recipe_structure(recipe_obj: Dict[str, Any]) -> None:
             raise HTTPException(status_code=400, detail="agent_recipe_invalid_schema")
 
 
+def _normalize_agent_recipe_steps_impl(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    extra_keys = {
+        "similarity_score",
+        "seed_prompt",
+        "fps",
+        "gain",
+        "source",
+        "precision",
+        "recall",
+        "coverage",
+        "duplicates",
+    }
+    for step in steps:
+        prompt = step.get("prompt")
+        threshold = step.get("threshold")
+        has_exemplar = step.get("exemplar") is not None
+        if (prompt is None and not has_exemplar) or threshold is None:
+            continue
+        try:
+            thr_val = float(threshold)
+        except Exception:
+            continue
+        if math.isnan(thr_val) or thr_val < 0.0 or thr_val > 1.0:
+            continue
+        entry = {
+            "prompt": "" if prompt is None else str(prompt),
+            "threshold": thr_val,
+            "type": step.get("type"),
+            "exemplar": dict(step["exemplar"]) if isinstance(step.get("exemplar"), dict) else step.get("exemplar"),
+        }
+        sim_raw = step.get("similarity_score")
+        if sim_raw is not None:
+            try:
+                sim_val = float(sim_raw)
+            except Exception:
+                sim_val = None
+            if sim_val is not None and 0.0 <= sim_val <= 1.0:
+                entry["similarity_score"] = sim_val
+        for key in extra_keys:
+            if key in entry:
+                continue
+            if key in step:
+                entry[key] = step[key]
+        normalized.append(entry)
+    return normalized
+
+
 def _save_exemplar_crop_impl(
     *,
     exemplar: Dict[str, Any],
@@ -272,3 +332,704 @@ def _list_agent_recipes_impl(
             continue
     recipes.sort(key=lambda r: r.get("created_at", 0), reverse=True)
     return recipes
+
+
+def _persist_agent_recipe_impl(
+    dataset_id: Optional[str],
+    class_id: Optional[int],
+    class_name: Optional[str],
+    label: str,
+    recipe: Dict[str, Any],
+    *,
+    crop_overrides: Optional[Dict[str, bytes]] = None,
+    clip_head_overrides: Optional[Dict[str, bytes]] = None,
+    meta_overrides: Optional[Dict[str, Any]] = None,
+    recipes_root: Path,
+    max_clip_head_bytes: int,
+    max_crops: int,
+    max_crop_bytes: int,
+    resolve_dataset_fn,
+    load_coco_index_fn,
+    compute_dataset_signature_fn,
+    compute_labelmap_hash_fn,
+    resolve_clip_classifier_fn,
+    load_clip_head_fn,
+    save_clip_head_artifacts_fn,
+    load_clip_head_artifacts_fn,
+    save_exemplar_crop_fn,
+    sanitize_prompts_fn,
+    path_is_within_root_fn,
+) -> Dict[str, Any]:
+    if not isinstance(recipe, dict) or not recipe:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_empty")
+    # Accept either a raw recipe body, or a wrapper containing {"recipe": {...}} (e.g., imported payload).
+    recipe_body: Dict[str, Any] = recipe
+    if (
+        isinstance(recipe.get("recipe"), dict)
+        and not any(k in recipe for k in ("steps", "text_prompts", "positives", "mode"))
+    ):
+        recipe_body = recipe.get("recipe") or {}
+    if not isinstance(recipe_body, dict) or not recipe_body:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_empty")
+    _validate_agent_recipe_structure(recipe_body)
+    cleaned_label = label.strip() or "agent_recipe"
+    recipe_id = f"ar_{uuid.uuid4().hex[:8]}"
+    images: Dict[int, Dict[str, Any]] = {}
+    categories: List[Dict[str, Any]] = []
+    dataset_signature: Optional[str] = None
+    labelmap_hash: Optional[str] = None
+    labelmap_entries: Optional[List[str]] = None
+    dataset_root: Optional[Path] = None
+    dataset_id_clean = (dataset_id or "").strip()
+    try:
+        if dataset_id_clean:
+            dataset_root = resolve_dataset_fn(dataset_id_clean)
+            coco, _, images = load_coco_index_fn(dataset_root)
+            categories = coco.get("categories") or []
+            dataset_signature = compute_dataset_signature_fn(dataset_id_clean, dataset_root, images, categories)
+            labelmap_hash, labelmap_entries = compute_labelmap_hash_fn(categories)
+            if class_id is not None:
+                try:
+                    cid = int(class_id)
+                except Exception:
+                    cid = None
+                if cid is not None:
+                    found = any(int(cat.get("id", idx)) == cid for idx, cat in enumerate(categories))
+                    if not found and not crop_overrides:
+                        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_class_missing")
+    except HTTPException:
+        if not crop_overrides and not meta_overrides:
+            raise
+    except Exception:
+        # Allow portability when importing with embedded crops; we'll fall back to meta overrides.
+        pass
+    if not dataset_signature and meta_overrides:
+        dataset_signature = meta_overrides.get("dataset_signature")
+    if not labelmap_hash and meta_overrides:
+        labelmap_hash = meta_overrides.get("labelmap_hash")
+        labelmap_entries = meta_overrides.get("labelmap")
+    if not labelmap_entries:
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="agent_recipe_labelmap_missing")
+    recipe_mode = _classify_agent_recipe_mode(recipe_body)
+    if recipe_mode == "sam3_steps":
+        raw_steps = recipe_body.get("steps")
+        if raw_steps is None:
+            raw_steps = []
+        if not isinstance(raw_steps, list):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        steps_raw = [dict(s) for s in raw_steps if isinstance(s, dict)]
+    else:
+        steps_raw = _normalize_agent_recipe_steps_impl(recipe_body.get("steps") or [])
+    text_prompts_raw = recipe_body.get("text_prompts")
+    positives_raw = recipe_body.get("positives")
+    negatives_raw = recipe_body.get("negatives")
+    if text_prompts_raw is None:
+        text_prompts_raw = recipe.get("text_prompts")
+    if positives_raw is None:
+        positives_raw = recipe.get("positives")
+    if negatives_raw is None:
+        negatives_raw = recipe.get("negatives")
+    text_prompts: List[str] = []
+    if isinstance(text_prompts_raw, list):
+        text_prompts = sanitize_prompts_fn([str(p) for p in text_prompts_raw if str(p).strip()])
+    positives_list: List[Dict[str, Any]] = (
+        [p for p in (positives_raw or []) if isinstance(p, dict)] if isinstance(positives_raw, list) else []
+    )
+    negatives_list: List[Dict[str, Any]] = (
+        [n for n in (negatives_raw or []) if isinstance(n, dict)] if isinstance(negatives_raw, list) else []
+    )
+    is_greedy = bool(recipe_body.get("mode") == "sam3_greedy" or text_prompts or positives_list)
+    if not (steps_raw or text_prompts or positives_list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_empty")
+    recipe_dir = recipes_root / recipe_id
+    cleanup_recipe_dir = True
+    try:
+        crops_dir = recipe_dir / "crops"
+        crops_dir.mkdir(parents=True, exist_ok=True)
+        # Optional portable CLIP head artifacts (embedded into the recipe package).
+        clip_head_cfg_raw: Optional[Dict[str, Any]] = None
+        if isinstance(recipe_body.get("clip_head"), dict):
+            clip_head_cfg_raw = recipe_body.get("clip_head")
+        elif isinstance(recipe.get("clip_head"), dict):
+            clip_head_cfg_raw = recipe.get("clip_head")
+
+        clip_head_classifier_path: Optional[str] = None
+        for src in (recipe_body, recipe):
+            if isinstance(src, dict) and isinstance(src.get("_clip_head_classifier_path"), str):
+                clip_head_classifier_path = str(src.get("_clip_head_classifier_path"))
+                break
+
+        clip_head_written = False
+        clip_dir = recipe_dir / "clip_head"
+        head_npz_bytes = None
+        head_meta_bytes = None
+        if clip_head_overrides:
+            head_npz_bytes = clip_head_overrides.get("clip_head/head.npz") or clip_head_overrides.get("head.npz")
+            head_meta_bytes = clip_head_overrides.get("clip_head/meta.json") or clip_head_overrides.get("meta.json")
+        if head_npz_bytes:
+            try:
+                clip_dir.mkdir(parents=True, exist_ok=True)
+                (clip_dir / "head.npz").write_bytes(head_npz_bytes)
+                clip_head_written = True
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"agent_recipe_clip_head_write_failed:{exc}",
+                ) from exc
+        if head_meta_bytes:
+            try:
+                clip_dir.mkdir(parents=True, exist_ok=True)
+                (clip_dir / "meta.json").write_bytes(head_meta_bytes)
+                clip_head_written = True
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"agent_recipe_clip_head_meta_write_failed:{exc}",
+                ) from exc
+        if not clip_head_written and clip_head_classifier_path:
+            resolved_classifier = resolve_clip_classifier_fn(clip_head_classifier_path)
+            if resolved_classifier is not None:
+                head = load_clip_head_fn(resolved_classifier)
+                if head is not None:
+                    min_prob = 0.5
+                    margin = 0.0
+                    if clip_head_cfg_raw:
+                        try:
+                            if clip_head_cfg_raw.get("min_prob") is not None:
+                                min_prob = float(clip_head_cfg_raw.get("min_prob"))
+                            if clip_head_cfg_raw.get("margin") is not None:
+                                margin = float(clip_head_cfg_raw.get("margin"))
+                        except Exception:
+                            min_prob = 0.5
+                            margin = 0.0
+                    save_clip_head_artifacts_fn(recipe_dir=recipe_dir, head=head, min_prob=min_prob, margin=margin)
+                    clip_head_written = True
+
+        clip_head_cfg_clean: Optional[Dict[str, Any]] = None
+        if clip_head_written:
+            loaded = load_clip_head_artifacts_fn(recipe_dir=recipe_dir, fallback_meta=clip_head_cfg_raw)
+            if loaded is not None:
+                min_prob = 0.5
+                margin = 0.0
+                if loaded.get("min_prob") is not None:
+                    try:
+                        min_prob = float(loaded.get("min_prob"))
+                    except Exception:
+                        min_prob = 0.5
+                if loaded.get("margin") is not None:
+                    try:
+                        margin = float(loaded.get("margin"))
+                    except Exception:
+                        margin = 0.0
+                clip_head_cfg_clean = {
+                    "artifact": "clip_head/head.npz",
+                    "clip_model": loaded.get("clip_model"),
+                    "proba_mode": loaded.get("proba_mode"),
+                    "classes": loaded.get("classes") if isinstance(loaded.get("classes"), list) else [],
+                    "min_prob": float(max(0.0, min(1.0, min_prob))),
+                    "margin": float(max(0.0, min(1.0, margin))),
+                }
+                if clip_head_cfg_raw:
+                    if clip_head_cfg_raw.get("auto_tuned") is not None:
+                        clip_head_cfg_clean["auto_tuned"] = bool(clip_head_cfg_raw.get("auto_tuned"))
+                    if clip_head_cfg_raw.get("target_precision") is not None:
+                        try:
+                            clip_head_cfg_clean["target_precision"] = float(clip_head_cfg_raw.get("target_precision"))
+                        except Exception:
+                            pass
+            try:
+                total = 0
+                if clip_dir.exists():
+                    for f in clip_dir.iterdir():
+                        if f.is_file():
+                            total += f.stat().st_size
+                if total > max_clip_head_bytes:
+                    raise HTTPException(
+                        status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="agent_recipe_clip_head_too_large",
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+
+        def _safe_crop_filename(preferred: Optional[str], prefix: str, idx: int) -> str:
+            try:
+                name = Path(str(preferred)).name if preferred else ""
+            except Exception:
+                name = ""
+            if not name:
+                name = f"{prefix}_{idx:03d}.png"
+            if not name.lower().endswith(".png"):
+                name = f"{name}.png"
+            name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+            base, ext = os.path.splitext(name)
+            if not ext:
+                ext = ".png"
+            candidate = f"{base}{ext}"
+            counter = 1
+            while (crops_dir / candidate).exists():
+                counter += 1
+                candidate = f"{base}_{counter}{ext}"
+            return candidate
+
+        def _materialize_crop_entry(
+            entry: Dict[str, Any], *, prefix: str, idx: int, fallback_step_idx: int
+        ) -> Optional[Dict[str, Any]]:
+            """Materialize a crop into crops_dir and return a portable entry dict."""
+            entry_copy = dict(entry)
+            entry_copy.pop("crop_base64", None)
+            crop_key = entry_copy.get("crop_path") or entry_copy.get("path")
+            crop_bytes = None
+            if crop_overrides and crop_key:
+                crop_bytes = crop_overrides.get(str(crop_key))
+                if crop_bytes is None:
+                    try:
+                        crop_bytes = crop_overrides.get(str(Path("crops") / Path(str(crop_key)).name))
+                    except Exception:
+                        crop_bytes = None
+            filename = _safe_crop_filename(str(crop_key) if crop_key else None, prefix, idx)
+            if crop_bytes is not None:
+                crop_path = crops_dir / filename
+                try:
+                    with crop_path.open("wb") as fp:
+                        fp.write(crop_bytes)
+                    entry_copy["crop_path"] = str(Path("crops") / crop_path.name)
+                    entry_copy.pop("path", None)
+                    entry_copy.pop("embed_id", None)
+                    entry_copy.pop("crop_base64", None)
+                    return entry_copy
+                except Exception:
+                    # Fall back to a portable dict without guarantees if write fails.
+                    entry_copy.pop("path", None)
+                    entry_copy.pop("embed_id", None)
+                    entry_copy.pop("crop_base64", None)
+                    return entry_copy
+            enriched = None
+            if images:
+                enriched = save_exemplar_crop_fn(
+                    exemplar=entry_copy,
+                    images=images,
+                    crop_dir=crops_dir,
+                    step_idx=fallback_step_idx,
+                    crop_name=filename,
+                )
+            if enriched is None:
+                entry_copy.pop("path", None)
+                entry_copy.pop("embed_id", None)
+                entry_copy.pop("crop_base64", None)
+                # Ensure crop_path, if present, is made portable.
+                if crop_key:
+                    try:
+                        entry_copy["crop_path"] = str(Path("crops") / Path(str(crop_key)).name)
+                    except Exception:
+                        pass
+                return entry_copy
+            enriched.pop("path", None)
+            enriched.pop("embed_id", None)
+            enriched.pop("crop_base64", None)
+            return enriched
+
+        portable_steps: List[Dict[str, Any]] = []
+        portable_positives: List[Dict[str, Any]] = []
+        portable_negatives: List[Dict[str, Any]] = []
+        for idx, step in enumerate(steps_raw, start=1):
+            entry = dict(step)
+            ex = step.get("exemplar")
+            if ex:
+                enriched = None
+                # Prefer provided crops if present (e.g., imported package), else derive from dataset.
+                crop_key = None
+                if isinstance(ex, dict):
+                    crop_key = ex.get("crop_path")
+                    crop_bytes = None
+                    if crop_overrides and crop_key:
+                        crop_bytes = crop_overrides.get(crop_key)
+                        if crop_bytes is None:
+                            try:
+                                alt_key = str(Path("crops") / Path(crop_key).name)
+                                crop_bytes = crop_overrides.get(alt_key)
+                            except Exception:
+                                crop_bytes = None
+                    if crop_bytes is not None:
+                        crop_path = crops_dir / Path(crop_key).name
+                        try:
+                            with crop_path.open("wb") as fp:
+                                fp.write(crop_bytes)
+                            if crop_path.exists():
+                                pass
+                            enriched = {
+                                **ex,
+                                "crop_path": str(Path("crops") / crop_path.name),
+                            }
+                        except Exception:
+                            enriched = dict(ex)
+                if enriched is None and images and isinstance(ex, dict):
+                    enriched = save_exemplar_crop_fn(exemplar=ex, images=images, crop_dir=crops_dir, step_idx=idx)
+                if enriched is None and isinstance(ex, dict):
+                    enriched = dict(ex)
+                entry["exemplar"] = enriched
+            portable_steps.append(entry)
+
+        # Greedy-mode crop banks.
+        if is_greedy and positives_list:
+            for p_idx, pos in enumerate(positives_list, start=1):
+                enriched_pos = _materialize_crop_entry(pos, prefix="pos", idx=p_idx, fallback_step_idx=2000 + p_idx)
+                if enriched_pos:
+                    portable_positives.append(enriched_pos)
+        for n_idx, neg in enumerate(negatives_list, start=1):
+            enriched_neg = _materialize_crop_entry(neg, prefix="neg", idx=n_idx, fallback_step_idx=3000 + n_idx)
+            if enriched_neg:
+                portable_negatives.append(enriched_neg)
+
+        def _normalize_crop_path(path_str: Optional[str]) -> Optional[str]:
+            if not path_str:
+                return None
+            try:
+                return str(Path("crops") / Path(path_str).name)
+            except Exception:
+                return None
+
+        # Normalize crop paths in steps and negatives for portability.
+        for entry in portable_steps:
+            ex = entry.get("exemplar")
+            if isinstance(ex, dict) and ex.get("crop_path"):
+                normalized = _normalize_crop_path(ex.get("crop_path"))
+                if normalized:
+                    ex["crop_path"] = normalized
+                ex.pop("path", None)
+                ex.pop("crop_base64", None)
+        for entry in portable_positives:
+            if isinstance(entry, dict) and entry.get("crop_path"):
+                normalized = _normalize_crop_path(entry.get("crop_path"))
+                if normalized:
+                    entry["crop_path"] = normalized
+                entry.pop("path", None)
+                entry.pop("crop_base64", None)
+        for neg in portable_negatives:
+            if isinstance(neg, dict) and neg.get("crop_path"):
+                normalized = _normalize_crop_path(neg.get("crop_path"))
+                if normalized:
+                    neg["crop_path"] = normalized
+                neg.pop("path", None)
+                neg.pop("crop_base64", None)
+
+        # Enforce crop count/byte limits after all crops are materialized.
+        def _assert_crop_limits() -> None:
+            if not crops_dir.exists():
+                return
+            count = 0
+            total = 0
+            try:
+                for cf in crops_dir.glob("*.png"):
+                    count += 1
+                    try:
+                        total += cf.stat().st_size
+                    except Exception:
+                        continue
+                if count > max_crops or total > max_crop_bytes:
+                    raise HTTPException(
+                        status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="agent_recipe_crops_too_large",
+                    )
+            except HTTPException as exc:
+                raise exc
+
+        _assert_crop_limits()
+
+        params_src = recipe_body.get("params")
+        if not isinstance(params_src, dict):
+            params_src = recipe.get("params") if isinstance(recipe.get("params"), dict) else None
+        params = params_src or {
+            "mask_threshold": recipe_body.get("mask_threshold", recipe.get("mask_threshold")),
+            "min_size": recipe_body.get("min_size", recipe.get("min_size")),
+            "simplify_epsilon": recipe_body.get("simplify_epsilon", recipe.get("simplify_epsilon")),
+            "max_results": recipe_body.get("max_results", recipe.get("max_results")),
+            "similarity_score": recipe_body.get("similarity_score", recipe.get("similarity_score")),
+            "seed_threshold": recipe_body.get("seed_threshold", recipe.get("seed_threshold")),
+            "expand_threshold": recipe_body.get("expand_threshold", recipe.get("expand_threshold")),
+            "max_visual_seeds": recipe_body.get("max_visual_seeds", recipe.get("max_visual_seeds")),
+            "seed_dedupe_iou": recipe_body.get("seed_dedupe_iou", recipe.get("seed_dedupe_iou")),
+            "dedupe_iou": recipe_body.get("dedupe_iou", recipe.get("dedupe_iou")),
+            "use_clip_fp_guard": recipe_body.get("use_clip_fp_guard", recipe.get("use_clip_fp_guard")),
+            "use_negative_exemplars": recipe_body.get("use_negative_exemplars", recipe.get("use_negative_exemplars")),
+            "negative_strength": recipe_body.get("negative_strength", recipe.get("negative_strength")),
+            "clip_head_background_guard": recipe_body.get(
+                "clip_head_background_guard", recipe.get("clip_head_background_guard")
+            ),
+            "clip_head_background_margin": recipe_body.get(
+                "clip_head_background_margin", recipe.get("clip_head_background_margin")
+            ),
+            "clip_head_background_apply": recipe_body.get(
+                "clip_head_background_apply", recipe.get("clip_head_background_apply")
+            ),
+            "clip_head_background_penalty": recipe_body.get(
+                "clip_head_background_penalty", recipe.get("clip_head_background_penalty")
+            ),
+        }
+        if isinstance(params, dict) and "clip_head_background_guard" not in params:
+            params["clip_head_background_guard"] = recipe_body.get(
+                "clip_head_background_guard", recipe.get("clip_head_background_guard")
+            )
+        if isinstance(params, dict) and "clip_head_background_margin" not in params:
+            params["clip_head_background_margin"] = recipe_body.get(
+                "clip_head_background_margin", recipe.get("clip_head_background_margin")
+            )
+        if isinstance(params, dict) and "clip_head_background_apply" not in params:
+            params["clip_head_background_apply"] = recipe_body.get(
+                "clip_head_background_apply", recipe.get("clip_head_background_apply")
+            )
+        if isinstance(params, dict) and "clip_head_background_penalty" not in params:
+            params["clip_head_background_penalty"] = recipe_body.get(
+                "clip_head_background_penalty", recipe.get("clip_head_background_penalty")
+            )
+        thresholds = sorted({float(s.get("threshold", 0.0)) for s in portable_steps if s.get("threshold") is not None})
+        if thresholds:
+            params["thresholds"] = thresholds
+        schema_version_out: Optional[int] = None
+        try:
+            schema_version_out = int(recipe_body.get("schema_version")) if recipe_body.get("schema_version") is not None else None
+        except Exception:
+            schema_version_out = None
+        mode_out: Optional[str] = recipe_body.get("mode") if isinstance(recipe_body.get("mode"), str) else None
+        if recipe_mode == "sam3_steps":
+            schema_version_out = 2
+            mode_out = "sam3_steps"
+        elif is_greedy:
+            mode_out = mode_out or "sam3_greedy"
+        optimizer_raw: Optional[Dict[str, Any]] = None
+        for src in (recipe_body, recipe):
+            if isinstance(src, dict) and isinstance(src.get("optimizer"), dict):
+                optimizer_raw = src.get("optimizer")  # type: ignore[assignment]
+                break
+        optimizer_clean: Optional[Dict[str, Any]] = dict(optimizer_raw) if isinstance(optimizer_raw, dict) else None
+        payload = {
+            "id": recipe_id,
+            "dataset_id": dataset_id,
+            "dataset_signature": dataset_signature,
+            "labelmap_hash": labelmap_hash,
+            "labelmap": labelmap_entries,
+            "class_id": class_id,
+            "class_name": class_name,
+            "label": cleaned_label,
+            "created_at": time.time(),
+            "params": params,
+            "recipe": {
+                "schema_version": schema_version_out,
+                "mode": mode_out,
+                "text_prompts": text_prompts if text_prompts else None,
+                "positives": portable_positives if portable_positives else None,
+                "steps": portable_steps,
+                "negatives": portable_negatives,
+                "clip_head": clip_head_cfg_clean,
+                "optimizer": optimizer_clean,
+                "summary": recipe_body.get("summary") or recipe.get("summary"),
+            },
+        }
+        path = (recipes_root / f"{recipe_id}.json").resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path_is_within_root_fn(path, recipes_root.resolve()):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+        try:
+            with path.open("w", encoding="utf-8") as fp:
+                json.dump(payload, fp, ensure_ascii=False, indent=2)
+            # Persist a portable zip alongside the JSON for download.
+            zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("recipe.json", json.dumps(payload, ensure_ascii=False, indent=2))
+                if crops_dir.exists():
+                    for crop_file in crops_dir.glob("*.png"):
+                        try:
+                            zf.write(crop_file, arcname=f"crops/{crop_file.name}")
+                        except Exception:
+                            continue
+                clip_dir = recipe_dir / "clip_head"
+                if clip_dir.exists():
+                    for artifact in clip_dir.iterdir():
+                        try:
+                            if not artifact.is_file():
+                                continue
+                            if artifact.name not in {"head.npz", "meta.json"}:
+                                continue
+                            zf.write(artifact, arcname=f"clip_head/{artifact.name}")
+                        except Exception:
+                            continue
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"agent_recipe_save_failed:{exc}",
+            ) from exc
+        payload["_path"] = str(path)
+        payload["_zip"] = str((recipes_root / f"{recipe_id}.zip").resolve())
+        cleanup_recipe_dir = False
+        return payload
+    finally:
+        if cleanup_recipe_dir:
+            try:
+                shutil.rmtree(recipe_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
+def _load_agent_recipe_impl(
+    recipe_id: str,
+    *,
+    recipes_root: Path,
+    path_is_within_root_fn,
+) -> Dict[str, Any]:
+    path = (recipes_root / f"{recipe_id}.json").resolve()
+    if not path_is_within_root_fn(path, recipes_root.resolve()) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        if not isinstance(data.get("recipe"), dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        _validate_agent_recipe_structure(data.get("recipe") or {})
+        data["_path"] = str(path)
+        zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+        if zip_path.exists():
+            data["_zip"] = str(zip_path)
+        # Inline a small number of crop previews if present on disk (kept small so
+        # /agent_mining/apply_image payloads don't explode when the UI forwards recipes).
+        recipe_block = data.get("recipe") or {}
+        recipe_dir = (recipes_root / recipe_id).resolve()
+        if not path_is_within_root_fn(recipe_dir, recipes_root.resolve()):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+        crop_dir = (recipe_dir / "crops").resolve()
+        if not path_is_within_root_fn(crop_dir, recipe_dir):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+        max_inline = 8
+        inlined = 0
+
+        def _inline_crop(entry: Dict[str, Any]) -> None:
+            nonlocal inlined
+            if inlined >= max_inline:
+                return
+            crop_path = entry.get("crop_path")
+            if not crop_path or not isinstance(crop_path, str):
+                return
+            try:
+                crop_name = Path(crop_path).name
+            except Exception:
+                crop_name = ""
+            abs_path = (crop_dir / crop_name).resolve() if crop_name else None
+            if abs_path and path_is_within_root_fn(abs_path, crop_dir) and abs_path.exists() and abs_path.is_file():
+                try:
+                    with abs_path.open("rb") as cfp:
+                        b64 = base64.b64encode(cfp.read()).decode("ascii")
+                    entry["crop_base64"] = f"data:image/png;base64,{b64}"
+                    entry["crop_path"] = str(Path("crops") / crop_name)
+                    inlined += 1
+                except Exception:
+                    return
+            else:
+                # Normalize to relative path in case it was absolute originally.
+                try:
+                    entry["crop_path"] = f"crops/{Path(crop_path).name}"
+                except Exception:
+                    return
+
+        steps = recipe_block.get("steps") or []
+        if isinstance(steps, list):
+            for step in steps:
+                ex = step.get("exemplar") if isinstance(step, dict) else None
+                if isinstance(ex, dict):
+                    _inline_crop(ex)
+        positives = recipe_block.get("positives") or []
+        if isinstance(positives, list):
+            for ex in positives:
+                if isinstance(ex, dict):
+                    _inline_crop(ex)
+        negatives = recipe_block.get("negatives") or []
+        if isinstance(negatives, list):
+            for ex in negatives:
+                if isinstance(ex, dict):
+                    _inline_crop(ex)
+        return data
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_load_failed:{exc}") from exc
+
+
+def _load_agent_recipe_json_only_impl(
+    recipe_id: str,
+    *,
+    recipes_root: Path,
+    path_is_within_root_fn,
+) -> Dict[str, Any]:
+    """Load an agent recipe payload without inlining crop_base64 blobs (suitable for inference/export)."""
+    path = (recipes_root / f"{recipe_id}.json").resolve()
+    if not path_is_within_root_fn(path, recipes_root.resolve()) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
+        data["_path"] = str(path)
+        zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+        if zip_path.exists():
+            data["_zip"] = str(zip_path)
+        return data
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_load_failed:{exc}") from exc
+
+
+def _ensure_recipe_zip_impl(
+    recipe: Dict[str, Any],
+    *,
+    recipes_root: Path,
+) -> Path:
+    recipe_id = recipe.get("id")
+    if not recipe_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_missing_id")
+    zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+    if zip_path.exists():
+        return zip_path
+    recipe_dir = recipes_root / recipe_id
+    crops_dir = recipe_dir / "crops"
+    clip_head_dir = recipe_dir / "clip_head"
+    try:
+        # Never embed crop_base64 blobs inside the portable zip JSON; the PNGs are included separately.
+        def _strip_unportable_fields(obj: Any) -> None:
+            if isinstance(obj, dict):
+                # UI-only / internal fields should not ship in portable zips.
+                for k in list(obj.keys()):
+                    if isinstance(k, str) and k.startswith("_"):
+                        obj.pop(k, None)
+                obj.pop("crop_base64", None)
+                for v in obj.values():
+                    _strip_unportable_fields(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    _strip_unportable_fields(v)
+
+        clean_recipe = json.loads(json.dumps(recipe))
+        _strip_unportable_fields(clean_recipe)
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("recipe.json", json.dumps(clean_recipe, ensure_ascii=False, indent=2))
+            if crops_dir.exists():
+                for crop_file in crops_dir.glob("*.png"):
+                    try:
+                        zf.write(crop_file, arcname=f"crops/{crop_file.name}")
+                    except Exception:
+                        continue
+            if clip_head_dir.exists():
+                for artifact in clip_head_dir.iterdir():
+                    try:
+                        if not artifact.is_file():
+                            continue
+                        if artifact.name not in {"head.npz", "meta.json"}:
+                            continue
+                        zf.write(artifact, arcname=f"clip_head/{artifact.name}")
+                    except Exception:
+                        continue
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_zip_failed:{exc}") from exc
+    return zip_path

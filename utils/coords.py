@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple, List
 
 
 def _xyxy_to_qwen_bbox(width: int, height: int, x1: float, y1: float, x2: float, y2: float) -> Tuple[float, float, float, float]:
@@ -117,3 +117,78 @@ def _agent_iou_xyxy(box_a: Sequence[float], box_b: Sequence[float]) -> float:
     area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
     denom = area_a + area_b - inter
     return inter / denom if denom > 0 else 0.0
+
+
+def _agent_round_bbox_2d(bbox: Any) -> Optional[List[float]]:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        return [round(float(v), 1) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_clip_xyxy(
+    xyxy: Optional[Tuple[float, float, float, float]],
+    img_w: int,
+    img_h: int,
+) -> Optional[Tuple[float, float, float, float]]:
+    if not xyxy:
+        return None
+    x1, y1, x2, y2 = xyxy
+    x1 = max(0.0, min(float(img_w), float(x1)))
+    y1 = max(0.0, min(float(img_h), float(y1)))
+    x2 = max(0.0, min(float(img_w), float(x2)))
+    y2 = max(0.0, min(float(img_h), float(y2)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _agent_expand_window_xyxy(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    img_w: int,
+    img_h: int,
+    min_size: int,
+) -> Tuple[Tuple[float, float, float, float], bool]:
+    width = max(0.0, x2 - x1)
+    height = max(0.0, y2 - y1)
+    target_w = max(width, float(min_size))
+    target_h = max(height, float(min_size))
+    if target_w > img_w:
+        target_w = float(img_w)
+    if target_h > img_h:
+        target_h = float(img_h)
+    expanded = target_w > width or target_h > height
+    if not expanded:
+        return (x1, y1, x2, y2), False
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    nx1 = cx - target_w / 2.0
+    nx2 = cx + target_w / 2.0
+    ny1 = cy - target_h / 2.0
+    ny2 = cy + target_h / 2.0
+    if nx1 < 0.0:
+        nx2 -= nx1
+        nx1 = 0.0
+    if nx2 > img_w:
+        nx1 -= nx2 - img_w
+        nx2 = float(img_w)
+    if ny1 < 0.0:
+        ny2 -= ny1
+        ny1 = 0.0
+    if ny2 > img_h:
+        ny1 -= ny2 - img_h
+        ny2 = float(img_h)
+    nx1 = max(0.0, min(float(img_w), nx1))
+    nx2 = max(0.0, min(float(img_w), nx2))
+    ny1 = max(0.0, min(float(img_h), ny1))
+    ny2 = max(0.0, min(float(img_h), ny2))
+    return (nx1, ny1, nx2, ny2), True
+
+
+def _agent_xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> List[float]:
+    return [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]

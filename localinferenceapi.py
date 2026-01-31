@@ -56,6 +56,9 @@ from utils.labels import (
     _normalize_class_name_for_match,
     _normalize_labelmap_entries,
     _agent_label_prefix_candidates,
+    _agent_label_color_map,
+    _agent_label_prefix_map,
+    _agent_overlay_key_text,
 )
 from utils.parsing import (
     _coerce_int,
@@ -119,6 +122,10 @@ from utils.coords import (
     _window_bbox_2d_to_full_xyxy,
     _window_local_bbox_2d_to_full_xyxy,
     _window_local_xyxy_to_full_xyxy,
+    _agent_round_bbox_2d,
+    _agent_clip_xyxy,
+    _agent_expand_window_xyxy,
+    _agent_xyxy_to_xywh,
     _agent_iou_xyxy,
 )
 from collections import OrderedDict
@@ -6508,47 +6515,6 @@ def _agent_compact_tool_response(tool_result: AgentToolResult) -> Dict[str, Any]
     return compact
 
 
-def _agent_label_color_map(labelmap: Sequence[str]) -> Dict[str, str]:
-    colors: Dict[str, str] = {}
-    if not labelmap:
-        return colors
-    golden = 0.61803398875
-    for idx, label in enumerate(labelmap):
-        name = str(label).strip()
-        if not name:
-            continue
-        hue = (idx * golden) % 1.0
-        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.9)
-        colors[name] = f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
-    return colors
-
-
-def _agent_label_prefix_map(labels: Sequence[str]) -> Dict[str, str]:
-    prefixes: Dict[str, str] = {}
-    used: Set[str] = set()
-    for label in labels:
-        label_str = str(label or "").strip()
-        if not label_str:
-            continue
-        candidates = _agent_label_prefix_candidates(label_str)
-        chosen = None
-        for cand in candidates:
-            if cand not in used:
-                chosen = cand
-                break
-        if chosen is None:
-            base = candidates[0] if candidates else "X"
-            base = re.sub(r"[^A-Za-z0-9]+", "", base).upper() or "X"
-            idx = 1
-            chosen = f"{base}{idx}"
-            while chosen in used:
-                idx += 1
-                chosen = f"{base}{idx}"
-        prefixes[label_str] = chosen
-        used.add(chosen)
-    return prefixes
-
-
 def _agent_current_label_colors(labels: Sequence[str]) -> Dict[str, str]:
     global _AGENT_ACTIVE_LABEL_COLORS
     if _AGENT_ACTIVE_LABEL_COLORS:
@@ -6641,22 +6607,6 @@ def _agent_cluster_ids_from_handles(handles: Sequence[str]) -> List[int]:
         if cid is not None:
             ids.append(int(cid))
     return ids
-
-
-def _agent_overlay_key_text(
-    label_colors: Mapping[str, str],
-    label_prefixes: Optional[Mapping[str, str]] = None,
-) -> str:
-    if not label_colors:
-        return ""
-    lines: List[str] = []
-    for label, color in label_colors.items():
-        prefix = label_prefixes.get(label) if label_prefixes else None
-        if prefix:
-            lines.append(f"{label} ({prefix}) -> {color}")
-        else:
-            lines.append(f"{label} -> {color}")
-    return "\n".join(lines)
 
 
 def _agent_detection_center_px(det: Dict[str, Any], img_w: int, img_h: int) -> Optional[Tuple[float, float]]:
@@ -6897,15 +6847,6 @@ def _agent_cluster_label_counts(cluster_ids: Sequence[int]) -> Dict[str, int]:
             continue
         counts[label] = counts.get(label, 0) + 1
     return counts
-
-
-def _agent_round_bbox_2d(bbox: Any) -> Optional[List[float]]:
-    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-        return None
-    try:
-        return [round(float(v), 1) for v in bbox[:4]]
-    except (TypeError, ValueError):
-        return None
 
 
 def _agent_cluster_summaries(
@@ -7346,23 +7287,6 @@ def _agent_context_chunk(
     }
 
 
-def _agent_clip_xyxy(
-    xyxy: Optional[Tuple[float, float, float, float]],
-    img_w: int,
-    img_h: int,
-) -> Optional[Tuple[float, float, float, float]]:
-    if not xyxy:
-        return None
-    x1, y1, x2, y2 = xyxy
-    x1 = max(0.0, min(float(img_w), float(x1)))
-    y1 = max(0.0, min(float(img_h), float(y1)))
-    x2 = max(0.0, min(float(img_w), float(x2)))
-    y2 = max(0.0, min(float(img_h), float(y2)))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return x1, y1, x2, y2
-
-
 def _agent_overlay_crop_xyxy(
     tool_args: Mapping[str, Any],
     tool_result: Any,
@@ -7432,55 +7356,6 @@ def _agent_overlay_crop_xyxy(
         return _agent_clip_xyxy(xyxy, img_w, img_h)
 
     return None
-
-
-def _agent_expand_window_xyxy(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    img_w: int,
-    img_h: int,
-    min_size: int,
-) -> Tuple[Tuple[float, float, float, float], bool]:
-    width = max(0.0, x2 - x1)
-    height = max(0.0, y2 - y1)
-    target_w = max(width, float(min_size))
-    target_h = max(height, float(min_size))
-    if target_w > img_w:
-        target_w = float(img_w)
-    if target_h > img_h:
-        target_h = float(img_h)
-    expanded = target_w > width or target_h > height
-    if not expanded:
-        return (x1, y1, x2, y2), False
-    cx = (x1 + x2) / 2.0
-    cy = (y1 + y2) / 2.0
-    nx1 = cx - target_w / 2.0
-    nx2 = cx + target_w / 2.0
-    ny1 = cy - target_h / 2.0
-    ny2 = cy + target_h / 2.0
-    if nx1 < 0.0:
-        nx2 -= nx1
-        nx1 = 0.0
-    if nx2 > img_w:
-        nx1 -= nx2 - img_w
-        nx2 = float(img_w)
-    if ny1 < 0.0:
-        ny2 -= ny1
-        ny1 = 0.0
-    if ny2 > img_h:
-        ny1 -= ny2 - img_h
-        ny2 = float(img_h)
-    nx1 = max(0.0, min(float(img_w), nx1))
-    nx2 = max(0.0, min(float(img_w), nx2))
-    ny1 = max(0.0, min(float(img_h), ny1))
-    ny2 = max(0.0, min(float(img_h), ny2))
-    return (nx1, ny1, nx2, ny2), True
-
-
-def _agent_xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> List[float]:
-    return [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
 
 
 def _agent_merge_detections(

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Sequence, Union
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Union
 import re
+import colorsys
 
 import joblib
 from fastapi import HTTPException
@@ -74,6 +75,63 @@ def _agent_label_prefix_candidates(label: str) -> List[str]:
         uniq.append(cand)
         seen.add(cand)
     return uniq
+
+
+def _agent_label_color_map(labelmap: Sequence[str]) -> Dict[str, str]:
+    colors: Dict[str, str] = {}
+    if not labelmap:
+        return colors
+    golden = 0.61803398875
+    for idx, label in enumerate(labelmap):
+        name = str(label).strip()
+        if not name:
+            continue
+        hue = (idx * golden) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.9)
+        colors[name] = f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
+    return colors
+
+
+def _agent_label_prefix_map(labels: Sequence[str]) -> Dict[str, str]:
+    prefixes: Dict[str, str] = {}
+    used: Set[str] = set()
+    for label in labels:
+        label_str = str(label or "").strip()
+        if not label_str:
+            continue
+        candidates = _agent_label_prefix_candidates(label_str)
+        chosen = None
+        for cand in candidates:
+            if cand not in used:
+                chosen = cand
+                break
+        if chosen is None:
+            base = candidates[0] if candidates else "X"
+            base = re.sub(r"[^A-Za-z0-9]+", "", base).upper() or "X"
+            idx = 1
+            chosen = f"{base}{idx}"
+            while chosen in used:
+                idx += 1
+                chosen = f"{base}{idx}"
+        prefixes[label_str] = chosen
+        used.add(chosen)
+    return prefixes
+
+
+def _agent_overlay_key_text(
+    label_colors: Mapping[str, str],
+    label_prefixes: Optional[Mapping[str, str]] = None,
+) -> str:
+    if not label_colors:
+        return ""
+    lines: List[str] = []
+    for label, color in label_colors.items():
+        prefix = label_prefixes.get(label) if label_prefixes else None
+        if prefix:
+            lines.append(f\"{label} ({prefix}) -> {color}\")
+        else:
+            lines.append(f\"{label} -> {color}\")
+    return \"\\n\".join(lines)
 
 
 def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = False) -> List[str]:

@@ -64,6 +64,7 @@ from utils.labels import (
 from utils.classifier_utils import (
     _is_background_class_name,
     _clip_head_background_indices,
+    _agent_background_classes_from_head,
     _find_clip_head_target_index,
 )
 from utils.parsing import (
@@ -6061,14 +6062,6 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
         }
     )
     return AgentToolResult(name=call.name, result=result or {})
-
-
-def _agent_background_classes_from_head(head: Optional[Dict[str, Any]]) -> List[str]:
-    if not isinstance(head, dict):
-        return []
-    classes = [str(c) for c in list(head.get("classes") or [])]
-    indices = _clip_head_background_indices(classes)
-    return [classes[idx] for idx in indices if 0 <= idx < len(classes)]
 
 
 def _agent_load_labelmap(dataset_id: Optional[str]) -> List[str]:

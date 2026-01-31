@@ -113,6 +113,7 @@ from services.prepass import (
     _agent_format_source_counts,
     _agent_label_counts_summary,
     _agent_compact_tool_result,
+    _agent_select_similarity_exemplars as _agent_select_similarity_exemplars_impl,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import (
@@ -10644,34 +10645,11 @@ def _agent_select_similarity_exemplars(
     trace_readable: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     min_score = float(payload.similarity_min_exemplar_score or 0.6)
-    by_label: Dict[str, List[Dict[str, Any]]] = {}
-    for det in detections:
-        if not isinstance(det, dict):
-            continue
-        label = str(det.get("label") or det.get("class_name") or "").strip()
-        if not label:
-            continue
-        by_label.setdefault(label, []).append(det)
-    selections: Dict[str, List[Dict[str, Any]]] = {}
-    for label, dets in by_label.items():
-        dets_sorted = sorted(dets, key=lambda d: float(d.get("score") or 0.0), reverse=True)
-        high = [d for d in dets_sorted if float(d.get("score") or 0.0) >= min_score]
-        chosen: List[Dict[str, Any]] = []
-        if high:
-            chosen.extend(high[:3])
-        if chosen:
-            selections[label] = chosen
-            if trace_readable:
-                handles = []
-                for det in chosen:
-                    handle = det.get("handle")
-                    if handle:
-                        handles.append(str(handle))
-                handle_text = ", ".join(handles) if handles else "n/a"
-                trace_readable(
-                    f"deep_prepass similarity exemplars label={label} count={len(chosen)} handles={handle_text}"
-                )
-    return selections
+    return _agent_select_similarity_exemplars_impl(
+        min_score,
+        detections=detections,
+        trace_readable=trace_readable,
+    )
 
 
 def _run_prepass_annotation_qwen(

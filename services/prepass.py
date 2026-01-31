@@ -217,3 +217,39 @@ def _agent_cluster_match(
         if _agent_iou_xyxy(bbox, cluster_bbox) >= iou_thr:
             return cluster
     return None
+
+
+def _agent_select_similarity_exemplars(
+    min_score: float,
+    *,
+    detections: List[Dict[str, Any]],
+    trace_readable: Optional[Any] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    by_label: Dict[str, List[Dict[str, Any]]] = {}
+    for det in detections:
+        if not isinstance(det, dict):
+            continue
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        if not label:
+            continue
+        by_label.setdefault(label, []).append(det)
+    selections: Dict[str, List[Dict[str, Any]]] = {}
+    for label, dets in by_label.items():
+        dets_sorted = sorted(dets, key=lambda d: float(d.get("score") or 0.0), reverse=True)
+        high = [d for d in dets_sorted if float(d.get("score") or 0.0) >= min_score]
+        chosen: List[Dict[str, Any]] = []
+        if high:
+            chosen.extend(high[:3])
+        if chosen:
+            selections[label] = chosen
+            if trace_readable:
+                handles = []
+                for det in chosen:
+                    handle = det.get("handle")
+                    if handle:
+                        handles.append(str(handle))
+                handle_text = ", ".join(handles) if handles else "n/a"
+                trace_readable(
+                    f"deep_prepass similarity exemplars label={label} count={len(chosen)} handles={handle_text}"
+                )
+    return selections

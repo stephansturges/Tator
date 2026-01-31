@@ -156,6 +156,8 @@ from services.detector_jobs import (
 )
 from services.qwen_jobs import (
     _log_qwen_get_request_impl as _log_qwen_get_request_impl,
+    _qwen_job_log_impl as _qwen_job_log_impl,
+    _qwen_job_update_impl as _qwen_job_update_impl,
     _serialize_qwen_job_impl as _serialize_qwen_job_impl,
 )
 from services.sam3_jobs import _serialize_sam3_job_impl as _serialize_sam3_job_impl
@@ -10526,15 +10528,7 @@ def _job_update(job: ClipTrainingJob, *, status: Optional[str] = None, message: 
 
 
 def _qwen_job_log(job: QwenTrainingJob, message: str) -> None:
-    entry = {"timestamp": time.time(), "message": message}
-    job.logs.append(entry)
-    if len(job.logs) > MAX_JOB_LOGS:
-        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-    job.updated_at = time.time()
-    try:
-        logger.info("[qwen-train %s] %s", job.job_id[:8], message)
-    except Exception:
-        pass
+    _qwen_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
 
 
 def _qwen_job_update(
@@ -10547,22 +10541,17 @@ def _qwen_job_update(
     result: Optional[Dict[str, Any]] = None,
     log_message: bool = True,
 ) -> None:
-    if status is not None:
-        job.status = status
-    if message is not None:
-        if message != job.message:
-            job.message = message
-            if log_message:
-                _qwen_job_log(job, message)
-        else:
-            job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if result is not None:
-        job.result = result
-    job.updated_at = time.time()
+    _qwen_job_update_impl(
+        job,
+        status=status,
+        message=message,
+        progress=progress,
+        error=error,
+        result=result,
+        log_message=log_message,
+        max_logs=MAX_JOB_LOGS,
+        logger=logger,
+    )
 
 
 def _serialize_job(job: ClipTrainingJob) -> Dict[str, Any]:

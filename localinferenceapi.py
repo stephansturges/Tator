@@ -298,7 +298,11 @@ from services.qwen import (
     _resolve_qwen_window_size as _resolve_qwen_window_size_impl,
     _resolve_qwen_window_overlap as _resolve_qwen_window_overlap_impl,
 )
-from services.detectors import _agent_tool_run_detector_impl as _agent_tool_run_detector_impl
+from services.detectors import (
+    _agent_tool_run_detector_impl as _agent_tool_run_detector_impl,
+    _ensure_yolo_inference_runtime_impl as _ensure_yolo_inference_runtime_impl,
+    _ensure_rfdetr_inference_runtime_impl as _ensure_rfdetr_inference_runtime_impl,
+)
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -9963,6 +9967,34 @@ rfdetr_infer_path: Optional[str] = None
 rfdetr_infer_labelmap: List[str] = []
 rfdetr_infer_task: Optional[str] = None
 rfdetr_infer_variant: Optional[str] = None
+
+
+def _set_yolo_infer_state(
+    model: Any,
+    path: Optional[str],
+    labelmap: List[str],
+    task: Optional[str],
+) -> None:
+    global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
+    yolo_infer_model = model
+    yolo_infer_path = path
+    yolo_infer_labelmap = labelmap
+    yolo_infer_task = task
+
+
+def _set_rfdetr_infer_state(
+    model: Any,
+    path: Optional[str],
+    labelmap: List[str],
+    task: Optional[str],
+    variant: Optional[str],
+) -> None:
+    global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
+    rfdetr_infer_model = model
+    rfdetr_infer_path = path
+    rfdetr_infer_labelmap = labelmap
+    rfdetr_infer_task = task
+    rfdetr_infer_variant = variant
 YOLO_VARIANTS = [
     {"id": "yolov8n", "label": "YOLOv8 Nano", "task": "detect"},
     {"id": "yolov8s", "label": "YOLOv8 Small", "task": "detect"},
@@ -12815,62 +12847,32 @@ def _yolo_detect_layer_index(model: Any) -> int:
 
 def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
-    active = _load_yolo_active()
-    if not isinstance(active, dict):
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_active_missing")
-    best_path = active.get("best_path")
-    if not best_path:
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_active_missing")
-    labelmap_path = active.get("labelmap_path")
-    task = active.get("task")
-    with YOLO_INFER_LOCK:
-        if yolo_infer_model is not None and yolo_infer_path == best_path:
-            return yolo_infer_model, yolo_infer_labelmap, yolo_infer_task
-        try:
-            from ultralytics import YOLO  # type: ignore
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"yolo_unavailable:{exc}") from exc
-        _patch_ultralytics_for_head_grafting()
-        model = YOLO(best_path)
-        labelmap = _yolo_load_labelmap(Path(labelmap_path)) if labelmap_path else []
-        resolved_task = task or getattr(model, "task", None)
-        yolo_infer_model = model
-        yolo_infer_path = best_path
-        yolo_infer_labelmap = labelmap
-        yolo_infer_task = resolved_task
-        return model, labelmap, resolved_task
+    return _ensure_yolo_inference_runtime_impl(
+        load_active_fn=_load_yolo_active,
+        load_labelmap_fn=_yolo_load_labelmap,
+        patch_ultralytics_fn=_patch_ultralytics_for_head_grafting,
+        yolo_lock=YOLO_INFER_LOCK,
+        get_state_fn=lambda: (yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task),
+        set_state_fn=lambda model, path, labelmap, task: _set_yolo_infer_state(model, path, labelmap, task),
+        import_yolo_fn=lambda: __import__("ultralytics").YOLO,  # type: ignore[attr-defined]
+        http_exception_cls=HTTPException,
+    )
 
 
 def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
-    active = _load_rfdetr_active()
-    if not isinstance(active, dict):
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing")
-    best_path = active.get("best_path")
-    if not best_path:
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing")
-    if not Path(best_path).exists():
-        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing_weights")
-    labelmap_path = active.get("labelmap_path")
-    task = active.get("task") or "detect"
-    variant = active.get("variant")
-    with RFDETR_INFER_LOCK:
-        if rfdetr_infer_model is not None and rfdetr_infer_path == best_path:
-            return rfdetr_infer_model, rfdetr_infer_labelmap, rfdetr_infer_task
-        try:
-            from rfdetr import (
-                RFDETRBase,
-                RFDETRLarge,
-                RFDETRNano,
-                RFDETRSmall,
-                RFDETRMedium,
-                RFDETRSegPreview,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"rfdetr_unavailable:{exc}") from exc
-        variant_info = _rfdetr_variant_info(task, variant)
-        variant_id = variant_info.get("id")
-        model_cls_map = {
+
+    def _import_rfdetr() -> Dict[str, Any]:
+        from rfdetr import (  # type: ignore
+            RFDETRBase,
+            RFDETRLarge,
+            RFDETRNano,
+            RFDETRSmall,
+            RFDETRMedium,
+            RFDETRSegPreview,
+        )
+
+        return {
             "rfdetr-nano": RFDETRNano,
             "rfdetr-small": RFDETRSmall,
             "rfdetr-medium": RFDETRMedium,
@@ -12878,28 +12880,27 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
             "rfdetr-large": RFDETRLarge,
             "rfdetr-seg-preview": RFDETRSegPreview,
         }
-        model_cls = model_cls_map.get(variant_id)
-        if not model_cls:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_variant_unknown")
-        model_kwargs: Dict[str, Any] = {
-            "pretrain_weights": best_path,
-            "device": "cuda" if torch.cuda.is_available() else "cpu",
-        }
-        if variant_id == "rfdetr-seg-preview" or task == "segment":
-            model_kwargs["segmentation_head"] = True
-        model = model_cls(**model_kwargs)
-        labelmap = _yolo_load_labelmap(Path(labelmap_path)) if labelmap_path else []
-        if labelmap:
-            try:
-                model.model.class_names = labelmap
-            except Exception:
-                pass
-        rfdetr_infer_model = model
-        rfdetr_infer_path = best_path
-        rfdetr_infer_labelmap = labelmap
-        rfdetr_infer_task = task
-        rfdetr_infer_variant = variant_id
-        return model, labelmap, task
+
+    return _ensure_rfdetr_inference_runtime_impl(
+        load_active_fn=_load_rfdetr_active,
+        load_labelmap_fn=_yolo_load_labelmap,
+        variant_info_fn=_rfdetr_variant_info,
+        rfdetr_lock=RFDETR_INFER_LOCK,
+        get_state_fn=lambda: (
+            rfdetr_infer_model,
+            rfdetr_infer_path,
+            rfdetr_infer_labelmap,
+            rfdetr_infer_task,
+            rfdetr_infer_variant,
+        ),
+        set_state_fn=lambda model, path, labelmap, task, variant_id: _set_rfdetr_infer_state(
+            model, path, labelmap, task, variant_id
+        ),
+        import_rfdetr_fn=_import_rfdetr,
+        http_exception_cls=HTTPException,
+        torch_available=torch.cuda.is_available,
+        resolve_device_fn=lambda: "cuda" if torch.cuda.is_available() else "cpu",
+    )
 
 
 def _yolo_build_aug_args(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:

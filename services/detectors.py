@@ -1,6 +1,96 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+
+def _ensure_yolo_inference_runtime_impl(
+    *,
+    load_active_fn: Callable[[], Dict[str, Any]],
+    load_labelmap_fn: Callable[[Any], List[str]],
+    patch_ultralytics_fn: Callable[[], None],
+    yolo_lock: Any,
+    get_state_fn: Callable[[], Tuple[Any, Optional[str], List[str], Optional[str]]],
+    set_state_fn: Callable[[Any, Optional[str], List[str], Optional[str]], None],
+    import_yolo_fn: Callable[[], Any],
+    http_exception_cls: Any,
+) -> Tuple[Any, List[str], Optional[str]]:
+    active = load_active_fn()
+    if not isinstance(active, dict):
+        raise http_exception_cls(status_code=412, detail="yolo_active_missing")
+    best_path = active.get("best_path")
+    if not best_path:
+        raise http_exception_cls(status_code=412, detail="yolo_active_missing")
+    labelmap_path = active.get("labelmap_path")
+    task = active.get("task")
+    with yolo_lock:
+        model, path, labelmap, cached_task = get_state_fn()
+        if model is not None and path == best_path:
+            return model, labelmap, cached_task
+        try:
+            YOLO = import_yolo_fn()
+        except Exception as exc:  # noqa: BLE001
+            raise http_exception_cls(status_code=503, detail=f"yolo_unavailable:{exc}") from exc
+        patch_ultralytics_fn()
+        model = YOLO(best_path)
+        labelmap = load_labelmap_fn(labelmap_path) if labelmap_path else []
+        resolved_task = task or getattr(model, "task", None)
+        set_state_fn(model, best_path, labelmap, resolved_task)
+        return model, labelmap, resolved_task
+
+
+def _ensure_rfdetr_inference_runtime_impl(
+    *,
+    load_active_fn: Callable[[], Dict[str, Any]],
+    load_labelmap_fn: Callable[[Any], List[str]],
+    variant_info_fn: Callable[[str, Optional[str]], Dict[str, Any]],
+    rfdetr_lock: Any,
+    get_state_fn: Callable[[], Tuple[Any, Optional[str], List[str], Optional[str], Optional[str]]],
+    set_state_fn: Callable[[Any, Optional[str], List[str], Optional[str], Optional[str]], None],
+    import_rfdetr_fn: Callable[[], Dict[str, Any]],
+    http_exception_cls: Any,
+    torch_available: Callable[[], bool],
+    resolve_device_fn: Callable[[], str],
+) -> Tuple[Any, List[str], Optional[str]]:
+    active = load_active_fn()
+    if not isinstance(active, dict):
+        raise http_exception_cls(status_code=412, detail="rfdetr_active_missing")
+    best_path = active.get("best_path")
+    if not best_path:
+        raise http_exception_cls(status_code=412, detail="rfdetr_active_missing")
+    if not Path(best_path).exists():
+        raise http_exception_cls(status_code=412, detail="rfdetr_active_missing_weights")
+    labelmap_path = active.get("labelmap_path")
+    task = active.get("task") or "detect"
+    variant = active.get("variant")
+    with rfdetr_lock:
+        model, path, labelmap, cached_task, cached_variant = get_state_fn()
+        if model is not None and path == best_path:
+            return model, labelmap, cached_task
+        try:
+            import_map = import_rfdetr_fn()
+        except Exception as exc:  # noqa: BLE001
+            raise http_exception_cls(status_code=503, detail=f"rfdetr_unavailable:{exc}") from exc
+        variant_info = variant_info_fn(task, variant)
+        variant_id = variant_info.get("id")
+        model_cls = import_map.get(variant_id)
+        if not model_cls:
+            raise http_exception_cls(status_code=400, detail="rfdetr_variant_unknown")
+        model_kwargs: Dict[str, Any] = {
+            "pretrain_weights": best_path,
+            "device": resolve_device_fn() if torch_available() else "cpu",
+        }
+        if variant_id == "rfdetr-seg-preview" or task == "segment":
+            model_kwargs["segmentation_head"] = True
+        model = model_cls(**model_kwargs)
+        labelmap = load_labelmap_fn(labelmap_path) if labelmap_path else []
+        if labelmap:
+            try:
+                model.model.class_names = labelmap
+            except Exception:
+                pass
+        set_state_fn(model, best_path, labelmap, task, variant_id)
+        return model, labelmap, task
 
 
 def _agent_tool_run_detector_impl(

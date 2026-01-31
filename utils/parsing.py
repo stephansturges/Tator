@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
@@ -79,3 +80,18 @@ def _parse_device_ids_string(raw: Optional[str]) -> Optional[list[int]]:
             raise ValueError(f"invalid_device_token:{part}")
         ids.append(int(part))
     return ids
+
+
+def _agent_extract_json_array(text: str) -> Optional[list[Any]]:
+    if not text:
+        return None
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    snippet = text[start : end + 1]
+    try:
+        parsed = json.loads(snippet)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, list) else None

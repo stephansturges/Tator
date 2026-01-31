@@ -1279,3 +1279,134 @@ def _validate_prepass_recipe_manifest_impl(
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing_asset")
         if entry.get("sha256") and sha256_fn(target) != entry.get("sha256"):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_hash_mismatch")
+
+
+def _collect_recipe_assets_impl(
+    recipe_meta: Dict[str, Any],
+    temp_dir: Path,
+    *,
+    read_labelmap_lines_fn,
+    load_labelmap_meta_fn,
+    active_labelmap_path: Optional[str],
+    sanitize_run_id_fn,
+    copy_tree_filtered_fn,
+    sha256_fn,
+    get_qwen_model_entry_fn,
+    resolve_classifier_path_fn,
+    yolo_job_root: Path,
+    rfdetr_job_root: Path,
+    rfdetr_keep_files: Optional[set[str]],
+    qwen_metadata_filename: str,
+    qwen_job_root: Path,
+    upload_root: Path,
+    calibration_root: Path,
+) -> Dict[str, Any]:
+    assets: Dict[str, Any] = {"copied": [], "missing": []}
+    config = recipe_meta.get("config") or {}
+    glossary_text = recipe_meta.get("glossary") or ""
+    if glossary_text:
+        glossary_path = temp_dir / "glossary.json"
+        glossary_path.write_text(json.dumps({"glossary": glossary_text}, indent=2), encoding="utf-8")
+        assets["copied"].append(
+            {
+                "path": "glossary.json",
+                "size": glossary_path.stat().st_size,
+                "sha256": sha256_fn(glossary_path),
+            }
+        )
+
+    labelmap_lines: List[str] = []
+    if isinstance(config.get("labelmap"), list):
+        labelmap_lines = [str(x).strip() for x in config.get("labelmap") or [] if str(x).strip()]
+    if not labelmap_lines:
+        dataset_id = config.get("dataset_id")
+        if isinstance(dataset_id, str) and dataset_id.strip():
+            labelmap_lines, _ = load_labelmap_meta_fn(dataset_id)
+    if not labelmap_lines and active_labelmap_path:
+        try:
+            labelmap_lines = read_labelmap_lines_fn(Path(active_labelmap_path))
+        except Exception:
+            labelmap_lines = []
+    if labelmap_lines:
+        labelmap_path = temp_dir / "labelmap.txt"
+        labelmap_path.write_text("\n".join(labelmap_lines) + "\n", encoding="utf-8")
+        assets["copied"].append(
+            {
+                "path": "labelmap.txt",
+                "size": labelmap_path.stat().st_size,
+                "sha256": sha256_fn(labelmap_path),
+            }
+        )
+
+    def _copy_run(root: Path, run_id: Optional[str], keep: Optional[set[str]], kind: str):
+        if not run_id:
+            return
+        run_dir = root / sanitize_run_id_fn(run_id)
+        if not run_dir.exists():
+            assets["missing"].append({"kind": kind, "id": run_id})
+            return
+        dest = temp_dir / "models" / kind / run_dir.name
+        assets["copied"].extend(copy_tree_filtered_fn(run_dir, dest, keep_files=keep))
+
+    _copy_run(yolo_job_root, config.get("yolo_id"), None, "yolo_runs")
+    _copy_run(rfdetr_job_root, config.get("rfdetr_id"), rfdetr_keep_files, "rfdetr_runs")
+
+    copied_qwen_ids: set[str] = set()
+
+    def _copy_qwen_run(model_id: Optional[str]) -> None:
+        if not model_id:
+            return
+        if model_id in copied_qwen_ids:
+            return
+        entry = get_qwen_model_entry_fn(str(model_id))
+        if not entry:
+            assets["missing"].append({"kind": "qwen_model", "id": model_id})
+            return
+        raw_path = entry.get("path")
+        if not raw_path:
+            assets["missing"].append({"kind": "qwen_model", "id": model_id})
+            return
+        run_path = Path(str(raw_path)).resolve()
+        if run_path.name == "latest":
+            run_path = run_path.parent
+        if not run_path.exists():
+            assets["missing"].append({"kind": "qwen_model", "id": model_id})
+            return
+        dest = temp_dir / "models" / "qwen_runs" / run_path.name
+        assets["copied"].extend(copy_tree_filtered_fn(run_path, dest, keep_files=None))
+        copied_qwen_ids.add(model_id)
+
+    _copy_qwen_run(config.get("model_id"))
+    _copy_qwen_run(config.get("prepass_caption_model_id"))
+
+    classifier_id = config.get("classifier_id")
+    if classifier_id:
+        try:
+            classifier_path = resolve_classifier_path_fn(classifier_id)
+        except HTTPException:
+            classifier_path = None
+        if classifier_path and classifier_path.exists():
+            dest = temp_dir / "models" / "classifiers"
+            dest.mkdir(parents=True, exist_ok=True)
+            target = dest / classifier_path.name
+            shutil.copy2(classifier_path, target)
+            assets["copied"].append(
+                {
+                    "path": str(target.relative_to(temp_dir)),
+                    "size": target.stat().st_size,
+                    "sha256": sha256_fn(target),
+                }
+            )
+        else:
+            assets["missing"].append({"kind": "classifier", "id": classifier_id})
+
+    job_id = config.get("ensemble_job_id")
+    if job_id:
+        job_dir = calibration_root / sanitize_run_id_fn(job_id)
+        if job_dir.exists():
+            dest = temp_dir / "models" / "calibration_jobs" / job_dir.name
+            assets["copied"].extend(copy_tree_filtered_fn(job_dir, dest, keep_files=None))
+        else:
+            assets["missing"].append({"kind": "calibration_job", "id": job_id})
+
+    return assets

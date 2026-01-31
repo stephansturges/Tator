@@ -82,6 +82,7 @@ from utils.datasets import _iter_yolo_images
 from services.prepass_config import _normalize_recipe_thresholds
 from services.prepass_recipes import _write_prepass_recipe_meta, _load_prepass_recipe_meta
 from services.datasets import _load_dataset_glossary, _load_qwen_labelmap
+from services.prepass import _agent_merge_prepass_detections, _agent_filter_scoreless_detections
 from services.glossary_library import (
     _normalize_glossary_name,
     _glossary_key,
@@ -97,6 +98,7 @@ from utils.coords import (
     _window_bbox_2d_to_full_xyxy,
     _window_local_bbox_2d_to_full_xyxy,
     _window_local_xyxy_to_full_xyxy,
+    _agent_iou_xyxy,
 )
 from collections import OrderedDict
 try:
@@ -7803,24 +7805,6 @@ def _agent_merge_detections(
     return merged
 
 
-def _agent_iou_xyxy(box_a: Sequence[float], box_b: Sequence[float]) -> float:
-    try:
-        ax1, ay1, ax2, ay2 = [float(v) for v in box_a[:4]]
-        bx1, by1, bx2, by2 = [float(v) for v in box_b[:4]]
-    except Exception:
-        return 0.0
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-    inter = iw * ih
-    if inter <= 0:
-        return 0.0
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    denom = area_a + area_b - inter
-    return inter / denom if denom > 0 else 0.0
-
-
 def _agent_source_counts(detections: Sequence[Dict[str, Any]]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for det in detections:
@@ -7854,97 +7838,6 @@ def _agent_detection_has_source(det: Dict[str, Any], sources: Set[str]) -> bool:
             if str(item) in sources:
                 return True
     return False
-
-
-def _agent_merge_prepass_detections(
-    detections: List[Dict[str, Any]],
-    *,
-    iou_thr: float = 0.85,
-) -> Tuple[List[Dict[str, Any]], int]:
-    if not detections or iou_thr <= 0:
-        return detections, 0
-    def det_score(det: Dict[str, Any]) -> float:
-        try:
-            return float(det.get("score") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    merged: List[Dict[str, Any]] = []
-    removed = 0
-    ordered = sorted(detections, key=det_score, reverse=True)
-    for det in ordered:
-        label = str(det.get("label") or det.get("class_name") or "").strip()
-        box = det.get("bbox_xyxy_px")
-        if not isinstance(box, (list, tuple)) or len(box) < 4:
-            merged.append(det)
-            continue
-        matched_idx = None
-        for idx, kept in enumerate(merged):
-            kept_label = str(kept.get("label") or kept.get("class_name") or "").strip()
-            if label and kept_label and label != kept_label:
-                continue
-            kept_box = kept.get("bbox_xyxy_px")
-            if not isinstance(kept_box, (list, tuple)) or len(kept_box) < 4:
-                continue
-            if _agent_iou_xyxy(box, kept_box) >= iou_thr:
-                matched_idx = idx
-                break
-        if matched_idx is None:
-            entry = dict(det)
-            source_list = set(entry.get("source_list") or [])
-            if entry.get("source"):
-                source_list.add(entry.get("source"))
-            if source_list:
-                entry["source_list"] = sorted(source_list)
-            merged.append(entry)
-        else:
-            kept = merged[matched_idx]
-            source_list = set(kept.get("source_list") or [])
-            if kept.get("source"):
-                source_list.add(kept.get("source"))
-            if det.get("source"):
-                source_list.add(det.get("source"))
-            keep_det = kept
-            if det_score(det) > det_score(kept):
-                keep_det = dict(det)
-            keep_det["source_list"] = sorted(source_list) if source_list else keep_det.get("source_list")
-            merged[matched_idx] = keep_det
-            removed += 1
-    return merged, removed
-
-
-def _agent_filter_scoreless_detections(
-    detections: List[Dict[str, Any]],
-    *,
-    iou_thr: float,
-) -> Tuple[List[Dict[str, Any]], int]:
-    if not detections or iou_thr <= 0:
-        return detections, 0
-    anchors = [
-        det
-        for det in detections
-        if det.get("score") is not None and (det.get("score_source") or det.get("source")) != "unknown"
-    ]
-    if not anchors:
-        return detections, 0
-    filtered: List[Dict[str, Any]] = []
-    removed = 0
-    for det in detections:
-        score = det.get("score")
-        score_source = det.get("score_source") or det.get("source") or "unknown"
-        if score is None or score_source == "unknown":
-            bbox = det.get("bbox_xyxy_px") or []
-            has_overlap = False
-            for anchor in anchors:
-                anchor_bbox = anchor.get("bbox_xyxy_px") or []
-                if _agent_iou_xyxy(bbox, anchor_bbox) >= iou_thr:
-                    has_overlap = True
-                    break
-            if not has_overlap:
-                removed += 1
-                continue
-        filtered.append(det)
-    return filtered, removed
 
 
 def _resolve_classifier_batch_size() -> int:

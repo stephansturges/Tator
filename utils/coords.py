@@ -99,3 +99,21 @@ def _window_local_xyxy_to_full_xyxy(
     wx1, wy1, _, _ = window_xyxy
     x1, y1, x2, y2 = map(float, local_xyxy[:4])
     return x1 + wx1, y1 + wy1, x2 + wx1, y2 + wy1
+
+
+def _agent_iou_xyxy(box_a: Sequence[float], box_b: Sequence[float]) -> float:
+    try:
+        ax1, ay1, ax2, ay2 = [float(v) for v in box_a[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in box_b[:4]]
+    except Exception:
+        return 0.0
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0 else 0.0

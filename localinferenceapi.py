@@ -234,6 +234,11 @@ from services.detector_params import (
     _clamp_max_det_value as _clamp_max_det_value_impl,
     _clamp_slice_params as _clamp_slice_params_impl,
 )
+from services.calibration_helpers import (
+    _calibration_sample_images as _calibration_sample_images_impl,
+    _calibration_hash_payload as _calibration_hash_payload_impl,
+    _calibration_safe_link as _calibration_safe_link_impl,
+)
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -29488,12 +29493,7 @@ def _calibration_list_images(dataset_id: str) -> List[str]:
 
 
 def _calibration_sample_images(images: List[str], *, max_images: int, seed: int) -> List[str]:
-    if max_images <= 0 or len(images) <= max_images:
-        return list(images)
-    rng = random.Random(seed)
-    picks = list(images)
-    rng.shuffle(picks)
-    return picks[:max_images]
+    return _calibration_sample_images_impl(images, max_images=max_images, seed=seed)
 
 
 def _calibration_cache_image(pil_img: Image.Image, sam_variant: Optional[str]) -> str:
@@ -29504,25 +29504,11 @@ def _calibration_cache_image(pil_img: Image.Image, sam_variant: Optional[str]) -
 
 
 def _calibration_hash_payload(payload: Dict[str, Any]) -> str:
-    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=True)
-    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
+    return _calibration_hash_payload_impl(payload)
 
 
 def _calibration_safe_link(src: Path, dest: Path) -> None:
-    try:
-        if dest.is_symlink() and not dest.exists():
-            dest.unlink()
-        if dest.exists() or dest.is_symlink():
-            return
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        os.symlink(str(src.resolve()), dest)
-    except Exception:
-        try:
-            if dest.exists():
-                return
-            shutil.copy2(src, dest)
-        except Exception:
-            pass
+    _calibration_safe_link_impl(src, dest)
 
 
 def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> None:

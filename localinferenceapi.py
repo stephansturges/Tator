@@ -81,7 +81,7 @@ from utils.glossary import (
 from utils.datasets import _iter_yolo_images
 from services.prepass_config import _normalize_recipe_thresholds
 from services.prepass_recipes import _write_prepass_recipe_meta, _load_prepass_recipe_meta
-from services.datasets import _load_dataset_glossary
+from services.datasets import _load_dataset_glossary, _load_qwen_labelmap
 from services.glossary_library import (
     _normalize_glossary_name,
     _glossary_key,
@@ -6498,7 +6498,11 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
         if yolo_labels:
             labelmap = yolo_labels
         else:
-            labelmap = _load_qwen_labelmap(dataset_root)
+            labelmap = _load_qwen_labelmap(
+                dataset_root,
+                load_qwen_meta=_load_qwen_dataset_metadata,
+                collect_labels=_collect_labels_from_qwen_jsonl,
+            )
         meta = _load_sam3_dataset_metadata(dataset_root) or _load_qwen_dataset_metadata(dataset_root) or {}
         glossary = _normalize_labelmap_glossary(
             meta.get("labelmap_glossary") or meta.get("glossary") or meta.get("labelmap_ontology")
@@ -28953,7 +28957,12 @@ def _prepare_qwen_training_split(
         **meta,
         "id": meta.get("id") or dataset_root.name,
         "label": meta.get("label") or meta.get("id") or dataset_root.name,
-        "classes": meta.get("classes") or _load_qwen_labelmap(dataset_root),
+        "classes": meta.get("classes")
+        or _load_qwen_labelmap(
+            dataset_root,
+            load_qwen_meta=_load_qwen_dataset_metadata,
+            collect_labels=_collect_labels_from_qwen_jsonl,
+        ),
         "context": meta.get("context") or "",
         "created_at": meta.get("created_at") or time.time(),
         "train_count": counts["train"],
@@ -30159,7 +30168,11 @@ def _dataset_integrity_report(dataset_root: Path) -> Dict[str, Any]:
                 report["issues"].append("no_images_found")
         report["image_count"] = _count_dir_files(train_images)
         report["annotation_bytes"] = annotations_path.stat().st_size if annotations_path.exists() else None
-        labelmap = _load_qwen_labelmap(dataset_root)
+        labelmap = _load_qwen_labelmap(
+            dataset_root,
+            load_qwen_meta=_load_qwen_dataset_metadata,
+            collect_labels=_collect_labels_from_qwen_jsonl,
+        )
         if not labelmap:
             report["issues"].append("missing_labelmap")
     elif train_images.exists() and train_labels.exists():
@@ -30226,7 +30239,11 @@ def get_dataset_glossary(dataset_id: str):
     dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
     glossary = _load_dataset_glossary(dataset_root)
     if not glossary:
-        labelmap = _discover_yolo_labelmap(dataset_root) or _load_qwen_labelmap(dataset_root)
+        labelmap = _discover_yolo_labelmap(dataset_root) or _load_qwen_labelmap(
+            dataset_root,
+            load_qwen_meta=_load_qwen_dataset_metadata,
+            collect_labels=_collect_labels_from_qwen_jsonl,
+        )
         if labelmap:
             glossary = _default_agent_glossary_for_labelmap(labelmap)
     return {"dataset_id": dataset_id, "glossary": glossary}
@@ -35137,17 +35154,6 @@ def _extract_qwen_detections_from_payload(payload: Dict[str, Any]) -> List[Dict[
     return []
 
 
-def _load_qwen_labelmap(dataset_root: Path) -> List[str]:
-    meta = _load_qwen_dataset_metadata(dataset_root) or {}
-    classes = [str(cls).strip() for cls in meta.get("classes", []) if str(cls).strip()]
-    if classes:
-        return classes
-    labels = set()
-    for split in ("train", "val"):
-        labels.update(_collect_labels_from_qwen_jsonl(dataset_root / split / "annotations.jsonl"))
-    return sorted(labels)
-
-
 def _discover_yolo_labelmap(dataset_root: Path) -> List[str]:
     for name in ("labelmap.txt", "classes.txt", "labels.txt"):
         candidate = dataset_root / name
@@ -35739,7 +35745,11 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
         metadata["type"] = "bbox"
         _persist_qwen_dataset_metadata(dataset_root, metadata)
     dataset_id = metadata.get("id") or dataset_root.name
-    labelmap = _load_qwen_labelmap(dataset_root)
+    labelmap = _load_qwen_labelmap(
+        dataset_root,
+        load_qwen_meta=_load_qwen_dataset_metadata,
+        collect_labels=_collect_labels_from_qwen_jsonl,
+    )
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
     label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}

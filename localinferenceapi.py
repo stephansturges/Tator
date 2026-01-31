@@ -138,6 +138,11 @@ from services.agent_cascades import (
     _ensure_cascade_zip_impl as _ensure_cascade_zip_impl,
     _import_agent_cascade_zip_bytes_impl as _import_agent_cascade_zip_bytes_impl,
 )
+from services.prompt_helper_presets import (
+    _list_prompt_helper_presets_impl as _list_prompt_helper_presets_impl,
+    _load_prompt_helper_preset_impl as _load_prompt_helper_preset_impl,
+    _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
+)
 from services.datasets import (
     _load_dataset_glossary,
     _load_qwen_labelmap,
@@ -15250,45 +15255,25 @@ def prompt_helper_expand(payload: PromptRecipeExpandRequest):
 
 
 def _list_prompt_helper_presets() -> List[Dict[str, Any]]:
-    presets: List[Dict[str, Any]] = []
-    for path in PROMPT_HELPER_PRESET_ROOT.glob("*.json"):
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            presets.append(data)
-        except Exception:
-            continue
-    presets.sort(key=lambda p: p.get("created_at", 0), reverse=True)
-    return presets
+    return _list_prompt_helper_presets_impl(presets_root=PROMPT_HELPER_PRESET_ROOT)
 
 
 def _load_prompt_helper_preset(preset_id: str) -> Dict[str, Any]:
-    path = (PROMPT_HELPER_PRESET_ROOT / f"{preset_id}.json").resolve()
-    if not str(path).startswith(str(PROMPT_HELPER_PRESET_ROOT.resolve())) or not path.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_preset_not_found")
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"prompt_helper_preset_load_failed:{exc}") from exc
+    return _load_prompt_helper_preset_impl(
+        preset_id,
+        presets_root=PROMPT_HELPER_PRESET_ROOT,
+        path_is_within_root_fn=_path_is_within_root,
+    )
 
 
 def _save_prompt_helper_preset(label: str, dataset_id: str, prompts_by_class: Dict[int, List[str]]) -> Dict[str, Any]:
-    preset_id = f"phset_{uuid.uuid4().hex[:8]}"
-    created_at = time.time()
-    payload = {
-        "id": preset_id,
-        "label": label or preset_id,
-        "dataset_id": dataset_id,
-        "created_at": created_at,
-        "prompts_by_class": prompts_by_class,
-    }
-    path = (PROMPT_HELPER_PRESET_ROOT / f"{preset_id}.json").resolve()
-    if not str(path).startswith(str(PROMPT_HELPER_PRESET_ROOT.resolve())):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-    return payload
+    return _save_prompt_helper_preset_impl(
+        label,
+        dataset_id,
+        prompts_by_class,
+        presets_root=PROMPT_HELPER_PRESET_ROOT,
+        path_is_within_root_fn=_path_is_within_root,
+    )
 
 
 @app.post("/sam3/prompt_helper/jobs")

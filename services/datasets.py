@@ -99,6 +99,61 @@ def _purge_dataset_artifacts_impl(
         pass
 
 
+def _extract_qwen_detections_from_payload_impl(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    detections = payload.get("detections")
+    if isinstance(detections, list):
+        return [d for d in detections if isinstance(d, dict)]
+    conversations = payload.get("conversations")
+    if not isinstance(conversations, list):
+        return []
+    for message in reversed(conversations):
+        if not isinstance(message, dict):
+            continue
+        if message.get("from") != "gpt":
+            continue
+        value = message.get("value")
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            continue
+        detections = parsed.get("detections")
+        if isinstance(detections, list):
+            return [det for det in detections if isinstance(det, dict)]
+    return []
+
+
+def _collect_labels_from_qwen_jsonl_impl(
+    jsonl_path: Path,
+    *,
+    extract_detections_fn=_extract_qwen_detections_from_payload_impl,
+) -> List[str]:
+    labels: set[str] = set()
+    if not jsonl_path.exists():
+        return []
+    try:
+        with jsonl_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                detections = extract_detections_fn(payload)
+                for det in detections:
+                    label = str(det.get("label", "")).strip()
+                    if label:
+                        labels.add(label)
+    except Exception:
+        return sorted(labels)
+    return sorted(labels)
+
+
 def _detect_yolo_layout_impl(dataset_root: Path) -> dict:
     labelmap_path = dataset_root / "labelmap.txt"
     train_images = dataset_root / "train" / "images"

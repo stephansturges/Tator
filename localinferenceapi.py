@@ -161,6 +161,8 @@ from services.datasets import (
     _compute_labelmap_hash_impl as _compute_labelmap_hash_impl,
     _compute_dataset_signature_impl as _compute_dataset_signature_impl,
     _purge_dataset_artifacts_impl as _purge_dataset_artifacts_impl,
+    _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
+    _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -15362,54 +15364,14 @@ def get_segmentation_build_job(job_id: str):
 
 
 def _collect_labels_from_qwen_jsonl(jsonl_path: Path) -> List[str]:
-    labels: set[str] = set()
-    if not jsonl_path.exists():
-        return []
-    try:
-        with jsonl_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    payload = json.loads(line)
-                except Exception:
-                    continue
-                detections = _extract_qwen_detections_from_payload(payload)
-                for det in detections:
-                    label = str(det.get("label", "")).strip()
-                    if label:
-                        labels.add(label)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to scan labels from %s: %s", jsonl_path, exc)
-    return sorted(labels)
+    return _collect_labels_from_qwen_jsonl_impl(
+        jsonl_path,
+        extract_detections_fn=_extract_qwen_detections_from_payload,
+    )
 
 
 def _extract_qwen_detections_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    detections = payload.get("detections")
-    if isinstance(detections, list):
-        return [det for det in detections if isinstance(det, dict)]
-    conversations = payload.get("conversations")
-    if not isinstance(conversations, list):
-        return []
-    for message in reversed(conversations):
-        if not isinstance(message, dict):
-            continue
-        if message.get("from") != "gpt":
-            continue
-        value = message.get("value")
-        if not isinstance(value, str):
-            continue
-        try:
-            parsed = json.loads(value)
-        except Exception:
-            continue
-        detections = parsed.get("detections")
-        if isinstance(detections, list):
-            return [det for det in detections if isinstance(det, dict)]
-    return []
+    return _extract_qwen_detections_from_payload_impl(payload)
 
 
 def _discover_yolo_labelmap(dataset_root: Path) -> List[str]:

@@ -19,7 +19,7 @@ def _read_labelmap_lines(path: Path) -> List[str]:
         lines = [line.strip() for line in path.read_text().splitlines()]
         return [line for line in lines if line]
     except Exception:
-    return []
+        return []
 
 
 def _normalize_class_name_for_match(name: Optional[str]) -> str:
@@ -42,6 +42,38 @@ def _normalize_labelmap_entries(values: Sequence[str]) -> List[str]:
         norm = _normalize_class_name_for_match(text)
         normalized.append(norm or text.lower())
     return normalized
+
+
+def _agent_label_prefix_candidates(label: str) -> List[str]:
+    if not label:
+        return []
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", str(label)).strip()
+    tokens = [tok for tok in cleaned.split() if tok]
+    candidates: List[str] = []
+    if tokens:
+        if len(tokens) >= 2:
+            candidates.append(tokens[0][0] + tokens[1][0])
+            if len(tokens[1]) >= 2:
+                candidates.append(tokens[0][0] + tokens[1][:2])
+        if len(tokens[0]) >= 2:
+            candidates.append(tokens[0][:2])
+        if len(tokens[0]) >= 3:
+            candidates.append(tokens[0][:3])
+    else:
+        flat = re.sub(r"[^A-Za-z0-9]+", "", str(label))
+        if len(flat) >= 2:
+            candidates.append(flat[:2])
+        if len(flat) >= 3:
+            candidates.append(flat[:3])
+    seen: set[str] = set()
+    uniq: List[str] = []
+    for cand in candidates:
+        cand = re.sub(r"[^A-Za-z0-9]+", "", cand).upper()
+        if len(cand) < 2 or cand in seen:
+            continue
+        uniq.append(cand)
+        seen.add(cand)
+    return uniq
 
 
 def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = False) -> List[str]:

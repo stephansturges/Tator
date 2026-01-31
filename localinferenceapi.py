@@ -55,6 +55,7 @@ from utils.labels import (
     _load_labelmap_file,
     _normalize_class_name_for_match,
     _normalize_labelmap_entries,
+    _agent_label_prefix_candidates,
 )
 from utils.parsing import (
     _coerce_int,
@@ -6520,38 +6521,6 @@ def _agent_label_color_map(labelmap: Sequence[str]) -> Dict[str, str]:
         r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 0.9)
         colors[name] = f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
     return colors
-
-
-def _agent_label_prefix_candidates(label: str) -> List[str]:
-    if not label:
-        return []
-    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", str(label)).strip()
-    tokens = [tok for tok in cleaned.split() if tok]
-    candidates: List[str] = []
-    if tokens:
-        if len(tokens) >= 2:
-            candidates.append(tokens[0][0] + tokens[1][0])
-            if len(tokens[1]) >= 2:
-                candidates.append(tokens[0][0] + tokens[1][:2])
-        if len(tokens[0]) >= 2:
-            candidates.append(tokens[0][:2])
-        if len(tokens[0]) >= 3:
-            candidates.append(tokens[0][:3])
-    else:
-        flat = re.sub(r"[^A-Za-z0-9]+", "", str(label))
-        if len(flat) >= 2:
-            candidates.append(flat[:2])
-        if len(flat) >= 3:
-            candidates.append(flat[:3])
-    seen: Set[str] = set()
-    uniq: List[str] = []
-    for cand in candidates:
-        cand = re.sub(r"[^A-Za-z0-9]+", "", cand).upper()
-        if len(cand) < 2 or cand in seen:
-            continue
-        uniq.append(cand)
-        seen.add(cand)
-    return uniq
 
 
 def _agent_label_prefix_map(labels: Sequence[str]) -> Dict[str, str]:

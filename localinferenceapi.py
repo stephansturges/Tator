@@ -235,6 +235,7 @@ from services.detector_params import (
     _clamp_slice_params as _clamp_slice_params_impl,
 )
 from services.calibration_helpers import (
+    _calibration_list_images as _calibration_list_images_impl,
     _calibration_sample_images as _calibration_sample_images_impl,
     _calibration_hash_payload as _calibration_hash_payload_impl,
     _calibration_safe_link as _calibration_safe_link_impl,
@@ -29480,16 +29481,9 @@ def _calibration_prepass_worker(
 
 
 def _calibration_list_images(dataset_id: str) -> List[str]:
-    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
-    images: List[str] = []
-    for split in ("val", "train"):
-        split_root = dataset_root / split
-        if not split_root.exists():
-            continue
-        for entry in sorted(split_root.iterdir()):
-            if entry.is_file() and entry.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}:
-                images.append(entry.name)
-    return images
+    return _calibration_list_images_impl(
+        dataset_id, resolve_dataset_fn=_resolve_sam3_or_qwen_dataset
+    )
 
 
 def _calibration_sample_images(images: List[str], *, max_images: int, seed: int) -> List[str]:

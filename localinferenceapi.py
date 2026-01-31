@@ -212,6 +212,10 @@ from services.classifier_select import (
     _agent_classifier_matches_labelmap as _classifier_matches_labelmap,
     _agent_classifier_classes_for_path as _classifier_classes_for_path,
 )
+from services.overlay_tools import (
+    _agent_overlay_base_image as _overlay_base_image,
+    _agent_overlay_crop_xyxy as _overlay_crop_xyxy,
+)
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -6583,12 +6587,12 @@ def _agent_cluster_summaries(
 
 
 def _agent_overlay_base_image() -> Optional[Image.Image]:
-    if _AGENT_ACTIVE_GRID_IMAGE is not None:
-        return _AGENT_ACTIVE_GRID_IMAGE
-    if _AGENT_ACTIVE_IMAGE_BASE64 or _AGENT_ACTIVE_IMAGE_TOKEN:
-        base_img, _, _ = _agent_resolve_image(_AGENT_ACTIVE_IMAGE_BASE64, _AGENT_ACTIVE_IMAGE_TOKEN)
-        return base_img
-    return None
+    return _overlay_base_image(
+        grid_image=_AGENT_ACTIVE_GRID_IMAGE,
+        image_base64=_AGENT_ACTIVE_IMAGE_BASE64,
+        image_token=_AGENT_ACTIVE_IMAGE_TOKEN,
+        image_resolver=_agent_resolve_image,
+    )
 
 
 def _agent_tool_grid_cell_from_args(
@@ -6657,69 +6661,19 @@ def _agent_overlay_crop_xyxy(
     img_w: int,
     img_h: int,
 ) -> Optional[Tuple[float, float, float, float]]:
-    agent_view = tool_result.get("__agent_view__") if isinstance(tool_result, dict) else None
-    grid_cell = tool_args.get("grid_cell") or (
-        agent_view.get("grid_cell") if isinstance(agent_view, dict) else None
+    return _overlay_crop_xyxy(
+        tool_args,
+        tool_result,
+        img_w,
+        img_h,
+        grid=_AGENT_ACTIVE_GRID,
+        cluster_index=_AGENT_ACTIVE_CLUSTER_INDEX,
+        grid_cell_xyxy_fn=_agent_grid_cell_xyxy,
+        clip_xyxy_fn=_agent_clip_xyxy,
+        qwen_bbox_to_xyxy_fn=_qwen_bbox_to_xyxy,
+        window_local_bbox_fn=_window_local_bbox_2d_to_full_xyxy,
+        grid_overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
     )
-    if grid_cell and _AGENT_ACTIVE_GRID:
-        cell_xyxy = _agent_grid_cell_xyxy(
-            _AGENT_ACTIVE_GRID,
-            str(grid_cell),
-            overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
-        )
-        return _agent_clip_xyxy(cell_xyxy, img_w, img_h)
-
-    window_xyxy = None
-    for source in (tool_result, tool_args):
-        if isinstance(source, dict):
-            win = source.get("window_xyxy_px")
-            if isinstance(win, (list, tuple)) and len(win) >= 4:
-                window_xyxy = tuple(float(v) for v in win[:4])
-                break
-    if window_xyxy:
-        return _agent_clip_xyxy(window_xyxy, img_w, img_h)
-
-    window_bbox_2d = None
-    if isinstance(tool_result, dict):
-        window_bbox_2d = tool_result.get("window_bbox_2d")
-    if window_bbox_2d is None:
-        window_bbox_2d = tool_args.get("window_bbox_2d")
-    if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
-        return _agent_clip_xyxy(_qwen_bbox_to_xyxy(img_w, img_h, window_bbox_2d), img_w, img_h)
-
-    window_arg = tool_args.get("window")
-    if isinstance(window_arg, dict):
-        if isinstance(window_arg.get("bbox_xyxy_px"), (list, tuple)) and len(window_arg.get("bbox_xyxy_px")) >= 4:
-            xyxy = tuple(float(v) for v in window_arg.get("bbox_xyxy_px")[:4])
-            return _agent_clip_xyxy(xyxy, img_w, img_h)
-        if isinstance(window_arg.get("bbox_2d"), (list, tuple)) and len(window_arg.get("bbox_2d")) >= 4:
-            return _agent_clip_xyxy(_qwen_bbox_to_xyxy(img_w, img_h, window_arg.get("bbox_2d")), img_w, img_h)
-
-    cluster_id = tool_args.get("cluster_id")
-    if cluster_id is not None:
-        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cluster_id))
-        if cluster:
-            bbox_xyxy = cluster.get("bbox_xyxy_px")
-            if isinstance(bbox_xyxy, (list, tuple)) and len(bbox_xyxy) >= 4:
-                xyxy = tuple(float(v) for v in bbox_xyxy[:4])
-                return _agent_clip_xyxy(xyxy, img_w, img_h)
-
-    bbox_2d = tool_args.get("bbox_2d")
-    bbox_space = str(tool_args.get("bbox_space") or "full").strip().lower()
-    if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) >= 4:
-        if bbox_space == "window":
-            window_bbox_2d = tool_args.get("window_bbox_2d")
-            if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
-                xyxy = _window_local_bbox_2d_to_full_xyxy(img_w, img_h, window_bbox_2d, bbox_2d)
-                return _agent_clip_xyxy(xyxy, img_w, img_h) if xyxy else None
-        return _agent_clip_xyxy(_qwen_bbox_to_xyxy(img_w, img_h, bbox_2d), img_w, img_h)
-
-    bbox_xyxy_px = tool_args.get("bbox_xyxy_px")
-    if isinstance(bbox_xyxy_px, (list, tuple)) and len(bbox_xyxy_px) >= 4:
-        xyxy = tuple(float(v) for v in bbox_xyxy_px[:4])
-        return _agent_clip_xyxy(xyxy, img_w, img_h)
-
-    return None
 
 
 def _agent_merge_detections(

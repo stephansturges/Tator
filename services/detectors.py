@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -90,7 +92,99 @@ def _ensure_rfdetr_inference_runtime_impl(
             except Exception:
                 pass
         set_state_fn(model, best_path, labelmap, task, variant_id)
-        return model, labelmap, task
+    return model, labelmap, task
+
+
+def _load_yolo_active_impl(yolo_active_path: Path) -> Dict[str, Any]:
+    if not yolo_active_path.exists():
+        return {}
+    try:
+        return json.loads(yolo_active_path.read_text())
+    except Exception:
+        return {}
+
+
+def _save_yolo_active_impl(payload: Dict[str, Any], yolo_active_path: Path) -> Dict[str, Any]:
+    yolo_active_path.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(payload or {})
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    yolo_active_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return data
+
+
+def _load_rfdetr_active_impl(
+    rfdetr_active_path: Path,
+    rfdetr_job_root: Path,
+    save_active_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
+) -> Dict[str, Any]:
+    def _load_from(path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text())
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    active = _load_from(rfdetr_active_path)
+    best_path = str(active.get("best_path") or "")
+    if best_path and Path(best_path).exists():
+        return active
+
+    fallback_path = rfdetr_job_root / "active.json"
+    fallback = _load_from(fallback_path)
+    fallback_best = str(fallback.get("best_path") or "")
+    if fallback_best and Path(fallback_best).exists():
+        try:
+            save_active_fn(fallback)
+        except Exception:
+            pass
+        return fallback
+    return {}
+
+
+def _save_rfdetr_active_impl(payload: Dict[str, Any], rfdetr_active_path: Path) -> Dict[str, Any]:
+    rfdetr_active_path.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(payload or {})
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    rfdetr_active_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return data
+
+
+def _load_detector_default_impl(detector_default_path: Path) -> Dict[str, Any]:
+    if not detector_default_path.exists():
+        return {"mode": "rfdetr"}
+    try:
+        payload = json.loads(detector_default_path.read_text())
+        if isinstance(payload, dict):
+            mode = str(payload.get("mode") or "").strip().lower()
+            if mode in {"yolo", "rfdetr"}:
+                return payload
+    except Exception:
+        pass
+    return {"mode": "rfdetr"}
+
+
+def _save_detector_default_impl(
+    payload: Dict[str, Any],
+    detector_default_path: Path,
+    http_exception_cls: Any,
+) -> Dict[str, Any]:
+    detector_default_path.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(payload or {})
+    mode = str(data.get("mode") or "").strip().lower()
+    if mode not in {"yolo", "rfdetr"}:
+        raise http_exception_cls(status_code=400, detail="detector_mode_invalid")
+    data["mode"] = mode
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    detector_default_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return data
 
 
 def _agent_tool_run_detector_impl(

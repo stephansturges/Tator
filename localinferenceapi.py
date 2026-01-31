@@ -302,6 +302,12 @@ from services.detectors import (
     _agent_tool_run_detector_impl as _agent_tool_run_detector_impl,
     _ensure_yolo_inference_runtime_impl as _ensure_yolo_inference_runtime_impl,
     _ensure_rfdetr_inference_runtime_impl as _ensure_rfdetr_inference_runtime_impl,
+    _load_yolo_active_impl as _load_yolo_active_impl,
+    _save_yolo_active_impl as _save_yolo_active_impl,
+    _load_rfdetr_active_impl as _load_rfdetr_active_impl,
+    _save_rfdetr_active_impl as _save_rfdetr_active_impl,
+    _load_detector_default_impl as _load_detector_default_impl,
+    _save_detector_default_impl as _save_detector_default_impl,
 )
 from collections import OrderedDict
 try:
@@ -11748,88 +11754,27 @@ def _list_rfdetr_runs() -> List[Dict[str, Any]]:
 
 
 def _load_yolo_active() -> Dict[str, Any]:
-    if not YOLO_ACTIVE_PATH.exists():
-        return {}
-    try:
-        return json.loads(YOLO_ACTIVE_PATH.read_text())
-    except Exception:
-        return {}
+    return _load_yolo_active_impl(YOLO_ACTIVE_PATH)
 
 
 def _save_yolo_active(payload: Dict[str, Any]) -> Dict[str, Any]:
-    YOLO_ACTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = dict(payload or {})
-    data["updated_at"] = time.time()
-    if "created_at" not in data:
-        data["created_at"] = data["updated_at"]
-    YOLO_ACTIVE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
-    return data
+    return _save_yolo_active_impl(payload, YOLO_ACTIVE_PATH)
 
 
 def _load_rfdetr_active() -> Dict[str, Any]:
-    def _load_from(path: Path) -> Dict[str, Any]:
-        if not path.exists():
-            return {}
-        try:
-            payload = json.loads(path.read_text())
-            return payload if isinstance(payload, dict) else {}
-        except Exception:
-            return {}
-
-    active = _load_from(RFDETR_ACTIVE_PATH)
-    best_path = str(active.get("best_path") or "")
-    if best_path and Path(best_path).exists():
-        return active
-
-    # Fallback to run-level active.json if model-level active is missing/stale.
-    fallback_path = RFDETR_JOB_ROOT / "active.json"
-    fallback = _load_from(fallback_path)
-    fallback_best = str(fallback.get("best_path") or "")
-    if fallback_best and Path(fallback_best).exists():
-        try:
-            _save_rfdetr_active(fallback)
-        except Exception:
-            pass
-        return fallback
-    return {}
+    return _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH, RFDETR_JOB_ROOT, _save_rfdetr_active)
 
 
 def _save_rfdetr_active(payload: Dict[str, Any]) -> Dict[str, Any]:
-    RFDETR_ACTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = dict(payload or {})
-    data["updated_at"] = time.time()
-    if "created_at" not in data:
-        data["created_at"] = data["updated_at"]
-    RFDETR_ACTIVE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
-    return data
+    return _save_rfdetr_active_impl(payload, RFDETR_ACTIVE_PATH)
 
 
 def _load_detector_default() -> Dict[str, Any]:
-    if not DETECTOR_DEFAULT_PATH.exists():
-        return {"mode": "rfdetr"}
-    try:
-        payload = json.loads(DETECTOR_DEFAULT_PATH.read_text())
-        if isinstance(payload, dict):
-            mode = str(payload.get("mode") or "").strip().lower()
-            if mode in {"yolo", "rfdetr"}:
-                return payload
-    except Exception:
-        pass
-    return {"mode": "rfdetr"}
+    return _load_detector_default_impl(DETECTOR_DEFAULT_PATH)
 
 
 def _save_detector_default(payload: Dict[str, Any]) -> Dict[str, Any]:
-    DETECTOR_DEFAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = dict(payload or {})
-    mode = str(data.get("mode") or "").strip().lower()
-    if mode not in {"yolo", "rfdetr"}:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="detector_mode_invalid")
-    data["mode"] = mode
-    data["updated_at"] = time.time()
-    if "created_at" not in data:
-        data["created_at"] = data["updated_at"]
-    DETECTOR_DEFAULT_PATH.write_text(json.dumps(data, indent=2, sort_keys=True))
-    return data
+    return _save_detector_default_impl(payload, DETECTOR_DEFAULT_PATH, HTTPException)
 
 
 def _detect_yolo_layout(dataset_root: Path) -> Dict[str, Any]:

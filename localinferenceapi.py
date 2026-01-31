@@ -166,6 +166,8 @@ from services.glossary_library import (
     _load_glossary_library,
     _persist_glossary_library,
     _find_glossary_entry,
+    _upsert_glossary_entry_impl as _upsert_glossary_entry_impl,
+    _delete_glossary_entry_impl as _delete_glossary_entry_impl,
 )
 from utils.coords import (
     _xyxy_to_qwen_bbox,
@@ -23278,43 +23280,29 @@ def _dataset_integrity_report(dataset_root: Path) -> Dict[str, Any]:
 
 
 def _upsert_glossary_entry(name: str, glossary_text: str) -> Dict[str, Any]:
-    normalized_name = _normalize_glossary_name(name)
-    if not normalized_name:
-        raise ValueError("glossary_name_required")
-    glossary_text = _normalize_labelmap_glossary(glossary_text)
-    with GLOSSARY_LIBRARY_LOCK:
-        entries = _load_glossary_library()
-        entry = _find_glossary_entry(entries, normalized_name)
-        now = time.time()
-        if entry:
-            entry["name"] = normalized_name
-            entry["glossary"] = glossary_text
-            entry["updated_at"] = now
-        else:
-            entry = {
-                "name": normalized_name,
-                "glossary": glossary_text,
-                "created_at": now,
-                "updated_at": now,
-            }
-            entries.append(entry)
-        entries.sort(key=lambda item: _glossary_key(item.get("name")))
-        _persist_glossary_library(entries)
-    return entry
+    return _upsert_glossary_entry_impl(
+        name,
+        glossary_text,
+        normalize_name_fn=_normalize_glossary_name,
+        normalize_glossary_fn=_normalize_labelmap_glossary,
+        load_entries_fn=_load_glossary_library,
+        find_entry_fn=_find_glossary_entry,
+        persist_entries_fn=_persist_glossary_library,
+        glossary_key_fn=_glossary_key,
+        lock=GLOSSARY_LIBRARY_LOCK,
+        time_fn=time.time,
+    )
 
 
 def _delete_glossary_entry(name: str) -> bool:
-    normalized_name = _normalize_glossary_name(name)
-    if not normalized_name:
-        return False
-    with GLOSSARY_LIBRARY_LOCK:
-        entries = _load_glossary_library()
-        before = len(entries)
-        entries = [entry for entry in entries if _glossary_key(entry.get("name")) != _glossary_key(normalized_name)]
-        if len(entries) == before:
-            return False
-        _persist_glossary_library(entries)
-    return True
+    return _delete_glossary_entry_impl(
+        name,
+        normalize_name_fn=_normalize_glossary_name,
+        load_entries_fn=_load_glossary_library,
+        persist_entries_fn=_persist_glossary_library,
+        glossary_key_fn=_glossary_key,
+        lock=GLOSSARY_LIBRARY_LOCK,
+    )
 
 
 @app.get("/datasets/{dataset_id}/glossary")

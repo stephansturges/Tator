@@ -107,6 +107,8 @@ from services.prepass_recipes import (
     _normalize_agent_recipe_execution_plan as _normalize_agent_recipe_execution_plan_impl,
     _validate_agent_recipe_structure as _validate_agent_recipe_structure_impl,
     _save_exemplar_crop_impl as _save_exemplar_crop_impl,
+    _delete_agent_recipe_impl as _delete_agent_recipe_impl,
+    _list_agent_recipes_impl as _list_agent_recipes_impl,
 )
 from services.datasets import (
     _load_dataset_glossary,
@@ -13472,46 +13474,16 @@ def _load_agent_recipe_json_only(recipe_id: str) -> Dict[str, Any]:
 
 
 def _delete_agent_recipe(recipe_id: str) -> None:
-    json_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.json").resolve()
-    zip_path = (AGENT_MINING_RECIPES_ROOT / f"{recipe_id}.zip").resolve()
-    recipe_dir = (AGENT_MINING_RECIPES_ROOT / recipe_id).resolve()
-    if not _path_is_within_root(json_path, AGENT_MINING_RECIPES_ROOT.resolve()):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
-    removed_any = False
-    for path in (json_path, zip_path):
-        if path.exists():
-            try:
-                path.unlink()
-                removed_any = True
-            except Exception:
-                pass
-    if recipe_dir.exists() and recipe_dir.is_dir():
-        try:
-            shutil.rmtree(recipe_dir)
-            removed_any = True
-        except Exception:
-            pass
-    if not removed_any:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
+    return _delete_agent_recipe_impl(
+        recipe_id,
+        recipes_root=AGENT_MINING_RECIPES_ROOT,
+        path_is_within_root_fn=_path_is_within_root,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _list_agent_recipes(dataset_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    recipes: List[Dict[str, Any]] = []
-    for path in AGENT_MINING_RECIPES_ROOT.glob("*.json"):
-        try:
-            with path.open("r", encoding="utf-8") as fp:
-                data = json.load(fp)
-            if dataset_id and data.get("dataset_id") != dataset_id:
-                continue
-            data["_path"] = str(path)
-            zip_path = (AGENT_MINING_RECIPES_ROOT / f"{data.get('id','')}.zip").resolve()
-            if zip_path.exists():
-                data["_zip"] = str(zip_path)
-            recipes.append(data)
-        except Exception:
-            continue
-    recipes.sort(key=lambda r: r.get("created_at", 0), reverse=True)
-    return recipes
+    return _list_agent_recipes_impl(recipes_root=AGENT_MINING_RECIPES_ROOT, dataset_id=dataset_id)
 
 
 def _ensure_recipe_zip(recipe: Dict[str, Any]) -> Path:

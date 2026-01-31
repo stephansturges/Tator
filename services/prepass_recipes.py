@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal, List
 
@@ -218,3 +219,56 @@ def _save_exemplar_crop_impl(
         "crop_size": [crop.width, crop.height],
     }
     return enriched
+
+
+def _delete_agent_recipe_impl(
+    recipe_id: str,
+    *,
+    recipes_root: Path,
+    path_is_within_root_fn,
+    http_exception_cls,
+) -> None:
+    json_path = (recipes_root / f"{recipe_id}.json").resolve()
+    zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+    recipe_dir = (recipes_root / recipe_id).resolve()
+    if not path_is_within_root_fn(json_path, recipes_root.resolve()):
+        raise http_exception_cls(status_code=400, detail="agent_recipe_path_invalid")
+    removed_any = False
+    for path in (json_path, zip_path):
+        if path.exists():
+            try:
+                path.unlink()
+                removed_any = True
+            except Exception:
+                pass
+    if recipe_dir.exists() and recipe_dir.is_dir():
+        try:
+            shutil.rmtree(recipe_dir)
+            removed_any = True
+        except Exception:
+            pass
+    if not removed_any:
+        raise http_exception_cls(status_code=404, detail="agent_recipe_not_found")
+
+
+def _list_agent_recipes_impl(
+    *,
+    recipes_root: Path,
+    dataset_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    recipes: List[Dict[str, Any]] = []
+    for path in recipes_root.glob("*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if dataset_id and data.get("dataset_id") != dataset_id:
+                continue
+            data["_path"] = str(path)
+            zip_path = (recipes_root / f"{data.get('id','')}.zip").resolve()
+            if zip_path.exists():
+                data["_zip"] = str(zip_path)
+            recipes.append(data)
+        except Exception:
+            continue
+    recipes.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+    return recipes

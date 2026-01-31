@@ -155,6 +155,11 @@ from utils.llm import (
     _agent_stream_extract_tool_name,
     _agent_parse_json_relaxed,
 )
+from utils.trace_utils import (
+    _agent_trace_sanitize_payload,
+    _agent_trace_sanitize_messages,
+    _agent_trace_full_jsonable,
+)
 from services.readable import (
     _agent_readable_trim,
     _agent_readable_banner,
@@ -9720,140 +9725,6 @@ def _agent_tool_prompt_qwen(grid_enabled: bool = False) -> str:
         "If the response already starts after ✿FUNCTION✿:, continue with the tool name and do not repeat the token.\n"
         "Keep args minimal; use only grid_cell, handles, labels, and intent as needed.\n"
     )
-
-
-def _agent_trace_sanitize_payload(payload: QwenPrepassRequest, image_token: Optional[str]) -> Dict[str, Any]:
-    try:
-        data = payload.dict()
-    except Exception:
-        data = {}
-    image_base64 = data.get("image_base64")
-    if isinstance(image_base64, str) and image_base64:
-        data["image_base64"] = f"<base64:{len(image_base64)}>"
-    if image_token:
-        data["resolved_image_token"] = image_token
-    return data
-
-
-def _agent_trace_sanitize_messages(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    sanitized: List[Dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, dict):
-            sanitized.append({"role": "unknown", "content": str(msg)})
-            continue
-        role = msg.get("role")
-        content = msg.get("content")
-        fn_call = msg.get("function_call")
-        fn_payload = None
-        if fn_call:
-            if hasattr(fn_call, "model_dump"):
-                try:
-                    fn_call = fn_call.model_dump()
-                except Exception:
-                    fn_call = None
-            if isinstance(fn_call, dict):
-                fn_payload = {
-                    "name": fn_call.get("name"),
-                    "arguments": fn_call.get("arguments"),
-                }
-            else:
-                fn_payload = {
-                    "name": getattr(fn_call, "name", None),
-                    "arguments": getattr(fn_call, "arguments", None),
-                }
-        if isinstance(content, list):
-            safe_content: List[Dict[str, Any]] = []
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                item_type = item.get("type")
-                if not item_type:
-                    if "text" in item:
-                        item_type = "text"
-                    elif "image" in item:
-                        item_type = "image"
-                    elif "audio" in item:
-                        item_type = "audio"
-                    elif "video" in item:
-                        item_type = "video"
-                    elif "file" in item:
-                        item_type = "file"
-                if item_type == "text":
-                    safe_content.append({"type": "text", "text": str(item.get("text") or "")})
-                elif item_type == "image":
-                    image_val = item.get("image")
-                    if isinstance(image_val, str):
-                        if image_val.startswith("data:image"):
-                            safe_content.append({"type": "image", "image": f"<image_base64:{len(image_val)}>"})
-                        else:
-                            safe_content.append({"type": "image", "image": image_val[:200]})
-                    else:
-                        safe_content.append({"type": "image", "image": "<image>"})
-                elif item_type in {"audio", "video", "file"}:
-                    safe_content.append({"type": item_type, "value": "<omitted>"})
-                else:
-                    safe_content.append({"type": str(item_type or "unknown"), "value": "<omitted>"})
-            entry = {"role": role, "content": safe_content}
-            if fn_payload:
-                entry["function_call"] = fn_payload
-            sanitized.append(entry)
-        else:
-            entry = {"role": role, "content": content}
-            if fn_payload:
-                entry["function_call"] = fn_payload
-            sanitized.append(entry)
-    return sanitized
-
-
-def _agent_trace_full_jsonable(value: Any, *, _depth: int = 0) -> Any:
-    if _depth > 6:
-        return "<max_depth>"
-    if value is None or isinstance(value, (int, float, bool)):
-        return value
-    if isinstance(value, str):
-        if value.startswith("data:image"):
-            return f"<image_base64:{len(value)}>"
-        if len(value) > 2000 and re.fullmatch(r"[A-Za-z0-9+/=\\s]+", value):
-            return f"<base64:{len(value)}>"
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, (list, tuple, set)):
-        return [_agent_trace_full_jsonable(item, _depth=_depth + 1) for item in value]
-    if isinstance(value, dict):
-        return {
-            str(key): _agent_trace_full_jsonable(item, _depth=_depth + 1)
-            for key, item in value.items()
-        }
-    if isinstance(value, (bytes, bytearray)):
-        return f"<bytes:{len(value)}>"
-    if isinstance(value, Image.Image):
-        try:
-            return f"<image:{value.size[0]}x{value.size[1]} {value.mode}>"
-        except Exception:
-            return "<image>"
-    if isinstance(value, np.ndarray):
-        try:
-            if value.size <= 2000:
-                return value.tolist()
-        except Exception:
-            pass
-        return {"type": "ndarray", "shape": list(value.shape), "dtype": str(value.dtype)}
-    if torch is not None and isinstance(value, torch.Tensor):
-        try:
-            arr = value.detach().cpu().numpy()
-            return _agent_trace_full_jsonable(arr, _depth=_depth + 1)
-        except Exception:
-            return {"type": "tensor", "shape": list(value.shape), "dtype": str(value.dtype)}
-    if hasattr(value, "model_dump"):
-        try:
-            return _agent_trace_full_jsonable(value.model_dump(), _depth=_depth + 1)
-        except Exception:
-            return str(value)
-    try:
-        return json.loads(json.dumps(value))
-    except Exception:
-        return str(value)
 
 
 def _agent_full_trace_write(record: Dict[str, Any]) -> None:

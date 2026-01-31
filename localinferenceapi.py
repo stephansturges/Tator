@@ -6540,13 +6540,6 @@ def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
     return json.dumps(mapped, indent=2, ensure_ascii=True)
 
 
-def _agent_compact_tool_response(tool_result: AgentToolResult) -> Dict[str, Any]:
-    compact = _agent_compact_tool_result(tool_result.result)
-    if tool_result.error:
-        return {"error": tool_result.error, "result": compact}
-    return compact
-
-
 def _agent_current_label_colors(labels: Sequence[str]) -> Dict[str, str]:
     global _AGENT_ACTIVE_LABEL_COLORS
     if _AGENT_ACTIVE_LABEL_COLORS:

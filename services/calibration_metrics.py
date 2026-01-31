@@ -1931,3 +1931,96 @@ def _normalize_steps_for_head_tuning_impl(
             }
         )
     return out
+
+
+def _prefilter_prompts_with_clip_impl(
+    prompts: Sequence[str],
+    *,
+    keep_prompts: Sequence[str],
+    cat_id: int,
+    class_name: str,
+    eval_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    clip_model_name: Optional[str],
+    sample_size: int,
+    keep_ratio: float,
+    seed: int,
+    log_fn: Optional[Callable[[str], None]] = None,
+    collect_crops_fn: Callable[..., List[Image.Image]],
+    encode_pil_fn: Callable[..., Optional[np.ndarray]],
+    encode_text_fn: Callable[..., Optional[np.ndarray]],
+) -> List[str]:
+    prompt_list: List[str] = []
+    seen: set[str] = set()
+    for p in prompts:
+        key = str(p).strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        prompt_list.append(key)
+    if not prompt_list:
+        return []
+
+    keep_set = {str(p).strip().lower() for p in keep_prompts if str(p).strip()}
+    extra_indices = [idx for idx, p in enumerate(prompt_list) if p.lower() not in keep_set]
+    if not extra_indices:
+        return prompt_list
+
+    crops = collect_crops_fn(
+        cat_id=cat_id,
+        eval_ids=eval_ids,
+        images=images,
+        gt_by_image_cat=gt_by_image_cat,
+        sample_size=sample_size,
+        seed=seed,
+    )
+    if not crops:
+        if log_fn:
+            try:
+                log_fn(f"[steps] CLIP prefilter skipped for {class_name}: no GT crops in sample.")
+            except Exception:
+                pass
+        return prompt_list
+
+    img_emb = encode_pil_fn(crops, clip_model_override=clip_model_name)
+    text_emb = encode_text_fn(prompt_list, clip_model_override=clip_model_name)
+    if img_emb is None or text_emb is None:
+        if log_fn:
+            try:
+                log_fn(f"[steps] CLIP prefilter skipped for {class_name}: CLIP embeddings unavailable.")
+            except Exception:
+                pass
+        return prompt_list
+
+    try:
+        sims = np.matmul(text_emb, img_emb.T)
+        scores = sims.max(axis=1) if sims.size else np.zeros(len(prompt_list), dtype=np.float32)
+    except Exception:
+        if log_fn:
+            try:
+                log_fn(f"[steps] CLIP prefilter skipped for {class_name}: similarity computation failed.")
+            except Exception:
+                pass
+        return prompt_list
+
+    keep_ratio = max(0.05, min(float(keep_ratio), 1.0))
+    extra_count = len(extra_indices)
+    keep_count = max(1, int(round(extra_count * keep_ratio)))
+    keep_count = min(extra_count, keep_count)
+    ranked = sorted(extra_indices, key=lambda i: float(scores[i]), reverse=True)
+    kept_extra = set(ranked[:keep_count])
+
+    filtered = [p for idx, p in enumerate(prompt_list) if idx in kept_extra or p.lower() in keep_set]
+    if log_fn:
+        try:
+            log_fn(
+                f"[steps] CLIP prefilter {class_name}: kept {len(filtered)}/{len(prompt_list)} prompts "
+                f"(base {len(prompt_list) - extra_count} + filtered {len(kept_extra)})"
+            )
+        except Exception:
+            pass
+    return filtered

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 from utils.coords import _agent_iou_xyxy
 
@@ -17,6 +17,66 @@ def _agent_source_counts(detections: Sequence[Dict[str, Any]]) -> Dict[str, int]
         source = str(det.get("source") or det.get("score_source") or "unknown")
         counts[source] = counts.get(source, 0) + 1
     return counts
+
+
+def _agent_format_source_counts(counts: Mapping[str, int]) -> str:
+    if not counts:
+        return "none"
+    parts = [f"{key}={counts[key]}" for key in sorted(counts.keys())]
+    return ", ".join(parts)
+
+
+def _agent_label_counts_summary(detections: Sequence[Dict[str, Any]], limit: int = 8) -> str:
+    counts: Dict[str, int] = {}
+    for det in detections:
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        if not label:
+            continue
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return "none"
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    parts = [f"{label}({count})" for label, count in ordered[:limit]]
+    if len(ordered) > limit:
+        parts.append(f"+{len(ordered) - limit} more")
+    return ", ".join(parts)
+
+
+def _agent_compact_tool_result(result: Dict[str, Any], max_items: int = 0) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"summary": "tool_result_invalid"}
+    if max_items <= 0:
+        return result
+    detections = result.get("detections")
+    if not isinstance(detections, list):
+        candidates = result.get("candidates")
+        if not isinstance(candidates, list):
+            return result
+        total = len(candidates)
+        if total <= max_items:
+            return result
+        trimmed = candidates[:max_items]
+        return {
+            **{k: v for k, v in result.items() if k != "candidates"},
+            "candidates": trimmed,
+            "candidate_count": total,
+            "truncated": True,
+        }
+    total = len(detections)
+    if total <= max_items:
+        return result
+    classes = {}
+    for det in detections:
+        label = str(det.get("label") or det.get("class") or "unknown")
+        classes[label] = classes.get(label, 0) + 1
+    trimmed = detections[:max_items]
+    return {
+        **{k: v for k, v in result.items() if k != "detections"},
+        "detections": trimmed,
+        "detection_count": total,
+        "class_counts": classes,
+        "truncated": True,
+    }
 
 
 def _agent_merge_prepass_detections(

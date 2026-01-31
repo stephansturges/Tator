@@ -224,6 +224,12 @@ from services.detector_merge import (
     _agent_merge_detections as _merge_detections,
     _merge_detections_nms as _merge_detections_nms,
 )
+from services.detector_params import (
+    _clamp_conf_value as _clamp_conf_value_impl,
+    _clamp_iou_value as _clamp_iou_value_impl,
+    _clamp_max_det_value as _clamp_max_det_value_impl,
+    _clamp_slice_params as _clamp_slice_params_impl,
+)
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -11640,27 +11646,15 @@ def _raise_on_labelmap_mismatch(
 
 
 def _clamp_conf_value(conf: float, warnings: List[str]) -> float:
-    if conf < 0 or conf > 1:
-        warnings.append("conf_clamped")
-        return min(1.0, max(0.0, conf))
-    return conf
+    return _clamp_conf_value_impl(conf, warnings)
 
 
 def _clamp_iou_value(iou: float, warnings: List[str]) -> float:
-    if iou < 0 or iou > 1:
-        warnings.append("iou_clamped")
-        return min(1.0, max(0.0, iou))
-    return iou
+    return _clamp_iou_value_impl(iou, warnings)
 
 
 def _clamp_max_det_value(max_det: int, warnings: List[str]) -> int:
-    if max_det < 1:
-        warnings.append("max_det_clamped")
-        return 1
-    if max_det > 5000:
-        warnings.append("max_det_clamped")
-        return 5000
-    return max_det
+    return _clamp_max_det_value_impl(max_det, warnings)
 
 
 def _clamp_slice_params(
@@ -11671,20 +11665,9 @@ def _clamp_slice_params(
     img_h: int,
     warnings: List[str],
 ) -> Tuple[int, float, float]:
-    max_dim = max(img_w, img_h, 1)
-    if slice_size < 64:
-        slice_size = 64
-        warnings.append("slice_size_clamped")
-    if slice_size > max_dim:
-        slice_size = max_dim
-        warnings.append("slice_size_clamped")
-    if overlap < 0 or overlap >= 0.95:
-        overlap = min(0.9, max(0.0, overlap))
-        warnings.append("overlap_clamped")
-    if merge_iou < 0 or merge_iou > 1:
-        merge_iou = min(1.0, max(0.0, merge_iou))
-        warnings.append("merge_iou_clamped")
-    return slice_size, overlap, merge_iou
+    return _clamp_slice_params_impl(
+        slice_size, overlap, merge_iou, img_w, img_h, warnings
+    )
 
 
 class Sam3ModelActivateRequest(BaseModel):

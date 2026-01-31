@@ -245,6 +245,8 @@ from services.classifier import (
     _clip_head_keep_mask_impl as _clip_head_keep_mask_impl,
     _resolve_head_normalize_embeddings_impl as _resolve_head_normalize_embeddings_impl,
     _resolve_active_head_normalize_embeddings_impl as _resolve_active_head_normalize_embeddings_impl,
+    _save_clip_head_artifacts_impl as _save_clip_head_artifacts_impl,
+    _load_clip_head_artifacts_impl as _load_clip_head_artifacts_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -15180,124 +15182,16 @@ def _save_clip_head_artifacts(
     min_prob: float,
     margin: float,
 ) -> None:
-    """Persist a portable CLIP head artifact into a recipe package directory."""
-    clip_dir = (recipe_dir / "clip_head").resolve()
-    if not _path_is_within_root(clip_dir, recipe_dir.resolve()):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_path_invalid")
-    clip_dir.mkdir(parents=True, exist_ok=True)
-
-    npz_path = clip_dir / "head.npz"
-    meta_path = clip_dir / "meta.json"
-    classifier_type = str(head.get("classifier_type") or "").strip().lower()
-    if not classifier_type and head.get("layers"):
-        classifier_type = "mlp"
-    if classifier_type == "mlp":
-        layers = head.get("layers")
-        if not isinstance(layers, list) or not layers:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_invalid")
-        arrays: Dict[str, np.ndarray] = {}
-        layers_meta: List[Dict[str, str]] = []
-        total_layers = len(layers)
-        normalize_flag = _resolve_head_normalize_embeddings(head, default=True)
-        for idx, layer in enumerate(layers):
-            try:
-                weight = np.asarray(layer.get("weight"), dtype=np.float32)
-                bias = np.asarray(layer.get("bias"), dtype=np.float32).reshape(-1)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_clip_head_invalid:{exc}") from exc
-            if weight.ndim != 2 or bias.ndim != 1 or weight.shape[0] != bias.shape[0]:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_invalid")
-            weight_key = f"layer{idx}_weight"
-            bias_key = f"layer{idx}_bias"
-            arrays[weight_key] = weight
-            arrays[bias_key] = bias
-            activation = str(layer.get("activation") or "").strip().lower()
-            if not activation:
-                activation = "linear" if idx == total_layers - 1 else "relu"
-            if activation not in {"relu", "linear", "none", "identity"}:
-                activation = "relu" if idx < total_layers - 1 else "linear"
-            layers_meta.append({
-                "weight": weight_key,
-                "bias": bias_key,
-                "activation": activation,
-            })
-        try:
-            np.savez_compressed(str(npz_path), **arrays)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_clip_head_write_failed:{exc}") from exc
-        classes = head.get("classes") if isinstance(head.get("classes"), list) else []
-        encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
-        encoder_model = head.get("encoder_model")
-        if not isinstance(encoder_model, str) or not encoder_model.strip():
-            encoder_model = head.get("clip_model")
-        meta = {
-            "clip_model": head.get("clip_model"),
-            "encoder_type": encoder_type,
-            "encoder_model": encoder_model,
-            "proba_mode": "softmax",
-            "classifier_type": "mlp",
-            "classes": [str(c) for c in classes],
-            "layers": layers_meta,
-            "normalize_embeddings": bool(normalize_flag),
-            "embedding_center_values": head.get("embedding_center_values").tolist() if isinstance(head.get("embedding_center_values"), np.ndarray) else head.get("embedding_center_values"),
-            "embedding_std_values": head.get("embedding_std_values").tolist() if isinstance(head.get("embedding_std_values"), np.ndarray) else head.get("embedding_std_values"),
-            "calibration_temperature": head.get("temperature") if head.get("temperature") is not None else head.get("calibration_temperature"),
-            "logit_adjustment": head.get("logit_adjustment"),
-            "logit_adjustment_inference": bool(head.get("logit_adjustment_inference")),
-            "arcface": bool(head.get("arcface")),
-            "arcface_margin": head.get("arcface_margin"),
-            "arcface_scale": head.get("arcface_scale"),
-            "min_prob": float(min_prob),
-            "margin": float(margin),
-        }
-    else:
-        try:
-            coef = np.asarray(head.get("coef"), dtype=np.float32)
-            intercept = np.asarray(head.get("intercept"), dtype=np.float32).reshape(-1)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_clip_head_invalid:{exc}") from exc
-        if coef.ndim != 2 or intercept.ndim != 1:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_clip_head_invalid")
-
-        try:
-            np.savez_compressed(str(npz_path), coef=coef, intercept=intercept)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_clip_head_write_failed:{exc}") from exc
-
-        classes = head.get("classes") if isinstance(head.get("classes"), list) else []
-        encoder_type = head.get("encoder_type") if isinstance(head.get("encoder_type"), str) else "clip"
-        encoder_model = head.get("encoder_model")
-        if not isinstance(encoder_model, str) or not encoder_model.strip():
-            encoder_model = head.get("clip_model")
-        normalize_flag = _resolve_head_normalize_embeddings(head, default=True)
-        meta = {
-            "clip_model": head.get("clip_model"),
-            "encoder_type": encoder_type,
-            "encoder_model": encoder_model,
-            "proba_mode": head.get("proba_mode"),
-            "classifier_type": "logreg",
-            "classes": [str(c) for c in classes],
-            "normalize_embeddings": bool(normalize_flag),
-            "embedding_center_values": head.get("embedding_center_values").tolist() if isinstance(head.get("embedding_center_values"), np.ndarray) else head.get("embedding_center_values"),
-            "embedding_std_values": head.get("embedding_std_values").tolist() if isinstance(head.get("embedding_std_values"), np.ndarray) else head.get("embedding_std_values"),
-            "calibration_temperature": head.get("temperature") if head.get("temperature") is not None else head.get("calibration_temperature"),
-            "logit_adjustment": head.get("logit_adjustment"),
-            "logit_adjustment_inference": bool(head.get("logit_adjustment_inference")),
-            "min_prob": float(min_prob),
-            "margin": float(margin),
-        }
-    try:
-        with meta_path.open("w", encoding="utf-8") as fp:
-            json.dump(meta, fp, ensure_ascii=False, indent=2)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_clip_head_meta_write_failed:{exc}") from exc
-
-    try:
-        total = npz_path.stat().st_size + meta_path.stat().st_size
-    except Exception:
-        total = 0
-    if total and total > AGENT_RECIPE_MAX_CLIP_HEAD_BYTES:
-        raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_clip_head_too_large")
+    return _save_clip_head_artifacts_impl(
+        recipe_dir=recipe_dir,
+        head=head,
+        min_prob=min_prob,
+        margin=margin,
+        path_is_within_root_fn=_path_is_within_root,
+        http_exception_cls=HTTPException,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings,
+        max_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
+    )
 
 
 def _load_clip_head_artifacts(
@@ -15305,171 +15199,15 @@ def _load_clip_head_artifacts(
     recipe_dir: Path,
     fallback_meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Load a portable CLIP head artifact from a recipe package directory."""
-    clip_dir = (recipe_dir / "clip_head").resolve()
-    npz_path = (clip_dir / "head.npz").resolve()
-    meta_path = (clip_dir / "meta.json").resolve()
-    if not _path_is_within_root(npz_path, clip_dir) or not _path_is_within_root(meta_path, clip_dir):
-        return None
-    if not npz_path.exists() or not npz_path.is_file():
-        return None
-    meta: Dict[str, Any] = {}
-    if meta_path.exists() and meta_path.is_file():
-        try:
-            with meta_path.open("r", encoding="utf-8") as fp:
-                loaded = json.load(fp)
-            if isinstance(loaded, dict):
-                meta = loaded
-        except Exception:
-            meta = {}
-    if not meta and isinstance(fallback_meta, dict):
-        meta = fallback_meta
-    classes_raw = meta.get("classes") if isinstance(meta.get("classes"), list) else []
-    classes = [str(c) for c in classes_raw]
-    proba_mode = meta.get("proba_mode")
-    min_prob = meta.get("min_prob")
-    margin = meta.get("margin")
-    classifier_type = str(meta.get("classifier_type") or "").strip().lower()
-    layers_meta = meta.get("layers") if isinstance(meta.get("layers"), list) else None
-    normalize_flag = meta.get("normalize_embeddings")
-    center_vals = meta.get("embedding_center_values")
-    std_vals = meta.get("embedding_std_values")
-    temperature_val = meta.get("calibration_temperature")
-    logit_adjustment = meta.get("logit_adjustment")
-    logit_adjustment_inference = meta.get("logit_adjustment_inference")
-    arcface_flag = meta.get("arcface")
-    if arcface_flag is None:
-        arcface_flag = meta.get("arcface_enabled")
-    arcface_margin = meta.get("arcface_margin")
-    arcface_scale = meta.get("arcface_scale")
-
-    min_prob_val: Optional[float] = None
-    margin_val: Optional[float] = None
-    try:
-        if min_prob is not None:
-            min_prob_val = float(min_prob)
-    except Exception:
-        min_prob_val = None
-    try:
-        if margin is not None:
-            margin_val = float(margin)
-    except Exception:
-        margin_val = None
-
-    clip_model_val: Optional[str] = None
-    try:
-        raw = meta.get("clip_model")
-        if isinstance(raw, str) and raw.strip():
-            clip_model_val = raw.strip()
-    except Exception:
-        clip_model_val = None
-
-    encoder_type = meta.get("encoder_type") if isinstance(meta.get("encoder_type"), str) else "clip"
-    encoder_model = meta.get("encoder_model")
-    if not isinstance(encoder_model, str) or not encoder_model.strip():
-        encoder_model = clip_model_val
-
-    if classifier_type == "mlp" or layers_meta:
-        try:
-            with np.load(str(npz_path)) as data:
-                layers: List[Dict[str, Any]] = []
-                total_layers = len(layers_meta or [])
-                for idx, layer in enumerate(layers_meta or []):
-                    weight_key = layer.get("weight")
-                    bias_key = layer.get("bias")
-                    if not weight_key or not bias_key:
-                        return None
-                    weight = np.asarray(data.get(weight_key), dtype=np.float32)
-                    bias = np.asarray(data.get(bias_key), dtype=np.float32).reshape(-1)
-                    if weight.ndim != 2 or bias.ndim != 1 or weight.shape[0] != bias.shape[0]:
-                        return None
-                    activation = str(layer.get("activation") or "").strip().lower()
-                    if not activation:
-                        activation = "linear" if idx == total_layers - 1 else "relu"
-                    if activation not in {"relu", "linear", "none", "identity"}:
-                        activation = "relu" if idx < total_layers - 1 else "linear"
-                    layers.append({
-                        "weight": weight,
-                        "bias": bias,
-                        "activation": activation,
-                    })
-        except Exception:
-            return None
-        bg_indices = _clip_head_background_indices(classes)
-        bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
-        embedding_dim = 0
-        try:
-            embedding_dim = int(layers[0].get("weight").shape[1]) if layers else 0
-        except Exception:
-            embedding_dim = 0
-        return {
-            "classes": classes,
-            "background_indices": bg_indices,
-            "background_classes": bg_classes,
-            "layers": layers,
-            "clip_model": clip_model_val,
-            "encoder_type": encoder_type,
-            "encoder_model": encoder_model,
-            "embedding_dim": embedding_dim,
-            "proba_mode": "softmax",
-            "classifier_type": "mlp",
-            "normalize_embeddings": bool(normalize_flag) if normalize_flag is not None else True,
-            "embedding_center_values": center_vals,
-            "embedding_std_values": std_vals,
-            "temperature": temperature_val,
-            "logit_adjustment": logit_adjustment,
-            "logit_adjustment_inference": bool(logit_adjustment_inference),
-            "arcface": bool(arcface_flag),
-            "arcface_margin": arcface_margin,
-            "arcface_scale": arcface_scale,
-            "min_prob": min_prob_val,
-            "margin": margin_val,
-        }
-
-    try:
-        with np.load(str(npz_path)) as data:
-            coef = np.asarray(data["coef"], dtype=np.float32)
-            intercept = np.asarray(data["intercept"], dtype=np.float32).reshape(-1)
-    except Exception:
-        return None
-
-    if not isinstance(proba_mode, str) or not proba_mode:
-        if coef.shape[0] == 1 and len(classes) == 2:
-            proba_mode = "binary"
-        else:
-            proba_mode = "softmax"
-
-    if not clip_model_val and coef.ndim == 2:
-        emb_dim = 0
-        try:
-            emb_dim = int(coef.shape[1])
-        except Exception:
-            emb_dim = 0
-        clip_model_val = _infer_clip_model_from_embedding_dim(emb_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
-
-    bg_indices = _clip_head_background_indices(classes)
-    bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []
-
-    return {
-        "classes": classes,
-        "background_indices": bg_indices,
-        "background_classes": bg_classes,
-        "coef": coef,
-        "intercept": intercept,
-        "clip_model": clip_model_val,
-        "encoder_type": encoder_type,
-        "encoder_model": encoder_model,
-        "proba_mode": proba_mode,
-        "classifier_type": "logreg",
-        "normalize_embeddings": bool(normalize_flag) if normalize_flag is not None else True,
-        "embedding_center_values": center_vals,
-        "embedding_std_values": std_vals,
-        "temperature": temperature_val,
-        "logit_adjustment": logit_adjustment,
-        "logit_adjustment_inference": bool(logit_adjustment_inference),
-        "min_prob": min_prob_val,
-        "margin": margin_val,
-    }
+    return _load_clip_head_artifacts_impl(
+        recipe_dir=recipe_dir,
+        fallback_meta=fallback_meta,
+        path_is_within_root_fn=_path_is_within_root,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        infer_clip_model_fn=_infer_clip_model_from_embedding_dim,
+        active_clip_model_name=clip_model_name,
+        default_clip_model=DEFAULT_CLIP_MODEL,
+    )
 
 
 def _resolve_clip_head_background_settings(payload: "AgentMiningRequest") -> Tuple[bool, bool, float, str]:

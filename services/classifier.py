@@ -1434,3 +1434,75 @@ def _successive_halving_search_impl(
         keep_n = max(1, int(len(stage_results) * float(keep_ratio)))
         remaining = [candidate for _key, _res, candidate in stage_results[:keep_n]]
     return remaining[0], history
+
+
+def _load_labelmap_simple_impl(
+    path: Optional[str],
+    *,
+    load_labelmap_file_fn: Callable[[Path], Sequence[str]],
+) -> List[str]:
+    if not path:
+        return []
+    try:
+        classes = load_labelmap_file_fn(Path(path))
+        return [str(c) for c in list(classes)]
+    except Exception:
+        return []
+
+
+def _validate_clip_dataset_impl(
+    inputs: Dict[str, str],
+    *,
+    http_exception_cls: Any,
+    load_labelmap_simple_fn: Callable[[Optional[str]], List[str]],
+) -> Dict[str, Any]:
+    """
+    Light validation of staged CLIP dataset to fail fast before launching a job.
+    Expects keys: images_dir, labels_dir, optional labelmap_path.
+    """
+    images_dir = inputs.get("images_dir")
+    labels_dir = inputs.get("labels_dir")
+    labelmap_path = inputs.get("labelmap_path")
+    if not images_dir or not labels_dir:
+        raise http_exception_cls(status_code=400, detail="clip_dataset_missing_paths")
+    img_root = Path(images_dir)
+    lbl_root = Path(labels_dir)
+    if not img_root.is_dir() or not lbl_root.is_dir():
+        raise http_exception_cls(status_code=400, detail="clip_dataset_missing_paths")
+    valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+    image_files: List[Path] = []
+    for p in img_root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in valid_exts:
+            image_files.append(p)
+    if not image_files:
+        raise http_exception_cls(status_code=400, detail="clip_images_missing")
+    label_files = [p for p in lbl_root.rglob("*") if p.is_file() and p.suffix.lower() == ".txt"]
+    if not label_files:
+        raise http_exception_cls(status_code=400, detail="clip_labels_missing")
+    labelmap = load_labelmap_simple_fn(labelmap_path)
+    max_cid = -1
+    box_count = 0
+    for lf in label_files:
+        try:
+            for line in lf.read_text(encoding="utf-8").splitlines():
+                parts = line.strip().split()
+                if len(parts) < 5:
+                    continue
+                try:
+                    cid = int(float(parts[0]))
+                except Exception:
+                    continue
+                max_cid = max(max_cid, cid)
+                box_count += 1
+        except Exception:
+            continue
+    if box_count == 0:
+        raise http_exception_cls(status_code=400, detail="clip_labels_empty")
+    if labelmap and max_cid >= len(labelmap):
+        raise http_exception_cls(status_code=400, detail="clip_labelmap_class_mismatch")
+    return {
+        "images": len(image_files),
+        "labels": len(label_files),
+        "boxes": box_count,
+        "labelmap_classes": len(labelmap),
+    }

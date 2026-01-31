@@ -256,6 +256,8 @@ from services.classifier import (
     _score_head_tuning_candidate_impl as _score_head_tuning_candidate_impl,
     _update_best_clip_head_sweep_summary_impl as _update_best_clip_head_sweep_summary_impl,
     _successive_halving_search_impl as _successive_halving_search_impl,
+    _load_labelmap_simple_impl as _load_labelmap_simple_impl,
+    _validate_clip_dataset_impl as _validate_clip_dataset_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -32065,66 +32067,15 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
 
 
 def _load_labelmap_simple(path: Optional[str]) -> List[str]:
-    if not path:
-        return []
-    try:
-        classes = _load_labelmap_file(Path(path))
-        return classes
-    except Exception:
-        return []
+    return _load_labelmap_simple_impl(path, load_labelmap_file_fn=_load_labelmap_file)
 
 
 def _validate_clip_dataset(inputs: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Light validation of staged CLIP dataset to fail fast before launching a job.
-    Expects keys: images_dir, labels_dir, optional labelmap_path.
-    """
-    images_dir = inputs.get("images_dir")
-    labels_dir = inputs.get("labels_dir")
-    labelmap_path = inputs.get("labelmap_path")
-    if not images_dir or not labels_dir:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_dataset_missing_paths")
-    img_root = Path(images_dir)
-    lbl_root = Path(labels_dir)
-    if not img_root.is_dir() or not lbl_root.is_dir():
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_dataset_missing_paths")
-    valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
-    image_files: List[Path] = []
-    for p in img_root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in valid_exts:
-            image_files.append(p)
-    if not image_files:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_images_missing")
-    label_files = [p for p in lbl_root.rglob("*") if p.is_file() and p.suffix.lower() == ".txt"]
-    if not label_files:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_labels_missing")
-    labelmap = _load_labelmap_simple(labelmap_path)
-    max_cid = -1
-    box_count = 0
-    for lf in label_files:
-        try:
-            for line in lf.read_text(encoding="utf-8").splitlines():
-                parts = line.strip().split()
-                if len(parts) < 5:
-                    continue
-                try:
-                    cid = int(float(parts[0]))
-                except Exception:
-                    continue
-                max_cid = max(max_cid, cid)
-                box_count += 1
-        except Exception:
-            continue
-    if box_count == 0:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_labels_empty")
-    if labelmap and max_cid >= len(labelmap):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_labelmap_class_mismatch")
-    return {
-        "images": len(image_files),
-        "labels": len(label_files),
-        "boxes": box_count,
-        "labelmap_classes": len(labelmap),
-    }
+    return _validate_clip_dataset_impl(
+        inputs,
+        http_exception_cls=HTTPException,
+        load_labelmap_simple_fn=_load_labelmap_simple,
+    )
 
 
 @app.post("/clip/train")

@@ -41,6 +41,9 @@ from starlette.status import (
     HTTP_500_INTERNAL_SERVER_ERROR,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
+from utils.io import _ensure_directory, _load_json_metadata, _write_qwen_metadata
+from utils.image import _load_image_size
+from utils.labels import _read_labelmap_lines, _load_labelmap_file
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -15596,27 +15599,6 @@ def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:
     return " • ".join(parts)
 
 
-def _write_qwen_metadata(meta_path: Path, metadata: Dict[str, Any]) -> None:
-    try:
-        with meta_path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to write Qwen metadata for %s: %s", meta_path.parent, exc)
-
-
-def _load_json_metadata(path: Path) -> Optional[Dict[str, Any]]:
-    if not path.exists():
-        return None
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-            if isinstance(data, dict):
-                return data
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to read metadata file %s: %s", path, exc)
-    return None
-
-
 def _ensure_qwen_dataset_signature(dataset_dir: Path, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     signature = metadata.get("signature")
     if signature:
@@ -16177,16 +16159,6 @@ def _collect_rfdetr_artifacts(run_dir: Path) -> Dict[str, bool]:
         "labelmap": (run_dir / "labelmap.txt").exists(),
         "run_meta": (run_dir / RFDETR_RUN_META_NAME).exists(),
     }
-
-
-def _read_labelmap_lines(path: Path) -> List[str]:
-    if not path.exists():
-        return []
-    try:
-        lines = [line.strip() for line in path.read_text().splitlines()]
-        return [line for line in lines if line]
-    except Exception:
-        return []
 
 
 def _flatten_metrics(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -30013,15 +29985,6 @@ def _iter_yolo_images(images_dir: Path) -> List[Path]:
     return sorted([p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in exts])
 
 
-def _load_image_size(image_path: Path) -> Tuple[int, int]:
-    try:
-        with Image.open(image_path) as im:
-            width, height = im.size
-            return int(width), int(height)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"image_read_failed:{image_path.name}:{exc}") from exc
-
-
 def _qwen_det_from_yolo(
     tokens: List[str],
     *,
@@ -38064,43 +38027,6 @@ def _publish_clip_training_artifacts(artifacts: TrainingArtifacts) -> TrainingAr
     return artifacts
 
 
-def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = False) -> List[str]:
-    if path is None:
-        return []
-    if isinstance(path, Path):
-        path_str = str(path)
-        lower = path.name.lower()
-    else:
-        path_str = str(path)
-        lower = Path(path_str).name.lower()
-    if not path_str.strip():
-        return []
-    try:
-        if lower.endswith(".pkl"):
-            data = joblib.load(path_str)
-            if isinstance(data, list):
-                return [str(item) for item in data]
-            raise ValueError("labelmap_pickle_invalid")
-        entries: List[str] = []
-        with open(path_str, "r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if stripped:
-                    entries.append(stripped)
-        if not entries:
-            raise ValueError("labelmap_empty")
-        return entries
-    except FileNotFoundError as exc:
-        if strict:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found") from exc
-        return []
-    except Exception as exc:  # noqa: BLE001
-        if strict:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"labelmap_load_failed:{exc}") from exc
-        logger.warning("Failed to load labelmap from %s: %s", path_str, exc)
-        return []
-
-
 def _current_active_payload() -> Dict[str, Any]:
     encoder_ready = _active_encoder_ready()
     encoder_error = clip_last_error
@@ -38864,16 +38790,6 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
             _cleanup_job(job)
 
     threading.Thread(target=worker, name=f"clip-train-{job.job_id[:8]}", daemon=True).start()
-
-
-def _ensure_directory(path: str) -> str:
-    abs_path = os.path.abspath(path or ".")
-    if not os.path.isdir(abs_path):
-        try:
-            Path(abs_path).mkdir(parents=True, exist_ok=True)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"output_dir_missing:{abs_path}") from exc
-    return abs_path
 
 
 def _coerce_int(value: Any, fallback: int, *, minimum: Optional[int] = None) -> int:

@@ -5,6 +5,20 @@ from typing import Any, Dict, List, Sequence, Tuple
 from utils.coords import _agent_iou_xyxy
 
 
+def _agent_source_counts(detections: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for det in detections:
+        sources = det.get("source_list")
+        if isinstance(sources, (list, tuple)) and sources:
+            for src in sources:
+                source = str(src or "unknown")
+                counts[source] = counts.get(source, 0) + 1
+            continue
+        source = str(det.get("source") or det.get("score_source") or "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
 def _agent_merge_prepass_detections(
     detections: List[Dict[str, Any]],
     *,

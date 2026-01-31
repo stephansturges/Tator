@@ -82,7 +82,7 @@ from utils.datasets import _iter_yolo_images
 from services.prepass_config import _normalize_recipe_thresholds
 from services.prepass_recipes import _write_prepass_recipe_meta, _load_prepass_recipe_meta
 from services.datasets import _load_dataset_glossary, _load_qwen_labelmap
-from services.prepass import _agent_merge_prepass_detections, _agent_filter_scoreless_detections
+from services.prepass import _agent_merge_prepass_detections, _agent_filter_scoreless_detections, _agent_source_counts
 from services.glossary_library import (
     _normalize_glossary_name,
     _glossary_key,
@@ -7804,19 +7804,6 @@ def _agent_merge_detections(
         return merged[:max_det]
     return merged
 
-
-def _agent_source_counts(detections: Sequence[Dict[str, Any]]) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for det in detections:
-        sources = det.get("source_list")
-        if isinstance(sources, (list, tuple)) and sources:
-            for src in sources:
-                source = str(src or "unknown")
-                counts[source] = counts.get(source, 0) + 1
-            continue
-        source = str(det.get("source") or det.get("score_source") or "unknown")
-        counts[source] = counts.get(source, 0) + 1
-    return counts
 
 
 def _agent_format_source_counts(counts: Mapping[str, int]) -> str:

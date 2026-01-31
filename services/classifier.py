@@ -1146,3 +1146,86 @@ def _clip_auto_predict_details_impl(
         "margin": None,
         "error": None,
     }
+
+
+def _score_detections_with_clip_head_impl(
+    dets: Sequence[Any],
+    *,
+    pil_img: Any,
+    clip_head: Dict[str, Any],
+    score_mode: str,
+    bbox_to_xyxy_pixels_fn: Callable[[Sequence[float], int, int], Optional[Tuple[float, float, float, float]]],
+    encode_pil_batch_for_head_fn: Callable[[Sequence[Any], Dict[str, Any]], Optional[np.ndarray]],
+    clip_head_predict_proba_fn: Callable[[np.ndarray, Dict[str, Any]], Optional[np.ndarray]],
+    clip_head_background_indices_fn: Callable[[Sequence[str]], List[int]],
+    find_target_index_fn: Callable[[Sequence[str], Optional[str]], Optional[int]],
+) -> Optional[Dict[int, float]]:
+    """
+    Compute CLIP-head-based scores for a list of detections.
+
+    Returns a dict mapping id(det)->score, and also populates det.clip_head_prob/margin where available.
+    """
+    if not dets:
+        return {}
+    if not isinstance(clip_head, dict):
+        return None
+    classes = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
+    if not classes:
+        return None
+    crops: List[Any] = []
+    det_refs: List[Any] = []
+    for det in dets:
+        bbox_xyxy = bbox_to_xyxy_pixels_fn(det.bbox or [], pil_img.width, pil_img.height)
+        if bbox_xyxy is None:
+            continue
+        x1, y1, x2, y2 = bbox_xyxy
+        if x2 <= x1 or y2 <= y1:
+            continue
+        try:
+            crops.append(pil_img.crop((x1, y1, x2, y2)))
+        except Exception:
+            continue
+        det_refs.append(det)
+    if not det_refs:
+        return {}
+
+    feats = encode_pil_batch_for_head_fn(crops, head=clip_head)
+    if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
+        return None
+    proba = clip_head_predict_proba_fn(feats, clip_head)
+    if proba is None:
+        return None
+
+    bg_indices = clip_head_background_indices_fn(classes)
+    scores: Dict[int, float] = {}
+    for det, row in zip(det_refs, proba):
+        label = det.class_name or det.qwen_label
+        t_idx = find_target_index_fn(classes, label)
+        if t_idx is None or t_idx < 0 or t_idx >= row.shape[0]:
+            continue
+        try:
+            p_t = float(row[int(t_idx)])
+        except Exception:
+            continue
+        p_other = 0.0
+        try:
+            if row.shape[0] > 1:
+                other = np.asarray(row, dtype=np.float32).copy()
+                other[int(t_idx)] = -1.0
+                p_other = float(np.max(other))
+        except Exception:
+            p_other = 0.0
+        p_bg: Optional[float] = None
+        if bg_indices:
+            try:
+                p_bg = float(np.max(row[bg_indices]))
+            except Exception:
+                p_bg = None
+        det.clip_head_prob = p_t
+        det.clip_head_margin = float(p_t - p_other)
+        if p_bg is not None:
+            det.clip_head_bg_prob = float(p_bg)
+            det.clip_head_bg_margin = float(p_t - p_bg)
+        score = p_t if score_mode == "clip_head_prob" else float(p_t - p_other)
+        scores[id(det)] = float(score)
+    return scores

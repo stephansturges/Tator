@@ -251,6 +251,7 @@ from services.classifier import (
     _infer_clip_model_from_embedding_dim_impl as _infer_clip_model_from_embedding_dim_impl,
     _clip_auto_predict_label_impl as _clip_auto_predict_label_impl,
     _clip_auto_predict_details_impl as _clip_auto_predict_details_impl,
+    _score_detections_with_clip_head_impl as _score_detections_with_clip_head_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -15245,75 +15246,17 @@ def _score_detections_with_clip_head(
     clip_head: Dict[str, Any],
     score_mode: Literal["clip_head_prob", "clip_head_margin"],
 ) -> Optional[Dict[int, float]]:
-    """
-    Compute CLIP-head-based scores for a list of detections.
-
-    Returns a dict mapping id(det)->score, and also populates det.clip_head_prob/margin where available.
-    """
-    if not dets:
-        return {}
-    if not isinstance(clip_head, dict):
-        return None
-    classes = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
-    if not classes:
-        return None
-    crops: List[Image.Image] = []
-    det_refs: List[QwenDetection] = []
-    for det in dets:
-        bbox_xyxy = _bbox_to_xyxy_pixels(det.bbox or [], pil_img.width, pil_img.height)
-        if bbox_xyxy is None:
-            continue
-        x1, y1, x2, y2 = bbox_xyxy
-        if x2 <= x1 or y2 <= y1:
-            continue
-        try:
-            crops.append(pil_img.crop((x1, y1, x2, y2)))
-        except Exception:
-            continue
-        det_refs.append(det)
-    if not det_refs:
-        return {}
-
-    feats = _encode_pil_batch_for_head(crops, head=clip_head)
-    if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
-        return None
-    proba = _clip_head_predict_proba(feats, clip_head)
-    if proba is None:
-        return None
-
-    bg_indices = _clip_head_background_indices(classes)
-    scores: Dict[int, float] = {}
-    for det, row in zip(det_refs, proba):
-        label = det.class_name or det.qwen_label
-        t_idx = _find_clip_head_target_index(classes, label)
-        if t_idx is None or t_idx < 0 or t_idx >= row.shape[0]:
-            continue
-        try:
-            p_t = float(row[int(t_idx)])
-        except Exception:
-            continue
-        p_other = 0.0
-        try:
-            if row.shape[0] > 1:
-                other = np.asarray(row, dtype=np.float32).copy()
-                other[int(t_idx)] = -1.0
-                p_other = float(np.max(other))
-        except Exception:
-            p_other = 0.0
-        p_bg: Optional[float] = None
-        if bg_indices:
-            try:
-                p_bg = float(np.max(row[bg_indices]))
-            except Exception:
-                p_bg = None
-        det.clip_head_prob = p_t
-        det.clip_head_margin = float(p_t - p_other)
-        if p_bg is not None:
-            det.clip_head_bg_prob = float(p_bg)
-            det.clip_head_bg_margin = float(p_t - p_bg)
-        score = p_t if score_mode == "clip_head_prob" else float(p_t - p_other)
-        scores[id(det)] = float(score)
-    return scores
+    return _score_detections_with_clip_head_impl(
+        dets,
+        pil_img=pil_img,
+        clip_head=clip_head,
+        score_mode=score_mode,
+        bbox_to_xyxy_pixels_fn=_bbox_to_xyxy_pixels,
+        encode_pil_batch_for_head_fn=_encode_pil_batch_for_head,
+        clip_head_predict_proba_fn=_clip_head_predict_proba,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        find_target_index_fn=_find_clip_head_target_index,
+    )
 
 
 def _select_diverse_indices(

@@ -10802,26 +10802,8 @@ def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> Non
     _log_qwen_get_request_impl(endpoint, jobs, logger)
 
 
-def _coerce_metric_value(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _coerce_metric_value(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_coerce_metric_value(item) for item in value]
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return str(value)
-
-
 def _qwen_job_append_metric(job: QwenTrainingJob, metric: Dict[str, Any]) -> None:
-    if not metric:
-        return
-    sanitized = {str(key): _coerce_metric_value(val) for key, val in metric.items()}
-    _qwen_job_append_metric_impl(job, sanitized, max_points=MAX_QWEN_METRIC_POINTS)
+    _qwen_job_append_metric_impl(job, metric, max_points=MAX_QWEN_METRIC_POINTS)
 
 
 def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:

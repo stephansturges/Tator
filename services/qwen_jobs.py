@@ -101,7 +101,23 @@ def _qwen_job_update_impl(
 def _qwen_job_append_metric_impl(job, metric: Dict[str, Any], *, max_points: Optional[int]) -> None:
     if not metric:
         return
-    job.metrics.append(metric)
+    sanitized = {str(key): _coerce_metric_value_impl(val) for key, val in metric.items()}
+    job.metrics.append(sanitized)
     if max_points and len(job.metrics) > max_points:
         job.metrics[:] = job.metrics[-max_points:]
     job.updated_at = time.time()
+
+
+def _coerce_metric_value_impl(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _coerce_metric_value_impl(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coerce_metric_value_impl(item) for item in value]
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)

@@ -121,7 +121,13 @@ from services.context_store import (
     _agent_context_store as _agent_context_store_impl,
     _agent_context_chunk as _agent_context_chunk_impl,
 )
-from services.tile_context import _cluster_owner_cell, _tile_clusters, _tile_cluster_payload, _tile_caption_hint
+from services.tile_context import (
+    _cluster_owner_cell,
+    _tile_clusters,
+    _tile_cluster_payload,
+    _tile_caption_hint,
+    _build_tile_context_payloads as _build_tile_context_payloads_impl,
+)
 from services.prepass_grid import (
     _agent_grid_col_label,
     _agent_grid_col_index,
@@ -8149,59 +8155,29 @@ def _agent_tool_get_tile_context(
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
     if not _AGENT_ACTIVE_GRID:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
-    cluster_list = _tile_cluster_payload(cell, _AGENT_ACTIVE_CLUSTERS or [], handle_fn=_agent_cluster_handle)
-    counts = _agent_cluster_label_counts([item["cluster_id"] for item in cluster_list])
-    tool_usage = dict(_AGENT_GRID_TOOL_USAGE.get(cell, {}))
-    tool_usage_last = dict(_AGENT_GRID_TOOL_LAST.get(cell, {}))
-    caption_hint = _tile_caption_hint(cell, _AGENT_ACTIVE_WINDOWED_CAPTIONS, _AGENT_ACTIVE_GRID)
-    labels = _agent_overlay_labels(_AGENT_ACTIVE_CLUSTERS or [], _AGENT_ACTIVE_LABELMAP or [])
-    label_colors = _agent_current_label_colors(labels) if labels else {}
-    label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
-    agent_cluster_list = []
-    for item in cluster_list:
-        if not isinstance(item, dict):
-            continue
-        agent_cluster_list.append(
-            {
-                "handle": item.get("handle"),
-                "label": item.get("label"),
-                "score": item.get("score"),
-                "sources": item.get("sources"),
-                "grid_cell": item.get("grid_cell"),
-                "owner_cell": item.get("owner_cell"),
-                "verified": bool(item.get("verified")),
-            }
-        )
-    payload = {
-        "tile_id": cell,
-        "grid_cell": cell,
-        "tile_cluster_list": cluster_list,
-        "tile_counts": counts,
-        "tool_usage": tool_usage,
-        "tool_usage_last": tool_usage_last,
-        "caption_hint": caption_hint,
-        "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
-        "cluster_total": len(cluster_list),
-    }
-    public_payload = {
-        "tile_id": cell,
-        "grid_cell": cell,
-        "tile_cluster_list": agent_cluster_list,
-        "tile_counts": counts,
-        "tool_usage": tool_usage,
-        "tool_usage_last": tool_usage_last,
-        "caption_hint": caption_hint,
-        "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
-        "cluster_total": len(cluster_list),
-    }
+    payload, public_payload = _build_tile_context_payloads_impl(
+        cell,
+        clusters=_AGENT_ACTIVE_CLUSTERS or [],
+        grid=_AGENT_ACTIVE_GRID,
+        windowed_captions=_AGENT_ACTIVE_WINDOWED_CAPTIONS,
+        handle_fn=_agent_cluster_handle,
+        cluster_label_counts_fn=_agent_cluster_label_counts,
+        overlay_labels_fn=_agent_overlay_labels,
+        label_colors_fn=_agent_current_label_colors,
+        label_prefixes_fn=_agent_current_label_prefixes,
+        overlay_key_fn=_agent_overlay_key_text,
+        labelmap=_AGENT_ACTIVE_LABELMAP or [],
+        grid_usage=_AGENT_GRID_TOOL_USAGE,
+        grid_usage_last=_AGENT_GRID_TOOL_LAST,
+    )
     stored = _agent_context_store(public_payload, kind="tile")
     if stored.get("chunked"):
         preview = {
-            "cluster_total": len(cluster_list),
-            "tile_counts": counts,
-            "tool_usage": tool_usage,
-            "tool_usage_last": tool_usage_last,
-            "caption_hint": caption_hint,
+            "cluster_total": public_payload.get("cluster_total"),
+            "tile_counts": public_payload.get("tile_counts"),
+            "tool_usage": public_payload.get("tool_usage"),
+            "tool_usage_last": public_payload.get("tool_usage_last"),
+            "caption_hint": public_payload.get("caption_hint"),
         }
         return {
             "tile_id": cell,
@@ -8212,15 +8188,7 @@ def _agent_tool_get_tile_context(
             "byte_size": stored.get("byte_size"),
             "preview": preview,
             "__agent_view__": {
-                "tile_id": cell,
-                "grid_cell": cell,
-                "tile_cluster_list": agent_cluster_list,
-                "tile_counts": counts,
-                "tool_usage": tool_usage,
-                "tool_usage_last": tool_usage_last,
-                "caption_hint": caption_hint,
-                "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
-                "cluster_total": len(cluster_list),
+                **public_payload,
                 "chunked": True,
                 "context_handle": stored.get("context_handle"),
                 "chunk_total": stored.get("chunk_total"),
@@ -8231,15 +8199,7 @@ def _agent_tool_get_tile_context(
         "byte_size": stored.get("byte_size"),
         "chunked": False,
         "__agent_view__": {
-            "tile_id": cell,
-            "grid_cell": cell,
-            "tile_cluster_list": agent_cluster_list,
-            "tile_counts": counts,
-            "tool_usage": tool_usage,
-            "tool_usage_last": tool_usage_last,
-            "caption_hint": caption_hint,
-            "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
-            "cluster_total": len(cluster_list),
+            **public_payload,
             "chunked": False,
         },
     }

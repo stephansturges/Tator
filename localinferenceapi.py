@@ -60,6 +60,11 @@ from utils.labels import (
     _agent_label_prefix_map,
     _agent_overlay_key_text,
 )
+from utils.classifier_utils import (
+    _is_background_class_name,
+    _clip_head_background_indices,
+    _find_clip_head_target_index,
+)
 from utils.parsing import (
     _coerce_int,
     _coerce_float,
@@ -19034,18 +19039,6 @@ def _load_clip_head_artifacts(
     }
 
 
-def _is_background_class_name(name: Optional[str]) -> bool:
-    try:
-        label = str(name or "").strip().lower()
-    except Exception:
-        return False
-    return label.startswith("__bg_")
-
-
-def _clip_head_background_indices(classes: Sequence[str]) -> List[int]:
-    return [idx for idx, label in enumerate(classes) if _is_background_class_name(label)]
-
-
 def _resolve_clip_head_background_settings(payload: "AgentMiningRequest") -> Tuple[bool, bool, float, str]:
     try:
         guard = bool(getattr(payload, "clip_head_background_guard", False))
@@ -19064,16 +19057,6 @@ def _resolve_clip_head_background_settings(payload: "AgentMiningRequest") -> Tup
     guard_seed = bool(guard and apply_mode in {"seed", "both"})
     guard_final = bool(guard and apply_mode in {"final", "both"})
     return guard_seed, guard_final, float(margin_val), apply_mode
-
-
-def _find_clip_head_target_index(classes: Sequence[str], class_name: Optional[str]) -> Optional[int]:
-    target = _normalize_class_name_for_match(class_name)
-    if not target:
-        return None
-    for idx, c in enumerate(classes):
-        if _normalize_class_name_for_match(c) == target:
-            return int(idx)
-    return None
 
 
 def _clip_auto_predict_label(

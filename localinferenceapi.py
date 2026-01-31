@@ -189,6 +189,7 @@ from services.readable import (
     _agent_readable_tool_result_summary,
     _agent_readable_line,
     _agent_readable_candidates_summary,
+    _agent_readable_write as _agent_readable_write_impl,
 )
 from services.prepass_windows import _agent_sam3_text_windows
 from services.prepass_similarity import (
@@ -9168,15 +9169,11 @@ def _agent_full_trace_write(record: Dict[str, Any]) -> None:
 
 
 def _agent_readable_write(line: str) -> None:
-    if not line:
-        return
-    try:
-        if _AGENT_TRACE_READABLE_WRITER is not None:
-            _AGENT_TRACE_READABLE_WRITER(line)
-        if PREPASS_READABLE_TO_CONSOLE:
-            logging.getLogger("prepass.readable").info(line)
-    except Exception:
-        return
+    _agent_readable_write_impl(
+        line,
+        writer=_AGENT_TRACE_READABLE_WRITER,
+        to_console=PREPASS_READABLE_TO_CONSOLE,
+    )
 
 
 def _agent_run_prepass(

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+import logging
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from services.prepass_grid import _agent_grid_cell_for_detection
 
@@ -13,6 +14,24 @@ def _agent_readable_trim(text: Optional[str], max_len: Optional[int] = None) -> 
     if max_len is None or max_len <= 0 or len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _agent_readable_write(
+    line: str,
+    *,
+    writer: Optional[Callable[[str], None]] = None,
+    to_console: bool = False,
+    logger_name: str = "prepass.readable",
+) -> None:
+    if not line:
+        return
+    try:
+        if writer is not None:
+            writer(line)
+        if to_console:
+            logging.getLogger(logger_name).info(line)
+    except Exception:
+        return
 
 
 def _agent_readable_banner(title: str, *, width: int = 88, fill: str = "=") -> str:

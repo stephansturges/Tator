@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -185,6 +187,282 @@ def _save_detector_default_impl(
         data["created_at"] = data["updated_at"]
     detector_default_path.write_text(json.dumps(data, indent=2, sort_keys=True))
     return data
+
+
+def _yolo_run_dir_impl(
+    run_id: str,
+    *,
+    create: bool,
+    job_root: Path,
+    sanitize_fn: Callable[[str], str],
+    http_exception_cls: Any,
+) -> Path:
+    safe_id = sanitize_fn(run_id)
+    candidate = (job_root / safe_id).resolve()
+    if not str(candidate).startswith(str(job_root.resolve())):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    if create:
+        candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+def _yolo_load_run_meta_impl(run_dir: Path, *, meta_name: str) -> Dict[str, Any]:
+    meta_path = run_dir / meta_name
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
+def _yolo_write_run_meta_impl(
+    run_dir: Path,
+    meta: Dict[str, Any],
+    *,
+    meta_name: str,
+    time_fn: Callable[[], float],
+) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = dict(meta or {})
+    now = time_fn()
+    payload.setdefault("created_at", now)
+    payload["updated_at"] = now
+    (run_dir / meta_name).write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _yolo_prune_run_dir_impl(
+    run_dir: Path,
+    *,
+    keep_files: Optional[set[str]],
+    keep_files_default: Sequence[str],
+    dir_size_fn: Callable[[Path], int],
+    meta_name: str,
+) -> Dict[str, Any]:
+    kept: List[str] = []
+    deleted: List[str] = []
+    freed = 0
+    if not run_dir.exists():
+        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    keep = set(keep_files or keep_files_default)
+    for child in run_dir.iterdir():
+        if child.is_file() and child.suffix == ".yaml":
+            keep.add(child.name)
+    weights_dir = run_dir / "weights"
+    if weights_dir.exists():
+        best_path = weights_dir / "best.pt"
+        target_best = run_dir / "best.pt"
+        if best_path.exists() and not target_best.exists():
+            try:
+                shutil.copy2(best_path, target_best)
+            except Exception:
+                pass
+    for child in list(run_dir.iterdir()):
+        if child.name in keep:
+            kept.append(child.name)
+            continue
+        try:
+            if child.is_dir():
+                freed += dir_size_fn(child)
+                shutil.rmtree(child)
+            else:
+                freed += child.stat().st_size
+                child.unlink()
+            deleted.append(child.name)
+        except Exception:
+            continue
+    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+
+
+def _rfdetr_run_dir_impl(
+    run_id: str,
+    *,
+    create: bool,
+    job_root: Path,
+    sanitize_fn: Callable[[str], str],
+    http_exception_cls: Any,
+) -> Path:
+    safe_id = sanitize_fn(run_id)
+    candidate = (job_root / safe_id).resolve()
+    if not str(candidate).startswith(str(job_root.resolve())):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    if create:
+        candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+def _rfdetr_load_run_meta_impl(run_dir: Path, *, meta_name: str) -> Dict[str, Any]:
+    meta_path = run_dir / meta_name
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
+def _rfdetr_write_run_meta_impl(
+    run_dir: Path,
+    meta: Dict[str, Any],
+    *,
+    meta_name: str,
+    time_fn: Callable[[], float],
+) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = dict(meta or {})
+    now = time_fn()
+    payload.setdefault("created_at", now)
+    payload["updated_at"] = now
+    (run_dir / meta_name).write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _rfdetr_prune_run_dir_impl(
+    run_dir: Path,
+    *,
+    keep_files: Optional[set[str]],
+    keep_files_default: Sequence[str],
+    dir_size_fn: Callable[[Path], int],
+) -> Dict[str, Any]:
+    kept: List[str] = []
+    deleted: List[str] = []
+    freed = 0
+    if not run_dir.exists():
+        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    keep = set(keep_files or keep_files_default)
+    for child in list(run_dir.iterdir()):
+        if child.name in keep:
+            kept.append(child.name)
+            continue
+        try:
+            if child.is_dir():
+                freed += dir_size_fn(child)
+                shutil.rmtree(child)
+            else:
+                freed += child.stat().st_size
+                child.unlink()
+            deleted.append(child.name)
+        except Exception:
+            continue
+    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+
+
+def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
+    return {
+        "best_pt": (run_dir / "best.pt").exists(),
+        "metrics_json": (run_dir / "metrics.json").exists(),
+        "metrics_series": (run_dir / "metrics_series.json").exists(),
+        "results_csv": (run_dir / "results.csv").exists(),
+        "args_yaml": (run_dir / "args.yaml").exists(),
+        "labelmap": (run_dir / "labelmap.txt").exists(),
+        "run_meta": (run_dir / meta_name).exists(),
+    }
+
+
+def _collect_rfdetr_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
+    return {
+        "best_regular": (run_dir / "checkpoint_best_regular.pth").exists(),
+        "best_ema": (run_dir / "checkpoint_best_ema.pth").exists(),
+        "best_total": (run_dir / "checkpoint_best_total.pth").exists(),
+        "best_optimized": (run_dir / "checkpoint_best_optimized.pt").exists(),
+        "results_json": (run_dir / "results.json").exists(),
+        "metrics_series": (run_dir / "metrics_series.json").exists(),
+        "log_txt": (run_dir / "log.txt").exists(),
+        "labelmap": (run_dir / "labelmap.txt").exists(),
+        "run_meta": (run_dir / meta_name).exists(),
+    }
+
+
+def _flatten_metrics_impl(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if out is None:
+        out = {}
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            next_prefix = f"{prefix}/{key}" if prefix else str(key)
+            _flatten_metrics_impl(value, next_prefix, out)
+    else:
+        out[prefix] = obj
+    return out
+
+
+def _lookup_metric_impl(flat: Dict[str, Any], keys: List[str]) -> Optional[float]:
+    if not flat:
+        return None
+    lowered = {str(k).lower(): v for k, v in flat.items()}
+    for key in keys:
+        if key in flat:
+            value = flat[key]
+        else:
+            value = lowered.get(key.lower())
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return None
+
+
+def _yolo_metrics_summary_impl(run_dir: Path, *, read_csv_last_row_fn: Callable[[Path], Optional[Dict[str, str]]]) -> Dict[str, float]:
+    summary: Dict[str, float] = {}
+    metrics_path = run_dir / "metrics.json"
+    if metrics_path.exists():
+        try:
+            data = json.loads(metrics_path.read_text())
+            flat = _flatten_metrics_impl(data)
+            summary["map50_95"] = _lookup_metric_impl(flat, ["metrics/mAP50-95(B)", "metrics/mAP50-95", "map50-95"])
+            summary["map50"] = _lookup_metric_impl(flat, ["metrics/mAP50(B)", "metrics/mAP50", "map50"])
+            summary["precision"] = _lookup_metric_impl(flat, ["metrics/precision(B)", "metrics/precision", "precision"])
+            summary["recall"] = _lookup_metric_impl(flat, ["metrics/recall(B)", "metrics/recall", "recall"])
+        except Exception:
+            pass
+    if any(value is not None for value in summary.values()):
+        return {k: v for k, v in summary.items() if v is not None}
+    csv_path = run_dir / "results.csv"
+    last_row = read_csv_last_row_fn(csv_path)
+    if not last_row:
+        return {}
+
+    def _csv_value(name_variants: List[str]) -> Optional[float]:
+        for key in name_variants:
+            if key in last_row:
+                try:
+                    return float(last_row[key])
+                except Exception:
+                    return None
+            for col, val in last_row.items():
+                if col.strip().lower() == key.strip().lower():
+                    try:
+                        return float(val)
+                    except Exception:
+                        return None
+        return None
+
+    return {
+        "map50_95": _csv_value(["metrics/mAP50-95(B)", "metrics/mAP50-95"]),
+        "map50": _csv_value(["metrics/mAP50(B)", "metrics/mAP50"]),
+        "precision": _csv_value(["metrics/precision(B)", "metrics/precision"]),
+        "recall": _csv_value(["metrics/recall(B)", "metrics/recall"]),
+    }
+
+
+def _rfdetr_metrics_summary_impl(run_dir: Path) -> Dict[str, float]:
+    metrics_path = run_dir / "results.json"
+    if not metrics_path.exists():
+        return {}
+    try:
+        data = json.loads(metrics_path.read_text())
+    except Exception:
+        return {}
+    flat = _flatten_metrics_impl(data)
+    return {
+        "map": _lookup_metric_impl(flat, ["coco/bbox_mAP", "bbox_mAP", "metrics/bbox_mAP", "map"]),
+        "map50": _lookup_metric_impl(flat, ["coco/bbox_mAP50", "bbox_mAP50", "metrics/bbox_mAP50", "map50"]),
+        "map75": _lookup_metric_impl(flat, ["coco/bbox_mAP75", "bbox_mAP75", "metrics/bbox_mAP75", "map75"]),
+    }
+
+
+def _clean_metric_summary_impl(summary: Dict[str, Optional[float]]) -> Dict[str, float]:
+    return {key: float(value) for key, value in summary.items() if value is not None}
 
 
 def _agent_tool_run_detector_impl(

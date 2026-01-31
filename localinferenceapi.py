@@ -394,6 +394,21 @@ from services.detectors import (
     _save_rfdetr_active_impl as _save_rfdetr_active_impl,
     _load_detector_default_impl as _load_detector_default_impl,
     _save_detector_default_impl as _save_detector_default_impl,
+    _yolo_run_dir_impl as _yolo_run_dir_impl,
+    _yolo_load_run_meta_impl as _yolo_load_run_meta_impl,
+    _yolo_write_run_meta_impl as _yolo_write_run_meta_impl,
+    _yolo_prune_run_dir_impl as _yolo_prune_run_dir_impl,
+    _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
+    _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
+    _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
+    _rfdetr_prune_run_dir_impl as _rfdetr_prune_run_dir_impl,
+    _collect_yolo_artifacts_impl as _collect_yolo_artifacts_impl,
+    _collect_rfdetr_artifacts_impl as _collect_rfdetr_artifacts_impl,
+    _flatten_metrics_impl as _flatten_metrics_impl,
+    _lookup_metric_impl as _lookup_metric_impl,
+    _yolo_metrics_summary_impl as _yolo_metrics_summary_impl,
+    _rfdetr_metrics_summary_impl as _rfdetr_metrics_summary_impl,
+    _clean_metric_summary_impl as _clean_metric_summary_impl,
 )
 from collections import OrderedDict
 try:
@@ -11439,68 +11454,36 @@ def _sanitize_yolo_run_id(raw: str) -> str:
 
 
 def _yolo_run_dir(run_id: str, *, create: bool = False) -> Path:
-    safe_id = _sanitize_yolo_run_id(run_id)
-    candidate = (YOLO_JOB_ROOT / safe_id).resolve()
-    if not str(candidate).startswith(str(YOLO_JOB_ROOT.resolve())):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_run_id")
-    if create:
-        candidate.mkdir(parents=True, exist_ok=True)
-    return candidate
+    return _yolo_run_dir_impl(
+        run_id,
+        create=create,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _yolo_load_run_meta(run_dir: Path) -> Dict[str, Any]:
-    meta_path = run_dir / YOLO_RUN_META_NAME
-    if not meta_path.exists():
-        return {}
-    try:
-        return json.loads(meta_path.read_text())
-    except Exception:
-        return {}
+    return _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
 
 
 def _yolo_write_run_meta(run_dir: Path, meta: Dict[str, Any]) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    payload = dict(meta or {})
-    now = time.time()
-    payload.setdefault("created_at", now)
-    payload["updated_at"] = now
-    (run_dir / YOLO_RUN_META_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    _yolo_write_run_meta_impl(
+        run_dir,
+        meta,
+        meta_name=YOLO_RUN_META_NAME,
+        time_fn=time.time,
+    )
 
 
 def _yolo_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) -> Dict[str, Any]:
-    kept: List[str] = []
-    deleted: List[str] = []
-    freed = 0
-    if not run_dir.exists():
-        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
-    keep = set(keep_files or YOLO_KEEP_FILES)
-    for child in run_dir.iterdir():
-        if child.is_file() and child.suffix == ".yaml":
-            keep.add(child.name)
-    weights_dir = run_dir / "weights"
-    if weights_dir.exists():
-        best_path = weights_dir / "best.pt"
-        target_best = run_dir / "best.pt"
-        if best_path.exists() and not target_best.exists():
-            try:
-                shutil.copy2(best_path, target_best)
-            except Exception:
-                pass
-    for child in list(run_dir.iterdir()):
-        if child.name in keep:
-            kept.append(child.name)
-            continue
-        try:
-            if child.is_dir():
-                freed += _dir_size_bytes(child)
-                shutil.rmtree(child)
-            else:
-                freed += child.stat().st_size
-                child.unlink()
-            deleted.append(child.name)
-        except Exception:
-            continue
-    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    return _yolo_prune_run_dir_impl(
+        run_dir,
+        keep_files=keep_files,
+        keep_files_default=YOLO_KEEP_FILES,
+        dir_size_fn=_dir_size_bytes,
+        meta_name=YOLO_RUN_META_NAME,
+    )
 
 
 def _sanitize_rfdetr_run_id(raw: str) -> str:
@@ -11508,173 +11491,63 @@ def _sanitize_rfdetr_run_id(raw: str) -> str:
 
 
 def _rfdetr_run_dir(run_id: str, *, create: bool = False) -> Path:
-    safe_id = _sanitize_rfdetr_run_id(run_id)
-    candidate = (RFDETR_JOB_ROOT / safe_id).resolve()
-    if not str(candidate).startswith(str(RFDETR_JOB_ROOT.resolve())):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_run_id")
-    if create:
-        candidate.mkdir(parents=True, exist_ok=True)
-    return candidate
+    return _rfdetr_run_dir_impl(
+        run_id,
+        create=create,
+        job_root=RFDETR_JOB_ROOT,
+        sanitize_fn=_sanitize_rfdetr_run_id,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _rfdetr_load_run_meta(run_dir: Path) -> Dict[str, Any]:
-    meta_path = run_dir / RFDETR_RUN_META_NAME
-    if not meta_path.exists():
-        return {}
-    try:
-        return json.loads(meta_path.read_text())
-    except Exception:
-        return {}
+    return _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
 
 
 def _rfdetr_write_run_meta(run_dir: Path, meta: Dict[str, Any]) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    payload = dict(meta or {})
-    now = time.time()
-    payload.setdefault("created_at", now)
-    payload["updated_at"] = now
-    (run_dir / RFDETR_RUN_META_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    _rfdetr_write_run_meta_impl(
+        run_dir,
+        meta,
+        meta_name=RFDETR_RUN_META_NAME,
+        time_fn=time.time,
+    )
 
 
 def _rfdetr_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) -> Dict[str, Any]:
-    kept: List[str] = []
-    deleted: List[str] = []
-    freed = 0
-    if not run_dir.exists():
-        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
-    keep = set(keep_files or RFDETR_KEEP_FILES)
-    for child in list(run_dir.iterdir()):
-        if child.name in keep:
-            kept.append(child.name)
-            continue
-        try:
-            if child.is_dir():
-                freed += _dir_size_bytes(child)
-                shutil.rmtree(child)
-            else:
-                freed += child.stat().st_size
-                child.unlink()
-            deleted.append(child.name)
-        except Exception:
-            continue
-    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    return _rfdetr_prune_run_dir_impl(
+        run_dir,
+        keep_files=keep_files,
+        keep_files_default=RFDETR_KEEP_FILES,
+        dir_size_fn=_dir_size_bytes,
+    )
 
 
 def _collect_yolo_artifacts(run_dir: Path) -> Dict[str, bool]:
-    return {
-        "best_pt": (run_dir / "best.pt").exists(),
-        "metrics_json": (run_dir / "metrics.json").exists(),
-        "metrics_series": (run_dir / "metrics_series.json").exists(),
-        "results_csv": (run_dir / "results.csv").exists(),
-        "args_yaml": (run_dir / "args.yaml").exists(),
-        "labelmap": (run_dir / "labelmap.txt").exists(),
-        "run_meta": (run_dir / YOLO_RUN_META_NAME).exists(),
-    }
+    return _collect_yolo_artifacts_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
 
 
 def _collect_rfdetr_artifacts(run_dir: Path) -> Dict[str, bool]:
-    return {
-        "best_regular": (run_dir / "checkpoint_best_regular.pth").exists(),
-        "best_ema": (run_dir / "checkpoint_best_ema.pth").exists(),
-        "best_total": (run_dir / "checkpoint_best_total.pth").exists(),
-        "best_optimized": (run_dir / "checkpoint_best_optimized.pt").exists(),
-        "results_json": (run_dir / "results.json").exists(),
-        "metrics_series": (run_dir / "metrics_series.json").exists(),
-        "log_txt": (run_dir / "log.txt").exists(),
-        "labelmap": (run_dir / "labelmap.txt").exists(),
-        "run_meta": (run_dir / RFDETR_RUN_META_NAME).exists(),
-    }
+    return _collect_rfdetr_artifacts_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
 
 
 def _flatten_metrics(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if out is None:
-        out = {}
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            next_prefix = f"{prefix}/{key}" if prefix else str(key)
-            _flatten_metrics(value, next_prefix, out)
-    else:
-        out[prefix] = obj
-    return out
+    return _flatten_metrics_impl(obj, prefix=prefix, out=out)
 
 
 def _lookup_metric(flat: Dict[str, Any], keys: List[str]) -> Optional[float]:
-    if not flat:
-        return None
-    lowered = {str(k).lower(): v for k, v in flat.items()}
-    for key in keys:
-        if key in flat:
-            value = flat[key]
-        else:
-            value = lowered.get(key.lower())
-        if value is None:
-            continue
-        try:
-            return float(value)
-        except Exception:
-            continue
-    return None
+    return _lookup_metric_impl(flat, keys)
 
 
 def _yolo_metrics_summary(run_dir: Path) -> Dict[str, float]:
-    summary: Dict[str, float] = {}
-    metrics_path = run_dir / "metrics.json"
-    if metrics_path.exists():
-        try:
-            data = json.loads(metrics_path.read_text())
-            flat = _flatten_metrics(data)
-            summary["map50_95"] = _lookup_metric(flat, ["metrics/mAP50-95(B)", "metrics/mAP50-95", "map50-95"])
-            summary["map50"] = _lookup_metric(flat, ["metrics/mAP50(B)", "metrics/mAP50", "map50"])
-            summary["precision"] = _lookup_metric(flat, ["metrics/precision(B)", "metrics/precision", "precision"])
-            summary["recall"] = _lookup_metric(flat, ["metrics/recall(B)", "metrics/recall", "recall"])
-        except Exception:
-            pass
-    if any(value is not None for value in summary.values()):
-        return {k: v for k, v in summary.items() if v is not None}
-    csv_path = run_dir / "results.csv"
-    last_row = _read_csv_last_row(csv_path)
-    if not last_row:
-        return {}
-    def _csv_value(name_variants: List[str]) -> Optional[float]:
-        for key in name_variants:
-            if key in last_row:
-                try:
-                    return float(last_row[key])
-                except Exception:
-                    return None
-            for col, val in last_row.items():
-                if col.strip().lower() == key.strip().lower():
-                    try:
-                        return float(val)
-                    except Exception:
-                        return None
-        return None
-    return {
-        "map50_95": _csv_value(["metrics/mAP50-95(B)", "metrics/mAP50-95"]),
-        "map50": _csv_value(["metrics/mAP50(B)", "metrics/mAP50"]),
-        "precision": _csv_value(["metrics/precision(B)", "metrics/precision"]),
-        "recall": _csv_value(["metrics/recall(B)", "metrics/recall"]),
-    }
+    return _yolo_metrics_summary_impl(run_dir, read_csv_last_row_fn=_read_csv_last_row)
 
 
 def _rfdetr_metrics_summary(run_dir: Path) -> Dict[str, float]:
-    metrics_path = run_dir / "results.json"
-    if not metrics_path.exists():
-        return {}
-    try:
-        data = json.loads(metrics_path.read_text())
-    except Exception:
-        return {}
-    flat = _flatten_metrics(data)
-    return {
-        "map": _lookup_metric(flat, ["coco/bbox_mAP", "bbox_mAP", "metrics/bbox_mAP", "map"]),
-        "map50": _lookup_metric(flat, ["coco/bbox_mAP50", "bbox_mAP50", "metrics/bbox_mAP50", "map50"]),
-        "map75": _lookup_metric(flat, ["coco/bbox_mAP75", "bbox_mAP75", "metrics/bbox_mAP75", "map75"]),
-    }
+    return _rfdetr_metrics_summary_impl(run_dir)
 
 
 def _clean_metric_summary(summary: Dict[str, Optional[float]]) -> Dict[str, float]:
-    return {key: float(value) for key, value in summary.items() if value is not None}
+    return _clean_metric_summary_impl(summary)
 
 
 def _list_yolo_runs() -> List[Dict[str, Any]]:

@@ -41,7 +41,14 @@ from starlette.status import (
     HTTP_500_INTERNAL_SERVER_ERROR,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
-from utils.io import _ensure_directory, _load_json_metadata, _write_qwen_metadata
+from utils.io import (
+    _ensure_directory,
+    _load_json_metadata,
+    _write_qwen_metadata,
+    _atomic_write_text,
+    _atomic_write_json,
+    _read_csv_last_row,
+)
 from utils.image import _load_image_size
 from utils.labels import _read_labelmap_lines, _load_labelmap_file
 from collections import OrderedDict
@@ -16191,20 +16198,6 @@ def _lookup_metric(flat: Dict[str, Any], keys: List[str]) -> Optional[float]:
     return None
 
 
-def _read_csv_last_row(path: Path) -> Optional[Dict[str, str]]:
-    if not path.exists():
-        return None
-    try:
-        with path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            last_row = None
-            for row in reader:
-                last_row = row
-            return last_row
-    except Exception:
-        return None
-
-
 def _yolo_metrics_summary(run_dir: Path) -> Dict[str, float]:
     summary: Dict[str, float] = {}
     metrics_path = run_dir / "metrics.json"
@@ -29959,23 +29952,6 @@ def _qwen_build_output_payload(detections: List[Dict[str, Any]], mode: str) -> s
             if bbox:
                 items.append({"label": label, "bbox": bbox})
     return json.dumps({"detections": items}, ensure_ascii=False)
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp_{uuid.uuid4().hex[:8]}")
-    try:
-        tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.replace(path)
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
-    _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _iter_yolo_images(images_dir: Path) -> List[Path]:

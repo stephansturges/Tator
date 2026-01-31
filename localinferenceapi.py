@@ -93,7 +93,10 @@ from utils.glossary import (
     _default_agent_glossary_for_labelmap,
 )
 from utils.datasets import _iter_yolo_images
-from services.prepass_config import _normalize_recipe_thresholds
+from services.prepass_config import (
+    _normalize_recipe_thresholds,
+    _require_sam3_for_prepass as _require_sam3_for_prepass_impl,
+)
 from services.prepass_recipes import _write_prepass_recipe_meta, _load_prepass_recipe_meta
 from services.datasets import (
     _load_dataset_glossary,
@@ -1420,15 +1423,13 @@ def _resolve_sam3_mining_devices() -> List[torch.device]:
 
 
 def _require_sam3_for_prepass(enable_text: bool, enable_similarity: bool) -> None:
-    if not (enable_text or enable_similarity):
-        return
-    if (
-        SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None
-        or build_sam3_image_model is None
-        or Sam3ImageProcessor is None
-    ):
-        detail = f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}"
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    _require_sam3_for_prepass_impl(
+        enable_text,
+        enable_similarity,
+        sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
+        build_sam3_image_model=build_sam3_image_model,
+        sam3_image_processor=Sam3ImageProcessor,
+    )
 
 
 def _reset_sam3_runtime() -> None:

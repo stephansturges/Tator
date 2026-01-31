@@ -275,6 +275,7 @@ scrn.png
 /*.txt
 !requirements.txt
 !requirements-dev.txt
+!refactor.txt
 prepass_*
 qwen_agentic_*
 

@@ -1,0 +1,16 @@
+{
+  "images": {
+    "img_0.png": "96a85bdd5297343509aa09c233219472b6f2af0ab0f0cec9ab635a39779d11a3",
+    "img_1.png": "db2f42f7016bf0a3a69ac4ce5bfd4048933944165c3c6ce50c45508809303ee7",
+    "img_2.png": "56e9b76df06a173aeeae396e12e0127c6b85876004a680616cc6c1f1504c15eb",
+    "img_3.png": "6f883f0badba18d3e78aaf510f3ac1be7e975e069a9177eef8a972a9654b352c"
+  },
+  "labelmap": {
+    "path": "labelmap.txt",
+    "sha256": "a5d8e52be9e4044c76253b8c172cee274654a1e5e42bd2b3bb4a1aba94e53042"
+  },
+  "glossary": {
+    "path": "glossary.json",
+    "sha256": "cb9385bd3ff92726c74750fd9598a8f370804fd131ae09bb30c3dd4461139d2f"
+  }
+}

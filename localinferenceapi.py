@@ -144,7 +144,11 @@ from services.prompt_helper_presets import (
     _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
 )
 from services.prompt_helper import _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl
-from services.classifier_jobs import _serialize_clip_job_impl as _serialize_clip_job_impl
+from services.classifier_jobs import (
+    _clip_job_log_impl as _clip_job_log_impl,
+    _clip_job_update_impl as _clip_job_update_impl,
+    _serialize_clip_job_impl as _serialize_clip_job_impl,
+)
 from services.detector_jobs import (
     _serialize_rfdetr_job_impl as _serialize_rfdetr_job_impl,
     _serialize_yolo_head_graft_job_impl as _serialize_yolo_head_graft_job_impl,
@@ -10494,15 +10498,7 @@ MAX_QWEN_METRIC_POINTS: Optional[int] = None
 
 
 def _job_log(job: ClipTrainingJob, message: str) -> None:
-    entry = {"timestamp": time.time(), "message": message}
-    job.logs.append(entry)
-    if len(job.logs) > MAX_JOB_LOGS:
-        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-    job.updated_at = time.time()
-    try:
-        logger.info("[clip-train %s] %s", job.job_id[:8], message)
-    except Exception:  # noqa: BLE001 - logging failures should never break workflow
-        pass
+    _clip_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
 
 
 def _clip_job_append_metric(job: ClipTrainingJob, metric: Dict[str, Any]) -> None:
@@ -10517,20 +10513,16 @@ def _clip_job_append_metric(job: ClipTrainingJob, metric: Dict[str, Any]) -> Non
 def _job_update(job: ClipTrainingJob, *, status: Optional[str] = None, message: Optional[str] = None,
                 progress: Optional[float] = None, error: Optional[str] = None,
                 artifacts: Optional[Dict[str, Any]] = None) -> None:
-    if status is not None:
-        job.status = status
-    if message is not None:
-        if message != job.message:
-            job.message = message
-            _job_log(job, message)
-        else:
-            job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if artifacts is not None:
-        job.artifacts = artifacts
+    _clip_job_update_impl(
+        job,
+        status=status,
+        message=message,
+        progress=progress,
+        error=error,
+        artifacts=artifacts,
+        max_logs=MAX_JOB_LOGS,
+        logger=logger,
+    )
 
 
 def _qwen_job_log(job: QwenTrainingJob, message: str) -> None:

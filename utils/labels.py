@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
+import re
 
 import joblib
 from fastapi import HTTPException
@@ -18,7 +19,29 @@ def _read_labelmap_lines(path: Path) -> List[str]:
         lines = [line.strip() for line in path.read_text().splitlines()]
         return [line for line in lines if line]
     except Exception:
-        return []
+    return []
+
+
+def _normalize_class_name_for_match(name: Optional[str]) -> str:
+    if not name:
+        return ""
+    try:
+        s = str(name).strip().lower()
+    except Exception:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def _normalize_labelmap_entries(values: Sequence[str]) -> List[str]:
+    normalized: List[str] = []
+    for raw in values or []:
+        text = str(raw or "").strip()
+        if not text:
+            normalized.append("")
+            continue
+        norm = _normalize_class_name_for_match(text)
+        normalized.append(norm or text.lower())
+    return normalized
 
 
 def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = False) -> List[str]:

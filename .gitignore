@@ -278,6 +278,8 @@ scrn.png
 !refactor.txt
 prepass_*
 qwen_agentic_*
+!services/
+!services/*.py
 
 # Local scratch/docs (never commit)
 docs/_local/

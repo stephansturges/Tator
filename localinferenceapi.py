@@ -50,7 +50,12 @@ from utils.io import (
     _read_csv_last_row,
 )
 from utils.image import _load_image_size
-from utils.labels import _read_labelmap_lines, _load_labelmap_file
+from utils.labels import (
+    _read_labelmap_lines,
+    _load_labelmap_file,
+    _normalize_class_name_for_match,
+    _normalize_labelmap_entries,
+)
 from utils.parsing import (
     _coerce_int,
     _coerce_float,
@@ -74,6 +79,7 @@ from utils.glossary import (
     _dedupe_synonyms,
 )
 from utils.datasets import _iter_yolo_images
+from services.prepass_config import _normalize_recipe_thresholds
 from utils.coords import (
     _xyxy_to_qwen_bbox,
     _qwen_bbox_to_xyxy,
@@ -14034,18 +14040,6 @@ def _apply_expected_labelmap_warnings(expected: Optional[List[str]], labelmap: L
         warnings.append("labelmap_mismatch")
 
 
-def _normalize_labelmap_entries(values: Sequence[str]) -> List[str]:
-    normalized: List[str] = []
-    for raw in values or []:
-        text = str(raw or "").strip()
-        if not text:
-            normalized.append("")
-            continue
-        norm = _normalize_class_name_for_match(text)
-        normalized.append(norm or text.lower())
-    return normalized
-
-
 def _labelmaps_match(expected: Sequence[str], actual: Sequence[str]) -> bool:
     if not expected or not actual:
         return True
@@ -20438,17 +20432,6 @@ def _load_clip_head_artifacts(
         "min_prob": min_prob_val,
         "margin": margin_val,
     }
-
-
-def _normalize_class_name_for_match(name: Optional[str]) -> str:
-    if not name:
-        return ""
-    try:
-        s = str(name).strip().lower()
-    except Exception:
-        return ""
-    # Treat underscores/hyphens/spaces as equivalent and ignore punctuation.
-    return re.sub(r"[^a-z0-9]+", "", s)
 
 
 def _is_background_class_name(name: Optional[str]) -> bool:
@@ -31546,27 +31529,6 @@ def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
         return cleaned or prompts
     except Exception:
         return prompts
-
-
-def _normalize_recipe_thresholds(thresholds: Optional[List[float]], fallback: float, limit: int = 20) -> List[float]:
-    values = thresholds if thresholds is not None else [fallback]
-    cleaned: List[float] = []
-    seen = set()
-    for raw in values:
-        try:
-            val = float(raw)
-        except Exception:
-            continue
-        if val < 0.0 or val > 1.0:
-            continue
-        key = round(val, 4)
-        if key in seen:
-            continue
-        seen.add(key)
-        cleaned.append(val)
-        if len(cleaned) >= limit:
-            break
-    return cleaned
 
 
 def _expand_midpoints(values: List[float], *, fine_step: float = 0.05, clamp: Tuple[float, float] = (0.0, 1.0), limit: int = 20) -> List[float]:

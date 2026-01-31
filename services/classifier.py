@@ -582,3 +582,16 @@ def _clip_head_keep_mask_impl(
             p_other = np.zeros_like(p_target)
         keep &= p_target >= (p_other + margin_f)
     return keep
+
+
+def _resolve_head_normalize_embeddings_impl(head: Optional[Dict[str, Any]], *, default: bool = True) -> bool:
+    if not head:
+        return default
+    raw = head.get("normalize_embeddings")
+    if raw is None:
+        raw = head.get("mlp_normalize_embeddings")
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)

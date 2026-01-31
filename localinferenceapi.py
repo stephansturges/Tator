@@ -243,6 +243,7 @@ from services.classifier import (
     _load_clip_head_from_classifier_impl as _load_clip_head_from_classifier_impl,
     _clip_head_predict_proba_impl as _clip_head_predict_proba_impl,
     _clip_head_keep_mask_impl as _clip_head_keep_mask_impl,
+    _resolve_head_normalize_embeddings_impl as _resolve_head_normalize_embeddings_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -32002,16 +32003,7 @@ def _active_encoder_ready() -> bool:
 
 
 def _resolve_head_normalize_embeddings(head: Optional[Dict[str, Any]], *, default: bool = True) -> bool:
-    if not head:
-        return default
-    raw = head.get("normalize_embeddings")
-    if raw is None:
-        raw = head.get("mlp_normalize_embeddings")
-    if raw is None:
-        return default
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(raw)
+    return _resolve_head_normalize_embeddings_impl(head, default=default)
 
 
 def _resolve_active_head_normalize_embeddings(

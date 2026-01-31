@@ -181,10 +181,14 @@ from services.readable import (
     _agent_readable_line,
     _agent_readable_candidates_summary,
 )
-from services.prepass_windows import (
-    _agent_similarity_windows,
-    _agent_sam3_text_windows,
-    _agent_exemplars_for_window,
+from services.prepass_windows import _agent_sam3_text_windows
+from services.prepass_similarity import (
+    _agent_run_similarity_global,
+    _agent_run_similarity_expansion,
+)
+from services.prepass_provenance import (
+    _agent_attach_provenance,
+    _agent_finalize_provenance,
 )
 from collections import OrderedDict
 try:
@@ -10389,36 +10393,6 @@ def _agent_run_prepass(
     )
 
 
-def _agent_attach_provenance(
-    detections: Sequence[Dict[str, Any]],
-    *,
-    source: str,
-    source_primary: Optional[str] = None,
-    source_prompt: Optional[str] = None,
-    source_exemplar_handles: Optional[Sequence[str]] = None,
-    source_detector_run_id: Optional[str] = None,
-) -> None:
-    for det in detections:
-        if not isinstance(det, dict):
-            continue
-        if source_primary:
-            det.setdefault("source_primary", source_primary)
-        else:
-            det.setdefault("source_primary", source)
-        if source_prompt:
-            det.setdefault("source_prompt", source_prompt)
-        if source_exemplar_handles:
-            det.setdefault("source_exemplar_handles", list(source_exemplar_handles))
-        if source_detector_run_id:
-            det.setdefault("source_detector_run_id", source_detector_run_id)
-        sources = det.get("source_list")
-        if not isinstance(sources, list):
-            sources = []
-        if source and source not in sources:
-            sources.append(source)
-        det["source_list"] = sources
-
-
 def _agent_run_deep_prepass_part_a(
     payload: QwenPrepassRequest,
     *,
@@ -10729,6 +10703,7 @@ def _agent_run_deep_prepass(
                 pil_img=pil_img,
                 image_token=image_token,
                 exemplars_by_label=exemplars_by_label,
+                sam3_similarity_fn=_agent_tool_sam3_similarity,
                 trace_writer=trace_writer,
                 trace_full_writer=trace_full_writer,
                 trace_readable=trace_readable,
@@ -10741,6 +10716,8 @@ def _agent_run_deep_prepass(
                     pil_img=pil_img,
                     image_token=image_token,
                     exemplars_by_label=exemplars_by_label,
+                    sam3_similarity_fn=_agent_tool_sam3_similarity,
+                    grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
                     trace_writer=trace_writer,
                     trace_full_writer=trace_full_writer,
                     trace_readable=trace_readable,
@@ -11071,180 +11048,6 @@ def _agent_select_similarity_exemplars(
                     f"deep_prepass similarity exemplars label={label} count={len(chosen)} handles={handle_text}"
                 )
     return selections
-
-
-def _agent_run_similarity_global(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-    image_token: str,
-    exemplars_by_label: Dict[str, List[Dict[str, Any]]],
-    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_readable: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
-    detections: List[Dict[str, Any]] = []
-    warnings: List[str] = []
-    score_thr = payload.prepass_similarity_score
-    mask_thr = payload.sam3_mask_threshold
-
-    def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
-        if trace_writer:
-            trace_writer({"type": event, **payload_obj, "ts": time.time()})
-        if trace_full_writer:
-            trace_full_writer({"type": event, **payload_obj, "ts": time.time()})
-
-    for label, exemplars in exemplars_by_label.items():
-        exemplar_boxes = []
-        exemplar_handles = []
-        for det in exemplars:
-            bbox = det.get("bbox_2d")
-            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
-            handle = det.get("handle")
-            if handle:
-                exemplar_handles.append(str(handle))
-        if not exemplar_boxes:
-            continue
-        args = {
-            "image_token": image_token,
-            "label": label,
-            "exemplar_boxes": exemplar_boxes,
-            "score_thr": score_thr,
-            "mask_threshold": mask_thr,
-        }
-        _log_step("deep_prepass_tool_call", {"tool": "sam3_similarity", "args": args})
-        try:
-            result = _agent_tool_sam3_similarity(
-                image_token=image_token,
-                exemplar_boxes=exemplar_boxes,
-                label=label,
-                score_thr=score_thr,
-                mask_threshold=mask_thr,
-                register=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"deep_prepass_similarity_failed:{label}:full:{exc}")
-            continue
-        _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
-        dets = list(result.get("detections") or [])
-        if trace_readable:
-            trace_readable(
-                f"deep_prepass sam3_similarity label={label} window=full detections={len(dets)}"
-            )
-        _agent_attach_provenance(
-            dets,
-            source="sam3_similarity",
-            source_primary="sam3_similarity",
-            source_exemplar_handles=exemplar_handles or None,
-        )
-        detections.extend(dets)
-    return {"detections": detections, "warnings": warnings}
-
-
-def _agent_run_similarity_expansion(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-    image_token: str,
-    exemplars_by_label: Dict[str, List[Dict[str, Any]]],
-    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_readable: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
-    img_w, img_h = pil_img.size
-    detections: List[Dict[str, Any]] = []
-    warnings: List[str] = []
-    windows = _agent_similarity_windows(
-        payload,
-        pil_img=pil_img,
-        grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
-    )
-    score_thr = payload.prepass_similarity_score
-    mask_thr = payload.sam3_mask_threshold
-
-    def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
-        if trace_writer:
-            trace_writer({"type": event, **payload_obj, "ts": time.time()})
-        if trace_full_writer:
-            trace_full_writer({"type": event, **payload_obj, "ts": time.time()})
-
-    for label, exemplars in exemplars_by_label.items():
-        for window in windows:
-            window_xyxy = window.get("bbox_xyxy_px") or []
-            window_bbox_2d = window.get("bbox_2d")
-            window_exemplars = _agent_exemplars_for_window(
-                exemplars, img_w=img_w, img_h=img_h, window_xyxy=window_xyxy
-            )
-            if not window_exemplars:
-                continue
-            exemplar_boxes = []
-            exemplar_handles = []
-            for det in window_exemplars:
-                bbox = det.get("bbox_2d")
-                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                    exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
-                handle = det.get("handle")
-                if handle:
-                    exemplar_handles.append(str(handle))
-            if not exemplar_boxes:
-                continue
-            args = {
-                "image_token": image_token,
-                "label": label,
-                "exemplar_boxes": exemplar_boxes,
-                "score_thr": score_thr,
-                "mask_threshold": mask_thr,
-                "window_bbox_2d": window_bbox_2d,
-            }
-            if window.get("grid_cell"):
-                args["grid_cell"] = window.get("grid_cell")
-            _log_step("deep_prepass_tool_call", {"tool": "sam3_similarity", "args": args})
-            try:
-                result = _agent_tool_sam3_similarity(
-                    image_token=image_token,
-                    exemplar_boxes=exemplar_boxes,
-                    label=label,
-                    score_thr=score_thr,
-                    mask_threshold=mask_thr,
-                    window_bbox_2d=window_bbox_2d,
-                    grid_cell=window.get("grid_cell"),
-                    register=False,
-                )
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(f"deep_prepass_similarity_failed:{label}:{window.get('name')}:{exc}")
-                continue
-            _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
-            dets = list(result.get("detections") or [])
-            if trace_readable:
-                window_name = window.get("name") or window.get("grid_cell") or "window"
-                trace_readable(
-                    f"deep_prepass sam3_similarity label={label} window={window_name} detections={len(dets)}"
-                )
-            _agent_attach_provenance(
-                dets,
-                source="sam3_similarity",
-                source_primary="sam3_similarity",
-                source_exemplar_handles=exemplar_handles or None,
-            )
-            detections.extend(dets)
-    return {"detections": detections, "warnings": warnings}
-
-
-def _agent_finalize_provenance(detections: Sequence[Dict[str, Any]]) -> None:
-    for det in detections:
-        if not isinstance(det, dict):
-            continue
-        primary = det.get("source_primary")
-        if not primary:
-            primary = det.get("source") or det.get("score_source") or "unknown"
-            det["source_primary"] = primary
-        sources = det.get("source_list")
-        if not isinstance(sources, list):
-            sources = []
-        if primary and primary not in sources:
-            sources.append(primary)
-        det["source_list"] = sources
 
 
 def _run_prepass_annotation_qwen(

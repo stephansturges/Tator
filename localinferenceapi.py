@@ -59,6 +59,7 @@ from utils.labels import (
     _agent_label_color_map,
     _agent_label_prefix_map,
     _agent_overlay_key_text,
+    _agent_fuzzy_align_label,
 )
 from utils.classifier_utils import (
     _is_background_class_name,
@@ -7291,53 +7292,6 @@ def _agent_finalize_detections(
         **classifier_counts,
     }
     return merged, counts
-
-
-def _agent_fuzzy_align_label(label: Optional[str], labelmap: Sequence[str]) -> Optional[str]:
-    if not label:
-        return None
-    label_norm = _normalize_class_name_for_match(label)
-    if not label_norm:
-        return None
-    norm_map: Dict[str, str] = {}
-    for lbl in labelmap:
-        norm = _normalize_class_name_for_match(lbl)
-        if norm:
-            norm_map.setdefault(norm, lbl)
-    if label_norm in norm_map:
-        return norm_map[label_norm]
-    try:
-        import difflib
-    except Exception:
-        return None
-    # Fuzzy matching is deliberately strict to avoid re-mapping to the wrong class.
-    # Only allow near-exact matches with small edit distance and no ambiguity.
-    keys = list(norm_map.keys())
-    if not keys:
-        return None
-    best = None
-    best_score = 0.0
-    second = 0.0
-    for key in keys:
-        score = difflib.SequenceMatcher(None, label_norm, key).ratio()
-        if score > best_score:
-            second = best_score
-            best_score = score
-            best = key
-        elif score > second:
-            second = score
-    if best is None:
-        return None
-    if best_score < 0.92:
-        return None
-    if abs(len(best) - len(label_norm)) > 2:
-        return None
-    if best[0] != label_norm[0]:
-        return None
-    if second and abs(best_score - second) <= 0.02:
-        return None
-    return norm_map.get(best)
-    return None
 
 
 def _agent_sanitize_detection_items(

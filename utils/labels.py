@@ -128,10 +128,56 @@ def _agent_overlay_key_text(
     for label, color in label_colors.items():
         prefix = label_prefixes.get(label) if label_prefixes else None
         if prefix:
-            lines.append(f\"{label} ({prefix}) -> {color}\")
+            lines.append(f"{label} ({prefix}) -> {color}")
         else:
-            lines.append(f\"{label} -> {color}\")
-    return \"\\n\".join(lines)
+            lines.append(f"{label} -> {color}")
+    return "\n".join(lines)
+
+
+def _agent_fuzzy_align_label(label: Optional[str], labelmap: Sequence[str]) -> Optional[str]:
+    if not label:
+        return None
+    label_norm = _normalize_class_name_for_match(label)
+    if not label_norm:
+        return None
+    norm_map: Dict[str, str] = {}
+    for lbl in labelmap:
+        norm = _normalize_class_name_for_match(lbl)
+        if norm:
+            norm_map.setdefault(norm, lbl)
+    if label_norm in norm_map:
+        return norm_map[label_norm]
+    try:
+        import difflib
+    except Exception:
+        return None
+    # Fuzzy matching is deliberately strict to avoid re-mapping to the wrong class.
+    # Only allow near-exact matches with small edit distance and no ambiguity.
+    keys = list(norm_map.keys())
+    if not keys:
+        return None
+    best = None
+    best_score = 0.0
+    second = 0.0
+    for key in keys:
+        score = difflib.SequenceMatcher(None, label_norm, key).ratio()
+        if score > best_score:
+            second = best_score
+            best_score = score
+            best = key
+        elif score > second:
+            second = score
+    if best is None:
+        return None
+    if best_score < 0.92:
+        return None
+    if abs(len(best) - len(label_norm)) > 2:
+        return None
+    if best[0] != label_norm[0]:
+        return None
+    if second and abs(best_score - second) <= 0.02:
+        return None
+    return norm_map.get(best)
 
 
 def _load_labelmap_file(path: Optional[Union[str, Path]], *, strict: bool = False) -> List[str]:

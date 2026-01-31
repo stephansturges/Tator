@@ -29638,8 +29638,22 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
         prepass_cache_dir = CALIBRATION_CACHE_ROOT / "prepass" / prepass_config_key
         image_cache_dir = prepass_cache_dir / "images"
         image_cache_dir.mkdir(parents=True, exist_ok=True)
-        
+
         prepass_cache_meta = prepass_cache_dir / "prepass.meta.json"
+        if not prepass_cache_meta.exists():
+            _calibration_write_record_atomic(
+                prepass_cache_meta,
+                {
+                    "dataset_id": payload.dataset_id,
+                    "labelmap": labelmap,
+                    "labelmap_hash": labelmap_hash,
+                    "glossary_text": prepass_glossary_text,
+                    "glossary_hash": glossary_hash,
+                    "prepass_config": prepass_config,
+                    "prepass_config_key": prepass_config_key,
+                    "created_at": time.time(),
+                },
+            )
 
         def _safe_image_cache_name(image_name: str) -> str:
             safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_name)

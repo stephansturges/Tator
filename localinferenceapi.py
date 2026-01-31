@@ -323,6 +323,8 @@ from services.calibration_metrics import (
     _resolve_steps_hard_negative_export_config_impl as _resolve_steps_hard_negative_export_config_impl,
     _estimate_steps_speed_factor_impl as _estimate_steps_speed_factor_impl,
     _estimate_agent_global_optimizer_image_evals_impl as _estimate_agent_global_optimizer_image_evals_impl,
+    _build_steps_recipe_step_list_from_selected_stats_impl as _build_steps_recipe_step_list_from_selected_stats_impl,
+    _collect_clip_prefilter_crops_impl as _collect_clip_prefilter_crops_impl,
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
@@ -17951,62 +17953,11 @@ def _build_steps_recipe_step_list_from_selected_stats(
     prompts_fallback: Optional[Sequence[str]],
     payload: AgentMiningRequest,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Build the schema-v2 step list for a class, using the selected per-prompt stats.
-
-    This is intentionally tolerant of future fields:
-    - if a selected stat dict includes a per-prompt `seed_threshold` (or `selected_seed_threshold`), we
-      use it for the corresponding step; otherwise we fall back to `payload.seed_threshold`.
-    """
-    prompts: List[str] = []
-    step_list: List[Dict[str, Any]] = []
-
-    for s in selected_stats or []:
-        if not isinstance(s, dict):
-            continue
-        prompt = str(s.get("prompt") or "").strip()
-        if prompt:
-            prompts.append(prompt)
-
-    if not prompts and prompts_fallback:
-        try:
-            fallback = str(list(prompts_fallback)[0]).strip()
-        except Exception:
-            fallback = ""
-        if fallback:
-            prompts = [fallback]
-            selected_stats = [{}]
-
-    def _pick_seed_threshold(stat: Dict[str, Any]) -> float:
-        for key in ("seed_threshold", "selected_seed_threshold"):
-            if stat.get(key) is None:
-                continue
-            try:
-                val = float(stat.get(key))
-            except Exception:
-                continue
-            return max(0.0, min(1.0, val))
-        try:
-            return max(0.0, min(1.0, float(payload.seed_threshold)))
-        except Exception:
-            return 0.05
-
-    for idx, prompt in enumerate(prompts):
-        stat = selected_stats[idx] if idx < len(selected_stats) and isinstance(selected_stats[idx], dict) else {}
-        step_list.append(
-            {
-                "enabled": True,
-                "prompt": prompt,
-                "seed_threshold": _pick_seed_threshold(stat),
-                "expand_threshold": float(payload.expand_threshold),
-                "max_visual_seeds": int(getattr(payload, "steps_max_visual_seeds_per_step", 5) or 0),
-                "seed_dedupe_iou": float(payload.seed_dedupe_iou),
-                "dedupe_iou": float(payload.dedupe_iou),
-                "max_results": int(payload.max_results),
-            }
-        )
-
-    return prompts, step_list
+    return _build_steps_recipe_step_list_from_selected_stats_impl(
+        selected_stats,
+        prompts_fallback=prompts_fallback,
+        payload=payload,
+    )
 
 
 def _mine_seed_prompt_stats_image_first(
@@ -18428,51 +18379,14 @@ def _collect_clip_prefilter_crops(
     sample_size: int,
     seed: int,
 ) -> List[Image.Image]:
-    candidates: List[Tuple[int, List[float]]] = []
-    eval_set = set(int(i) for i in eval_ids)
-    for img_id, cat_map in gt_by_image_cat.items():
-        if int(img_id) not in eval_set:
-            continue
-        bboxes = cat_map.get(int(cat_id)) or []
-        for bbox in bboxes:
-            if not bbox or len(bbox) < 4:
-                continue
-            candidates.append((int(img_id), list(bbox)))
-    if not candidates:
-        return []
-    rng = random.Random(int(seed))
-    rng.shuffle(candidates)
-    sample_size = max(1, int(sample_size))
-    picks = candidates[: min(sample_size, len(candidates))]
-    crops: List[Image.Image] = []
-    image_cache: Dict[int, Image.Image] = {}
-    for img_id, bbox in picks:
-        info = images.get(int(img_id)) or {}
-        path = info.get("path")
-        if not path:
-            continue
-        pil_img = image_cache.get(int(img_id))
-        if pil_img is None:
-            try:
-                pil_img = Image.open(path).convert("RGB")
-            except Exception:
-                continue
-            image_cache[int(img_id)] = pil_img
-        try:
-            x0, y0, w, h = bbox[:4]
-            x1 = int(max(0.0, float(x0)))
-            y1 = int(max(0.0, float(y0)))
-            x2 = int(min(float(pil_img.width), float(x0) + float(w)))
-            y2 = int(min(float(pil_img.height), float(y0) + float(h)))
-        except Exception:
-            continue
-        if x2 <= x1 or y2 <= y1:
-            continue
-        try:
-            crops.append(pil_img.crop((x1, y1, x2, y2)))
-        except Exception:
-            continue
-    return crops
+    return _collect_clip_prefilter_crops_impl(
+        cat_id=cat_id,
+        eval_ids=eval_ids,
+        images=images,
+        gt_by_image_cat=gt_by_image_cat,
+        sample_size=sample_size,
+        seed=seed,
+    )
 
 
 def _prefilter_prompts_with_clip(

@@ -145,6 +145,7 @@ from services.prompt_helper_presets import (
 )
 from services.prompt_helper import _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl
 from services.classifier_jobs import (
+    _clip_job_append_metric_impl as _clip_job_append_metric_impl,
     _clip_job_log_impl as _clip_job_log_impl,
     _clip_job_update_impl as _clip_job_update_impl,
     _serialize_clip_job_impl as _serialize_clip_job_impl,
@@ -10520,12 +10521,7 @@ def _job_log(job: ClipTrainingJob, message: str) -> None:
 
 
 def _clip_job_append_metric(job: ClipTrainingJob, metric: Dict[str, Any]) -> None:
-    if not metric:
-        return
-    job.metrics.append(metric)
-    if len(job.metrics) > 2000:
-        job.metrics[:] = job.metrics[-2000:]
-    job.updated_at = time.time()
+    _clip_job_append_metric_impl(job, metric, max_points=2000)
 
 
 def _job_update(job: ClipTrainingJob, *, status: Optional[str] = None, message: Optional[str] = None,

@@ -65,3 +65,12 @@ def _clip_job_update_impl(
         job.error = error
     if artifacts is not None:
         job.artifacts = artifacts
+
+
+def _clip_job_append_metric_impl(job, metric: Dict[str, Any], *, max_points: int) -> None:
+    if not metric:
+        return
+    job.metrics.append(metric)
+    if len(job.metrics) > max_points:
+        job.metrics[:] = job.metrics[-max_points:]
+    job.updated_at = time.time()

@@ -83,6 +83,7 @@ from utils.glossary import (
     _clean_sam3_synonym,
     _normalize_synonym_list,
     _dedupe_synonyms,
+    _default_agent_glossary_for_labelmap,
 )
 from utils.datasets import _iter_yolo_images
 from services.prepass_config import _normalize_recipe_thresholds
@@ -6046,103 +6047,6 @@ def _agent_load_labelmap(dataset_id: Optional[str]) -> List[str]:
     return labelmap
 
 
-_DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
-    "bike": ["bike", "motorbike", "scooter", "motorcycle"],
-    "boat": ["boat", "canoe", "kayak", "surfboard", "ship"],
-    "building": ["building", "house", "store", "office building", "residential building", "warehouse"],
-    "bus": ["bus", "omnibus", "autobus", "coach"],
-    "container": ["container", "truck container", "shipping container"],
-    "digger": [
-        "digger",
-        "excavator",
-        "tractor",
-        "backhoe",
-        "construction vehicle",
-        "bulldozer",
-        "steam shovel",
-        "loader excavator",
-        "dozer",
-        "earthmover",
-        "heavy machinery",
-    ],
-    "gastank": [
-        "silos",
-        "tank",
-        "storage tank",
-        "barrel",
-        "pressure vessel",
-        "oil silo",
-        "storage silo",
-        "oil tank",
-    ],
-    "light_vehicle": [
-        "car",
-        "light vehicle",
-        "light_vehicle",
-        "pickup truck",
-        "sedan",
-        "suv",
-        "van",
-        "4x4",
-        "family car",
-        "passenger vehicle",
-        "automobile",
-        "hatchback",
-    ],
-    "person": [
-        "cyclist",
-        "person",
-        "swimmer",
-        "human",
-        "passenger",
-        "pedestrian",
-        "walker",
-        "hiker",
-        "individual",
-    ],
-    "solarpanels": ["array", "solar panel", "solarpanels"],
-    "truck": [
-        "truck",
-        "lorry",
-        "commercial vehicle",
-        "semi truck",
-        "articulated truck",
-        "heavy-duty vehicle",
-        "big rig",
-        "18-wheeler",
-        "semi-trailer truck",
-    ],
-    "utility_pole": [
-        "antenna",
-        "pole",
-        "utility pole",
-        "utility_pole",
-        "street fixture",
-        "drying rack",
-        "streetlight",
-        "street lamp",
-        "electricity pylon",
-        "power pylon",
-        "transmission tower",
-        "high-voltage pole",
-        "lattice tower",
-        "mast",
-        "comms mast",
-        "aerial mast",
-        "satellite dish",
-        "mounting pole",
-        "light fixture",
-    ],
-}
-
-_DEFAULT_SAM3_SYNONYMS: Dict[str, List[str]] = {
-    key: list(value) for key, value in _DEFAULT_GLOSSARY_MAP.items()
-}
-_SAM3_SYNONYM_CACHE: Dict[str, Dict[str, List[str]]] = {}
-_SAM3_SYNONYM_CACHE_ORDER: deque[str] = deque()
-_SAM3_SYNONYM_CACHE_LIMIT = 8
-
-
 def _sam3_synonym_cache_key(labelmap: Sequence[str], glossary: str, max_synonyms: Optional[int]) -> str:
     joined = ",".join([str(lbl).strip() for lbl in labelmap if str(lbl).strip()])
     limit = "none" if max_synonyms is None else str(int(max_synonyms))
@@ -6524,20 +6428,6 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
     if not glossary and labelmap:
         glossary = _default_agent_glossary_for_labelmap(labelmap)
     return labelmap, glossary
-
-
-def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
-    def _normalize(name: str) -> str:
-        return "".join(ch for ch in name.lower().strip() if ch.isalnum() or ch == "_")
-    mapped: Dict[str, List[str]] = {}
-    for label in labelmap:
-        norm = _normalize(label)
-        synonyms = _DEFAULT_GLOSSARY_MAP.get(norm)
-        if synonyms:
-            mapped[label] = synonyms
-    if not mapped:
-        return ""
-    return json.dumps(mapped, indent=2, ensure_ascii=True)
 
 
 def _agent_current_label_colors(labels: Sequence[str]) -> Dict[str, str]:

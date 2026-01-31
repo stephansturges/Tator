@@ -5,6 +5,96 @@ import re
 from typing import Any, Dict, List, Sequence
 
 
+_DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
+    "bike": ["bike", "motorbike", "scooter", "motorcycle"],
+    "boat": ["boat", "canoe", "kayak", "surfboard", "ship"],
+    "building": ["building", "house", "store", "office building", "residential building", "warehouse"],
+    "bus": ["bus", "omnibus", "autobus", "coach"],
+    "container": ["container", "truck container", "shipping container"],
+    "digger": [
+        "digger",
+        "excavator",
+        "tractor",
+        "backhoe",
+        "construction vehicle",
+        "bulldozer",
+        "steam shovel",
+        "loader excavator",
+        "dozer",
+        "earthmover",
+        "heavy machinery",
+    ],
+    "gastank": [
+        "silos",
+        "tank",
+        "storage tank",
+        "barrel",
+        "pressure vessel",
+        "oil silo",
+        "storage silo",
+        "oil tank",
+    ],
+    "light_vehicle": [
+        "car",
+        "light vehicle",
+        "light_vehicle",
+        "pickup truck",
+        "sedan",
+        "suv",
+        "van",
+        "4x4",
+        "family car",
+        "passenger vehicle",
+        "automobile",
+        "hatchback",
+    ],
+    "person": [
+        "cyclist",
+        "person",
+        "swimmer",
+        "human",
+        "passenger",
+        "pedestrian",
+        "walker",
+        "hiker",
+        "individual",
+    ],
+    "solarpanels": ["array", "solar panel", "solarpanels"],
+    "truck": [
+        "truck",
+        "lorry",
+        "commercial vehicle",
+        "semi truck",
+        "articulated truck",
+        "heavy-duty vehicle",
+        "big rig",
+        "18-wheeler",
+        "semi-trailer truck",
+    ],
+    "utility_pole": [
+        "antenna",
+        "pole",
+        "utility pole",
+        "utility_pole",
+        "street fixture",
+        "drying rack",
+        "streetlight",
+        "street lamp",
+        "electricity pylon",
+        "power pylon",
+        "transmission tower",
+        "high-voltage pole",
+        "lattice tower",
+        "mast",
+        "comms mast",
+        "aerial mast",
+        "satellite dish",
+        "mounting pole",
+        "light fixture",
+    ],
+}
+
+
 def _glossary_label_key(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(label).strip().lower())
 
@@ -199,3 +289,17 @@ def _dedupe_synonyms(terms: Sequence[str]) -> List[str]:
         seen.add(key)
         output.append(term)
     return output
+
+
+def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
+    def _normalize(name: str) -> str:
+        return "".join(ch for ch in name.lower().strip() if ch.isalnum() or ch == "_")
+    mapped: Dict[str, List[str]] = {}
+    for label in labelmap:
+        norm = _normalize(label)
+        synonyms = _DEFAULT_GLOSSARY_MAP.get(norm)
+        if synonyms:
+            mapped[label] = synonyms
+    if not mapped:
+        return ""
+    return json.dumps(mapped, indent=2, ensure_ascii=True)

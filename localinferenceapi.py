@@ -63,6 +63,9 @@ from utils.parsing import (
 from utils.glossary import (
     _glossary_label_key,
     _extract_glossary_synonyms,
+    _normalize_labelmap_glossary,
+    _normalize_glossary_name,
+    _glossary_key,
     _parse_glossary_mapping,
     _parse_glossary_synonyms,
     _split_synonym_terms,
@@ -6008,29 +6011,6 @@ def _agent_background_classes_from_head(head: Optional[Dict[str, Any]]) -> List[
 def _agent_load_labelmap(dataset_id: Optional[str]) -> List[str]:
     labelmap, _ = _agent_load_labelmap_meta(dataset_id)
     return labelmap
-
-
-def _normalize_labelmap_glossary(raw_glossary: Any) -> str:
-    if raw_glossary is None:
-        return ""
-    if isinstance(raw_glossary, str):
-        return raw_glossary.strip()
-    if isinstance(raw_glossary, list):
-        lines = [str(item).strip() for item in raw_glossary if str(item).strip()]
-        return "\n".join(lines)
-    if isinstance(raw_glossary, dict):
-        lines = []
-        for key, value in raw_glossary.items():
-            if value is None:
-                lines.append(f"{key}".strip())
-                continue
-            if isinstance(value, (list, tuple)):
-                joined = ", ".join([str(item) for item in value if str(item).strip()])
-                lines.append(f"{key}: {joined}".strip())
-            else:
-                lines.append(f"{key}: {value}".strip())
-        return "\n".join([line for line in lines if line.strip()])
-    return str(raw_glossary).strip()
 
 
 _DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
@@ -30212,14 +30192,6 @@ def _persist_dataset_glossary(dataset_root: Path, glossary_text: str) -> None:
             "labelmap_glossary": glossary_text,
         }
         _persist_sam3_dataset_metadata(dataset_root, fallback)
-
-
-def _normalize_glossary_name(name: str) -> str:
-    return re.sub(r"\\s+", " ", str(name or "").strip())
-
-
-def _glossary_key(name: str) -> str:
-    return _normalize_glossary_name(name).lower()
 
 
 def _find_any_file(root: Path) -> Optional[Path]:

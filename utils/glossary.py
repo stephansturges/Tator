@@ -9,6 +9,37 @@ def _glossary_label_key(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(label).strip().lower())
 
 
+def _normalize_labelmap_glossary(raw_glossary: Any) -> str:
+    if raw_glossary is None:
+        return ""
+    if isinstance(raw_glossary, str):
+        return raw_glossary.strip()
+    if isinstance(raw_glossary, list):
+        lines = [str(item).strip() for item in raw_glossary if str(item).strip()]
+        return "\n".join(lines)
+    if isinstance(raw_glossary, dict):
+        lines = []
+        for key, value in raw_glossary.items():
+            if value is None:
+                lines.append(f"{key}".strip())
+                continue
+            if isinstance(value, (list, tuple)):
+                joined = ", ".join([str(item) for item in value if str(item).strip()])
+                lines.append(f"{key}: {joined}".strip())
+            else:
+                lines.append(f"{key}: {value}".strip())
+        return "\n".join([line for line in lines if line.strip()])
+    return str(raw_glossary).strip()
+
+
+def _normalize_glossary_name(name: str) -> str:
+    return re.sub(r"\\s+", " ", str(name or "").strip())
+
+
+def _glossary_key(name: str) -> str:
+    return _normalize_glossary_name(name).lower()
+
+
 def _extract_glossary_synonyms(text: str) -> List[str]:
     cleaned = re.sub(r"[()]", " ", str(text))
     parts = re.split(r"[;,/]|\\band\\b|\\bor\\b", cleaned, flags=re.IGNORECASE)

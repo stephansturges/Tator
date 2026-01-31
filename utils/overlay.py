@@ -9,6 +9,21 @@ from PIL import Image, ImageDraw, ImageFont
 from utils.coords import _qwen_bbox_to_xyxy, _yolo_to_xyxy
 
 
+def _agent_overlay_labels(
+    clusters: Sequence[Dict[str, Any]],
+    labelmap: Optional[Sequence[str]] = None,
+) -> List[str]:
+    labels = list(labelmap or [])
+    if labels:
+        return labels
+    label_set = {
+        str(cluster.get("label") or "").strip()
+        for cluster in clusters
+        if isinstance(cluster, dict) and cluster.get("label")
+    }
+    return sorted(label for label in label_set if label)
+
+
 def _agent_detection_center_px(det: Dict[str, Any], img_w: int, img_h: int) -> Optional[Tuple[float, float]]:
     bbox = det.get("bbox_xyxy_px")
     if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:

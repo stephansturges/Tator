@@ -144,6 +144,7 @@ from utils.overlay import (
     _agent_render_detection_overlay,
     _agent_render_grid_overlay,
     _agent_image_to_data_uri,
+    _agent_overlay_labels,
 )
 from utils.llm import (
     _qwen_agent_message_text,
@@ -6789,18 +6790,6 @@ def _agent_grid_label_counts(
     return summary
 
 
-def _agent_overlay_labels(clusters: Sequence[Dict[str, Any]]) -> List[str]:
-    labels = list(_AGENT_ACTIVE_LABELMAP or [])
-    if labels:
-        return labels
-    label_set = {
-        str(cluster.get("label") or "").strip()
-        for cluster in clusters
-        if isinstance(cluster, dict) and cluster.get("label")
-    }
-    return sorted(label for label in label_set if label)
-
-
 def _agent_overlay_base_image() -> Optional[Image.Image]:
     if _AGENT_ACTIVE_GRID_IMAGE is not None:
         return _AGENT_ACTIVE_GRID_IMAGE
@@ -8730,7 +8719,7 @@ def _agent_tool_view_full_overlay(
     if base_img is None:
         base_img, _, _ = _agent_resolve_image(image_base64, image_token)
     clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
-    labels = _agent_overlay_labels(clusters)
+    labels = _agent_overlay_labels(clusters, _AGENT_ACTIVE_LABELMAP or [])
     label_colors = _agent_current_label_colors(labels) if labels else {}
     label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
     overlay_img = base_img
@@ -8773,7 +8762,7 @@ def _agent_tool_get_tile_context(
     tool_usage = dict(_AGENT_GRID_TOOL_USAGE.get(cell, {}))
     tool_usage_last = dict(_AGENT_GRID_TOOL_LAST.get(cell, {}))
     caption_hint = _agent_tile_caption_hint(cell)
-    labels = _agent_overlay_labels(_AGENT_ACTIVE_CLUSTERS or [])
+    labels = _agent_overlay_labels(_AGENT_ACTIVE_CLUSTERS or [], _AGENT_ACTIVE_LABELMAP or [])
     label_colors = _agent_current_label_colors(labels) if labels else {}
     label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
     agent_cluster_list = []
@@ -8889,7 +8878,7 @@ def _agent_tool_get_global_context() -> Dict[str, Any]:
             continue
         counts[label] = counts.get(label, 0) + 1
     usage_rows = _agent_grid_usage_rows(_AGENT_ACTIVE_GRID)
-    labels = _agent_overlay_labels(clusters)
+    labels = _agent_overlay_labels(clusters, _AGENT_ACTIVE_LABELMAP or [])
     label_colors = _agent_current_label_colors(labels) if labels else {}
     label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
     payload = {
@@ -8945,7 +8934,7 @@ def _agent_tool_think_missed_objects(
         if base is None:
             base, _, _ = _agent_resolve_image(image_base64, image_token)
         clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
-        labels = _agent_overlay_labels(clusters)
+        labels = _agent_overlay_labels(clusters, _AGENT_ACTIVE_LABELMAP or [])
         label_colors = _agent_current_label_colors(labels) if labels else {}
         label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
         overlay = base

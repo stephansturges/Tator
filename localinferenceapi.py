@@ -252,6 +252,10 @@ from services.classifier import (
     _clip_auto_predict_label_impl as _clip_auto_predict_label_impl,
     _clip_auto_predict_details_impl as _clip_auto_predict_details_impl,
     _score_detections_with_clip_head_impl as _score_detections_with_clip_head_impl,
+    _build_clip_head_sweep_grid_impl as _build_clip_head_sweep_grid_impl,
+    _score_head_tuning_candidate_impl as _score_head_tuning_candidate_impl,
+    _update_best_clip_head_sweep_summary_impl as _update_best_clip_head_sweep_summary_impl,
+    _successive_halving_search_impl as _successive_halving_search_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -16682,77 +16686,14 @@ def _build_clip_head_sweep_grid(
     allow_bg_tune: bool,
     allow_margin_tune: Optional[bool] = None,
 ) -> Tuple[List[float], List[float], List[float], float]:
-    """Return (min_prob candidates, margin candidates, bg_margin candidates, target_precision)."""
-    try:
-        base_min = float(base_min_prob)
-    except Exception:
-        base_min = 0.5
-    try:
-        base_mar = float(base_margin)
-    except Exception:
-        base_mar = 0.0
-    try:
-        base_bg = float(base_bg_margin)
-    except Exception:
-        base_bg = 0.0
-    base_min = max(0.0, min(1.0, base_min))
-    base_mar = max(0.0, min(1.0, base_mar))
-    base_bg = max(0.0, min(1.0, base_bg))
-    try:
-        target_precision = float(getattr(payload, "clip_head_target_precision", 0.9))
-    except Exception:
-        target_precision = 0.9
-    target_precision = max(0.0, min(1.0, target_precision))
-
-    auto_tune = True
-    try:
-        auto_tune = bool(getattr(payload, "clip_head_auto_tune", True))
-    except Exception:
-        auto_tune = True
-    bg_auto_tune = True
-    try:
-        bg_auto_tune = bool(getattr(payload, "clip_head_background_auto_tune", True))
-    except Exception:
-        bg_auto_tune = True
-    margin_auto_tune = True
-    try:
-        margin_auto_tune = bool(
-            getattr(payload, "clip_head_tune_margin", True)
-            if allow_margin_tune is None
-            else allow_margin_tune
-        )
-    except Exception:
-        margin_auto_tune = True
-
-    if not auto_tune:
-        return [base_min], [base_mar], [base_bg], target_precision
-
-    # IMPORTANT: For some classes, head probabilities cluster very close to 0 (especially when crops are small).
-    # A coarse 0.05 grid can miss the useful operating region entirely, making auto-tune look “broken”.
-    min_probs_raw: List[float] = []
-    # Very low thresholds (logistic heads often need these).
-    min_probs_raw.extend([0.0, 0.001, 0.002, 0.005])
-    # Dense sweep near zero.
-    min_probs_raw.extend([round(i * 0.01, 3) for i in range(0, 11)])  # 0.00..0.10
-    # Coarser sweep above 0.10.
-    min_probs_raw.extend([round(i * 0.05, 3) for i in range(3, 20)])  # 0.15..0.95
-    # Extra high-end points.
-    min_probs_raw.extend([0.975, 0.99])
-    # Always include the user-provided seed/default.
-    min_probs_raw.append(base_min)
-    min_probs = sorted({float(max(0.0, min(1.0, p))) for p in min_probs_raw})
-
-    margins = [0.0, 0.05, 0.1, 0.2]
-    margins.append(base_mar)
-    margins = sorted({float(max(0.0, min(1.0, m))) for m in margins})
-    if not margin_auto_tune:
-        margins = [base_mar]
-    bg_margins = [0.0, 0.02, 0.05, 0.1, 0.2]
-    bg_margins.append(base_bg)
-    bg_margins = sorted({float(max(0.0, min(1.0, m))) for m in bg_margins})
-    if not allow_bg_tune or not bg_auto_tune:
-        bg_margins = [base_bg]
-    return min_probs, margins, bg_margins, target_precision
+    return _build_clip_head_sweep_grid_impl(
+        payload,
+        base_min_prob=base_min_prob,
+        base_margin=base_margin,
+        base_bg_margin=base_bg_margin,
+        allow_bg_tune=allow_bg_tune,
+        allow_margin_tune=allow_margin_tune,
+    )
 
 
 def _score_head_tuning_candidate(
@@ -16764,14 +16705,16 @@ def _score_head_tuning_candidate(
     margin: float,
     bg_margin: float,
     target_precision: float,
-) -> Tuple[int, float, int, float, float, float]:
-    meets_target = bool(matched > 0 and precision >= float(target_precision))
-    if meets_target:
-        # Priority: reach target precision, then maximize matches (coverage), then minimize FPs.
-        # Tie-breaker: prefer the least-restrictive thresholds that still hit the target (more robust).
-        return (1, float(matched), -int(fps), float(precision), -float(min_prob), -float(margin), -float(bg_margin))
-    # If nothing hits the target, pick the best precision we can get, then maximize matches.
-    return (0, float(precision), int(matched), -int(fps), -float(min_prob), -float(margin), -float(bg_margin))
+) -> Tuple[int, float, int, float, float, float, float]:
+    return _score_head_tuning_candidate_impl(
+        matched=matched,
+        fps=fps,
+        precision=precision,
+        min_prob=min_prob,
+        margin=margin,
+        bg_margin=bg_margin,
+        target_precision=target_precision,
+    )
 
 
 def _update_best_clip_head_sweep_summary(
@@ -16791,39 +16734,22 @@ def _update_best_clip_head_sweep_summary(
     target_precision: float,
     debug: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Tuple[int, float, int, float, float, float, float]]]:
-    recall = matched / total_gt if total_gt else 0.0
-    precision = matched / max(1, matched + fps)
-    det_rate = det_images / total_images if total_images else 0.0
-    key = _score_head_tuning_candidate(
-        matched=int(matched),
-        fps=int(fps),
-        precision=float(precision),
-        min_prob=float(min_prob),
-        margin=float(margin),
-        bg_margin=float(bg_margin),
-        target_precision=float(target_precision),
+    return _update_best_clip_head_sweep_summary_impl(
+        best_summary=best_summary,
+        best_key=best_key,
+        total_gt=total_gt,
+        total_images=total_images,
+        matched=matched,
+        fps=fps,
+        duplicates=duplicates,
+        preds=preds,
+        det_images=det_images,
+        min_prob=min_prob,
+        margin=margin,
+        bg_margin=bg_margin,
+        target_precision=target_precision,
+        debug=debug,
     )
-    if best_key is not None and key <= best_key:
-        return best_summary, best_key
-    summary: Dict[str, Any] = {
-        "gts": int(total_gt),
-        "matches": int(matched),
-        "fps": int(fps),
-        "duplicates": int(duplicates),
-        "preds": int(preds),
-        "precision": float(precision),
-        "recall": float(recall),
-        "coverage_rate": float(recall),
-        "det_rate": float(det_rate),
-        "clip_head_min_prob": float(min_prob),
-        "clip_head_margin": float(margin),
-        "clip_head_background_margin": float(bg_margin),
-        "clip_head_target_precision": float(target_precision),
-        "clip_head_meets_target_precision": bool(float(precision) >= float(target_precision)),
-    }
-    if debug is not None:
-        summary["debug"] = debug
-    return summary, key
 
 
 def _successive_halving_search(
@@ -16835,116 +16761,14 @@ def _successive_halving_search(
     log_fn: Optional[Callable[[str], None]] = None,
     log_prefix: str = "",
 ) -> Tuple[Any, List[Dict[str, Any]]]:
-    """
-    Deterministic successive-halving controller.
-
-    - candidates: initial list of candidate configs
-    - budgets: increasing list of evaluation budgets (ints); larger budgets are more expensive but more reliable
-    - evaluator: function(candidate, budget) -> (key, result), where `key` is a comparable tuple; larger is better
-    - keep_ratio: fraction of candidates to keep between stages (0 < keep_ratio <= 1)
-    """
-    if not candidates:
-        raise ValueError("no_candidates")
-    if not budgets:
-        raise ValueError("no_budgets")
-    budgets_clean: List[int] = []
-    last = 0
-    for b in budgets:
-        try:
-            b_int = int(b)
-        except Exception:
-            continue
-        if b_int <= 0:
-            continue
-        if b_int <= last:
-            raise ValueError("budgets_must_be_increasing")
-        budgets_clean.append(b_int)
-        last = b_int
-    if not budgets_clean:
-        raise ValueError("no_valid_budgets")
-    try:
-        keep = float(keep_ratio)
-    except Exception:
-        keep = 0.5
-    keep = max(0.0, min(1.0, keep))
-    if keep <= 0.0:
-        raise ValueError("keep_ratio_must_be_positive")
-
-    active: List[Any] = list(candidates)
-    history: List[Dict[str, Any]] = []
-    for stage_idx, budget in enumerate(budgets_clean):
-        evaluated: List[Tuple[Tuple[Any, ...], Any, Any]] = []
-        total_candidates = len(active)
-        stage_total = len(budgets_clean)
-        if log_fn:
-            try:
-                prefix = f"{log_prefix} " if log_prefix else ""
-                log_fn(
-                    f"{prefix}Budget pass {stage_idx + 1}/{stage_total}: "
-                    f"eval_cap={int(budget)} candidates={total_candidates}"
-                )
-            except Exception:
-                pass
-        log_every = max(1, total_candidates // 5) if total_candidates > 0 else 1
-        for idx, cand in enumerate(active, start=1):
-            key, result = evaluator(cand, int(budget))
-            evaluated.append((key, cand, result))
-            if log_fn and (idx == total_candidates or idx % log_every == 0):
-                try:
-                    prefix = f"{log_prefix} " if log_prefix else ""
-                    log_fn(f"{prefix}Budget pass {stage_idx + 1}: evaluated {idx}/{total_candidates} candidates")
-                except Exception:
-                    pass
-        evaluated.sort(key=lambda x: x[0], reverse=True)
-        best_key = evaluated[0][0] if evaluated else None
-        if log_fn and evaluated:
-            try:
-                prefix = f"{log_prefix} " if log_prefix else ""
-                best_result = evaluated[0][2]
-                best_summary = best_result.get("summary") if isinstance(best_result, dict) else None
-                if isinstance(best_summary, dict):
-                    matches = int(best_summary.get("matches") or 0)
-                    fps = int(best_summary.get("fps") or 0)
-                    precision = float(best_summary.get("precision") or 0.0)
-                    min_prob = best_summary.get("clip_head_min_prob")
-                    margin = best_summary.get("clip_head_margin")
-                    head_bits = []
-                    if min_prob is not None:
-                        head_bits.append(f"p≥{float(min_prob):.3f}")
-                    if margin is not None and float(margin) > 0:
-                        head_bits.append(f"Δ≥{float(margin):.3f}")
-                    head_str = f" ({' '.join(head_bits)})" if head_bits else ""
-                    log_fn(
-                        f"{prefix}Budget pass {stage_idx + 1}: best matches={matches} fps={fps} "
-                        f"prec={precision:.3f}{head_str}"
-                    )
-            except Exception:
-                pass
-        history.append(
-            {
-                "stage": int(stage_idx),
-                "budget": int(budget),
-                "n_candidates": int(len(active)),
-                "best_key": best_key,
-            }
-        )
-        if stage_idx >= len(budgets_clean) - 1:
-            break
-        keep_n = max(1, int(math.ceil(len(evaluated) * keep)))
-        if log_fn:
-            try:
-                prefix = f"{log_prefix} " if log_prefix else ""
-                log_fn(
-                    f"{prefix}Budget pass {stage_idx + 1}: keeping {keep_n}/{len(evaluated)} candidates "
-                    f"(best_key={best_key})"
-                )
-            except Exception:
-                pass
-        active = [cand for _, cand, _ in evaluated[:keep_n]]
-
-    if not evaluated:
-        raise ValueError("no_evaluations")
-    return evaluated[0][1], history
+    return _successive_halving_search_impl(
+        candidates=candidates,
+        budgets=budgets,
+        evaluator=evaluator,
+        keep_ratio=keep_ratio,
+        log_fn=log_fn,
+        log_prefix=log_prefix,
+    )
 
 
 def _evaluate_sam3_greedy_recipe(

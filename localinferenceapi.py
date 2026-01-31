@@ -108,6 +108,7 @@ from services.prepass import (
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import _context_store, _context_chunk
+from services.tile_context import _cluster_owner_cell, _tile_clusters, _tile_cluster_payload, _tile_caption_hint
 from services.prepass_grid import (
     _agent_grid_col_label,
     _agent_grid_col_index,
@@ -6811,65 +6812,6 @@ def _agent_record_grid_tool_usage(
 
 
 
-def _agent_cluster_owner_cell(cluster: Mapping[str, Any]) -> Optional[str]:
-    owner = cluster.get("owner_cell")
-    if owner:
-        return str(owner)
-    cell = cluster.get("grid_cell")
-    if cell:
-        return str(cell)
-    return None
-
-
-def _agent_tile_clusters(grid_cell: str) -> List[Dict[str, Any]]:
-    clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
-    if not grid_cell:
-        return clusters
-    tile = str(grid_cell)
-    return [
-        cluster
-        for cluster in clusters
-        if isinstance(cluster, dict) and _agent_cluster_owner_cell(cluster) == tile
-    ]
-
-
-def _agent_tile_cluster_payload(grid_cell: str) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    for cluster in _agent_tile_clusters(grid_cell):
-        items.append(
-            {
-                "cluster_id": int(cluster.get("cluster_id")),
-                "handle": _agent_cluster_handle(cluster),
-                "label": cluster.get("label"),
-                "score": cluster.get("score"),
-                "sources": cluster.get("source_list") or [cluster.get("source")],
-                "grid_cell": cluster.get("grid_cell"),
-                "owner_cell": cluster.get("owner_cell"),
-                "verified": bool(cluster.get("classifier_accept")),
-            }
-        )
-    return items
-
-
-def _agent_tile_caption_hint(grid_cell: str) -> Optional[str]:
-    if not _AGENT_ACTIVE_WINDOWED_CAPTIONS or not _AGENT_ACTIVE_GRID:
-        return None
-    hints: List[str] = []
-    for entry in _AGENT_ACTIVE_WINDOWED_CAPTIONS:
-        if not isinstance(entry, dict):
-            continue
-        bbox = entry.get("bbox_2d")
-        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-            continue
-        cell = _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID, bbox)
-        if cell and str(cell) == str(grid_cell):
-            text = str(entry.get("caption") or "").strip()
-            if text:
-                hints.append(text)
-    if not hints:
-        return None
-    return " ".join(hints)
-
 
 def _agent_context_store(
     payload: Dict[str, Any],
@@ -8582,11 +8524,11 @@ def _agent_tool_get_tile_context(
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
     if not _AGENT_ACTIVE_GRID:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
-    cluster_list = _agent_tile_cluster_payload(cell)
+    cluster_list = _tile_cluster_payload(cell, _AGENT_ACTIVE_CLUSTERS or [], handle_fn=_agent_cluster_handle)
     counts = _agent_cluster_label_counts([item["cluster_id"] for item in cluster_list])
     tool_usage = dict(_AGENT_GRID_TOOL_USAGE.get(cell, {}))
     tool_usage_last = dict(_AGENT_GRID_TOOL_LAST.get(cell, {}))
-    caption_hint = _agent_tile_caption_hint(cell)
+    caption_hint = _tile_caption_hint(cell, _AGENT_ACTIVE_WINDOWED_CAPTIONS, _AGENT_ACTIVE_GRID)
     labels = _agent_overlay_labels(_AGENT_ACTIVE_CLUSTERS or [], _AGENT_ACTIVE_LABELMAP or [])
     label_colors = _agent_current_label_colors(labels) if labels else {}
     label_prefixes = _agent_current_label_prefixes(labels) if labels else {}

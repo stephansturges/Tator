@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from utils.coords import _qwen_bbox_to_xyxy
 from utils.coords import _xyxy_to_qwen_bbox
 from utils.overlay import _agent_detection_center_px
+from utils.labels import _agent_fuzzy_align_label
 
 
 def _agent_grid_col_label(index: int) -> str:
@@ -319,3 +320,45 @@ def _agent_grid_usage_text(rows: Sequence[Dict[str, Any]]) -> str:
             tool_bits.append(f"last={last_tool}")
         parts.append(f"{cell}: " + ",".join(tool_bits))
     return "; ".join(parts)
+
+
+def _agent_grid_label_counts(
+    *,
+    grid: Optional[Mapping[str, Any]],
+    clusters: Sequence[Dict[str, Any]],
+    label: Optional[str] = None,
+    labelmap: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    if not grid:
+        return []
+    label_filter = _agent_fuzzy_align_label(label, labelmap or []) if label else None
+    counts: Dict[str, Dict[str, Any]] = {}
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        cluster_label = str(cluster.get("label") or "").strip()
+        if label_filter and cluster_label != label_filter:
+            continue
+        cell = cluster.get("owner_cell") or cluster.get("grid_cell")
+        if not cell:
+            bbox_2d = cluster.get("bbox_2d")
+            if isinstance(bbox_2d, (list, tuple)) and len(bbox_2d) >= 4:
+                cell = _agent_grid_cell_for_window_bbox(grid, bbox_2d)
+        if not cell:
+            continue
+        entry = counts.setdefault(str(cell), {"grid_cell": str(cell), "counts": {}, "cluster_ids": []})
+        entry["cluster_ids"].append(int(cluster.get("cluster_id")))
+        entry["counts"][cluster_label] = entry["counts"].get(cluster_label, 0) + 1
+    summary: List[Dict[str, Any]] = []
+    for cell, entry in sorted(counts.items()):
+        counts_map = entry.get("counts") or {}
+        total = sum(int(v) for v in counts_map.values())
+        summary.append(
+            {
+                "grid_cell": cell,
+                "total": total,
+                "counts": counts_map,
+                "cluster_ids": entry.get("cluster_ids") or [],
+            }
+        )
+    return summary

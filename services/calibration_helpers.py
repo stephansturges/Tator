@@ -62,3 +62,10 @@ def _calibration_safe_link(src: Path, dest: Path) -> None:
             shutil.copy2(src, dest)
         except Exception:
             pass
+
+
+def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(record, ensure_ascii=False))
+    tmp_path.replace(path)

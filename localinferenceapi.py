@@ -239,6 +239,7 @@ from services.calibration_helpers import (
     _calibration_sample_images as _calibration_sample_images_impl,
     _calibration_hash_payload as _calibration_hash_payload_impl,
     _calibration_safe_link as _calibration_safe_link_impl,
+    _calibration_write_record_atomic as _calibration_write_record_atomic_impl,
 )
 from collections import OrderedDict
 try:
@@ -29401,10 +29402,7 @@ def _calibration_update(job: CalibrationJob, **kwargs: Any) -> None:
 
 
 def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(record, ensure_ascii=False))
-    tmp_path.replace(path)
+    _calibration_write_record_atomic_impl(path, record)
 
 
 def _calibration_prepass_worker(

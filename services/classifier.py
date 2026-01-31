@@ -595,3 +595,21 @@ def _resolve_head_normalize_embeddings_impl(head: Optional[Dict[str, Any]], *, d
     if isinstance(raw, str):
         return raw.strip().lower() in {"1", "true", "yes", "on"}
     return bool(raw)
+
+
+def _resolve_active_head_normalize_embeddings_impl(
+    meta_obj: Optional[Dict[str, Any]],
+    clf_obj: Optional[object],
+    *,
+    default: bool = True,
+    resolve_head_normalize_embeddings_fn: Callable[[Optional[Dict[str, Any]], bool], bool],
+) -> bool:
+    if isinstance(clf_obj, dict):
+        head_type = str(clf_obj.get("classifier_type") or clf_obj.get("head_type") or "").lower()
+        if head_type == "mlp":
+            return resolve_head_normalize_embeddings_fn(clf_obj, default=default)
+    if isinstance(meta_obj, dict) and str(meta_obj.get("classifier_type") or "").lower() == "mlp":
+        raw = meta_obj.get("mlp_normalize_embeddings")
+        if raw is not None:
+            return bool(raw)
+    return default

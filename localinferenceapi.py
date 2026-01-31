@@ -244,6 +244,7 @@ from services.classifier import (
     _clip_head_predict_proba_impl as _clip_head_predict_proba_impl,
     _clip_head_keep_mask_impl as _clip_head_keep_mask_impl,
     _resolve_head_normalize_embeddings_impl as _resolve_head_normalize_embeddings_impl,
+    _resolve_active_head_normalize_embeddings_impl as _resolve_active_head_normalize_embeddings_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -32012,15 +32013,12 @@ def _resolve_active_head_normalize_embeddings(
     *,
     default: bool = True,
 ) -> bool:
-    if isinstance(clf_obj, dict):
-        head_type = str(clf_obj.get("classifier_type") or clf_obj.get("head_type") or "").lower()
-        if head_type == "mlp":
-            return _resolve_head_normalize_embeddings(clf_obj, default=default)
-    if isinstance(meta_obj, dict) and str(meta_obj.get("classifier_type") or "").lower() == "mlp":
-        raw = meta_obj.get("mlp_normalize_embeddings")
-        if raw is not None:
-            return bool(raw)
-    return default
+    return _resolve_active_head_normalize_embeddings_impl(
+        meta_obj,
+        clf_obj,
+        default=default,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings,
+    )
 
 def mask_to_bounding_box(mask: np.ndarray) -> tuple[int,int,int,int]:
     rows = np.any(mask, axis=1)

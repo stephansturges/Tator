@@ -193,6 +193,20 @@ def _agent_grid_prompt_text(grid: Optional[Mapping[str, Any]]) -> str:
     )
 
 
+def _agent_grid_cells(grid: Optional[Mapping[str, Any]]) -> List[str]:
+    if not grid:
+        return []
+    labels = list(grid.get("col_labels") or [])
+    rows = int(grid.get("rows") or 0)
+    if not labels or rows <= 0:
+        return []
+    cells: List[str] = []
+    for row in range(1, rows + 1):
+        for col in labels:
+            cells.append(f"{col}{row}")
+    return cells
+
+
 def _agent_quadrant_windows_qwen(overlap_ratio: float = 0.1) -> List[Dict[str, Any]]:
     overlap_ratio = max(0.0, min(float(overlap_ratio), 0.4))
     base = 1000.0

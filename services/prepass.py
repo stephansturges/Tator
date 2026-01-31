@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from utils.coords import _agent_iou_xyxy
 
@@ -183,3 +183,37 @@ def _agent_detection_has_source(det: Dict[str, Any], sources: Set[str]) -> bool:
             if str(item) in sources:
                 return True
     return False
+
+
+def _agent_det_score(det: Dict[str, Any]) -> Optional[float]:
+    raw = det.get("score")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _agent_cluster_match(
+    det: Dict[str, Any],
+    clusters: Sequence[Dict[str, Any]],
+    *,
+    iou_thr: float,
+) -> Optional[Dict[str, Any]]:
+    label = str(det.get("label") or "").strip()
+    bbox = det.get("bbox_xyxy_px")
+    if not label or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        cluster_label = str(cluster.get("label") or "").strip()
+        if cluster_label and cluster_label != label:
+            continue
+        cluster_bbox = cluster.get("bbox_xyxy_px")
+        if not isinstance(cluster_bbox, (list, tuple)) or len(cluster_bbox) < 4:
+            continue
+        if _agent_iou_xyxy(bbox, cluster_bbox) >= iou_thr:
+            return cluster
+    return None

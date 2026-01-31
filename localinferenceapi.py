@@ -172,7 +172,11 @@ from services.sam3_jobs import (
     _sam3_job_update_impl as _sam3_job_update_impl,
     _serialize_sam3_job_impl as _serialize_sam3_job_impl,
 )
-from services.segmentation import _serialize_seg_job_impl as _serialize_seg_job_impl
+from services.segmentation import (
+    _seg_job_log_impl as _seg_job_log_impl,
+    _seg_job_update_impl as _seg_job_update_impl,
+    _serialize_seg_job_impl as _serialize_seg_job_impl,
+)
 from services.datasets import (
     _load_dataset_glossary,
     _load_qwen_labelmap,
@@ -10767,15 +10771,7 @@ def _rfdetr_job_append_metric(job: RfDetrTrainingJob, metric: Dict[str, Any]) ->
 
 
 def _seg_job_log(job: SegmentationBuildJob, message: str) -> None:
-    entry = {"timestamp": time.time(), "message": message}
-    job.logs.append(entry)
-    if len(job.logs) > MAX_JOB_LOGS:
-        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-    job.updated_at = time.time()
-    try:
-        logger.info("[seg-build %s] %s", job.job_id[:8], message)
-    except Exception:
-        pass
+    _seg_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
 
 
 def _seg_job_update(
@@ -10788,22 +10784,17 @@ def _seg_job_update(
     result: Optional[Dict[str, Any]] = None,
     log_message: bool = True,
 ) -> None:
-    if status is not None:
-        job.status = status
-    if message is not None:
-        if message != job.message:
-            job.message = message
-            if log_message:
-                _seg_job_log(job, message)
-        else:
-            job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if result is not None:
-        job.result = result
-    job.updated_at = time.time()
+    _seg_job_update_impl(
+        job,
+        status=status,
+        message=message,
+        progress=progress,
+        error=error,
+        result=result,
+        log_message=log_message,
+        max_logs=MAX_JOB_LOGS,
+        logger=logger,
+    )
 
 
 def _serialize_seg_job(job: SegmentationBuildJob) -> Dict[str, Any]:

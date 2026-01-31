@@ -116,6 +116,7 @@ from services.prepass import (
     _agent_select_similarity_exemplars as _agent_select_similarity_exemplars_impl,
     _agent_deep_prepass_cleanup_impl,
     _agent_run_deep_prepass_part_a_impl,
+    _agent_run_deep_prepass_impl,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import (
@@ -10059,99 +10060,31 @@ def _agent_run_deep_prepass(
     trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
     trace_readable: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
-    warnings: List[str] = []
-    part_a = _agent_run_deep_prepass_part_a(
+    return _agent_run_deep_prepass_impl(
         payload,
         pil_img=pil_img,
         image_token=image_token,
         labelmap=labelmap,
         glossary=glossary,
+        run_part_a_fn=_agent_run_deep_prepass_part_a,
+        cleanup_fn=_agent_deep_prepass_cleanup,
+        select_exemplars_fn=_agent_select_similarity_exemplars,
+        run_similarity_global_fn=lambda *args, **kwargs: _agent_run_similarity_global(
+            *args,
+            **kwargs,
+            sam3_similarity_fn=_agent_tool_sam3_similarity,
+        ),
+        run_similarity_windowed_fn=lambda *args, **kwargs: _agent_run_similarity_expansion(
+            *args,
+            **kwargs,
+            sam3_similarity_fn=_agent_tool_sam3_similarity,
+            grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
+        ),
+        finalize_provenance_fn=_agent_finalize_provenance,
         trace_writer=trace_writer,
         trace_full_writer=trace_full_writer,
         trace_readable=trace_readable,
     )
-    detections = list(part_a.get("detections") or [])
-    warnings.extend(list(part_a.get("warnings") or []))
-    if trace_readable:
-        trace_readable(f"deep prepass A: detections={len(detections)}")
-    cleanup_a = _agent_deep_prepass_cleanup(
-        payload,
-        detections=detections,
-        pil_img=pil_img,
-        labelmap=labelmap,
-    )
-    detections = list(cleanup_a.get("detections") or [])
-    removed = int(cleanup_a.get("removed") or 0)
-    scoreless_removed = int(cleanup_a.get("scoreless_removed") or 0)
-    rejected = int(cleanup_a.get("rejected") or 0)
-    if trace_readable:
-        trace_readable(
-            "deep prepass A cleanup: "
-            f"cleaned={len(detections)} removed={removed} "
-            f"scoreless_removed={scoreless_removed} rejected={rejected}"
-        )
-    added_similarity = 0
-    if payload.enable_sam3_similarity is not False and detections:
-        exemplars_by_label = _agent_select_similarity_exemplars(
-            payload,
-            detections=detections,
-            trace_readable=trace_readable,
-        )
-        similarity_detections: List[Dict[str, Any]] = []
-        if exemplars_by_label:
-            global_result = _agent_run_similarity_global(
-                payload,
-                pil_img=pil_img,
-                image_token=image_token,
-                exemplars_by_label=exemplars_by_label,
-                sam3_similarity_fn=_agent_tool_sam3_similarity,
-                trace_writer=trace_writer,
-                trace_full_writer=trace_full_writer,
-                trace_readable=trace_readable,
-            )
-            similarity_detections.extend(list(global_result.get("detections") or []))
-            warnings.extend(list(global_result.get("warnings") or []))
-            if payload.similarity_window_extension:
-                window_result = _agent_run_similarity_expansion(
-                    payload,
-                    pil_img=pil_img,
-                    image_token=image_token,
-                    exemplars_by_label=exemplars_by_label,
-                    sam3_similarity_fn=_agent_tool_sam3_similarity,
-                    grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
-                    trace_writer=trace_writer,
-                    trace_full_writer=trace_full_writer,
-                    trace_readable=trace_readable,
-                )
-                similarity_detections.extend(list(window_result.get("detections") or []))
-                warnings.extend(list(window_result.get("warnings") or []))
-        added_similarity = len(similarity_detections)
-        if similarity_detections:
-            detections = detections + similarity_detections
-            cleanup_b = _agent_deep_prepass_cleanup(
-                payload,
-                detections=detections,
-                pil_img=pil_img,
-                labelmap=labelmap,
-            )
-            detections = list(cleanup_b.get("detections") or [])
-            removed_b = int(cleanup_b.get("removed") or 0)
-            scoreless_removed_b = int(cleanup_b.get("scoreless_removed") or 0)
-            rejected_b = int(cleanup_b.get("rejected") or 0)
-            if trace_readable:
-                trace_readable(
-                    "deep prepass B: "
-                    f"added_similarity={added_similarity} cleaned={len(detections)} "
-                    f"removed={removed_b} scoreless_removed={scoreless_removed_b} rejected={rejected_b}"
-                )
-    _agent_finalize_provenance(detections)
-    return {
-        "detections": detections,
-        "warnings": warnings,
-        "sam3_text_prompts": part_a.get("sam3_text_prompts") or {},
-        "sam3_text_term_map": part_a.get("sam3_text_term_map") or {},
-        "image_size": part_a.get("image_size") or {},
-    }
 
 
 def _agent_run_deep_prepass_caption(

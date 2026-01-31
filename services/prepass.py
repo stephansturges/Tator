@@ -550,6 +550,115 @@ def _agent_run_deep_prepass_part_a_impl(
     }
 
 
+def _agent_run_deep_prepass_impl(
+    payload: Any,
+    *,
+    pil_img: Any,
+    image_token: str,
+    labelmap: List[str],
+    glossary: str,
+    run_part_a_fn: Any,
+    cleanup_fn: Any,
+    select_exemplars_fn: Any,
+    run_similarity_global_fn: Any,
+    run_similarity_windowed_fn: Any,
+    finalize_provenance_fn: Any,
+    trace_writer: Optional[Any] = None,
+    trace_full_writer: Optional[Any] = None,
+    trace_readable: Optional[Any] = None,
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    part_a = run_part_a_fn(
+        payload,
+        pil_img=pil_img,
+        image_token=image_token,
+        labelmap=labelmap,
+        glossary=glossary,
+        trace_writer=trace_writer,
+        trace_full_writer=trace_full_writer,
+        trace_readable=trace_readable,
+    )
+    detections = list(part_a.get("detections") or [])
+    warnings.extend(list(part_a.get("warnings") or []))
+    if trace_readable:
+        trace_readable(f"deep prepass A: detections={len(detections)}")
+    cleanup_a = cleanup_fn(
+        payload,
+        detections=detections,
+        pil_img=pil_img,
+        labelmap=labelmap,
+    )
+    detections = list(cleanup_a.get("detections") or [])
+    removed = int(cleanup_a.get("removed") or 0)
+    scoreless_removed = int(cleanup_a.get("scoreless_removed") or 0)
+    rejected = int(cleanup_a.get("rejected") or 0)
+    if trace_readable:
+        trace_readable(
+            "deep prepass A cleanup: "
+            f"cleaned={len(detections)} removed={removed} "
+            f"scoreless_removed={scoreless_removed} rejected={rejected}"
+        )
+    added_similarity = 0
+    if getattr(payload, "enable_sam3_similarity", True) is not False and detections:
+        exemplars_by_label = select_exemplars_fn(
+            payload,
+            detections=detections,
+            trace_readable=trace_readable,
+        )
+        similarity_detections: List[Dict[str, Any]] = []
+        if exemplars_by_label:
+            global_result = run_similarity_global_fn(
+                payload,
+                pil_img=pil_img,
+                image_token=image_token,
+                exemplars_by_label=exemplars_by_label,
+                trace_writer=trace_writer,
+                trace_full_writer=trace_full_writer,
+                trace_readable=trace_readable,
+            )
+            similarity_detections.extend(list(global_result.get("detections") or []))
+            warnings.extend(list(global_result.get("warnings") or []))
+            if getattr(payload, "similarity_window_extension", False):
+                window_result = run_similarity_windowed_fn(
+                    payload,
+                    pil_img=pil_img,
+                    image_token=image_token,
+                    exemplars_by_label=exemplars_by_label,
+                    trace_writer=trace_writer,
+                    trace_full_writer=trace_full_writer,
+                    trace_readable=trace_readable,
+                )
+                similarity_detections.extend(list(window_result.get("detections") or []))
+                warnings.extend(list(window_result.get("warnings") or []))
+        added_similarity = len(similarity_detections)
+        if similarity_detections:
+            detections = detections + similarity_detections
+            cleanup_b = cleanup_fn(
+                payload,
+                detections=detections,
+                pil_img=pil_img,
+                labelmap=labelmap,
+            )
+            detections = list(cleanup_b.get("detections") or [])
+            removed_b = int(cleanup_b.get("removed") or 0)
+            scoreless_removed_b = int(cleanup_b.get("scoreless_removed") or 0)
+            rejected_b = int(cleanup_b.get("rejected") or 0)
+            if trace_readable:
+                trace_readable(
+                    "deep prepass B: "
+                    f"added_similarity={added_similarity} cleaned={len(detections)} "
+                    f"removed={removed_b} scoreless_removed={scoreless_removed_b} rejected={rejected_b}"
+                )
+    finalize_provenance_fn(detections)
+    return {
+        "detections": detections,
+        "warnings": warnings,
+        "sam3_text_prompts": part_a.get("sam3_text_prompts") or {},
+        "sam3_text_term_map": part_a.get("sam3_text_term_map") or {},
+        "image_size": part_a.get("image_size") or {},
+    }
+
+
 def _agent_select_similarity_exemplars(
     min_score: float,
     *,

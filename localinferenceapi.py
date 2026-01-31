@@ -117,6 +117,7 @@ from services.prepass import (
     _agent_deep_prepass_cleanup_impl,
     _agent_run_deep_prepass_part_a_impl,
     _agent_run_deep_prepass_impl,
+    _agent_run_deep_prepass_caption_impl,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import (
@@ -10100,209 +10101,30 @@ def _agent_run_deep_prepass_caption(
     trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
     trace_readable: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    if not payload.prepass_caption:
-        return "", []
-    caption_hints: List[QwenCaptionHint] = []
-    hint_items = list(detections or [])
-    hint_items.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
-    for det in hint_items[: min(len(hint_items), 160)]:
-        label = str(det.get("label") or det.get("class_name") or "").strip()
-        if not label:
-            continue
-        bbox = det.get("bbox_xyxy_px")
-        if not bbox and det.get("bbox_2d"):
-            bbox = _qwen_bbox_to_xyxy(pil_img.width, pil_img.height, det.get("bbox_2d") or [])
-        if not bbox or len(bbox) < 4:
-            continue
-        caption_hints.append(
-            QwenCaptionHint(
-                label=label,
-                bbox=[float(v) for v in bbox[:4]],
-                confidence=det.get("score"),
-            )
-        )
-    det_hint_summary = _agent_label_counts_summary(hint_items, limit=10)
-    prepass_prompt = (
-        "Write a detailed, multi-sentence caption. Use detection hints as suggestions, "
-        "but mention other visible objects. Preserve specific details you see (counts, actions, "
-        "notable attributes). Do not mention labels, hints, or coordinates. "
-        "Never output labelmap tags (e.g., light_vehicle); use natural words like car or van. "
-        "Avoid any token with underscores."
-    )
-    if det_hint_summary and det_hint_summary != "none":
-        prepass_prompt = f"{prepass_prompt} Detection hints: {det_hint_summary}."
-
-    caption_profile = (payload.prepass_caption_profile or "light").strip().lower()
-    if caption_profile not in {"light", "deep"}:
-        caption_profile = "light"
-    caption_variant = payload.prepass_caption_variant or payload.model_variant or "auto"
-    caption_model_id = (payload.prepass_caption_model_id or model_id_override or "").strip() or None
-    caption_max_tokens = int(payload.prepass_caption_max_tokens or (512 if caption_profile == "light" else 1024))
-    caption_mode = "windowed"
-    caption_all_windows = True
-    include_coords = False
-    caption_payload = QwenCaptionRequest(
+    return _agent_run_deep_prepass_caption_impl(
+        payload,
+        pil_img=pil_img,
         image_token=image_token,
-        user_prompt=prepass_prompt,
-        label_hints=caption_hints or None,
-        image_width=pil_img.width,
-        image_height=pil_img.height,
-        include_counts=True,
-        include_coords=include_coords,
-        max_boxes=min(len(caption_hints), 120),
-        max_new_tokens=caption_max_tokens,
-        model_variant=caption_variant,
-        model_id=caption_model_id,
-        final_answer_only=True,
-        two_stage_refine=caption_mode == "windowed",
-        caption_mode=caption_mode,
-        caption_all_windows=caption_all_windows,
-        restrict_to_labels=False,
-        fast_mode=True,
-        multi_model_cache=True,
-        labelmap_glossary=glossary,
+        detections=detections,
+        model_id_override=model_id_override,
+        glossary=glossary,
+        grid_for_log=grid_for_log,
+        caption_request_cls=QwenCaptionRequest,
+        qwen_caption_fn=qwen_caption,
+        sanitize_caption_fn=_sanitize_qwen_caption,
+        label_counts_fn=_agent_label_counts_summary,
+        qwen_bbox_to_xyxy_fn=_qwen_bbox_to_xyxy,
+        xyxy_to_bbox_fn=_xyxy_to_qwen_bbox,
+        grid_cell_for_window_bbox_fn=_agent_grid_cell_for_window_bbox,
+        readable_format_bbox_fn=_agent_readable_format_bbox,
+        unload_non_qwen_fn=_unload_non_qwen_runtimes,
+        caption_window_hook=_CAPTION_WINDOW_HOOK,
+        http_exception_cls=HTTPException,
+        http_503_code=HTTP_503_SERVICE_UNAVAILABLE,
+        trace_writer=trace_writer,
+        trace_full_writer=trace_full_writer,
+        trace_readable=trace_readable,
     )
-
-    def _is_cuda_oom(exc: Exception) -> bool:
-        msg = str(exc).lower()
-        return "out of memory" in msg or ("cuda error" in msg and "memory" in msg)
-
-    windowed_captions: List[Tuple[int, int, int, str]] = []
-
-    def _window_hook(x0: int, y0: int, size: int, caption: str) -> None:
-        windowed_captions.append((x0, y0, size, caption))
-        if trace_readable:
-            cell = None
-            if grid_for_log:
-                bbox_2d = _xyxy_to_qwen_bbox(
-                    pil_img.width,
-                    pil_img.height,
-                    float(x0),
-                    float(y0),
-                    float(x0 + size),
-                    float(y0 + size),
-                )
-                cell = _agent_grid_cell_for_window_bbox(grid_for_log, bbox_2d)
-            cell_text = f" {cell}" if cell else ""
-            trace_readable(
-                f"prepass caption window{cell_text} "
-                f"[{x0},{y0},{x0 + size},{y0 + size}]: {caption}"
-            )
-        if trace_writer:
-            trace_writer(
-                {
-                    "type": "prepass_caption_window",
-                    "window": [int(x0), int(y0), int(size)],
-                    "grid_cell": _agent_grid_cell_for_window_bbox(
-                        grid_for_log, _xyxy_to_qwen_bbox(pil_img.width, pil_img.height, float(x0), float(y0), float(x0 + size), float(y0 + size))
-                    )
-                    if grid_for_log
-                    else None,
-                    "caption": caption,
-                    "ts": time.time(),
-                }
-            )
-        if trace_full_writer:
-            trace_full_writer(
-                {
-                    "type": "prepass_caption_window",
-                    "window": [int(x0), int(y0), int(size)],
-                    "grid_cell": _agent_grid_cell_for_window_bbox(
-                        grid_for_log, _xyxy_to_qwen_bbox(pil_img.width, pil_img.height, float(x0), float(y0), float(x0 + size), float(y0 + size))
-                    )
-                    if grid_for_log
-                    else None,
-                    "caption": caption,
-                    "ts": time.time(),
-                }
-            )
-
-    def _run_caption_with_hook(request: QwenCaptionRequest) -> QwenCaptionResponse:
-        token = None
-        if caption_mode == "windowed":
-            token = _CAPTION_WINDOW_HOOK.set(_window_hook)
-        try:
-            if trace_full_writer:
-                trace_full_writer(
-                    {
-                        "type": "prepass_caption_call",
-                        "payload": {
-                            "model_id": request.model_id,
-                            "variant": request.model_variant,
-                            "caption_mode": request.caption_mode,
-                            "caption_all_windows": request.caption_all_windows,
-                            "restrict_to_labels": request.restrict_to_labels,
-                            "max_new_tokens": request.max_new_tokens,
-                            "hint_count": len(request.label_hints or []),
-                        },
-                        "ts": time.time(),
-                    }
-                )
-            return qwen_caption(request)
-        finally:
-            if token is not None:
-                _CAPTION_WINDOW_HOOK.reset(token)
-
-    try:
-        response = _run_caption_with_hook(caption_payload)
-    except Exception as exc:  # noqa: BLE001
-        if _is_cuda_oom(exc):
-            try:
-                _unload_non_qwen_runtimes()
-                response = _run_caption_with_hook(caption_payload)
-            except Exception as retry_exc:  # noqa: BLE001
-                detail = str(retry_exc)
-                raise HTTPException(
-                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"prepass_caption_failed:{detail}",
-                ) from retry_exc
-        else:
-            detail = str(exc)
-            raise HTTPException(
-                status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"prepass_caption_failed:{detail}",
-            ) from exc
-    caption_text = _sanitize_qwen_caption(response.caption or "")
-    if not caption_text:
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="prepass_caption_failed:empty")
-    if trace_readable:
-        trace_readable(f"prepass caption summary: {caption_text}")
-    caption_entries: List[Dict[str, Any]] = []
-    if windowed_captions:
-        for x0, y0, size, caption in windowed_captions:
-            bbox_2d = _xyxy_to_qwen_bbox(
-                pil_img.width,
-                pil_img.height,
-                float(x0),
-                float(y0),
-                float(x0 + size),
-                float(y0 + size),
-            )
-            window_name = None
-            if grid_for_log:
-                window_name = _agent_grid_cell_for_window_bbox(grid_for_log, bbox_2d)
-            if not window_name:
-                window_name = f"window_{int(x0)}_{int(y0)}"
-            caption_entries.append(
-                {
-                    "window": window_name,
-                    "bbox_2d": list(bbox_2d),
-                    "caption": caption,
-                }
-            )
-            if trace_full_writer:
-                trace_full_writer(
-                    {
-                        "type": "prepass_caption_result",
-                        "window": {"name": window_name, "bbox_2d": list(bbox_2d)},
-                        "caption": caption,
-                        "ts": time.time(),
-                    }
-                )
-            if trace_readable:
-                coords = _agent_readable_format_bbox(bbox_2d)
-                trace_readable(f"prepass caption {window_name} {coords}: {caption}")
-    return caption_text, caption_entries
 
 
 def _agent_deep_prepass_cleanup(

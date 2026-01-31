@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from utils.coords import _agent_iou_xyxy
@@ -657,6 +658,252 @@ def _agent_run_deep_prepass_impl(
         "sam3_text_term_map": part_a.get("sam3_text_term_map") or {},
         "image_size": part_a.get("image_size") or {},
     }
+
+
+def _agent_run_deep_prepass_caption_impl(
+    payload: Any,
+    *,
+    pil_img: Any,
+    image_token: str,
+    detections: List[Dict[str, Any]],
+    model_id_override: Optional[str],
+    glossary: Optional[str],
+    grid_for_log: Optional[Dict[str, Any]],
+    caption_request_cls: Any,
+    qwen_caption_fn: Any,
+    sanitize_caption_fn: Any,
+    label_counts_fn: Any,
+    qwen_bbox_to_xyxy_fn: Any,
+    xyxy_to_bbox_fn: Any,
+    grid_cell_for_window_bbox_fn: Any,
+    readable_format_bbox_fn: Any,
+    unload_non_qwen_fn: Any,
+    caption_window_hook: Any,
+    http_exception_cls: Any,
+    http_503_code: int,
+    trace_writer: Optional[Any] = None,
+    trace_full_writer: Optional[Any] = None,
+    trace_readable: Optional[Any] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    if not getattr(payload, "prepass_caption", False):
+        return "", []
+    caption_hints: List[Any] = []
+    hint_items = list(detections or [])
+    hint_items.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
+    for det in hint_items[: min(len(hint_items), 160)]:
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        if not label:
+            continue
+        bbox = det.get("bbox_xyxy_px")
+        if not bbox and det.get("bbox_2d"):
+            bbox = qwen_bbox_to_xyxy_fn(pil_img.width, pil_img.height, det.get("bbox_2d") or [])
+        if not bbox or len(bbox) < 4:
+            continue
+        caption_hints.append(
+            {
+                "label": label,
+                "bbox": [float(v) for v in bbox[:4]],
+                "confidence": det.get("score"),
+            }
+        )
+    det_hint_summary = label_counts_fn(hint_items, limit=10)
+    prepass_prompt = (
+        "Write a detailed, multi-sentence caption. Use detection hints as suggestions, "
+        "but mention other visible objects. Preserve specific details you see (counts, actions, "
+        "notable attributes). Do not mention labels, hints, or coordinates. "
+        "Never output labelmap tags (e.g., light_vehicle); use natural words like car or van. "
+        "Avoid any token with underscores."
+    )
+    if det_hint_summary and det_hint_summary != "none":
+        prepass_prompt = f"{prepass_prompt} Detection hints: {det_hint_summary}."
+
+    caption_profile = (getattr(payload, "prepass_caption_profile", None) or "light").strip().lower()
+    if caption_profile not in {"light", "deep"}:
+        caption_profile = "light"
+    caption_variant = getattr(payload, "prepass_caption_variant", None) or getattr(payload, "model_variant", None) or "auto"
+    caption_model_id = (getattr(payload, "prepass_caption_model_id", None) or model_id_override or "").strip() or None
+    caption_max_tokens = int(getattr(payload, "prepass_caption_max_tokens", None) or (512 if caption_profile == "light" else 1024))
+    caption_mode = "windowed"
+    caption_all_windows = True
+    include_coords = False
+    caption_payload = caption_request_cls(
+        image_token=image_token,
+        user_prompt=prepass_prompt,
+        label_hints=caption_hints or None,
+        image_width=pil_img.width,
+        image_height=pil_img.height,
+        include_counts=True,
+        include_coords=include_coords,
+        max_boxes=min(len(caption_hints), 120),
+        max_new_tokens=caption_max_tokens,
+        model_variant=caption_variant,
+        model_id=caption_model_id,
+        final_answer_only=True,
+        two_stage_refine=caption_mode == "windowed",
+        caption_mode=caption_mode,
+        caption_all_windows=caption_all_windows,
+        restrict_to_labels=False,
+        fast_mode=True,
+        multi_model_cache=True,
+        labelmap_glossary=glossary,
+    )
+
+    def _is_cuda_oom(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "out of memory" in msg or ("cuda error" in msg and "memory" in msg)
+
+    windowed_captions: List[Tuple[int, int, int, str]] = []
+
+    def _window_hook(x0: int, y0: int, size: int, caption: str) -> None:
+        windowed_captions.append((x0, y0, size, caption))
+        if trace_readable:
+            cell = None
+            if grid_for_log:
+                bbox_2d = xyxy_to_bbox_fn(
+                    pil_img.width,
+                    pil_img.height,
+                    float(x0),
+                    float(y0),
+                    float(x0 + size),
+                    float(y0 + size),
+                )
+                cell = grid_cell_for_window_bbox_fn(grid_for_log, bbox_2d)
+            cell_text = f" {cell}" if cell else ""
+            trace_readable(
+                f"prepass caption window{cell_text} "
+                f"[{x0},{y0},{x0 + size},{y0 + size}]: {caption}"
+            )
+        if trace_writer:
+            trace_writer(
+                {
+                    "type": "prepass_caption_window",
+                    "window": [int(x0), int(y0), int(size)],
+                    "grid_cell": grid_cell_for_window_bbox_fn(
+                        grid_for_log,
+                        xyxy_to_bbox_fn(
+                            pil_img.width,
+                            pil_img.height,
+                            float(x0),
+                            float(y0),
+                            float(x0 + size),
+                            float(y0 + size),
+                        ),
+                    )
+                    if grid_for_log
+                    else None,
+                    "caption": caption,
+                    "ts": time.time(),
+                }
+            )
+        if trace_full_writer:
+            trace_full_writer(
+                {
+                    "type": "prepass_caption_window",
+                    "window": [int(x0), int(y0), int(size)],
+                    "grid_cell": grid_cell_for_window_bbox_fn(
+                        grid_for_log,
+                        xyxy_to_bbox_fn(
+                            pil_img.width,
+                            pil_img.height,
+                            float(x0),
+                            float(y0),
+                            float(x0 + size),
+                            float(y0 + size),
+                        ),
+                    )
+                    if grid_for_log
+                    else None,
+                    "caption": caption,
+                    "ts": time.time(),
+                }
+            )
+
+    def _run_caption_with_hook(request: Any) -> Any:
+        token = None
+        if caption_mode == "windowed":
+            token = caption_window_hook.set(_window_hook)
+        try:
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_caption_call",
+                        "payload": {
+                            "model_id": request.model_id,
+                            "variant": request.model_variant,
+                            "caption_mode": request.caption_mode,
+                            "caption_all_windows": request.caption_all_windows,
+                            "restrict_to_labels": request.restrict_to_labels,
+                            "max_new_tokens": request.max_new_tokens,
+                            "hint_count": len(request.label_hints or []),
+                        },
+                        "ts": time.time(),
+                    }
+                )
+            return qwen_caption_fn(request)
+        finally:
+            if token is not None:
+                caption_window_hook.reset(token)
+
+    try:
+        response = _run_caption_with_hook(caption_payload)
+    except Exception as exc:  # noqa: BLE001
+        if _is_cuda_oom(exc):
+            try:
+                unload_non_qwen_fn()
+                response = _run_caption_with_hook(caption_payload)
+            except Exception as retry_exc:  # noqa: BLE001
+                detail = str(retry_exc)
+                raise http_exception_cls(
+                    status_code=http_503_code,
+                    detail=f"prepass_caption_failed:{detail}",
+                ) from retry_exc
+        else:
+            detail = str(exc)
+            raise http_exception_cls(
+                status_code=http_503_code,
+                detail=f"prepass_caption_failed:{detail}",
+            ) from exc
+    caption_text = sanitize_caption_fn(response.caption or "")
+    if not caption_text:
+        raise http_exception_cls(status_code=http_503_code, detail="prepass_caption_failed:empty")
+    if trace_readable:
+        trace_readable(f"prepass caption summary: {caption_text}")
+    caption_entries: List[Dict[str, Any]] = []
+    if windowed_captions:
+        for x0, y0, size, caption in windowed_captions:
+            bbox_2d = xyxy_to_bbox_fn(
+                pil_img.width,
+                pil_img.height,
+                float(x0),
+                float(y0),
+                float(x0 + size),
+                float(y0 + size),
+            )
+            window_name = None
+            if grid_for_log:
+                window_name = grid_cell_for_window_bbox_fn(grid_for_log, bbox_2d)
+            if not window_name:
+                window_name = f"window_{int(x0)}_{int(y0)}"
+            caption_entries.append(
+                {
+                    "window": window_name,
+                    "bbox_2d": list(bbox_2d),
+                    "caption": caption,
+                }
+            )
+            if trace_full_writer:
+                trace_full_writer(
+                    {
+                        "type": "prepass_caption_result",
+                        "window": {"name": window_name, "bbox_2d": list(bbox_2d)},
+                        "caption": caption,
+                        "ts": time.time(),
+                    }
+                )
+            if trace_readable:
+                coords = readable_format_bbox_fn(bbox_2d)
+                trace_readable(f"prepass caption {window_name} {coords}: {caption}")
+    return caption_text, caption_entries
 
 
 def _agent_select_similarity_exemplars(

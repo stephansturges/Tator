@@ -1506,3 +1506,210 @@ def _validate_clip_dataset_impl(
         "boxes": box_count,
         "labelmap_classes": len(labelmap),
     }
+
+
+def _resolve_clip_labelmap_path_impl(
+    path_str: Optional[str],
+    *,
+    root_hint: Optional[str],
+    upload_root: Path,
+    labelmap_exts: Sequence[str],
+    path_is_within_root_fn: Callable[[Path, Path], bool],
+) -> Optional[Path]:
+    if not path_str:
+        return None
+    raw = str(path_str).strip()
+    if not raw:
+        return None
+    roots: List[Path] = []
+    labelmaps_root = (upload_root / "labelmaps").resolve()
+    classifiers_root = (upload_root / "classifiers").resolve()
+    if root_hint == "classifiers":
+        roots = [classifiers_root]
+    elif root_hint == "labelmaps":
+        roots = [labelmaps_root]
+    else:
+        roots = [labelmaps_root, classifiers_root]
+    for root in roots:
+        try:
+            candidate = (root / raw).resolve()
+        except Exception:
+            continue
+        if not path_is_within_root_fn(candidate, root):
+            continue
+        if candidate.suffix.lower() not in labelmap_exts:
+            continue
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _find_labelmap_for_classifier_impl(
+    classifier_path: Path,
+    *,
+    upload_root: Path,
+    labelmap_exts: Sequence[str],
+    path_is_within_root_fn: Callable[[Path, Path], bool],
+    joblib_load_fn: Callable[[str], Any],
+    resolve_clip_labelmap_path_fn: Callable[[Optional[str], Optional[str]], Optional[Path]],
+) -> Optional[Path]:
+    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    if meta_path.exists():
+        try:
+            meta_obj = joblib_load_fn(str(meta_path))
+            if isinstance(meta_obj, dict):
+                labelmap_hint = meta_obj.get("labelmap_filename") or meta_obj.get("labelmap_path")
+                resolved = resolve_clip_labelmap_path_fn(labelmap_hint, "labelmaps")
+                if resolved is not None:
+                    return resolved
+        except Exception:
+            pass
+    stem = classifier_path.stem
+    roots = [
+        (upload_root / "labelmaps").resolve(),
+        (upload_root / "classifiers").resolve(),
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for ext in labelmap_exts:
+            candidate = (root / f"{stem}{ext}").resolve()
+            if candidate.exists() and candidate.is_file() and path_is_within_root_fn(candidate, root):
+                return candidate
+    return None
+
+
+def _list_clip_labelmaps_impl(
+    *,
+    upload_root: Path,
+    labelmap_exts: Sequence[str],
+    load_labelmap_file_fn: Callable[[Path], Sequence[str]],
+) -> List[Dict[str, Any]]:
+    labelmaps_root = (upload_root / "labelmaps").resolve()
+    entries: List[Dict[str, Any]] = []
+    root = labelmaps_root
+    if not root.exists():
+        return entries
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in labelmap_exts:
+            continue
+        if path.name.endswith(".meta.pkl"):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        try:
+            classes = load_labelmap_file_fn(path)
+        except Exception:
+            classes = []
+        if not classes:
+            continue
+        entries.append(
+            {
+                "filename": path.name,
+                "path": str(path.resolve()),
+                "rel_path": str(path.relative_to(root)),
+                "root": "labelmaps",
+                "n_classes": len(classes),
+                "modified_at": stat.st_mtime,
+            }
+        )
+    entries.sort(key=lambda item: (item.get("modified_at") or 0), reverse=True)
+    return entries
+
+
+def _list_clip_classifiers_impl(
+    *,
+    upload_root: Path,
+    classifier_exts: Sequence[str],
+    labelmap_exts: Sequence[str],
+    path_is_within_root_fn: Callable[[Path, Path], bool],
+    joblib_load_fn: Callable[[str], Any],
+    resolve_clip_labelmap_path_fn: Callable[[Optional[str], Optional[str]], Optional[Path]],
+) -> List[Dict[str, Any]]:
+    """List classifier heads available for CLIP filtering (typically trained via the CLIP training tab)."""
+    root = (upload_root / "classifiers").resolve()
+    labelmaps_root = (upload_root / "labelmaps").resolve()
+    classifiers: List[Dict[str, Any]] = []
+    if not root.exists():
+        return classifiers
+
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in classifier_exts:
+            continue
+        if path.name.endswith(".meta.pkl"):
+            continue
+        if not path_is_within_root_fn(path.resolve(), root):
+            continue
+
+        entry: Dict[str, Any] = {
+            "filename": path.name,
+            "path": str(path.resolve()),
+            "rel_path": str(path.relative_to(root)),
+        }
+
+        meta_path = os.path.splitext(str(path))[0] + ".meta.pkl"
+        if os.path.exists(meta_path):
+            try:
+                meta_obj = joblib_load_fn(meta_path)
+                if isinstance(meta_obj, dict):
+                    entry["clip_model"] = meta_obj.get("clip_model")
+                    entry["encoder_type"] = meta_obj.get("encoder_type") or "clip"
+                    entry["encoder_model"] = meta_obj.get("encoder_model") or entry.get("clip_model")
+                    entry["solver"] = meta_obj.get("solver")
+                    entry["classifier_type"] = meta_obj.get("classifier_type")
+                    entry["embedding_dim"] = meta_obj.get("embedding_dim")
+                    entry["n_samples_train"] = meta_obj.get("n_samples_train")
+                    entry["n_samples_test"] = meta_obj.get("n_samples_test")
+                    labelmap_hint = meta_obj.get("labelmap_filename") or meta_obj.get("labelmap_path")
+                    if labelmap_hint:
+                        resolved = resolve_clip_labelmap_path_fn(labelmap_hint, "labelmaps")
+                        if resolved is not None:
+                            entry["labelmap_guess"] = str(resolved)
+                            entry["labelmap_guess_rel"] = str(resolved.relative_to(labelmaps_root))
+            except Exception:
+                pass
+
+        try:
+            clf_obj = joblib_load_fn(str(path))
+            classes_raw = getattr(clf_obj, "classes_", None)
+            if classes_raw is not None:
+                entry["classes"] = [str(c) for c in list(classes_raw)]
+                entry["n_classes"] = len(entry["classes"])
+            elif isinstance(clf_obj, dict) and clf_obj.get("classes"):
+                entry["classes"] = [str(c) for c in list(clf_obj.get("classes") or [])]
+                entry["n_classes"] = len(entry["classes"])
+                entry["classifier_type"] = clf_obj.get("classifier_type") or clf_obj.get("head_type")
+            coef = getattr(clf_obj, "coef_", None)
+            if coef is not None and hasattr(coef, "shape") and len(getattr(coef, "shape", [])) >= 2:
+                entry["embedding_dim"] = int(coef.shape[1])
+        except Exception as exc:  # noqa: BLE001
+            entry["load_error"] = str(exc)
+        if "encoder_type" not in entry:
+            entry["encoder_type"] = "clip"
+        if "encoder_model" not in entry:
+            entry["encoder_model"] = entry.get("clip_model")
+
+        try:
+            entry["modified_at"] = path.stat().st_mtime
+        except Exception:
+            entry["modified_at"] = None
+        try:
+            stem = path.stem
+            for ext in labelmap_exts:
+                candidate = (labelmaps_root / f"{stem}{ext}").resolve()
+                if candidate.exists() and path_is_within_root_fn(candidate, labelmaps_root):
+                    entry["labelmap_guess"] = str(candidate)
+                    entry["labelmap_guess_rel"] = str(candidate.relative_to(labelmaps_root))
+                    break
+        except Exception:
+            pass
+        classifiers.append(entry)
+
+    classifiers.sort(key=lambda c: (c.get("modified_at") or 0), reverse=True)
+    return classifiers

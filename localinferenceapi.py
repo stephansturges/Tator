@@ -258,6 +258,10 @@ from services.classifier import (
     _successive_halving_search_impl as _successive_halving_search_impl,
     _load_labelmap_simple_impl as _load_labelmap_simple_impl,
     _validate_clip_dataset_impl as _validate_clip_dataset_impl,
+    _resolve_clip_labelmap_path_impl as _resolve_clip_labelmap_path_impl,
+    _find_labelmap_for_classifier_impl as _find_labelmap_for_classifier_impl,
+    _list_clip_labelmaps_impl as _list_clip_labelmaps_impl,
+    _list_clip_classifiers_impl as _list_clip_classifiers_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -31555,89 +31559,14 @@ def list_clip_backbones():
 
 
 def _list_clip_classifiers() -> List[Dict[str, Any]]:
-    """List classifier heads available for CLIP filtering (typically trained via the CLIP training tab)."""
-    root = (UPLOAD_ROOT / "classifiers").resolve()
-    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
-    classifiers: List[Dict[str, Any]] = []
-    if not root.exists():
-        return classifiers
-
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in CLASSIFIER_ALLOWED_EXTS:
-            continue
-        if path.name.endswith(".meta.pkl"):
-            continue
-        if not _path_is_within_root(path.resolve(), root):
-            continue
-
-        entry: Dict[str, Any] = {
-            "filename": path.name,
-            "path": str(path.resolve()),
-            "rel_path": str(path.relative_to(root)),
-        }
-
-        meta_path = os.path.splitext(str(path))[0] + ".meta.pkl"
-        if os.path.exists(meta_path):
-            try:
-                meta_obj = joblib.load(meta_path)
-                if isinstance(meta_obj, dict):
-                    entry["clip_model"] = meta_obj.get("clip_model")
-                    entry["encoder_type"] = meta_obj.get("encoder_type") or "clip"
-                    entry["encoder_model"] = meta_obj.get("encoder_model") or entry.get("clip_model")
-                    entry["solver"] = meta_obj.get("solver")
-                    entry["classifier_type"] = meta_obj.get("classifier_type")
-                    entry["embedding_dim"] = meta_obj.get("embedding_dim")
-                    entry["n_samples_train"] = meta_obj.get("n_samples_train")
-                    entry["n_samples_test"] = meta_obj.get("n_samples_test")
-                    labelmap_hint = meta_obj.get("labelmap_filename") or meta_obj.get("labelmap_path")
-                    if labelmap_hint:
-                        resolved = _resolve_clip_labelmap_path(labelmap_hint, root_hint="labelmaps")
-                        if resolved is not None:
-                            entry["labelmap_guess"] = str(resolved)
-                            entry["labelmap_guess_rel"] = str(resolved.relative_to(labelmaps_root))
-            except Exception:
-                pass
-
-        try:
-            clf_obj = joblib.load(str(path))
-            classes_raw = getattr(clf_obj, "classes_", None)
-            if classes_raw is not None:
-                entry["classes"] = [str(c) for c in list(classes_raw)]
-                entry["n_classes"] = len(entry["classes"])
-            elif isinstance(clf_obj, dict) and clf_obj.get("classes"):
-                entry["classes"] = [str(c) for c in list(clf_obj.get("classes") or [])]
-                entry["n_classes"] = len(entry["classes"])
-                entry["classifier_type"] = clf_obj.get("classifier_type") or clf_obj.get("head_type")
-            coef = getattr(clf_obj, "coef_", None)
-            if coef is not None and hasattr(coef, "shape") and len(getattr(coef, "shape", [])) >= 2:
-                entry["embedding_dim"] = int(coef.shape[1])
-        except Exception as exc:  # noqa: BLE001
-            entry["load_error"] = str(exc)
-        if "encoder_type" not in entry:
-            entry["encoder_type"] = "clip"
-        if "encoder_model" not in entry:
-            entry["encoder_model"] = entry.get("clip_model")
-
-        try:
-            entry["modified_at"] = path.stat().st_mtime
-        except Exception:
-            entry["modified_at"] = None
-        try:
-            stem = path.stem
-            for ext in LABELMAP_ALLOWED_EXTS:
-                candidate = (labelmaps_root / f"{stem}{ext}").resolve()
-                if candidate.exists() and _path_is_within_root(candidate, labelmaps_root):
-                    entry["labelmap_guess"] = str(candidate)
-                    entry["labelmap_guess_rel"] = str(candidate.relative_to(labelmaps_root))
-                    break
-        except Exception:
-            pass
-        classifiers.append(entry)
-
-    classifiers.sort(key=lambda c: (c.get("modified_at") or 0), reverse=True)
-    return classifiers
+    return _list_clip_classifiers_impl(
+        upload_root=UPLOAD_ROOT,
+        classifier_exts=CLASSIFIER_ALLOWED_EXTS,
+        labelmap_exts=LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root,
+        joblib_load_fn=joblib.load,
+        resolve_clip_labelmap_path_fn=_resolve_clip_labelmap_path,
+    )
 
 
 @app.get("/clip/classifiers")
@@ -31646,96 +31575,32 @@ def list_clip_classifiers():
 
 
 def _resolve_clip_labelmap_path(path_str: Optional[str], *, root_hint: Optional[str] = None) -> Optional[Path]:
-    if not path_str:
-        return None
-    raw = str(path_str).strip()
-    if not raw:
-        return None
-    roots: List[Path] = []
-    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
-    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
-    if root_hint == "classifiers":
-        roots = [classifiers_root]
-    elif root_hint == "labelmaps":
-        roots = [labelmaps_root]
-    else:
-        roots = [labelmaps_root, classifiers_root]
-    for root in roots:
-        try:
-            candidate = (root / raw).resolve()
-        except Exception:
-            continue
-        if not _path_is_within_root(candidate, root):
-            continue
-        if candidate.suffix.lower() not in LABELMAP_ALLOWED_EXTS:
-            continue
-        if candidate.exists() and candidate.is_file():
-            return candidate
-    return None
+    return _resolve_clip_labelmap_path_impl(
+        path_str,
+        root_hint=root_hint,
+        upload_root=UPLOAD_ROOT,
+        labelmap_exts=LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root,
+    )
 
 
 def _find_labelmap_for_classifier(classifier_path: Path) -> Optional[Path]:
-    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
-    if meta_path.exists():
-        try:
-            meta_obj = joblib.load(meta_path)
-            if isinstance(meta_obj, dict):
-                labelmap_hint = meta_obj.get("labelmap_filename") or meta_obj.get("labelmap_path")
-                resolved = _resolve_clip_labelmap_path(labelmap_hint, root_hint="labelmaps")
-                if resolved is not None:
-                    return resolved
-        except Exception:
-            pass
-    stem = classifier_path.stem
-    roots = [
-        (UPLOAD_ROOT / "labelmaps").resolve(),
-        (UPLOAD_ROOT / "classifiers").resolve(),
-    ]
-    for root in roots:
-        if not root.exists():
-            continue
-        for ext in LABELMAP_ALLOWED_EXTS:
-            candidate = (root / f"{stem}{ext}").resolve()
-            if candidate.exists() and candidate.is_file() and _path_is_within_root(candidate, root):
-                return candidate
-    return None
+    return _find_labelmap_for_classifier_impl(
+        classifier_path,
+        upload_root=UPLOAD_ROOT,
+        labelmap_exts=LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root,
+        joblib_load_fn=joblib.load,
+        resolve_clip_labelmap_path_fn=_resolve_clip_labelmap_path,
+    )
 
 
 def _list_clip_labelmaps() -> List[Dict[str, Any]]:
-    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
-    entries: List[Dict[str, Any]] = []
-    root = labelmaps_root
-    if not root.exists():
-        return entries
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in LABELMAP_ALLOWED_EXTS:
-            continue
-        if path.name.endswith(".meta.pkl"):
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        try:
-            classes = _load_labelmap_file(path)
-        except Exception:
-            classes = []
-        if not classes:
-            continue
-        entries.append(
-            {
-                "filename": path.name,
-                "path": str(path.resolve()),
-                "rel_path": str(path.relative_to(root)),
-                "root": "labelmaps",
-                "n_classes": len(classes),
-                "modified_at": stat.st_mtime,
-            }
-        )
-    entries.sort(key=lambda item: (item.get("modified_at") or 0), reverse=True)
-    return entries
+    return _list_clip_labelmaps_impl(
+        upload_root=UPLOAD_ROOT,
+        labelmap_exts=LABELMAP_ALLOWED_EXTS,
+        load_labelmap_file_fn=_load_labelmap_file,
+    )
 
 
 @app.get("/clip/labelmaps")

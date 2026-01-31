@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
 
 from utils.coords import _agent_iou_xyxy
 
@@ -169,3 +169,17 @@ def _agent_filter_scoreless_detections(
                 continue
         filtered.append(det)
     return filtered, removed
+
+
+def _agent_detection_has_source(det: Dict[str, Any], sources: Set[str]) -> bool:
+    if not det or not sources:
+        return False
+    source = str(det.get("source") or det.get("score_source") or "")
+    if source and source in sources:
+        return True
+    source_list = det.get("source_list")
+    if isinstance(source_list, (list, tuple)):
+        for item in source_list:
+            if str(item) in sources:
+                return True
+    return False

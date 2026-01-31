@@ -235,7 +235,10 @@ from services.classifier_select import (
 )
 from services.classifier_batch import (
     _resolve_classifier_batch_size as _resolve_classifier_batch,
-    _predict_proba_batched as _predict_proba_batch,
+)
+from services.classifier import (
+    _predict_proba_batched_impl as _predict_proba_batched_impl,
+    _agent_classifier_review_impl as _agent_classifier_review_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -6425,7 +6428,7 @@ def _predict_proba_batched(
     empty_cache_fn = None
     if torch.cuda.is_available():
         empty_cache_fn = torch.cuda.empty_cache
-    return _predict_proba_batch(
+    return _predict_proba_batched_impl(
         crops,
         head,
         batch_size=batch_size,
@@ -6443,86 +6446,18 @@ def _agent_classifier_review(
     pil_img: Optional[Image.Image],
     classifier_head: Optional[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    counts = {
-        "classifier_checked": 0,
-        "classifier_rejected": 0,
-        "classifier_errors": 0,
-        "classifier_unavailable": 0,
-    }
-    if not detections:
-        return detections, counts
-    if pil_img is None or not isinstance(classifier_head, dict):
-        counts["classifier_unavailable"] = len(detections)
-        for det in detections:
-            det["classifier_accept"] = None
-            det["classifier_error"] = "unavailable"
-        return detections, counts
-    classes = [str(c) for c in list(classifier_head.get("classes") or [])]
-    bg_indices = _clip_head_background_indices(classes)
-    min_prob = float(classifier_head.get("min_prob") or 0.5)
-    margin = float(classifier_head.get("margin") or 0.0)
-    background_margin = float(classifier_head.get("background_margin") or 0.0)
-    accepted: List[Dict[str, Any]] = []
-
-    pending: List[Tuple[Dict[str, Any], int, Sequence[float]]] = []
-    crops: List[Image.Image] = []
-    for det in detections:
-        bbox = det.get("bbox_xyxy_px")
-        label = str(det.get("label") or "").strip()
-        if not bbox or len(bbox) < 4:
-            counts["classifier_errors"] += 1
-            det["classifier_accept"] = False
-            det["classifier_error"] = "missing_bbox"
-            continue
-        target_idx = _find_clip_head_target_index(classes, label)
-        if target_idx is None:
-            counts["classifier_errors"] += 1
-            det["classifier_accept"] = False
-            det["classifier_error"] = "label_not_in_classifier"
-            continue
-        x1, y1, x2, y2 = bbox[:4]
-        crop = pil_img.crop((x1, y1, x2, y2))
-        pending.append((det, target_idx, bbox[:4]))
-        crops.append(crop)
-
-    if pending:
-        proba_arr = _predict_proba_batched(crops, classifier_head, batch_size=_resolve_classifier_batch_size())
-        if proba_arr is None or proba_arr.ndim != 2:
-            for det, _target_idx, _bbox in pending:
-                counts["classifier_errors"] += 1
-                det["classifier_accept"] = False
-                det["classifier_error"] = "predict_failed"
-            return [], counts
-        for row, (det, target_idx, bbox) in zip(proba_arr, pending):
-            order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
-            best_idx = order[0] if order else None
-            best_label = classes[best_idx] if best_idx is not None else "unknown"
-            best_prob = float(row[best_idx]) if best_idx is not None else None
-            det["classifier_best"] = best_label
-            det["classifier_prob"] = best_prob
-            keep_mask = _clip_head_keep_mask(
-                row.reshape(1, -1),
-                target_index=target_idx,
-                min_prob=min_prob,
-                margin=margin,
-                background_indices=bg_indices,
-                background_guard=True,
-                background_margin=background_margin,
-            )
-            accept = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
-            det["classifier_accept"] = accept
-            counts["classifier_checked"] += 1
-            summary_bbox = _agent_readable_format_bbox(bbox)
-            prob_text = f"{best_prob:.3f}" if isinstance(best_prob, float) else "n/a"
-            _agent_readable_write(
-                f"classifier check label={det.get('label')} bbox={summary_bbox} "
-                f"best={best_label} prob={prob_text} accept={'yes' if accept else 'no'}"
-            )
-            if accept:
-                accepted.append(det)
-            else:
-                counts["classifier_rejected"] += 1
-    return accepted, counts
+    return _agent_classifier_review_impl(
+        detections,
+        pil_img=pil_img,
+        classifier_head=classifier_head,
+        resolve_batch_size_fn=_resolve_classifier_batch_size,
+        predict_proba_fn=lambda crops, head, bs: _predict_proba_batched(crops, head, batch_size=bs),
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        find_target_index_fn=_find_clip_head_target_index,
+        clip_head_keep_mask_fn=_clip_head_keep_mask,
+        readable_write_fn=_agent_readable_write,
+        readable_format_bbox_fn=_agent_readable_format_bbox,
+    )
 
 
 def _agent_finalize_detections(

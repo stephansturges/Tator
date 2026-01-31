@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -9,7 +10,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal, List
+from typing import Any, Dict, Optional, Literal, List, Tuple
 
 from fastapi import HTTPException
 from starlette.status import (
@@ -1033,3 +1034,93 @@ def _ensure_recipe_zip_impl(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_zip_failed:{exc}") from exc
     return zip_path
+
+
+def _import_agent_recipe_zip_bytes_impl(
+    zip_bytes: bytes,
+    *,
+    recipes_root: Path,
+    max_json_bytes: int,
+    max_clip_head_bytes: int,
+    max_crops: int,
+    max_crop_bytes: int,
+    persist_recipe_fn,
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    data: Dict[str, Any] = {}
+    crops: Dict[str, bytes] = {}
+    clip_head_files: Dict[str, bytes] = {}
+    if not zip_bytes:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_zip_only")
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            json_name = None
+            for name in names:
+                if name.lower().endswith(".json"):
+                    json_name = name
+                    break
+            if not json_name:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
+            json_info = zf.getinfo(json_name)
+            if json_info.file_size > max_json_bytes:
+                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_json_too_large")
+            json_path = Path(json_name)
+            if json_path.is_absolute() or ".." in json_path.parts:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
+            with zf.open(json_name) as jf:
+                data = json.load(jf)
+
+            total_bytes = 0
+            crop_count = 0
+            clip_head_bytes = 0
+            for name in names:
+                info = zf.getinfo(name)
+                arc_path = Path(name)
+                if arc_path.is_dir():
+                    continue
+                if arc_path.is_absolute() or ".." in arc_path.parts:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
+                if len(arc_path.parts) < 2 or arc_path.parts[0] != "crops":
+                    # Non-crop artifacts we support (portable CLIP head).
+                    if len(arc_path.parts) == 2 and arc_path.parts[0] == "clip_head" and arc_path.name in {"head.npz", "meta.json"}:
+                        clip_head_bytes += info.file_size
+                        if clip_head_bytes > max_clip_head_bytes:
+                            raise HTTPException(
+                                status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_clip_head_too_large"
+                            )
+                        clip_head_files[f"clip_head/{arc_path.name}"] = zf.read(name)
+                    continue
+                if arc_path.suffix.lower() != ".png":
+                    continue
+                crop_count += 1
+                total_bytes += info.file_size
+                if crop_count > max_crops or total_bytes > max_crop_bytes:
+                    raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_crops_too_large")
+                crops[f"crops/{arc_path.name}"] = zf.read(name)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_failed:{exc}") from exc
+    if not isinstance(data, dict) or not data:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
+    dataset_id = data.get("dataset_id") or (data.get("recipe") or {}).get("dataset_id") or ""
+    label = data.get("label") or (data.get("recipe") or {}).get("label") or "imported_recipe"
+    class_id = data.get("class_id")
+    class_name = data.get("class_name")
+    meta_overrides = {
+        "dataset_signature": data.get("dataset_signature"),
+        "labelmap_hash": data.get("labelmap_hash"),
+        "labelmap": data.get("labelmap"),
+    }
+    persisted = persist_recipe_fn(
+        dataset_id,
+        class_id,
+        class_name,
+        label,
+        data,
+        crop_overrides=crops,
+        clip_head_overrides=clip_head_files,
+        meta_overrides=meta_overrides,
+    )
+    old_id = data.get("id") if isinstance(data.get("id"), str) else None
+    return old_id, persisted

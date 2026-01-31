@@ -114,6 +114,7 @@ from services.prepass_recipes import (
     _load_agent_recipe_impl as _load_agent_recipe_impl,
     _load_agent_recipe_json_only_impl as _load_agent_recipe_json_only_impl,
     _ensure_recipe_zip_impl as _ensure_recipe_zip_impl,
+    _import_agent_recipe_zip_bytes_impl as _import_agent_recipe_zip_bytes_impl,
 )
 from services.datasets import (
     _load_dataset_glossary,
@@ -12920,6 +12921,18 @@ def _ensure_recipe_zip(recipe: Dict[str, Any]) -> Path:
     return _ensure_recipe_zip_impl(recipe, recipes_root=AGENT_MINING_RECIPES_ROOT)
 
 
+def _import_agent_recipe_zip_bytes(zip_bytes: bytes) -> Tuple[Optional[str], Dict[str, Any]]:
+    return _import_agent_recipe_zip_bytes_impl(
+        zip_bytes,
+        recipes_root=AGENT_MINING_RECIPES_ROOT,
+        max_json_bytes=AGENT_RECIPE_MAX_JSON_BYTES,
+        max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
+        max_crops=AGENT_RECIPE_MAX_CROPS,
+        max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
+        persist_recipe_fn=_persist_agent_recipe,
+    )
+
+
 def _sanitize_prompts(prompts: List[str]) -> List[str]:
     return _sanitize_prompts_impl(prompts)
 
@@ -15090,9 +15103,6 @@ def agent_mining_export_recipe(recipe_id: str):
 async def agent_mining_import_recipe(file: UploadFile = File(...)):
     staging_dir = Path(tempfile.mkdtemp(prefix="agent_recipe_import_", dir=str(AGENT_MINING_RECIPES_ROOT)))
     zip_path = staging_dir / "payload.zip"
-    data: Dict[str, Any] = {}
-    crops: Dict[str, bytes] = {}
-    clip_head_files: Dict[str, bytes] = {}
     try:
         await _write_upload_file(
             file,
@@ -15102,81 +15112,15 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
             quota_limit=AGENT_RECIPE_MAX_BYTES,
             allow_overwrite=True,
         )
-        if not zipfile.is_zipfile(zip_path):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_zip_only")
-        with zipfile.ZipFile(zip_path) as zf:
-            names = zf.namelist()
-            json_name = None
-            for name in names:
-                if name.lower().endswith(".json"):
-                    json_name = name
-                    break
-            if not json_name:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
-            json_info = zf.getinfo(json_name)
-            if json_info.file_size > AGENT_RECIPE_MAX_JSON_BYTES:
-                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_json_too_large")
-            json_path = Path(json_name)
-            if json_path.is_absolute() or ".." in json_path.parts:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
-            with zf.open(json_name) as jf:
-                data = json.load(jf)
-
-            total_bytes = 0
-            crop_count = 0
-            clip_head_bytes = 0
-            for name in names:
-                info = zf.getinfo(name)
-                arc_path = Path(name)
-                if arc_path.is_dir():
-                    continue
-                if arc_path.is_absolute() or ".." in arc_path.parts:
-                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
-                if len(arc_path.parts) < 2 or arc_path.parts[0] != "crops":
-                    # Non-crop artifacts we support (portable CLIP head).
-                    if len(arc_path.parts) == 2 and arc_path.parts[0] == "clip_head" and arc_path.name in {"head.npz", "meta.json"}:
-                        clip_head_bytes += info.file_size
-                        if clip_head_bytes > AGENT_RECIPE_MAX_CLIP_HEAD_BYTES:
-                            raise HTTPException(
-                                status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_clip_head_too_large"
-                            )
-                        clip_head_files[f"clip_head/{arc_path.name}"] = zf.read(name)
-                    continue
-                if arc_path.suffix.lower() != ".png":
-                    continue
-                crop_count += 1
-                total_bytes += info.file_size
-                if crop_count > AGENT_RECIPE_MAX_CROPS or total_bytes > AGENT_RECIPE_MAX_CROP_BYTES:
-                    raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="agent_recipe_import_crops_too_large")
-                crops[f"crops/{arc_path.name}"] = zf.read(name)
+        payload_bytes = zip_path.read_bytes()
+        _, persisted = _import_agent_recipe_zip_bytes(payload_bytes)
+        return persisted
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_failed:{exc}") from exc
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
-    if not isinstance(data, dict) or not data:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
-    dataset_id = data.get("dataset_id") or (data.get("recipe") or {}).get("dataset_id") or ""
-    label = data.get("label") or (data.get("recipe") or {}).get("label") or "imported_recipe"
-    class_id = data.get("class_id")
-    class_name = data.get("class_name")
-    meta_overrides = {
-        "dataset_signature": data.get("dataset_signature"),
-        "labelmap_hash": data.get("labelmap_hash"),
-        "labelmap": data.get("labelmap"),
-    }
-    persisted = _persist_agent_recipe(
-        dataset_id,
-        class_id,
-        class_name,
-        label,
-        data,
-        crop_overrides=crops,
-        clip_head_overrides=clip_head_files,
-        meta_overrides=meta_overrides,
-    )
-    return persisted
 
 
 @app.delete("/agent_mining/recipes/{recipe_id}")

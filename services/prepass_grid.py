@@ -262,3 +262,60 @@ def _agent_quadrant_windows_qwen(overlap_ratio: float = 0.1) -> List[Dict[str, A
             }
         )
     return clipped
+
+
+def _agent_grid_usage_rows(
+    grid: Optional[Mapping[str, Any]],
+    tool_usage: Mapping[str, Dict[str, int]],
+    tool_last: Mapping[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    cells = _agent_grid_cells(grid)
+    rows: List[Dict[str, Any]] = []
+    for cell in cells:
+        tool_counts = dict(tool_usage.get(cell, {}))
+        total = sum(int(v) for v in tool_counts.values())
+        last = tool_last.get(cell, {})
+        rows.append(
+            {
+                "grid_cell": cell,
+                "total_calls": total,
+                "tools": tool_counts,
+                "last_tool": last.get("tool"),
+                "last_ts": last.get("ts"),
+            }
+        )
+    return rows
+
+
+def _agent_grid_usage_text(rows: Sequence[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    tool_short = {
+        "look_and_inspect": "inspect",
+        "image_zoom_in_tool": "zoom",
+        "zoom_and_detect": "zoom_detect",
+        "run_detector": "detector",
+        "sam3_text": "sam3_text",
+        "sam3_similarity": "sam3_sim",
+        "qwen_infer": "qwen_infer",
+        "classify_crop": "classify",
+        "view_cell_raw": "view_raw",
+        "view_cell_overlay": "view_overlay",
+    }
+    parts: List[str] = []
+    for row in rows:
+        cell = row.get("grid_cell")
+        tools = row.get("tools") or {}
+        last_tool = row.get("last_tool")
+        if not tools:
+            suffix = f" last={last_tool}" if last_tool else ""
+            parts.append(f"{cell}: none{suffix}")
+            continue
+        tool_bits = []
+        for tool_name, count in sorted(tools.items()):
+            short = tool_short.get(tool_name, tool_name)
+            tool_bits.append(f"{short}={int(count)}")
+        if last_tool:
+            tool_bits.append(f"last={last_tool}")
+        parts.append(f"{cell}: " + ",".join(tool_bits))
+    return "; ".join(parts)

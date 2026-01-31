@@ -465,6 +465,99 @@ def _clean_metric_summary_impl(summary: Dict[str, Optional[float]]) -> Dict[str,
     return {key: float(value) for key, value in summary.items() if value is not None}
 
 
+def _list_yolo_runs_impl(
+    *,
+    job_root: Path,
+    dataset_cache_root: Path,
+    active_payload: Dict[str, Any],
+    load_meta_fn: Callable[[Path], Dict[str, Any]],
+    collect_artifacts_fn: Callable[[Path], Dict[str, bool]],
+    meta_name: str,
+) -> List[Dict[str, Any]]:
+    runs: List[Dict[str, Any]] = []
+    active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
+    for entry in job_root.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry == dataset_cache_root:
+            continue
+        meta_path = entry / meta_name
+        if not meta_path.exists():
+            continue
+        meta = load_meta_fn(entry)
+        run_id = meta.get("job_id") or entry.name
+        config = meta.get("config") or {}
+        dataset = config.get("dataset") or {}
+        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+        created_at = meta.get("created_at")
+        if not created_at:
+            try:
+                created_at = entry.stat().st_mtime
+            except Exception:
+                created_at = None
+        runs.append(
+            {
+                "run_id": run_id,
+                "run_name": run_name,
+                "status": meta.get("status"),
+                "message": meta.get("message"),
+                "created_at": created_at,
+                "updated_at": meta.get("updated_at"),
+                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+                "dataset_label": dataset.get("label"),
+                "artifacts": collect_artifacts_fn(entry),
+                "is_active": bool(active_id and run_id == active_id),
+            }
+        )
+    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return runs
+
+
+def _list_rfdetr_runs_impl(
+    *,
+    job_root: Path,
+    active_payload: Dict[str, Any],
+    load_meta_fn: Callable[[Path], Dict[str, Any]],
+    collect_artifacts_fn: Callable[[Path], Dict[str, bool]],
+    meta_name: str,
+) -> List[Dict[str, Any]]:
+    runs: List[Dict[str, Any]] = []
+    active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
+    for entry in job_root.iterdir():
+        if not entry.is_dir():
+            continue
+        meta_path = entry / meta_name
+        if not meta_path.exists():
+            continue
+        meta = load_meta_fn(entry)
+        run_id = meta.get("job_id") or entry.name
+        config = meta.get("config") or {}
+        dataset = config.get("dataset") or {}
+        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+        created_at = meta.get("created_at")
+        if not created_at:
+            try:
+                created_at = entry.stat().st_mtime
+            except Exception:
+                created_at = None
+        runs.append(
+            {
+                "run_id": run_id,
+                "run_name": run_name,
+                "status": meta.get("status"),
+                "message": meta.get("message"),
+                "created_at": created_at,
+                "updated_at": meta.get("updated_at"),
+                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+                "dataset_label": dataset.get("label"),
+                "artifacts": collect_artifacts_fn(entry),
+                "is_active": bool(active_id and run_id == active_id),
+            }
+        )
+    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return runs
+
+
 def _agent_tool_run_detector_impl(
     *,
     image_base64: Optional[str],

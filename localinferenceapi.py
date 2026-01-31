@@ -409,6 +409,8 @@ from services.detectors import (
     _yolo_metrics_summary_impl as _yolo_metrics_summary_impl,
     _rfdetr_metrics_summary_impl as _rfdetr_metrics_summary_impl,
     _clean_metric_summary_impl as _clean_metric_summary_impl,
+    _list_yolo_runs_impl as _list_yolo_runs_impl,
+    _list_rfdetr_runs_impl as _list_rfdetr_runs_impl,
 )
 from collections import OrderedDict
 try:
@@ -11551,83 +11553,24 @@ def _clean_metric_summary(summary: Dict[str, Optional[float]]) -> Dict[str, floa
 
 
 def _list_yolo_runs() -> List[Dict[str, Any]]:
-    runs: List[Dict[str, Any]] = []
-    active = _load_yolo_active()
-    active_id = active.get("run_id") if isinstance(active, dict) else None
-    for entry in YOLO_JOB_ROOT.iterdir():
-        if not entry.is_dir():
-            continue
-        if entry == YOLO_DATASET_CACHE_ROOT:
-            continue
-        meta_path = entry / YOLO_RUN_META_NAME
-        if not meta_path.exists():
-            continue
-        meta = _yolo_load_run_meta(entry)
-        run_id = meta.get("job_id") or entry.name
-        config = meta.get("config") or {}
-        dataset = config.get("dataset") or {}
-        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
-        created_at = meta.get("created_at")
-        if not created_at:
-            try:
-                created_at = entry.stat().st_mtime
-            except Exception:
-                created_at = None
-        runs.append(
-            {
-                "run_id": run_id,
-                "run_name": run_name,
-                "status": meta.get("status"),
-                "message": meta.get("message"),
-                "created_at": created_at,
-                "updated_at": meta.get("updated_at"),
-                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
-                "dataset_label": dataset.get("label"),
-                "artifacts": _collect_yolo_artifacts(entry),
-                "is_active": bool(active_id and run_id == active_id),
-            }
-        )
-    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
-    return runs
+    return _list_yolo_runs_impl(
+        job_root=YOLO_JOB_ROOT,
+        dataset_cache_root=YOLO_DATASET_CACHE_ROOT,
+        active_payload=_load_yolo_active(),
+        load_meta_fn=_yolo_load_run_meta,
+        collect_artifacts_fn=_collect_yolo_artifacts,
+        meta_name=YOLO_RUN_META_NAME,
+    )
 
 
 def _list_rfdetr_runs() -> List[Dict[str, Any]]:
-    runs: List[Dict[str, Any]] = []
-    active = _load_rfdetr_active()
-    active_id = active.get("run_id") if isinstance(active, dict) else None
-    for entry in RFDETR_JOB_ROOT.iterdir():
-        if not entry.is_dir():
-            continue
-        meta_path = entry / RFDETR_RUN_META_NAME
-        if not meta_path.exists():
-            continue
-        meta = _rfdetr_load_run_meta(entry)
-        run_id = meta.get("job_id") or entry.name
-        config = meta.get("config") or {}
-        dataset = config.get("dataset") or {}
-        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
-        created_at = meta.get("created_at")
-        if not created_at:
-            try:
-                created_at = entry.stat().st_mtime
-            except Exception:
-                created_at = None
-        runs.append(
-            {
-                "run_id": run_id,
-                "run_name": run_name,
-                "status": meta.get("status"),
-                "message": meta.get("message"),
-                "created_at": created_at,
-                "updated_at": meta.get("updated_at"),
-                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
-                "dataset_label": dataset.get("label"),
-                "artifacts": _collect_rfdetr_artifacts(entry),
-                "is_active": bool(active_id and run_id == active_id),
-            }
-        )
-    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
-    return runs
+    return _list_rfdetr_runs_impl(
+        job_root=RFDETR_JOB_ROOT,
+        active_payload=_load_rfdetr_active(),
+        load_meta_fn=_rfdetr_load_run_meta,
+        collect_artifacts_fn=_collect_rfdetr_artifacts,
+        meta_name=RFDETR_RUN_META_NAME,
+    )
 
 
 def _load_yolo_active() -> Dict[str, Any]:

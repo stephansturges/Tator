@@ -150,9 +150,15 @@ from services.classifier_jobs import (
     _serialize_clip_job_impl as _serialize_clip_job_impl,
 )
 from services.detector_jobs import (
+    _rfdetr_job_append_metric_impl as _rfdetr_job_append_metric_impl,
+    _rfdetr_job_log_impl as _rfdetr_job_log_impl,
+    _rfdetr_job_update_impl as _rfdetr_job_update_impl,
     _serialize_rfdetr_job_impl as _serialize_rfdetr_job_impl,
     _serialize_yolo_head_graft_job_impl as _serialize_yolo_head_graft_job_impl,
     _serialize_yolo_job_impl as _serialize_yolo_job_impl,
+    _yolo_job_append_metric_impl as _yolo_job_append_metric_impl,
+    _yolo_job_log_impl as _yolo_job_log_impl,
+    _yolo_job_update_impl as _yolo_job_update_impl,
 )
 from services.qwen_jobs import (
     _log_qwen_get_request_impl as _log_qwen_get_request_impl,
@@ -10619,29 +10625,18 @@ def _yolo_job_update(
     error: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
 ) -> None:
-    if status is not None:
-        job.status = status
-    if message is not None:
-        job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if result is not None:
-        job.result = result
-    job.updated_at = time.time()
+    _yolo_job_update_impl(
+        job,
+        status=status,
+        message=message,
+        progress=progress,
+        error=error,
+        result=result,
+    )
 
 
 def _yolo_job_log(job: YoloTrainingJob, message: str) -> None:
-    entry = {"timestamp": time.time(), "message": message}
-    job.logs.append(entry)
-    if len(job.logs) > YOLO_MAX_LOG_LINES:
-        job.logs[:] = job.logs[-YOLO_MAX_LOG_LINES:]
-    job.updated_at = time.time()
-    try:
-        logger.info("[yolo-train %s] %s", job.job_id[:8], message)
-    except Exception:
-        pass
+    _yolo_job_log_impl(job, message, max_logs=YOLO_MAX_LOG_LINES, logger=logger)
 
 
 def _yolo_head_graft_job_update(
@@ -10737,12 +10732,7 @@ def _yolo_head_graft_force_stop(job: YoloHeadGraftJob) -> bool:
 
 
 def _yolo_job_append_metric(job: YoloTrainingJob, metric: Dict[str, Any]) -> None:
-    if not metric:
-        return
-    job.metrics.append(metric)
-    if len(job.metrics) > 2000:
-        job.metrics[:] = job.metrics[-2000:]
-    job.updated_at = time.time()
+    _yolo_job_append_metric_impl(job, metric, max_points=2000)
 
 
 def _serialize_rfdetr_job(job: RfDetrTrainingJob) -> Dict[str, Any]:
@@ -10758,38 +10748,22 @@ def _rfdetr_job_update(
     error: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
 ) -> None:
-    if status is not None:
-        job.status = status
-    if message is not None:
-        job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if result is not None:
-        job.result = result
-    job.updated_at = time.time()
+    _rfdetr_job_update_impl(
+        job,
+        status=status,
+        message=message,
+        progress=progress,
+        error=error,
+        result=result,
+    )
 
 
 def _rfdetr_job_log(job: RfDetrTrainingJob, message: str) -> None:
-    entry = {"timestamp": time.time(), "message": message}
-    job.logs.append(entry)
-    if len(job.logs) > MAX_JOB_LOGS:
-        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
-    job.updated_at = time.time()
-    try:
-        logger.info("[rfdetr-train %s] %s", job.job_id[:8], message)
-    except Exception:
-        pass
+    _rfdetr_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
 
 
 def _rfdetr_job_append_metric(job: RfDetrTrainingJob, metric: Dict[str, Any]) -> None:
-    if not metric:
-        return
-    job.metrics.append(metric)
-    if len(job.metrics) > 2000:
-        job.metrics[:] = job.metrics[-2000:]
-    job.updated_at = time.time()
+    _rfdetr_job_append_metric_impl(job, metric, max_points=2000)
 
 
 def _seg_job_log(job: SegmentationBuildJob, message: str) -> None:

@@ -114,6 +114,7 @@ from services.prepass import (
     _agent_label_counts_summary,
     _agent_compact_tool_result,
     _agent_select_similarity_exemplars as _agent_select_similarity_exemplars_impl,
+    _agent_deep_prepass_cleanup_impl,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import (
@@ -10603,39 +10604,18 @@ def _agent_deep_prepass_cleanup(
     pil_img: Image.Image,
     labelmap: List[str],
 ) -> Dict[str, Any]:
-    img_w, img_h = pil_img.size
-    iou_thr = float(payload.iou or PREPASS_CLUSTER_IOU)
-    merged, removed = _agent_merge_prepass_detections(detections, iou_thr=iou_thr)
-    scoreless_iou = payload.scoreless_iou or 0.0
-    if scoreless_iou:
-        merged, scoreless_removed = _agent_filter_scoreless_detections(merged, iou_thr=float(scoreless_iou))
-    else:
-        scoreless_removed = 0
-    head: Optional[Dict[str, Any]] = None
-    if not payload.prepass_keep_all:
-        classifier_id = payload.classifier_id
-        if classifier_id:
-            classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
-            if classifier_path is not None:
-                head = _load_clip_head_from_classifier(classifier_path)
-        elif isinstance(active_classifier_head, dict):
-            head = dict(active_classifier_head)
-    background = _agent_background_classes_from_head(head)
-    cleaned, rejected = _agent_sanitize_detection_items(
-        merged,
+    return _agent_deep_prepass_cleanup_impl(
+        payload,
+        detections=detections,
         pil_img=pil_img,
-        classifier_head=head,
-        img_w=img_w,
-        img_h=img_h,
         labelmap=labelmap,
-        background=background,
+        resolve_classifier_path_fn=_resolve_agent_clip_classifier_path,
+        load_classifier_head_fn=_load_clip_head_from_classifier,
+        active_classifier_head=active_classifier_head,
+        background_from_head_fn=_agent_background_classes_from_head,
+        sanitize_fn=_agent_sanitize_detection_items,
+        default_iou=PREPASS_CLUSTER_IOU,
     )
-    return {
-        "detections": cleaned,
-        "removed": removed,
-        "scoreless_removed": scoreless_removed,
-        "rejected": rejected,
-    }
 
 
 def _agent_select_similarity_exemplars(

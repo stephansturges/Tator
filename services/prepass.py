@@ -219,6 +219,57 @@ def _agent_cluster_match(
     return None
 
 
+def _agent_deep_prepass_cleanup_impl(
+    payload: Any,
+    *,
+    detections: List[Dict[str, Any]],
+    pil_img: Any,
+    labelmap: List[str],
+    resolve_classifier_path_fn: Any,
+    load_classifier_head_fn: Any,
+    active_classifier_head: Any,
+    background_from_head_fn: Any,
+    sanitize_fn: Any,
+    default_iou: float,
+) -> Dict[str, Any]:
+    img_w, img_h = pil_img.size
+    iou_thr = float(getattr(payload, "iou", None) or default_iou)
+    merged, removed = _agent_merge_prepass_detections(detections, iou_thr=iou_thr)
+    scoreless_iou = getattr(payload, "scoreless_iou", None) or 0.0
+    if scoreless_iou:
+        merged, scoreless_removed = _agent_filter_scoreless_detections(
+            merged,
+            iou_thr=float(scoreless_iou),
+        )
+    else:
+        scoreless_removed = 0
+    head: Optional[Dict[str, Any]] = None
+    if not getattr(payload, "prepass_keep_all", False):
+        classifier_id = getattr(payload, "classifier_id", None)
+        if classifier_id:
+            classifier_path = resolve_classifier_path_fn(classifier_id)
+            if classifier_path is not None:
+                head = load_classifier_head_fn(classifier_path)
+        elif isinstance(active_classifier_head, dict):
+            head = dict(active_classifier_head)
+    background = background_from_head_fn(head)
+    cleaned, rejected = sanitize_fn(
+        merged,
+        pil_img=pil_img,
+        classifier_head=head,
+        img_w=img_w,
+        img_h=img_h,
+        labelmap=labelmap,
+        background=background,
+    )
+    return {
+        "detections": cleaned,
+        "removed": removed,
+        "scoreless_removed": scoreless_removed,
+        "rejected": rejected,
+    }
+
+
 def _agent_select_similarity_exemplars(
     min_score: float,
     *,

@@ -331,6 +331,12 @@ from services.qwen import (
     _run_qwen_caption_merge as _run_qwen_caption_merge_impl,
     _resolve_qwen_window_size as _resolve_qwen_window_size_impl,
     _resolve_qwen_window_overlap as _resolve_qwen_window_overlap_impl,
+    _humanize_class_name_impl as _humanize_class_name_impl,
+    _sanitize_prompts_impl as _sanitize_prompts_impl,
+    _generate_prompt_variants_for_class_impl as _generate_prompt_variants_for_class_impl,
+    _expand_prompts_with_prompt_llm_impl as _expand_prompts_with_prompt_llm_impl,
+    _refine_prompts_with_qwen_impl as _refine_prompts_with_qwen_impl,
+    _qwen_self_filter_prompts_impl as _qwen_self_filter_prompts_impl,
 )
 from services.detectors import (
     _agent_tool_run_detector_impl as _agent_tool_run_detector_impl,
@@ -24971,97 +24977,20 @@ def _iou(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, fl
 
 
 def _humanize_class_name(name: str) -> str:
-    return re.sub(r"[\\-_]+", " ", name).strip()
+    return _humanize_class_name_impl(name)
 
 
 def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_qwen: bool) -> List[str]:
-    base: List[str] = []
-    cleaned = class_name.strip()
-    if cleaned:
-        base.append(cleaned)
-    human = _humanize_class_name(cleaned)
-    if human and human.lower() != cleaned.lower():
-        base.append(human)
-    base_lower = {b.lower() for b in base if b}
-    base_words = []
-    for entry in base_lower:
-        base_words.extend(re.split(r"[\\s_\\-]+", entry))
-    base_words = [w for w in base_words if w]
-    variants: List[str] = []
-    if use_qwen and max_synonyms > 0:
-        try:
-            text = _generate_prompt_text(
-                (
-                    f"Generate up to {max_synonyms} alternative, common English labels for the object class "
-                    f"'{human or cleaned}'. Each label must be 1-3 full words, each word at least 3 letters. "
-                    "No abbreviations, no partial/truncated words, no numbering, no JSON. Avoid repeating the original name. "
-                    "Use labels typical of object-detection datasets (e.g., car -> car, automobile, sedan; "
-                    "person -> person, human, individual; utility pole -> utility pole, telephone pole, power pole). "
-                    "Return a single comma-separated list."
-                ),
-                max_new_tokens=96,
-            )
-            raw_parts = re.split(r"[\\n;,]+", text)
-            for part in raw_parts:
-                normalized = part.strip().strip('"').strip("'")
-                if not normalized:
-                    continue
-                if any(ch in normalized for ch in "{}[]:\""):
-                    continue
-                alpha_chars = re.sub(r"[^A-Za-z]", "", normalized)
-                if len(alpha_chars) < 3:
-                    continue
-                if len(normalized) > 40:
-                    continue
-                if not re.search(r"[A-Za-z]", normalized):
-                    continue
-                words = normalized.split()
-                if len(words) > 4:
-                    continue
-                if any(len(w) < 3 for w in words):
-                    continue
-                lowered = normalized.lower()
-                fragment_of_base = any(
-                    (lowered != b and lowered.startswith(b[: max(1, len(b) - 2)]))
-                    or (b.startswith(lowered) and (len(b) - len(lowered) <= 2))
-                    for b in base_lower
-                )
-                if fragment_of_base:
-                    continue
-                # Drop obvious truncated tokens relative to base words.
-                truncated_token = False
-                for w in words:
-                    lw = w.lower()
-                    for bw in base_words:
-                        if not bw:
-                            continue
-                        if bw.startswith(lw) and len(bw) - len(lw) >= 2:
-                            truncated_token = True
-                            break
-                        if lw.startswith(bw) and len(lw) - len(bw) >= 3:
-                            truncated_token = True
-                            break
-                    if truncated_token:
-                        break
-                if truncated_token:
-                    continue
-                variants.append(normalized)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Prompt helper: Qwen generation failed for %s: %s", class_name, exc)
-    seen = set()
-    ordered: List[str] = []
-    for item in [*base, *variants]:
-        key = item.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        ordered.append(item)
-    if max_synonyms <= 0:
-        return ordered[:1]
-    # Always keep the first/base entry, then up to max_synonyms additional candidates.
-    head = ordered[:1]
-    tail = ordered[1 : 1 + max_synonyms]
-    return head + tail
+    return _generate_prompt_variants_for_class_impl(
+        class_name,
+        max_synonyms,
+        use_qwen,
+        generate_prompt_text_fn=lambda prompt_text, tokens: _generate_prompt_text(prompt_text, max_new_tokens=tokens),
+        parse_prompt_candidates_fn=_parse_prompt_candidates,
+        sanitize_prompts_fn=_sanitize_prompts,
+        humanize_class_name_fn=_humanize_class_name,
+        log_fn=lambda msg: logger.warning("%s", msg),
+    )
 
 
 def _suggest_prompts_for_dataset(payload: PromptHelperSuggestRequest) -> Dict[str, Any]:
@@ -25606,179 +25535,43 @@ def _expand_prompts_with_prompt_llm(
     log_fn: Optional[Callable[[str], None]] = None,
     max_new_tokens: int = 128,
 ) -> List[str]:
-    """Use Qwen text-only generation to brainstorm additional prompt variants for a class."""
-    cleaned_base = _sanitize_prompts(base_prompts)
-    if max_new <= 0 or not cleaned_base:
-        return []
-
-    seen = {p.lower() for p in cleaned_base}
-    suggestions: List[str] = []
-    try:
-        known_list_str = ", ".join(cleaned_base)
-
-        def _log(msg: str) -> None:
-            if log_fn:
-                try:
-                    log_fn(msg)
-                except Exception:
-                    pass
-
-        def _run_brainstorm_with_retries(remaining: int, round_idx: int) -> List[str]:
-            """Try up to 3 times (initial + 2 critiques) to get a clean list."""
-            base_prompt = [
-                "Generate diverse noun-phrase prompts for open-vocabulary object detection with SAM3.",
-                f"Target class: '{_humanize_class_name(class_name)}'.",
-                f"Known good prompts: {known_list_str}.",
-            ]
-            base_prompt.extend(
-                [
-                    f"Propose up to {remaining} NEW, concrete object names (1-3 words) that strictly describe this class.",
-                    "Rules: letters/spaces/hyphens only; no numbers; no punctuation beyond commas between items; no adjectives alone; avoid repeats.",
-                    "Return ONLY a comma-separated list. Example: thing one, thing two, thing three",
-                ]
-            )
-            last_text = ""
-            for attempt in range(3):
-                prompt_lines = list(base_prompt)
-                if attempt > 0:
-                    prompt_lines.extend(
-                        [
-                            f"Previous output was invalid: {last_text or '(empty)'}",
-                            f"Try again. Respond ONLY with up to {remaining} comma-separated noun phrases (1-3 words, letters/spaces/hyphens).",
-                            "No commentary.",
-                        ]
-                    )
-                prompt_text = "\n".join(prompt_lines)
-                text = _generate_prompt_text(prompt_text, max_new_tokens=max_new_tokens)
-                last_text = text
-                if not text:
-                    _log(f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) returned empty/invalid")
-                    continue
-                parsed = _parse_prompt_candidates(text, seen, remaining)
-                if parsed and len(parsed) > remaining:
-                    parsed = parsed[:remaining]
-                _log(
-                    f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}"
-                    "): "
-                    f"{', '.join(parsed) if parsed else text}"
-                )
-                if parsed:
-                    return parsed
-                # If the only issue is duplication, don't treat it as a hard failure.
-                dup_check = _parse_prompt_candidates(text, set(), remaining)
-                if dup_check:
-                    _log(
-                        f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) "
-                        "produced only duplicates; keeping existing list."
-                    )
-                    return []
-                _log(f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}, attempt {attempt + 1}) yielded no valid candidates")
-            _log(f"Qwen prompt expansion (class={class_name}, round {round_idx + 1}) failed after 3 attempts")
-            return []
-
-        for round_idx in range(3):  # allow a few brainstorming rounds
-            if len(suggestions) >= max_new:
-                break
-            remaining = max_new - len(suggestions)
-            parsed = _run_brainstorm_with_retries(remaining, round_idx)
-            if not parsed:
-                continue
-            suggestions.extend(parsed)
-            if len(suggestions) >= max_new:
-                break
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Prompt recipe: Qwen expansion failed for %s: %s", class_name, exc)
-        suggestions = []
-    # Final sanitize + dedupe. We intentionally avoid extra model passes here so this
-    # helper stays lightweight and doesn't contend with SAM3 for GPU memory.
-    reviewed = _sanitize_prompts([*cleaned_base, *suggestions])
-    reviewed_lower = {p.lower() for p in cleaned_base}
-    final_new: List[str] = []
-    for p in reviewed:
-        low = p.lower()
-        if low in reviewed_lower:
-            continue
-        reviewed_lower.add(low)
-        final_new.append(p)
-        if len(final_new) >= max_new:
-            break
-    # Fallback: if nothing survived, return the cleaned base prompts only.
-    if not final_new:
-        if log_fn:
-            try:
-                log_fn(f"Qwen prompts fell back to base for {class_name}")
-            except Exception:
-                pass
-        return cleaned_base
-    return final_new
+    return _expand_prompts_with_prompt_llm_impl(
+        class_name,
+        base_prompts,
+        max_new,
+        log_fn=log_fn,
+        max_new_tokens=max_new_tokens,
+        generate_prompt_text_fn=lambda prompt_text, tokens: _generate_prompt_text(prompt_text, max_new_tokens=tokens),
+        parse_prompt_candidates_fn=_parse_prompt_candidates,
+        sanitize_prompts_fn=_sanitize_prompts,
+        humanize_class_name_fn=_humanize_class_name,
+    )
 
 
 def _sanitize_prompts(prompts: List[str]) -> List[str]:
-    cleaned: List[str] = []
-    seen = set()
-    for p in prompts:
-        if not isinstance(p, str):
-            continue
-        val = p.strip()
-        if not val:
-            continue
-        words = val.split()
-        if not (1 <= len(words) <= 4):
-            continue
-        if any(len(w) <= 1 for w in words):
-            continue
-        key = val.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        cleaned.append(val)
-    return cleaned
+    return _sanitize_prompts_impl(prompts)
 
 
 def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
-    prompts = _sanitize_prompts(prompts)
     if not prompts or Qwen3VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
-        return prompts
-    try:
-        prompt_text = (
-            "You are validating candidate noun phrases for open-vocabulary object detection. "
-            "Keep only entries that are concrete object-like noun phrases (1-4 words, nouns included). "
-            "Reject fragments, verbs, partial words, or unrelated terms. "
-            "Respond ONLY as a comma-separated list, no numbering, no explanations, ending with STOP.\n"
-            f"Candidates: {', '.join(prompts)}"
-        )
-        text = _generate_prompt_text(prompt_text, max_new_tokens=160)
-        if not text:
-            return prompts
-        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip() and t.strip().upper() != "STOP"]
-        cleaned = _sanitize_prompts(parts)
-        return cleaned or prompts
-    except Exception:
-        return prompts
+        return _sanitize_prompts(prompts)
+    return _refine_prompts_with_qwen_impl(
+        prompts,
+        generate_prompt_text_fn=lambda prompt_text, tokens: _generate_prompt_text(prompt_text, max_new_tokens=tokens),
+        sanitize_prompts_fn=_sanitize_prompts,
+    )
 
 
 def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
-    """Ask Qwen to self-critique the candidate prompts against the target class and return only credible entries."""
-    prompts = _sanitize_prompts(prompts)
     if not prompts or Qwen3VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
-        return prompts
-    try:
-        prompt_text = (
-            "You are double-checking candidate noun phrases for object detection. "
-            f"Target class: '{_humanize_class_name(class_name)}'. "
-            "From the list, keep ONLY phrases that clearly describe that class (synonyms or sub-types). "
-            "Drop anything ambiguous, misspelled, or unrelated. "
-            "Return ONLY a comma-separated list, no explanations, ending with STOP.\n"
-            f"Candidates: {', '.join(prompts)}"
-        )
-        text = _generate_prompt_text(prompt_text, max_new_tokens=160)
-        if not text:
-            return prompts
-        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip() and t.strip().upper() != "STOP"]
-        cleaned = _sanitize_prompts(parts)
-        return cleaned or prompts
-    except Exception:
-        return prompts
+        return _sanitize_prompts(prompts)
+    return _qwen_self_filter_prompts_impl(
+        class_name,
+        prompts,
+        generate_prompt_text_fn=lambda prompt_text, tokens: _generate_prompt_text(prompt_text, max_new_tokens=tokens),
+        sanitize_prompts_fn=_sanitize_prompts,
+        humanize_class_name_fn=_humanize_class_name,
+    )
 
 
 def _expand_midpoints(values: List[float], *, fine_step: float = 0.05, clamp: Tuple[float, float] = (0.0, 1.0), limit: int = 20) -> List[float]:

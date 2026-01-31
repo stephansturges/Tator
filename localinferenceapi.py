@@ -116,6 +116,13 @@ from services.prepass_recipes import (
     _ensure_recipe_zip_impl as _ensure_recipe_zip_impl,
     _import_agent_recipe_zip_bytes_impl as _import_agent_recipe_zip_bytes_impl,
 )
+from services.agent_cascades import (
+    _persist_agent_cascade_impl as _persist_agent_cascade_impl,
+    _load_agent_cascade_impl as _load_agent_cascade_impl,
+    _list_agent_cascades_impl as _list_agent_cascades_impl,
+    _delete_agent_cascade_impl as _delete_agent_cascade_impl,
+    _ensure_cascade_zip_impl as _ensure_cascade_zip_impl,
+)
 from services.datasets import (
     _load_dataset_glossary,
     _load_qwen_labelmap,
@@ -12930,6 +12937,48 @@ def _import_agent_recipe_zip_bytes(zip_bytes: bytes) -> Tuple[Optional[str], Dic
         max_crops=AGENT_RECIPE_MAX_CROPS,
         max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
         persist_recipe_fn=_persist_agent_recipe,
+    )
+
+
+def _persist_agent_cascade(label: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _persist_agent_cascade_impl(
+        label,
+        payload,
+        cascades_root=AGENT_MINING_CASCADES_ROOT,
+        path_is_within_root_fn=_path_is_within_root,
+    )
+
+
+def _load_agent_cascade(cascade_id: str) -> Dict[str, Any]:
+    return _load_agent_cascade_impl(
+        cascade_id,
+        cascades_root=AGENT_MINING_CASCADES_ROOT,
+        path_is_within_root_fn=_path_is_within_root,
+    )
+
+
+def _list_agent_cascades() -> List[Dict[str, Any]]:
+    return _list_agent_cascades_impl(cascades_root=AGENT_MINING_CASCADES_ROOT)
+
+
+def _delete_agent_cascade(cascade_id: str) -> None:
+    return _delete_agent_cascade_impl(
+        cascade_id,
+        cascades_root=AGENT_MINING_CASCADES_ROOT,
+        path_is_within_root_fn=_path_is_within_root,
+    )
+
+
+def _ensure_cascade_zip(cascade: Dict[str, Any]) -> Path:
+    return _ensure_cascade_zip_impl(
+        cascade,
+        cascades_root=AGENT_MINING_CASCADES_ROOT,
+        recipes_root=AGENT_MINING_RECIPES_ROOT,
+        classifiers_root=(UPLOAD_ROOT / "classifiers"),
+        path_is_within_root_fn=_path_is_within_root,
+        ensure_recipe_zip_fn=_ensure_recipe_zip,
+        load_recipe_fn=_load_agent_recipe,
+        resolve_classifier_fn=_resolve_agent_clip_classifier_path,
     )
 
 

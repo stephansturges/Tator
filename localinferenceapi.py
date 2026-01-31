@@ -115,6 +115,14 @@ from services.prepass_recipes import (
     _load_agent_recipe_json_only_impl as _load_agent_recipe_json_only_impl,
     _ensure_recipe_zip_impl as _ensure_recipe_zip_impl,
     _import_agent_recipe_zip_bytes_impl as _import_agent_recipe_zip_bytes_impl,
+    _prepass_recipe_dir_impl as _prepass_recipe_dir_impl,
+    _prepass_recipe_meta_path_impl as _prepass_recipe_meta_path_impl,
+    _prepass_recipe_assets_dir_impl as _prepass_recipe_assets_dir_impl,
+    _sha256_path_impl as _sha256_path_impl,
+    _copy_tree_filtered_impl as _copy_tree_filtered_impl,
+    _unique_prepass_recipe_name_impl as _unique_prepass_recipe_name_impl,
+    _validate_prepass_recipe_manifest_impl as _validate_prepass_recipe_manifest_impl,
+    _list_prepass_recipes_impl as _list_prepass_recipes_impl,
 )
 from services.agent_cascades import (
     _persist_agent_cascade_impl as _persist_agent_cascade_impl,
@@ -10090,112 +10098,56 @@ YOLO_HEAD_GRAFT_PATCHED = False
 
 
 def _prepass_recipe_dir(recipe_id: str, *, create: bool = False) -> Path:
-    safe = _sanitize_yolo_run_id(recipe_id)
-    path = PREPASS_RECIPE_ROOT / safe
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _prepass_recipe_dir_impl(
+        recipe_id,
+        create=create,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        sanitize_id_fn=_sanitize_yolo_run_id,
+    )
 
 
 def _prepass_recipe_meta_path(recipe_id: str) -> Path:
-    return _prepass_recipe_dir(recipe_id) / PREPASS_RECIPE_META
+    return _prepass_recipe_meta_path_impl(
+        recipe_id,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        meta_filename=PREPASS_RECIPE_META,
+        sanitize_id_fn=_sanitize_yolo_run_id,
+    )
 
 
 def _prepass_recipe_assets_dir(recipe_id: str, *, create: bool = False) -> Path:
-    path = _prepass_recipe_dir(recipe_id, create=create) / PREPASS_RECIPE_ASSETS
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _prepass_recipe_assets_dir_impl(
+        recipe_id,
+        create=create,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        assets_dirname=PREPASS_RECIPE_ASSETS,
+        sanitize_id_fn=_sanitize_yolo_run_id,
+    )
 
 
 def _sha256_path(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    return _sha256_path_impl(path)
 
 
 def _copy_tree_filtered(src: Path, dest: Path, *, keep_files: Optional[set[str]] = None) -> List[Dict[str, Any]]:
-    copied: List[Dict[str, Any]] = []
-    if not src.exists():
-        return copied
-    dest.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
-        if item.is_dir():
-            sub_dest = dest / item.name
-            copied.extend(_copy_tree_filtered(item, sub_dest, keep_files=keep_files))
-            continue
-        if keep_files is not None and item.name not in keep_files:
-            continue
-        target = dest / item.name
-        shutil.copy2(item, target)
-        copied.append(
-            {
-                "path": str(target.relative_to(dest.parent)),
-                "size": target.stat().st_size,
-                "sha256": _sha256_path(target),
-            }
-        )
-    return copied
+    return _copy_tree_filtered_impl(src, dest, keep_files=keep_files, sha256_fn=_sha256_path)
 
 
 def _unique_prepass_recipe_name(name: str) -> Tuple[str, Optional[str]]:
-    cleaned = (name or "").strip() or "Imported recipe"
-    existing = {str(entry.get("name") or "").strip() for entry in _list_prepass_recipes()}
-    if cleaned not in existing:
-        return cleaned, None
-    base = cleaned
-    idx = 2
-    while f"{base} ({idx})" in existing:
-        idx += 1
-    return f"{base} ({idx})", base
+    return _unique_prepass_recipe_name_impl(name, list_recipes_fn=_list_prepass_recipes)
 
 
 def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Path) -> None:
-    assets = manifest.get("assets") or {}
-    copied = assets.get("copied") or []
-    extract_root = extract_dir.resolve()
-    if not isinstance(copied, list):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
-    for entry in copied:
-        if not isinstance(entry, dict):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
-        rel = entry.get("path")
-        if not isinstance(rel, str) or not rel:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
-        target = (extract_root / rel).resolve()
-        if not _path_is_within_root(target, extract_root):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid_path")
-        if not target.exists():
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing_asset")
-        if entry.get("sha256") and _sha256_path(target) != entry.get("sha256"):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_hash_mismatch")
+    return _validate_prepass_recipe_manifest_impl(
+        manifest,
+        extract_dir,
+        sha256_fn=_sha256_path,
+        path_is_within_root_fn=_path_is_within_root,
+    )
 
 
 def _list_prepass_recipes() -> List[Dict[str, Any]]:
-    recipes: List[Dict[str, Any]] = []
-    for entry in PREPASS_RECIPE_ROOT.iterdir():
-        if not entry.is_dir():
-            continue
-        meta_path = entry / PREPASS_RECIPE_META
-        if not meta_path.exists():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text())
-        except Exception:
-            continue
-        recipes.append(
-            {
-                "id": meta.get("id") or entry.name,
-                "name": meta.get("name") or entry.name,
-                "description": meta.get("description") or "",
-                "created_at": meta.get("created_at"),
-                "updated_at": meta.get("updated_at"),
-            }
-        )
-    recipes.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or 0, reverse=True)
-    return recipes
+    return _list_prepass_recipes_impl(recipes_root=PREPASS_RECIPE_ROOT, meta_filename=PREPASS_RECIPE_META)
 
 
 @dataclass

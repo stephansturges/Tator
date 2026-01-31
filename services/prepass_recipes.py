@@ -9,6 +9,7 @@ import shutil
 import time
 import uuid
 import zipfile
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal, List, Tuple
 
@@ -1124,3 +1125,157 @@ def _import_agent_recipe_zip_bytes_impl(
     )
     old_id = data.get("id") if isinstance(data.get("id"), str) else None
     return old_id, persisted
+
+
+def _prepass_recipe_dir_impl(
+    recipe_id: str,
+    *,
+    create: bool,
+    recipes_root: Path,
+    sanitize_id_fn,
+) -> Path:
+    safe = sanitize_id_fn(recipe_id)
+    path = recipes_root / safe
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _prepass_recipe_meta_path_impl(
+    recipe_id: str,
+    *,
+    recipes_root: Path,
+    meta_filename: str,
+    sanitize_id_fn,
+) -> Path:
+    return _prepass_recipe_dir_impl(recipe_id, create=False, recipes_root=recipes_root, sanitize_id_fn=sanitize_id_fn) / meta_filename
+
+
+def _prepass_recipe_assets_dir_impl(
+    recipe_id: str,
+    *,
+    create: bool,
+    recipes_root: Path,
+    assets_dirname: str,
+    sanitize_id_fn,
+) -> Path:
+    path = _prepass_recipe_dir_impl(
+        recipe_id,
+        create=create,
+        recipes_root=recipes_root,
+        sanitize_id_fn=sanitize_id_fn,
+    ) / assets_dirname
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _sha256_path_impl(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _copy_tree_filtered_impl(
+    src: Path,
+    dest: Path,
+    *,
+    keep_files: Optional[set[str]] = None,
+    sha256_fn=_sha256_path_impl,
+) -> List[Dict[str, Any]]:
+    copied: List[Dict[str, Any]] = []
+    if not src.exists():
+        return copied
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if item.is_dir():
+            sub_dest = dest / item.name
+            copied.extend(_copy_tree_filtered_impl(item, sub_dest, keep_files=keep_files, sha256_fn=sha256_fn))
+            continue
+        if keep_files is not None and item.name not in keep_files:
+            continue
+        target = dest / item.name
+        shutil.copy2(item, target)
+        copied.append(
+            {
+                "path": str(target.relative_to(dest.parent)),
+                "size": target.stat().st_size,
+                "sha256": sha256_fn(target),
+            }
+        )
+    return copied
+
+
+def _list_prepass_recipes_impl(
+    *,
+    recipes_root: Path,
+    meta_filename: str,
+) -> List[Dict[str, Any]]:
+    recipes: List[Dict[str, Any]] = []
+    for entry in recipes_root.iterdir():
+        if not entry.is_dir():
+            continue
+        meta_path = entry / meta_filename
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        recipes.append(
+            {
+                "id": meta.get("id") or entry.name,
+                "name": meta.get("name") or entry.name,
+                "description": meta.get("description") or "",
+                "created_at": meta.get("created_at"),
+                "updated_at": meta.get("updated_at"),
+            }
+        )
+    recipes.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or 0, reverse=True)
+    return recipes
+
+
+def _unique_prepass_recipe_name_impl(
+    name: str,
+    *,
+    list_recipes_fn,
+) -> Tuple[str, Optional[str]]:
+    cleaned = (name or "").strip() or "Imported recipe"
+    existing = {str(entry.get("name") or "").strip() for entry in list_recipes_fn()}
+    if cleaned not in existing:
+        return cleaned, None
+    base = cleaned
+    idx = 2
+    while f"{base} ({idx})" in existing:
+        idx += 1
+    return f"{base} ({idx})", base
+
+
+def _validate_prepass_recipe_manifest_impl(
+    manifest: Dict[str, Any],
+    extract_dir: Path,
+    *,
+    sha256_fn=_sha256_path_impl,
+    path_is_within_root_fn=None,
+) -> None:
+    assets = manifest.get("assets") or {}
+    copied = assets.get("copied") or []
+    extract_root = extract_dir.resolve()
+    if not isinstance(copied, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+    for entry in copied:
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+        rel = entry.get("path")
+        if not isinstance(rel, str) or not rel:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+        target = (extract_root / rel).resolve()
+        if path_is_within_root_fn is not None:
+            if not path_is_within_root_fn(target, extract_root):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid_path")
+        if not target.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing_asset")
+        if entry.get("sha256") and sha256_fn(target) != entry.get("sha256"):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_hash_mismatch")

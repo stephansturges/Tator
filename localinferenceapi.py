@@ -106,6 +106,7 @@ from services.prepass_recipes import (
     _classify_agent_recipe_mode as _classify_agent_recipe_mode_impl,
     _normalize_agent_recipe_execution_plan as _normalize_agent_recipe_execution_plan_impl,
     _validate_agent_recipe_structure as _validate_agent_recipe_structure_impl,
+    _save_exemplar_crop_impl as _save_exemplar_crop_impl,
 )
 from services.datasets import (
     _load_dataset_glossary,
@@ -351,6 +352,7 @@ from services.calibration_metrics import (
     _collect_clip_prefilter_crops_impl as _collect_clip_prefilter_crops_impl,
     _normalize_steps_for_head_tuning_impl as _normalize_steps_for_head_tuning_impl,
     _prefilter_prompts_with_clip_impl as _prefilter_prompts_with_clip_impl,
+    _export_hard_negative_replay_impl as _export_hard_negative_replay_impl,
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
@@ -12852,53 +12854,13 @@ def _save_exemplar_crop(
     step_idx: int,
     crop_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Persist a single exemplar crop to disk and return enriched metadata."""
-    img_id = exemplar.get("image_id")
-    if img_id is None:
-        return None
-    info = images.get(int(img_id))
-    if not info:
-        return None
-    bbox = exemplar.get("bbox")
-    if not bbox or len(bbox) < 4:
-        return None
-    try:
-        x, y, w, h = map(float, bbox[:4])
-    except Exception:
-        return None
-    try:
-        img_path = info.get("path")
-        if not img_path:
-            return None
-        with Image.open(img_path) as pil_img:
-            pil_img = pil_img.convert("RGB")
-            width, height = pil_img.width, pil_img.height
-            x0 = max(0, x)
-            y0 = max(0, y)
-            x1 = min(width, x + w)
-            y1 = min(height, y + h)
-            crop = pil_img.crop((x0, y0, x1, y1))
-            crop_dir.mkdir(parents=True, exist_ok=True)
-            filename = crop_name or f"step_{step_idx:02d}_exemplar.png"
-            crop_path = crop_dir / filename
-            crop.save(crop_path, format="PNG")
-    except Exception:
-        return None
-    bbox_norm = None
-    try:
-        bbox_norm = [x / width, y / height, w / width, h / height]
-    except Exception:
-        bbox_norm = None
-    enriched = {
-        **exemplar,
-        "bbox": [x, y, w, h],
-        "bbox_xyxy": [x0, y0, x1, y1],
-        "bbox_norm": bbox_norm,
-        "image_size": [width, height],
-        "crop_path": str(Path("crops") / crop_path.name),
-        "crop_size": [crop.width, crop.height],
-    }
-    return enriched
+    return _save_exemplar_crop_impl(
+        exemplar=exemplar,
+        images=images,
+        crop_dir=crop_dir,
+        step_idx=step_idx,
+        crop_name=crop_name,
+    )
 
 
 def _export_hard_negative_replay(
@@ -12910,108 +12872,17 @@ def _export_hard_negative_replay(
     max_crops: int,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Optional[Dict[str, Any]]:
-    if max_crops <= 0 or not entries:
-        return None
-    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(class_name or "").strip()).strip("_")
-    if not safe_name:
-        safe_name = f"class_{int(class_id)}"
-    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-    run_dir = (CLIP_NEGATIVE_REPLAY_ROOT / str(dataset_id) / f"{int(class_id):03d}_{safe_name}" / stamp).resolve()
-    if not _path_is_within_root(run_dir, CLIP_NEGATIVE_REPLAY_ROOT):
-        return None
-    crops_dir = run_dir / "crops"
-    crops_dir.mkdir(parents=True, exist_ok=True)
-
-    def _score(entry: Dict[str, Any]) -> float:
-        try:
-            return float(entry.get("score") or 0.0)
-        except Exception:
-            return 0.0
-
-    entries_sorted = sorted([e for e in entries if isinstance(e, dict)], key=_score, reverse=True)
-    seen_keys: set[Tuple[int, Tuple[float, float, float, float]]] = set()
-    saved: List[Dict[str, Any]] = []
-    for entry in entries_sorted:
-        if len(saved) >= int(max_crops):
-            break
-        try:
-            img_id = int(entry.get("image_id"))
-        except Exception:
-            continue
-        bbox = entry.get("bbox_xyxy")
-        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-            continue
-        try:
-            bbox_key = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
-        except Exception:
-            continue
-        dedupe_key = (int(img_id), bbox_key)
-        if dedupe_key in seen_keys:
-            continue
-        seen_keys.add(dedupe_key)
-        image_path = entry.get("image_path")
-        if not isinstance(image_path, str) or not image_path:
-            continue
-        try:
-            with Image.open(image_path) as img:
-                pil_img = img.convert("RGB")
-        except Exception:
-            continue
-        x1, y1, x2, y2 = bbox_key
-        if x2 <= x1 or y2 <= y1:
-            continue
-        try:
-            crop = pil_img.crop((x1, y1, x2, y2))
-        except Exception:
-            continue
-        filename = f"hn_{len(saved):05d}.png"
-        crop_path = crops_dir / filename
-        try:
-            crop.save(crop_path, format="PNG")
-        except Exception:
-            continue
-        saved.append(
-            {
-                "image_id": int(img_id),
-                "image_path": str(image_path),
-                "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
-                "score": float(entry.get("score") or 0.0),
-                "clip_prob": entry.get("clip_prob"),
-                "clip_bg_prob": entry.get("clip_bg_prob"),
-                "clip_margin": entry.get("clip_margin"),
-                "prompt": entry.get("prompt"),
-                "crop_path": str(Path("crops") / crop_path.name),
-            }
-        )
-
-    if not saved:
-        return None
-
-    manifest = {
-        "dataset_id": str(dataset_id),
-        "class_id": int(class_id),
-        "class_name": str(class_name or f"class_{class_id}"),
-        "created_at": float(time.time()),
-        "count": int(len(saved)),
-        "entries": saved,
-    }
-    try:
-        with (run_dir / "manifest.json").open("w", encoding="utf-8") as fp:
-            json.dump(manifest, fp, indent=2)
-    except Exception:
-        return None
-    if log_fn:
-        try:
-            log_fn(f"[steps] Hard-negative export: saved {len(saved)}/{len(entries_sorted)} crops to {run_dir}")
-        except Exception:
-            pass
-    return {
-        "enabled": True,
-        "count": int(len(saved)),
-        "max_crops": int(max_crops),
-        "root": str(run_dir),
-        "manifest": str(run_dir / "manifest.json"),
-    }
+    return _export_hard_negative_replay_impl(
+        dataset_id=dataset_id,
+        class_id=class_id,
+        class_name=class_name,
+        entries=entries,
+        max_crops=max_crops,
+        replay_root=CLIP_NEGATIVE_REPLAY_ROOT,
+        path_is_within_root_fn=_path_is_within_root,
+        time_fn=time.time,
+        log_fn=log_fn,
+    )
 
 
 def _persist_agent_recipe(

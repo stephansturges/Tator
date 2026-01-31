@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal
+from typing import Any, Dict, Optional, Literal, List
 
 from fastapi import HTTPException
 from starlette.status import HTTP_404_NOT_FOUND
 import math
+from PIL import Image
 
 
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
@@ -160,3 +161,60 @@ def _validate_agent_recipe_structure(recipe_obj: Dict[str, Any]) -> None:
         steps = recipe_obj.get("steps")
         if steps is not None and not isinstance(steps, list):
             raise HTTPException(status_code=400, detail="agent_recipe_invalid_schema")
+
+
+def _save_exemplar_crop_impl(
+    *,
+    exemplar: Dict[str, Any],
+    images: Dict[int, Dict[str, Any]],
+    crop_dir: Path,
+    step_idx: int,
+    crop_name: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Persist a single exemplar crop to disk and return enriched metadata."""
+    img_id = exemplar.get("image_id")
+    if img_id is None:
+        return None
+    info = images.get(int(img_id))
+    if not info:
+        return None
+    bbox = exemplar.get("bbox")
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        x, y, w, h = map(float, bbox[:4])
+    except Exception:
+        return None
+    try:
+        img_path = info.get("path")
+        if not img_path:
+            return None
+        with Image.open(img_path) as pil_img:
+            pil_img = pil_img.convert("RGB")
+            width, height = pil_img.width, pil_img.height
+            x0 = max(0, x)
+            y0 = max(0, y)
+            x1 = min(width, x + w)
+            y1 = min(height, y + h)
+            crop = pil_img.crop((x0, y0, x1, y1))
+            crop_dir.mkdir(parents=True, exist_ok=True)
+            filename = crop_name or f"step_{step_idx:02d}_exemplar.png"
+            crop_path = crop_dir / filename
+            crop.save(crop_path, format="PNG")
+    except Exception:
+        return None
+    bbox_norm = None
+    try:
+        bbox_norm = [x / width, y / height, w / width, h / height]
+    except Exception:
+        bbox_norm = None
+    enriched = {
+        **exemplar,
+        "bbox": [x, y, w, h],
+        "bbox_xyxy": [x0, y0, x1, y1],
+        "bbox_norm": bbox_norm,
+        "image_size": [width, height],
+        "crop_path": str(Path("crops") / crop_path.name),
+        "crop_size": [crop.width, crop.height],
+    }
+    return enriched

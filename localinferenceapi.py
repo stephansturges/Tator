@@ -247,6 +247,7 @@ from services.classifier import (
     _resolve_active_head_normalize_embeddings_impl as _resolve_active_head_normalize_embeddings_impl,
     _save_clip_head_artifacts_impl as _save_clip_head_artifacts_impl,
     _load_clip_head_artifacts_impl as _load_clip_head_artifacts_impl,
+    _resolve_clip_head_background_settings_impl as _resolve_clip_head_background_settings_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -15211,23 +15212,7 @@ def _load_clip_head_artifacts(
 
 
 def _resolve_clip_head_background_settings(payload: "AgentMiningRequest") -> Tuple[bool, bool, float, str]:
-    try:
-        guard = bool(getattr(payload, "clip_head_background_guard", False))
-    except Exception:
-        guard = False
-    try:
-        apply_raw = str(getattr(payload, "clip_head_background_apply", "final") or "final").strip().lower()
-    except Exception:
-        apply_raw = "final"
-    apply_mode = apply_raw if apply_raw in {"seed", "final", "both"} else "final"
-    try:
-        margin_val = float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0)
-    except Exception:
-        margin_val = 0.0
-    margin_val = max(0.0, min(1.0, margin_val))
-    guard_seed = bool(guard and apply_mode in {"seed", "both"})
-    guard_final = bool(guard and apply_mode in {"final", "both"})
-    return guard_seed, guard_final, float(margin_val), apply_mode
+    return _resolve_clip_head_background_settings_impl(payload)
 
 
 def _clip_auto_predict_label(

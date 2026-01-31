@@ -934,3 +934,23 @@ def _load_clip_head_artifacts_impl(
         "min_prob": min_prob_val,
         "margin": margin_val,
     }
+
+
+def _resolve_clip_head_background_settings_impl(payload: Any) -> Tuple[bool, bool, float, str]:
+    try:
+        guard = bool(getattr(payload, "clip_head_background_guard", False))
+    except Exception:
+        guard = False
+    try:
+        apply_raw = str(getattr(payload, "clip_head_background_apply", "final") or "final").strip().lower()
+    except Exception:
+        apply_raw = "final"
+    apply_mode = apply_raw if apply_raw in {"seed", "final", "both"} else "final"
+    try:
+        margin_val = float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0)
+    except Exception:
+        margin_val = 0.0
+    margin_val = max(0.0, min(1.0, margin_val))
+    guard_seed = bool(guard and apply_mode in {"seed", "both"})
+    guard_final = bool(guard and apply_mode in {"final", "both"})
+    return guard_seed, guard_final, float(margin_val), apply_mode

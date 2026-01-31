@@ -205,6 +205,11 @@ from services.cluster_handles import (
     _agent_handles_from_cluster_ids as _handles_from_cluster_ids,
     _agent_cluster_ids_from_handles as _cluster_ids_from_handles,
 )
+from services.classifier_select import (
+    _agent_default_classifier_for_dataset as _select_default_classifier,
+    _agent_classifier_matches_labelmap as _classifier_matches_labelmap,
+    _agent_classifier_classes_for_path as _classifier_classes_for_path,
+)
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -5719,23 +5724,12 @@ def _agent_reset_registries() -> None:
 
 
 def _agent_default_classifier_for_dataset(dataset_id: Optional[str]) -> Optional[str]:
-    if not dataset_id:
-        return None
-    labelmap = _agent_load_labelmap(dataset_id)
-    if not labelmap:
-        return None
-    root = UPLOAD_ROOT / "classifiers"
-    candidates = [
-        "DinoV3_best_model_large.pkl",
-        f"{dataset_id}_clip_vitl14_bg5.pkl",
-        f"{dataset_id}_clip_vitb16_bg5.pkl",
-        f"{dataset_id}_clip_vitb32_bg5.pkl",
-    ]
-    for name in candidates:
-        path = root / name
-        if path.exists() and _agent_classifier_matches_labelmap(path, labelmap):
-            return str(path)
-    return None
+    return _select_default_classifier(
+        dataset_id,
+        load_labelmap_fn=_agent_load_labelmap,
+        classifier_matches_fn=_agent_classifier_matches_labelmap,
+        root_dir=UPLOAD_ROOT / "classifiers",
+    )
 
 
 def _agent_classifier_classes_for_path(path: Path) -> List[str]:
@@ -5743,35 +5737,19 @@ def _agent_classifier_classes_for_path(path: Path) -> List[str]:
     cached = _AGENT_CLASSIFIER_CLASS_CACHE.get(key)
     if cached is not None:
         return cached
-    classes: List[str] = []
-    try:
-        obj = joblib.load(str(path))
-        if isinstance(obj, dict):
-            raw = obj.get("classes")
-        else:
-            raw = getattr(obj, "classes_", None)
-        if raw is not None:
-            try:
-                classes = [str(c) for c in list(raw)]
-            except Exception:
-                classes = [str(raw)]
-    except Exception:
-        classes = []
+    classes = _classifier_classes_for_path(path, load_model_fn=joblib.load)
     _AGENT_CLASSIFIER_CLASS_CACHE[key] = classes
     return classes
 
 
 def _agent_classifier_matches_labelmap(path: Path, labelmap: Sequence[str]) -> bool:
-    if not labelmap:
-        return False
-    classes = _agent_classifier_classes_for_path(path)
-    if not classes:
-        return False
-    bg_indices = _clip_head_background_indices(classes)
-    filtered = [cls for idx, cls in enumerate(classes) if idx not in bg_indices]
-    label_norm = {_normalize_class_name_for_match(n) for n in labelmap if n}
-    clf_norm = {_normalize_class_name_for_match(n) for n in filtered if n}
-    return bool(label_norm) and label_norm == clf_norm
+    return _classifier_matches_labelmap(
+        path,
+        labelmap,
+        load_model_fn=joblib.load,
+        normalize_label_fn=_normalize_class_name_for_match,
+        bg_indices_fn=_clip_head_background_indices,
+    )
 
 
 _AgentToolRunner = None  # legacy tool runner removed

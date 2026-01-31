@@ -126,6 +126,25 @@ def _coerce_dataset_metadata_impl(
     return meta
 
 
+def _load_qwen_dataset_metadata_impl(
+    dataset_dir: Path,
+    *,
+    meta_name: str,
+    load_json_metadata_fn,
+) -> Optional[Dict[str, Any]]:
+    return load_json_metadata_fn(dataset_dir / meta_name)
+
+
+def _persist_qwen_dataset_metadata_impl(
+    dataset_dir: Path,
+    metadata: Dict[str, Any],
+    *,
+    meta_name: str,
+    write_qwen_metadata_fn,
+) -> None:
+    write_qwen_metadata_fn(dataset_dir / meta_name, metadata)
+
+
 def _agent_load_labelmap_meta(
     dataset_id: Optional[str],
     *,

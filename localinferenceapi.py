@@ -205,6 +205,8 @@ from services.datasets import (
     _load_registry_dataset_metadata_impl as _load_registry_dataset_metadata_impl,
     _persist_dataset_metadata_impl as _persist_dataset_metadata_impl,
     _coerce_dataset_metadata_impl as _coerce_dataset_metadata_impl,
+    _load_qwen_dataset_metadata_impl as _load_qwen_dataset_metadata_impl,
+    _persist_qwen_dataset_metadata_impl as _persist_qwen_dataset_metadata_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
     _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
     _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
@@ -11007,6 +11009,23 @@ def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
             entries.append(entry)
     entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
     return entries
+
+
+def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
+    return _load_qwen_dataset_metadata_impl(
+        dataset_dir,
+        meta_name=QWEN_METADATA_FILENAME,
+        load_json_metadata_fn=_load_json_metadata,
+    )
+
+
+def _persist_qwen_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
+    _persist_qwen_dataset_metadata_impl(
+        dataset_dir,
+        metadata,
+        meta_name=QWEN_METADATA_FILENAME,
+        write_qwen_metadata_fn=_write_qwen_metadata,
+    )
 
 
 def _load_sam3_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:

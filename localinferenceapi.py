@@ -108,6 +108,9 @@ from services.datasets import (
     _resolve_dataset_legacy_impl as _resolve_dataset_legacy_impl,
     _resolve_sam3_or_qwen_dataset_impl as _resolve_sam3_or_qwen_dataset_impl,
     _yolo_resolve_split_paths_impl as _yolo_resolve_split_paths_impl,
+    _find_any_file_impl as _find_any_file_impl,
+    _count_dir_files_impl as _count_dir_files_impl,
+    _dataset_integrity_report_impl as _dataset_integrity_report_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -23254,70 +23257,23 @@ def _persist_dataset_glossary(dataset_root: Path, glossary_text: str) -> None:
 
 
 def _find_any_file(root: Path) -> Optional[Path]:
-    if not root.exists() or not root.is_dir():
-        return None
-    try:
-        for entry in root.iterdir():
-            if entry.is_file():
-                return entry
-    except Exception:
-        return None
-    return None
+    return _find_any_file_impl(root)
 
 
 def _count_dir_files(root: Path) -> Optional[int]:
-    if not root.exists() or not root.is_dir():
-        return None
-    try:
-        return sum(1 for entry in root.iterdir() if entry.is_file())
-    except Exception:
-        return None
+    return _count_dir_files_impl(root)
 
 
 def _dataset_integrity_report(dataset_root: Path) -> Dict[str, Any]:
-    report: Dict[str, Any] = {
-        "dataset_root": str(dataset_root),
-        "type": "unknown",
-        "ok": True,
-        "issues": [],
-    }
-    annotations_path = dataset_root / "train" / "annotations.jsonl"
-    train_images = dataset_root / "train" / "images"
-    train_labels = dataset_root / "train" / "labels"
-    if annotations_path.exists():
-        report["type"] = "qwen"
-        if not train_images.exists():
-            report["issues"].append("missing_train_images")
-        if not annotations_path.is_file() or annotations_path.stat().st_size == 0:
-            report["issues"].append("missing_annotations")
-        if train_images.exists():
-            if not _find_any_file(train_images):
-                report["issues"].append("no_images_found")
-        report["image_count"] = _count_dir_files(train_images)
-        report["annotation_bytes"] = annotations_path.stat().st_size if annotations_path.exists() else None
-        labelmap = _load_qwen_labelmap(
-            dataset_root,
-            load_qwen_meta=_load_qwen_dataset_metadata,
-            collect_labels=_collect_labels_from_qwen_jsonl,
-        )
-        if not labelmap:
-            report["issues"].append("missing_labelmap")
-    elif train_images.exists() and train_labels.exists():
-        report["type"] = "yolo"
-        if not _find_any_file(train_images):
-            report["issues"].append("no_images_found")
-        if not _find_any_file(train_labels):
-            report["issues"].append("no_labels_found")
-        report["image_count"] = _count_dir_files(train_images)
-        report["label_count"] = _count_dir_files(train_labels)
-        labelmap = _discover_yolo_labelmap(dataset_root)
-        if not labelmap:
-            report["issues"].append("missing_labelmap")
-    else:
-        report["issues"].append("dataset_layout_unrecognized")
-    if report["issues"]:
-        report["ok"] = False
-    return report
+    return _dataset_integrity_report_impl(
+        dataset_root,
+        find_any_file_fn=_find_any_file,
+        count_dir_files_fn=_count_dir_files,
+        load_qwen_labelmap_fn=_load_qwen_labelmap,
+        load_qwen_meta_fn=_load_qwen_dataset_metadata,
+        collect_labels_fn=_collect_labels_from_qwen_jsonl,
+        discover_yolo_labelmap_fn=_discover_yolo_labelmap,
+    )
 
 
 

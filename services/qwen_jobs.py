@@ -121,3 +121,31 @@ def _coerce_metric_value_impl(value: Any) -> Any:
         return float(value)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _summarize_qwen_metric_impl(metric: Dict[str, Any]) -> str:
+    phase = (metric.get("phase") or "").lower()
+    epoch = metric.get("epoch")
+    total_epochs = metric.get("total_epochs")
+    parts: list[str] = []
+    if isinstance(epoch, (int, float)):
+        if isinstance(total_epochs, (int, float)) and total_epochs:
+            parts.append(f"Epoch {int(epoch)}/{int(total_epochs)}")
+        else:
+            parts.append(f"Epoch {int(epoch)}")
+    if phase == "train":
+        batch = metric.get("batch")
+        batches_per_epoch = metric.get("batches_per_epoch")
+        if isinstance(batch, (int, float)) and isinstance(batches_per_epoch, (int, float)) and batches_per_epoch:
+            parts.append(f"Batch {int(batch)}/{int(batches_per_epoch)}")
+        train_loss = metric.get("train_loss")
+        if isinstance(train_loss, (int, float)):
+            parts.append(f"Loss {float(train_loss):.4f}")
+    elif phase == "val":
+        value = metric.get("value")
+        metric_name = metric.get("metric") or "validation"
+        if isinstance(value, (int, float)):
+            parts.append(f"{metric_name} {float(value):.4f}")
+    if not parts:
+        return "Training in progress ..."
+    return " • ".join(parts)

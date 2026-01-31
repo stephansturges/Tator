@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import re
+from typing import Any, Optional
+
+
+def _coerce_int(value: Any, fallback: int, *, minimum: Optional[int] = None) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        result = fallback
+    if minimum is not None and result < minimum:
+        result = minimum
+    return result
+
+
+def _coerce_float(
+    value: Any,
+    fallback: float,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        result = fallback
+    if minimum is not None:
+        result = max(minimum, result)
+    if maximum is not None:
+        result = min(maximum, result)
+    return result
+
+
+def _normalise_optional_path(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        return None
+    return trimmed
+
+
+def _parse_bool(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_run_name(desired: Optional[str], fallback: str) -> str:
+    name = desired or fallback
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("_") or fallback

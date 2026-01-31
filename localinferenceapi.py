@@ -5337,6 +5337,8 @@ class CalibrationRequest(BaseModel):
     dataset_id: str
     max_images: Optional[int] = 2000
     seed: Optional[int] = 42
+    enable_yolo: Optional[bool] = True
+    enable_rfdetr: Optional[bool] = True
     base_fp_ratio: Optional[float] = 0.2
     relax_fp_ratio: Optional[float] = 0.2
     recall_floor: Optional[float] = 0.6
@@ -5372,6 +5374,22 @@ class CalibrationRequest(BaseModel):
     model_lr: Optional[float] = 1e-3
     model_weight_decay: Optional[float] = 1e-4
     model_seed: Optional[int] = 42
+    calibration_model: Optional[Literal["mlp", "xgb"]] = "xgb"
+    xgb_max_depth: Optional[int] = None
+    xgb_n_estimators: Optional[int] = None
+    xgb_learning_rate: Optional[float] = None
+    xgb_subsample: Optional[float] = None
+    xgb_colsample_bytree: Optional[float] = None
+    xgb_min_child_weight: Optional[float] = None
+    xgb_gamma: Optional[float] = None
+    xgb_reg_lambda: Optional[float] = None
+    xgb_reg_alpha: Optional[float] = None
+    xgb_scale_pos_weight: Optional[float] = None
+    xgb_tree_method: Optional[str] = None
+    xgb_max_bin: Optional[int] = None
+    xgb_early_stopping_rounds: Optional[int] = None
+    xgb_log1p_counts: Optional[bool] = None
+    xgb_standardize: Optional[bool] = None
 
 
 class QwenPrepassResponse(BaseModel):
@@ -10339,6 +10357,14 @@ def _agent_apply_ensemble_filter(
     job_dir = CALIBRATION_ROOT / job_id
     model_path = job_dir / "ensemble_mlp.pt"
     meta_path = job_dir / "ensemble_mlp.meta.json"
+    score_tool = "score_ensemble_candidates.py"
+    if not model_path.exists():
+        alt_model = job_dir / "ensemble_xgb.json"
+        alt_meta = job_dir / "ensemble_xgb.meta.json"
+        if alt_model.exists() and alt_meta.exists():
+            model_path = alt_model
+            meta_path = alt_meta
+            score_tool = "score_ensemble_candidates_xgb.py"
     if not model_path.exists() or not meta_path.exists():
         if warnings is not None:
             warnings.append("ensemble_filter_model_missing")
@@ -10390,7 +10416,7 @@ def _agent_apply_ensemble_filter(
         subprocess.run(build_cmd, check=True)
         score_cmd = [
             sys.executable,
-            str(root_dir / "tools" / "score_ensemble_candidates.py"),
+            str(root_dir / "tools" / score_tool),
             "--model",
             str(model_path),
             "--meta",
@@ -16368,12 +16394,31 @@ def _save_yolo_active(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _load_rfdetr_active() -> Dict[str, Any]:
-    if not RFDETR_ACTIVE_PATH.exists():
-        return {}
-    try:
-        return json.loads(RFDETR_ACTIVE_PATH.read_text())
-    except Exception:
-        return {}
+    def _load_from(path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text())
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    active = _load_from(RFDETR_ACTIVE_PATH)
+    best_path = str(active.get("best_path") or "")
+    if best_path and Path(best_path).exists():
+        return active
+
+    # Fallback to run-level active.json if model-level active is missing/stale.
+    fallback_path = RFDETR_JOB_ROOT / "active.json"
+    fallback = _load_from(fallback_path)
+    fallback_best = str(fallback.get("best_path") or "")
+    if fallback_best and Path(fallback_best).exists():
+        try:
+            _save_rfdetr_active(fallback)
+        except Exception:
+            pass
+        return fallback
+    return {}
 
 
 def _save_rfdetr_active(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -17463,6 +17508,8 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     best_path = active.get("best_path")
     if not best_path:
         raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing")
+    if not Path(best_path).exists():
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing_weights")
     labelmap_path = active.get("labelmap_path")
     task = active.get("task") or "detect"
     variant = active.get("variant")
@@ -32461,6 +32508,16 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
     try:
         _require_sam3_for_prepass(True, True)
         _prepare_for_training()
+        if payload.enable_yolo is not False:
+            yolo_active = _load_yolo_active()
+            yolo_best = str(yolo_active.get("best_path") or "")
+            if not yolo_best or not Path(yolo_best).exists():
+                raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_active_missing_weights")
+        if payload.enable_rfdetr is not False:
+            rfdetr_active = _load_rfdetr_active()
+            rfdetr_best = str(rfdetr_active.get("best_path") or "")
+            if not rfdetr_best or not Path(rfdetr_best).exists():
+                raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_active_missing_weights")
         labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
         if not labelmap:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="calibration_labelmap_missing")
@@ -32512,7 +32569,8 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
         )
 
         labelmap_hash = hashlib.sha1(",".join(labelmap).encode("utf-8")).hexdigest()
-        glossary_hash = hashlib.sha1((glossary or "").encode("utf-8")).hexdigest()
+        prepass_glossary_text = glossary or ""
+        glossary_hash = hashlib.sha1(prepass_glossary_text.encode("utf-8")).hexdigest()
         selected_hash = hashlib.sha1(json.dumps(selected, sort_keys=True).encode("utf-8")).hexdigest()
         prepass_config = {
             "sam3_text_synonym_budget": None
@@ -32539,6 +32597,7 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
                 "dataset_id": payload.dataset_id,
                 "labelmap_hash": labelmap_hash,
                 "glossary_hash": glossary_hash,
+                "glossary_text": prepass_glossary_text,
                 "prepass": prepass_config,
             }
         )
@@ -32708,6 +32767,7 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
                     "dataset_id": payload.dataset_id,
                     "labelmap_hash": labelmap_hash,
                     "glossary_hash": glossary_hash,
+                    "glossary_text": prepass_glossary_text,
                     "prepass_config": prepass_config,
                     "cached_images": len(list(image_cache_dir.glob("*.json"))),
                     "updated_at": time.time(),
@@ -32722,9 +32782,12 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
 
         features_path = output_dir / "ensemble_features.npz"
         labeled_path = output_dir / f"ensemble_features_iou{float(payload.label_iou or 0.9):.2f}.npz"
-        model_prefix = output_dir / "ensemble_mlp"
+        calibration_model = (payload.calibration_model or "xgb").strip().lower()
+        if calibration_model not in {"mlp", "xgb"}:
+            calibration_model = "xgb"
+        model_prefix = output_dir / ("ensemble_xgb" if calibration_model == "xgb" else "ensemble_mlp")
         meta_path = Path(str(model_prefix) + ".meta.json")
-        eval_path = output_dir / "ensemble_mlp.eval.json"
+        eval_path = output_dir / (f"{model_prefix.name}.eval.json")
 
         root_dir = Path(__file__).resolve().parent
 
@@ -32833,74 +32896,141 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
                 )
             )
             _calibration_safe_link(labeled_cache_path, labeled_path)
-        _run_step(
-            "train",
-            "Training MLP…",
-            [
+        if calibration_model == "xgb":
+            train_cmd = [
                 sys.executable,
-                str(root_dir / "tools" / "train_ensemble_mlp.py"),
+                str(root_dir / "tools" / "train_ensemble_xgb.py"),
                 "--input",
                 str(labeled_path),
                 "--output",
                 str(model_prefix),
-                "--hidden",
-                str(payload.model_hidden or "256,128"),
-                "--dropout",
-                str(float(payload.model_dropout or 0.1)),
-                "--epochs",
-                str(int(payload.model_epochs or 20)),
-                "--lr",
-                str(float(payload.model_lr or 1e-3)),
-                "--weight-decay",
-                str(float(payload.model_weight_decay or 1e-4)),
                 "--seed",
                 str(int(payload.model_seed or 42)),
-                "--device",
-                "cuda",
-            ],
-        )
-        optimize_metric = (payload.optimize_metric or "f1").strip().lower()
-        if optimize_metric not in {"f1", "recall"}:
-            optimize_metric = "f1"
-        steps_val = int(payload.threshold_steps or 200)
-        steps_val = max(20, min(1000, steps_val))
-        calibrate_cmd = [
-            sys.executable,
-            str(root_dir / "tools" / "calibrate_ensemble_threshold.py"),
-            "--model",
-            str(Path(str(model_prefix) + ".pt")),
-            "--data",
-            str(labeled_path),
-            "--meta",
-            str(meta_path),
-            "--target-fp-ratio",
-            str(float(payload.base_fp_ratio or 0.1)),
-            "--min-recall",
-            str(float(payload.recall_floor or 0.6)),
-            "--steps",
-            str(steps_val),
-            "--optimize",
-            optimize_metric,
-        ]
-        if payload.per_class_thresholds is not False:
-            calibrate_cmd.append("--per-class")
-        _run_step("calibrate", "Calibrating thresholds…", calibrate_cmd)
-        _run_step(
-            "relax",
-            "Relaxing thresholds…",
-            [
+                "--target-fp-ratio",
+                str(float(payload.base_fp_ratio or 0.1)),
+                "--min-recall",
+                str(float(payload.recall_floor or 0.6)),
+                "--threshold-steps",
+                str(int(payload.threshold_steps or 200)),
+            ]
+            if payload.per_class_thresholds is not False:
+                train_cmd.append("--per-class")
+            if payload.xgb_max_depth is not None:
+                train_cmd += ["--max-depth", str(int(payload.xgb_max_depth))]
+            if payload.xgb_n_estimators is not None:
+                train_cmd += ["--n-estimators", str(int(payload.xgb_n_estimators))]
+            if payload.xgb_learning_rate is not None:
+                train_cmd += ["--learning-rate", str(float(payload.xgb_learning_rate))]
+            if payload.xgb_subsample is not None:
+                train_cmd += ["--subsample", str(float(payload.xgb_subsample))]
+            if payload.xgb_colsample_bytree is not None:
+                train_cmd += ["--colsample-bytree", str(float(payload.xgb_colsample_bytree))]
+            if payload.xgb_min_child_weight is not None:
+                train_cmd += ["--min-child-weight", str(float(payload.xgb_min_child_weight))]
+            if payload.xgb_gamma is not None:
+                train_cmd += ["--gamma", str(float(payload.xgb_gamma))]
+            if payload.xgb_reg_lambda is not None:
+                train_cmd += ["--reg-lambda", str(float(payload.xgb_reg_lambda))]
+            if payload.xgb_reg_alpha is not None:
+                train_cmd += ["--reg-alpha", str(float(payload.xgb_reg_alpha))]
+            if payload.xgb_scale_pos_weight is not None:
+                train_cmd += ["--scale-pos-weight", str(float(payload.xgb_scale_pos_weight))]
+            if payload.xgb_tree_method:
+                train_cmd += ["--tree-method", str(payload.xgb_tree_method)]
+            if payload.xgb_max_bin is not None:
+                train_cmd += ["--max-bin", str(int(payload.xgb_max_bin))]
+            if payload.xgb_early_stopping_rounds is not None:
+                train_cmd += ["--early-stopping-rounds", str(int(payload.xgb_early_stopping_rounds))]
+            if payload.xgb_log1p_counts:
+                train_cmd.append("--log1p-counts")
+            if payload.xgb_standardize:
+                train_cmd.append("--standardize")
+            _run_step("train", "Training XGBoost…", train_cmd)
+            _run_step(
+                "relax",
+                "Relaxing thresholds…",
+                [
+                    sys.executable,
+                    str(root_dir / "tools" / "relax_ensemble_thresholds_xgb.py"),
+                    "--model",
+                    str(Path(str(model_prefix) + ".json")),
+                    "--data",
+                    str(labeled_path),
+                    "--meta",
+                    str(meta_path),
+                    "--fp-ratio-cap",
+                    str(float(payload.relax_fp_ratio or 0.2)),
+                ],
+            )
+        else:
+            _run_step(
+                "train",
+                "Training MLP…",
+                [
+                    sys.executable,
+                    str(root_dir / "tools" / "train_ensemble_mlp.py"),
+                    "--input",
+                    str(labeled_path),
+                    "--output",
+                    str(model_prefix),
+                    "--hidden",
+                    str(payload.model_hidden or "256,128"),
+                    "--dropout",
+                    str(float(payload.model_dropout or 0.1)),
+                    "--epochs",
+                    str(int(payload.model_epochs or 20)),
+                    "--lr",
+                    str(float(payload.model_lr or 1e-3)),
+                    "--weight-decay",
+                    str(float(payload.model_weight_decay or 1e-4)),
+                    "--seed",
+                    str(int(payload.model_seed or 42)),
+                    "--device",
+                    "cuda",
+                ],
+            )
+            optimize_metric = (payload.optimize_metric or "f1").strip().lower()
+            if optimize_metric not in {"f1", "recall"}:
+                optimize_metric = "f1"
+            steps_val = int(payload.threshold_steps or 200)
+            steps_val = max(20, min(1000, steps_val))
+            calibrate_cmd = [
                 sys.executable,
-                str(root_dir / "tools" / "relax_ensemble_thresholds.py"),
+                str(root_dir / "tools" / "calibrate_ensemble_threshold.py"),
                 "--model",
                 str(Path(str(model_prefix) + ".pt")),
                 "--data",
                 str(labeled_path),
                 "--meta",
                 str(meta_path),
-                "--fp-ratio-cap",
-                str(float(payload.relax_fp_ratio or 0.2)),
-            ],
-        )
+                "--target-fp-ratio",
+                str(float(payload.base_fp_ratio or 0.1)),
+                "--min-recall",
+                str(float(payload.recall_floor or 0.6)),
+                "--steps",
+                str(steps_val),
+                "--optimize",
+                optimize_metric,
+            ]
+            if payload.per_class_thresholds is not False:
+                calibrate_cmd.append("--per-class")
+            _run_step("calibrate", "Calibrating thresholds…", calibrate_cmd)
+            _run_step(
+                "relax",
+                "Relaxing thresholds…",
+                [
+                    sys.executable,
+                    str(root_dir / "tools" / "relax_ensemble_thresholds.py"),
+                    "--model",
+                    str(Path(str(model_prefix) + ".pt")),
+                    "--data",
+                    str(labeled_path),
+                    "--meta",
+                    str(meta_path),
+                    "--fp-ratio-cap",
+                    str(float(payload.relax_fp_ratio or 0.2)),
+                ],
+            )
         _calibration_update(job, phase="eval", message="Evaluating model…")
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
@@ -32908,9 +33038,13 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
         dedupe_grid = payload.dedupe_iou_grid or iou_grid
         eval_cmd = [
             sys.executable,
-            str(root_dir / "tools" / "eval_ensemble_mlp_dedupe.py"),
+            str(
+                root_dir
+                / "tools"
+                / ("eval_ensemble_xgb_dedupe.py" if calibration_model == "xgb" else "eval_ensemble_mlp_dedupe.py")
+            ),
             "--model",
-            str(Path(str(model_prefix) + ".pt")),
+            str(Path(str(model_prefix) + (".json" if calibration_model == "xgb" else ".pt"))),
             "--meta",
             str(meta_path),
             "--data",
@@ -32945,10 +33079,11 @@ def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> No
             "prepass_jsonl": str(prepass_path),
             "features": str(features_path),
             "labeled": str(labeled_path),
-            "model": str(Path(str(model_prefix) + ".pt")),
+            "model": str(Path(str(model_prefix) + (".json" if calibration_model == "xgb" else ".pt"))),
             "meta": str(meta_path),
             "eval": str(eval_path),
             "metrics": metrics,
+            "calibration_model": calibration_model,
         }
         _calibration_update(job, status="completed", message="Done", phase="completed", progress=1.0)
     except Exception as exc:  # noqa: BLE001

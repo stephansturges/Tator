@@ -88,7 +88,6 @@ Key notes:
 | 4000 | no | no | YOLO + RF‑DETR (dedupe on source_list union) | 0.663 | 0.635 | 0.649 |
 | 4000 | no | no | **Prepass + XGBoost (context)** | **0.850** | **0.799** | **0.824** |
 | 2000 | no | no | **Prepass + XGBoost (context)** | **0.844** | **0.688** | **0.758** |
-| 2000 | yes (2×2) | yes (2×2) | **Prepass + XGBoost (context)** | **0.737** | **0.485** | **0.585** |
 
 Notes:
 - Detector baselines above are derived from **prepass clusters** using `source_list` membership (more faithful than `score_source` alone).

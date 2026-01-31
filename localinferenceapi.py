@@ -144,6 +144,7 @@ from services.prompt_helper_presets import (
     _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
 )
 from services.prompt_helper import _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl
+from services.qwen_jobs import _serialize_qwen_job_impl as _serialize_qwen_job_impl
 from services.segmentation import _serialize_seg_job_impl as _serialize_seg_job_impl
 from services.datasets import (
     _load_dataset_glossary,
@@ -10578,19 +10579,7 @@ def _serialize_job(job: ClipTrainingJob) -> Dict[str, Any]:
 
 
 def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "logs": job.logs,
-        "config": job.config,
-        "metrics": job.metrics,
-        "result": job.result,
-        "error": job.error,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-    }
+    return _serialize_qwen_job_impl(job)
 
 
 def _sam3_job_log(job: Sam3TrainingJob, message: str) -> None:

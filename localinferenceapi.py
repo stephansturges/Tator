@@ -298,6 +298,7 @@ from services.qwen import (
     _resolve_qwen_window_size as _resolve_qwen_window_size_impl,
     _resolve_qwen_window_overlap as _resolve_qwen_window_overlap_impl,
 )
+from services.detectors import _agent_tool_run_detector_impl as _agent_tool_run_detector_impl
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -6757,188 +6758,46 @@ def _agent_tool_run_detector(
     expected_labelmap: Optional[Sequence[str]] = None,
     register: Optional[bool] = True,
 ) -> Dict[str, Any]:
-    pil_img, _, _ = _agent_resolve_image(image_base64, image_token)
-    img_w, img_h = pil_img.size
-    mode_norm = (mode or "yolo").strip().lower()
-    if mode_norm not in {"yolo", "rfdetr"}:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_detector_mode_invalid")
-    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
-    if window_xyxy is None and window_bbox_2d is not None:
-        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
-    crop_img = pil_img
-    offset_x = 0.0
-    offset_y = 0.0
-    if window_xyxy:
-        x1, y1, x2, y2 = window_xyxy
-        crop_img = pil_img.crop((x1, y1, x2, y2))
-        offset_x, offset_y = x1, y1
-    detections: List[Dict[str, Any]] = []
-    warnings: List[str] = []
-    if mode_norm == "yolo":
-        model, labelmap, task = _ensure_yolo_inference_runtime()
-        expected = list(expected_labelmap or (_AGENT_ACTIVE_LABELMAP or []))
-        _raise_on_labelmap_mismatch(expected=expected or None, actual=labelmap, context="yolo")
-        conf_val = _clamp_conf_value(float(conf) if conf is not None else 0.25, warnings)
-        iou_val = _clamp_iou_value(float(iou) if iou is not None else 0.45, warnings)
-        max_det_val = _clamp_max_det_value(int(max_det) if max_det is not None else 300, warnings)
-        raw: List[Dict[str, Any]] = []
-        if sahi and sahi.get("enabled"):
-            try:
-                slice_size = int(sahi.get("slice_size") or 640)
-                overlap = float(sahi.get("overlap") or 0.2)
-                merge_iou_val = float(merge_iou or sahi.get("merge_iou") or 0.5)
-                slice_size, overlap, merge_iou_val = _clamp_slice_params(
-                    slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings
-                )
-                slices, starts = _slice_image_sahi(crop_img, slice_size, overlap)
-                for tile, start in zip(slices, starts):
-                    tile_offset_x = float(start[0]) + offset_x
-                    tile_offset_y = float(start[1]) + offset_y
-                    with YOLO_INFER_LOCK:
-                        results = model.predict(
-                            Image.fromarray(tile),
-                            conf=conf_val,
-                            iou=iou_val,
-                            max_det=max_det_val,
-                            verbose=False,
-                        )
-                    raw.extend(_yolo_extract_detections(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h))
-                raw = _merge_detections_nms(raw, merge_iou_val, max_det_val)
-            except HTTPException as exc:
-                if "sahi_unavailable" in str(exc.detail):
-                    warnings.append(str(exc.detail))
-                else:
-                    warnings.append(f"sahi_failed:{exc.detail}")
-                raw = []
-        if not raw:
-            with YOLO_INFER_LOCK:
-                results = model.predict(
-                    crop_img,
-                    conf=conf_val,
-                    iou=iou_val,
-                    max_det=max_det_val,
-                    verbose=False,
-                )
-            raw = _yolo_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
-        for det in raw:
-            x1, y1, x2, y2 = _xywh_to_xyxy(det.get("bbox") or [])
-            detections.append(
-                _agent_det_payload(
-                    img_w,
-                    img_h,
-                    (x1, y1, x2, y2),
-                    label=det.get("class_name"),
-                    class_id=det.get("class_id"),
-                    score=det.get("score"),
-                    source="yolo",
-                    window=window_xyxy,
-                )
-            )
-    else:
-        model, labelmap, task = _ensure_rfdetr_inference_runtime()
-        expected = list(expected_labelmap or (_AGENT_ACTIVE_LABELMAP or []))
-        _raise_on_labelmap_mismatch(expected=expected or None, actual=labelmap, context="rfdetr")
-        conf_val = _clamp_conf_value(float(conf) if conf is not None else 0.25, warnings)
-        max_det_val = _clamp_max_det_value(int(max_det) if max_det is not None else 300, warnings)
-        raw: List[Dict[str, Any]] = []
-        if sahi and sahi.get("enabled"):
-            try:
-                slice_size = int(sahi.get("slice_size") or 640)
-                overlap = float(sahi.get("overlap") or 0.2)
-                merge_iou_val = float(merge_iou or sahi.get("merge_iou") or 0.5)
-                slice_size, overlap, merge_iou_val = _clamp_slice_params(
-                    slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings
-                )
-                slices, starts = _slice_image_sahi(crop_img, slice_size, overlap)
-                for tile, start in zip(slices, starts):
-                    tile_offset_x = float(start[0]) + offset_x
-                    tile_offset_y = float(start[1]) + offset_y
-                    try:
-                        with RFDETR_INFER_LOCK:
-                            results = model.predict(Image.fromarray(tile), threshold=conf_val)
-                    except Exception as exc:  # noqa: BLE001
-                        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
-                    extracted, shifted = _rfdetr_extract_detections(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h)
-                    if shifted:
-                        if expected:
-                            raise HTTPException(
-                                status_code=HTTP_412_PRECONDITION_FAILED,
-                                detail="detector_labelmap_shifted:rfdetr",
-                            )
-                        warnings.append("rfdetr_labelmap_shifted")
-                    raw.extend(extracted)
-                raw = _merge_detections_nms(raw, merge_iou_val, max_det_val)
-            except HTTPException as exc:
-                if "sahi_unavailable" in str(exc.detail):
-                    warnings.append(str(exc.detail))
-                else:
-                    warnings.append(f"sahi_failed:{exc.detail}")
-                raw = []
-        if not raw:
-            try:
-                with RFDETR_INFER_LOCK:
-                    results = model.predict(crop_img, threshold=conf_val)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
-            raw, shifted = _rfdetr_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
-            if shifted:
-                if expected:
-                    raise HTTPException(
-                        status_code=HTTP_412_PRECONDITION_FAILED,
-                        detail="detector_labelmap_shifted:rfdetr",
-                    )
-                warnings.append("rfdetr_labelmap_shifted")
-        raw.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
-        for det in raw[:max_det_val]:
-            x1, y1, x2, y2 = _xywh_to_xyxy(det.get("bbox") or [])
-            detections.append(
-                _agent_det_payload(
-                    img_w,
-                    img_h,
-                    (x1, y1, x2, y2),
-                    label=det.get("class_name"),
-                    class_id=det.get("class_id"),
-                    score=det.get("score"),
-                    source="rfdetr",
-                    window=window_xyxy,
-                )
-            )
-    register_summary: Optional[Dict[str, Any]] = None
-    if register:
-        register_summary = _agent_register_detections(
-            detections,
-            img_w=img_w,
-            img_h=img_h,
-            grid=_AGENT_ACTIVE_GRID,
-            labelmap=_AGENT_ACTIVE_LABELMAP or [],
-            background=None,
-            source_override=None,
-            owner_cell=grid_cell,
-        )
-    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
-    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
-    new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
-    new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
-    updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
-    agent_view = {
-        "mode": mode_norm,
-        "grid_cell": grid_cell,
-        "warnings": warnings or None,
-        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
-        "new_handles": new_handles,
-        "updated_clusters": len(updated_cluster_ids or []),
-        "updated_handles": updated_handles,
-        "new_items": new_summary.get("items"),
-        "new_items_total": new_summary.get("total"),
-        "new_items_truncated": new_summary.get("truncated"),
-        "label_counts": _agent_cluster_label_counts(new_cluster_ids or []),
-    }
-    return {
-        "detections": detections,
-        "warnings": warnings or None,
-        "register_summary": register_summary,
-        "__agent_view__": agent_view,
-    }
+    return _agent_tool_run_detector_impl(
+        image_base64=image_base64,
+        image_token=image_token,
+        detector_id=detector_id,
+        mode=mode,
+        conf=conf,
+        sahi=sahi,
+        window=window,
+        window_bbox_2d=window_bbox_2d,
+        grid_cell=grid_cell,
+        max_det=max_det,
+        iou=iou,
+        merge_iou=merge_iou,
+        expected_labelmap=expected_labelmap,
+        register=register,
+        resolve_image_fn=_agent_resolve_image,
+        normalize_window_fn=_normalize_window_xyxy,
+        ensure_yolo_runtime_fn=_ensure_yolo_inference_runtime,
+        ensure_rfdetr_runtime_fn=_ensure_rfdetr_inference_runtime,
+        raise_labelmap_mismatch_fn=_raise_on_labelmap_mismatch,
+        clamp_conf_fn=_clamp_conf_value,
+        clamp_iou_fn=_clamp_iou_value,
+        clamp_max_det_fn=_clamp_max_det_value,
+        clamp_slice_params_fn=_clamp_slice_params,
+        slice_image_fn=_slice_image_sahi,
+        yolo_extract_fn=_yolo_extract_detections,
+        rfdetr_extract_fn=_rfdetr_extract_detections,
+        merge_nms_fn=_merge_detections_nms,
+        xywh_to_xyxy_fn=_xywh_to_xyxy,
+        det_payload_fn=_agent_det_payload,
+        register_detections_fn=_agent_register_detections,
+        cluster_summaries_fn=_agent_cluster_summaries,
+        handles_from_cluster_ids_fn=_agent_handles_from_cluster_ids,
+        cluster_label_counts_fn=_agent_cluster_label_counts,
+        agent_labelmap=_AGENT_ACTIVE_LABELMAP or [],
+        agent_grid=_AGENT_ACTIVE_GRID,
+        yolo_lock=YOLO_INFER_LOCK,
+        rfdetr_lock=RFDETR_INFER_LOCK,
+        http_exception_cls=HTTPException,
+    )
 
 
 @_register_agent_tool("zoom_and_detect")

@@ -70,6 +70,7 @@ from utils.glossary import (
     _normalize_synonym_list,
     _dedupe_synonyms,
 )
+from utils.datasets import _iter_yolo_images
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -29806,13 +29807,6 @@ def _qwen_build_output_payload(detections: List[Dict[str, Any]], mode: str) -> s
             if bbox:
                 items.append({"label": label, "bbox": bbox})
     return json.dumps({"detections": items}, ensure_ascii=False)
-
-
-def _iter_yolo_images(images_dir: Path) -> List[Path]:
-    if not images_dir.exists():
-        return []
-    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-    return sorted([p for p in images_dir.rglob("*") if p.is_file() and p.suffix.lower() in exts])
 
 
 def _qwen_det_from_yolo(

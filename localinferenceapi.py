@@ -240,6 +240,7 @@ from services.calibration_helpers import (
     _calibration_hash_payload as _calibration_hash_payload_impl,
     _calibration_safe_link as _calibration_safe_link_impl,
     _calibration_write_record_atomic as _calibration_write_record_atomic_impl,
+    _calibration_update as _calibration_update_impl,
 )
 from collections import OrderedDict
 try:
@@ -29396,9 +29397,7 @@ def _serialize_calibration_job(job: CalibrationJob) -> Dict[str, Any]:
 
 
 def _calibration_update(job: CalibrationJob, **kwargs: Any) -> None:
-    for key, value in kwargs.items():
-        setattr(job, key, value)
-    job.updated_at = time.time()
+    _calibration_update_impl(job, **kwargs)
 
 
 def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:

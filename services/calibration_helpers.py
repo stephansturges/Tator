@@ -5,6 +5,7 @@ import json
 import os
 import random
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -69,3 +70,9 @@ def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(record, ensure_ascii=False))
     tmp_path.replace(path)
+
+
+def _calibration_update(job: Any, **kwargs: Any) -> None:
+    for key, value in kwargs.items():
+        setattr(job, key, value)
+    job.updated_at = time.time()

@@ -80,6 +80,8 @@ from utils.glossary import (
 )
 from utils.datasets import _iter_yolo_images
 from services.prepass_config import _normalize_recipe_thresholds
+from services.prepass_recipes import _write_prepass_recipe_meta, _load_prepass_recipe_meta
+from services.datasets import _load_dataset_glossary
 from utils.coords import (
     _xyxy_to_qwen_bbox,
     _qwen_bbox_to_xyxy,
@@ -14482,18 +14484,6 @@ def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Pat
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing_asset")
         if entry.get("sha256") and _sha256_path(target) != entry.get("sha256"):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_hash_mismatch")
-
-
-def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
-    meta_path = recipe_dir / PREPASS_RECIPE_META
-    meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def _load_prepass_recipe_meta(recipe_dir: Path) -> Dict[str, Any]:
-    meta_path = recipe_dir / PREPASS_RECIPE_META
-    if not meta_path.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
-    return json.loads(meta_path.read_text())
 
 
 def _list_prepass_recipes() -> List[Dict[str, Any]]:
@@ -30073,13 +30063,6 @@ async def upload_dataset_zip(
 @app.get("/datasets")
 def list_datasets():
     return _list_sam3_datasets()
-
-
-def _load_dataset_glossary(dataset_root: Path) -> str:
-    sam_meta = _load_sam3_dataset_metadata(dataset_root) or {}
-    qwen_meta = _load_qwen_dataset_metadata(dataset_root) or {}
-    raw = sam_meta.get("labelmap_glossary") or qwen_meta.get("labelmap_glossary")
-    return _normalize_labelmap_glossary(raw)
 
 
 def _glossary_preview(glossary_text: str, labelmap: Sequence[str], *, max_chars: int = 140, max_labels: int = 3) -> str:

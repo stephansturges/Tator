@@ -1,0 +1,66 @@
+{
+  "version": 2,
+  "description": "Ensemble accept/reject features for MLP classifier (includes global context + neighbor features).",
+  "classifier_prob_prefix": "clf_prob::",
+  "candidate_label_prefix": "cand_label::",
+  "sam3_features": [
+    "sam3_text_max::LABEL",
+    "sam3_text_count::LABEL",
+    "sam3_sim_max::LABEL",
+    "sam3_sim_count::LABEL"
+  ],
+  "candidate_raw_scores": [
+    "cand_raw_score_yolo",
+    "cand_raw_score_rfdetr",
+    "cand_raw_score_sam3_text",
+    "cand_raw_score_sam3_similarity"
+  ],
+  "candidate_source_scores": [
+    "cand_score_yolo",
+    "cand_score_rfdetr",
+    "cand_score_sam3_text",
+    "cand_score_sam3_similarity"
+  ],
+  "source_bitmask": [
+    "cand_has_yolo",
+    "cand_has_rfdetr",
+    "cand_has_sam3_text",
+    "cand_has_sam3_similarity"
+  ],
+  "support_counts": [
+    "support_count_total"
+  ],
+  "geometry": [
+    "geom_center_x",
+    "geom_center_y",
+    "geom_width",
+    "geom_height",
+    "geom_area",
+    "geom_aspect_ratio"
+  ],
+  "context_label_counts": [
+    "ctx_label_count::LABEL"
+  ],
+  "context_source_counts": [
+    "ctx_source_count::LABEL::SOURCE"
+  ],
+  "context_source_means": [
+    "ctx_source_mean::LABEL::SOURCE"
+  ],
+  "context_totals": [
+    "ctx_total_count",
+    "ctx_total_area",
+    "ctx_avg_area",
+    "ctx_avg_aspect_ratio"
+  ],
+  "context_neighbors": [
+    "ctx_neighbor_count_all",
+    "ctx_neighbor_count_same",
+    "ctx_neighbor_ratio_same",
+    "ctx_neighbor_score_mean_same"
+  ],
+  "term_hash": [
+    "sam3_term_hash_000..N"
+  ],
+  "notes": "Feature order is: classifier probs (all classes, including backgrounds), candidate label one-hot, sam3 aggregates per labelmap class, candidate raw scores by source, overlap scores, source bitmask, support counts, geometry (normalized), global context counts/scores, neighbor context, then hashed SAM3 term features."
+}

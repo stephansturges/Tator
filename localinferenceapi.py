@@ -126,6 +126,9 @@ from services.prepass_recipes import (
     _collect_recipe_assets_impl as _collect_recipe_assets_impl,
     _import_prepass_recipe_from_zip_impl as _import_prepass_recipe_from_zip_impl,
     _export_prepass_recipe_impl as _export_prepass_recipe_impl,
+    _save_prepass_recipe_impl as _save_prepass_recipe_impl,
+    _delete_prepass_recipe_impl as _delete_prepass_recipe_impl,
+    _get_prepass_recipe_impl as _get_prepass_recipe_impl,
 )
 from services.agent_cascades import (
     _persist_agent_cascade_impl as _persist_agent_cascade_impl,
@@ -21574,61 +21577,38 @@ def list_prepass_recipes():
 
 @app.get("/prepass/recipes/{recipe_id}", response_model=PrepassRecipeResponse)
 def get_prepass_recipe(recipe_id: str):
-    recipe_dir = _prepass_recipe_dir(recipe_id)
-    meta = _load_prepass_recipe_meta(recipe_dir)
-    return PrepassRecipeResponse(
-        id=meta.get("id") or recipe_id,
-        name=meta.get("name") or recipe_id,
-        description=meta.get("description"),
-        created_at=float(meta.get("created_at") or time.time()),
-        updated_at=float(meta.get("updated_at") or time.time()),
-        config=meta.get("config") or {},
-        glossary=meta.get("glossary"),
-        schema_version=int(meta.get("schema_version") or PREPASS_RECIPE_SCHEMA_VERSION),
+    data = _get_prepass_recipe_impl(
+        recipe_id,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        load_meta_fn=_load_prepass_recipe_meta,
+        prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
     )
+    return PrepassRecipeResponse(**data)
 
 
 @app.post("/prepass/recipes", response_model=PrepassRecipeResponse)
 def save_prepass_recipe(payload: PrepassRecipeRequest):
     recipe_id = payload.recipe_id or uuid.uuid4().hex
-    recipe_dir = _prepass_recipe_dir(recipe_id, create=True)
-    now = time.time()
-    existing = {}
-    meta_path = recipe_dir / PREPASS_RECIPE_META
-    if meta_path.exists():
-        try:
-            existing = json.loads(meta_path.read_text())
-        except Exception:
-            existing = {}
-    created_at = float(existing.get("created_at") or now)
-    recipe_meta = {
-        "id": recipe_id,
-        "schema_version": PREPASS_RECIPE_SCHEMA_VERSION,
-        "name": payload.name.strip(),
-        "description": (payload.description or "").strip(),
-        "config": payload.config or {},
-        "glossary": _normalize_labelmap_glossary(payload.glossary),
-        "created_at": created_at,
-        "updated_at": now,
-    }
-    _write_prepass_recipe_meta(recipe_dir, recipe_meta)
-    return PrepassRecipeResponse(
-        id=recipe_id,
-        name=recipe_meta["name"],
-        description=recipe_meta.get("description"),
-        created_at=created_at,
-        updated_at=now,
-        config=recipe_meta["config"],
-        glossary=recipe_meta.get("glossary") or None,
+    data = _save_prepass_recipe_impl(
+        payload.dict(),
+        recipe_id=recipe_id,
+        prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        normalize_glossary_fn=_normalize_labelmap_glossary,
+        write_meta_fn=_write_prepass_recipe_meta,
     )
+    return PrepassRecipeResponse(**data)
 
 
 @app.delete("/prepass/recipes/{recipe_id}")
 def delete_prepass_recipe(recipe_id: str):
-    recipe_dir = _prepass_recipe_dir(recipe_id)
-    if not recipe_dir.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
-    shutil.rmtree(recipe_dir, ignore_errors=True)
+    _delete_prepass_recipe_impl(
+        recipe_id,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        sanitize_run_id_fn=_sanitize_yolo_run_id,
+    )
     return {"status": "deleted", "id": recipe_id}
 
 

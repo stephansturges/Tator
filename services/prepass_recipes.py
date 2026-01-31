@@ -1657,3 +1657,94 @@ def _export_prepass_recipe_impl(
     zip_path = temp_dir.with_suffix(".zip")
     shutil.make_archive(zip_path.with_suffix("").as_posix(), "zip", temp_dir.as_posix())
     return zip_path
+
+
+def _save_prepass_recipe_impl(
+    payload: Dict[str, Any],
+    *,
+    recipe_id: str,
+    prepass_schema_version: int,
+    recipes_root: Path,
+    sanitize_run_id_fn,
+    normalize_glossary_fn,
+    write_meta_fn,
+) -> Dict[str, Any]:
+    recipe_dir = _prepass_recipe_dir_impl(
+        recipe_id,
+        create=True,
+        recipes_root=recipes_root,
+        sanitize_id_fn=sanitize_run_id_fn,
+    )
+    now = time.time()
+    existing = {}
+    meta_path = recipe_dir / "recipe.json"
+    if meta_path.exists():
+        try:
+            existing = json.loads(meta_path.read_text())
+        except Exception:
+            existing = {}
+    created_at = float(existing.get("created_at") or now)
+    recipe_meta = {
+        "id": recipe_id,
+        "schema_version": prepass_schema_version,
+        "name": str(payload.get("name") or "").strip(),
+        "description": (payload.get("description") or "").strip(),
+        "config": payload.get("config") or {},
+        "glossary": normalize_glossary_fn(payload.get("glossary")),
+        "created_at": created_at,
+        "updated_at": now,
+    }
+    write_meta_fn(recipe_dir, recipe_meta)
+    return {
+        "id": recipe_id,
+        "name": recipe_meta["name"],
+        "description": recipe_meta.get("description"),
+        "created_at": created_at,
+        "updated_at": now,
+        "config": recipe_meta["config"],
+        "glossary": recipe_meta.get("glossary") or None,
+    }
+
+
+def _delete_prepass_recipe_impl(
+    recipe_id: str,
+    *,
+    recipes_root: Path,
+    sanitize_run_id_fn,
+) -> None:
+    recipe_dir = _prepass_recipe_dir_impl(
+        recipe_id,
+        create=False,
+        recipes_root=recipes_root,
+        sanitize_id_fn=sanitize_run_id_fn,
+    )
+    if not recipe_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
+    shutil.rmtree(recipe_dir, ignore_errors=True)
+
+
+def _get_prepass_recipe_impl(
+    recipe_id: str,
+    *,
+    recipes_root: Path,
+    sanitize_run_id_fn,
+    load_meta_fn,
+    prepass_schema_version: int,
+) -> Dict[str, Any]:
+    recipe_dir = _prepass_recipe_dir_impl(
+        recipe_id,
+        create=False,
+        recipes_root=recipes_root,
+        sanitize_id_fn=sanitize_run_id_fn,
+    )
+    meta = load_meta_fn(recipe_dir)
+    return {
+        "id": meta.get("id") or recipe_id,
+        "name": meta.get("name") or recipe_id,
+        "description": meta.get("description"),
+        "created_at": float(meta.get("created_at") or time.time()),
+        "updated_at": float(meta.get("updated_at") or time.time()),
+        "config": meta.get("config") or {},
+        "glossary": meta.get("glossary"),
+        "schema_version": int(meta.get("schema_version") or prepass_schema_version),
+    }

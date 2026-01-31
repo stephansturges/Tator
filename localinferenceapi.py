@@ -104,6 +104,10 @@ from services.datasets import (
     _agent_load_labelmap_meta as _load_labelmap_meta,
     _detect_yolo_layout_impl as _detect_yolo_layout_impl,
     _yolo_labels_have_polygons_impl as _yolo_labels_have_polygons_impl,
+    _resolve_dataset_entry_impl as _resolve_dataset_entry_impl,
+    _resolve_dataset_legacy_impl as _resolve_dataset_legacy_impl,
+    _resolve_sam3_or_qwen_dataset_impl as _resolve_sam3_or_qwen_dataset_impl,
+    _yolo_resolve_split_paths_impl as _yolo_resolve_split_paths_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -11780,13 +11784,7 @@ def _yolo_labels_have_polygons(
 
 
 def _resolve_dataset_entry(dataset_id: str) -> Optional[Dict[str, Any]]:
-    cleaned = (dataset_id or "").strip()
-    if not cleaned:
-        return None
-    for entry in _list_all_datasets():
-        if cleaned in (entry.get("id"), entry.get("signature")):
-            return entry
-    return None
+    return _resolve_dataset_entry_impl(dataset_id, list_all_datasets_fn=_list_all_datasets)
 
 
 def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
@@ -11916,23 +11914,7 @@ def _resolve_rfdetr_training_dataset(payload: RfDetrTrainRequest) -> Dict[str, A
 
 
 def _yolo_resolve_split_paths(dataset_root: Path, layout: Optional[str]) -> Tuple[str, str]:
-    if layout == "split":
-        train_images = dataset_root / "train" / "images"
-        val_images = dataset_root / "val" / "images"
-        train_rel = str(train_images.relative_to(dataset_root))
-        if val_images.exists():
-            val_rel = str(val_images.relative_to(dataset_root))
-        else:
-            val_rel = train_rel
-        return train_rel, val_rel
-    images = dataset_root / "images"
-    train_rel = str(images.relative_to(dataset_root))
-    val_images = dataset_root / "val" / "images"
-    if val_images.exists():
-        val_rel = str(val_images.relative_to(dataset_root))
-    else:
-        val_rel = train_rel
-    return train_rel, val_rel
+    return _yolo_resolve_split_paths_impl(dataset_root, layout)
 
 
 def _yolo_load_labelmap(labelmap_path: Path) -> List[str]:
@@ -12956,32 +12938,21 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
 
 
 def _resolve_dataset_legacy(dataset_id: str) -> Path:
-    cleaned = (dataset_id or "").strip().replace("\\", "/")
-    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
-    candidate_qwen = (QWEN_DATASET_ROOT / safe).resolve()
-    if str(candidate_qwen).startswith(str(QWEN_DATASET_ROOT.resolve())) and candidate_qwen.exists():
-        return candidate_qwen
-    candidate_sam3 = (SAM3_DATASET_ROOT / safe).resolve()
-    if str(candidate_sam3).startswith(str(SAM3_DATASET_ROOT.resolve())) and candidate_sam3.exists():
-        return candidate_sam3
-    candidate_registry = (DATASET_REGISTRY_ROOT / safe).resolve()
-    if (
-        str(candidate_registry).startswith(str(DATASET_REGISTRY_ROOT.resolve()))
-        and candidate_registry.exists()
-    ):
-        return candidate_registry
-    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_dataset_not_found")
+    return _resolve_dataset_legacy_impl(
+        dataset_id,
+        qwen_root=QWEN_DATASET_ROOT,
+        sam3_root=SAM3_DATASET_ROOT,
+        registry_root=DATASET_REGISTRY_ROOT,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
-    cleaned = (dataset_id or "").strip()
-    for entry in _list_all_datasets():
-        if cleaned in (entry.get("id"), entry.get("signature")):
-            path = Path(entry["dataset_root"]).resolve()
-            if path.exists():
-                return path
-    # Fallback to legacy per-root resolution
-    return _resolve_dataset_legacy(dataset_id)
+    return _resolve_sam3_or_qwen_dataset_impl(
+        dataset_id,
+        list_all_datasets_fn=_list_all_datasets,
+        resolve_dataset_legacy_fn=_resolve_dataset_legacy,
+    )
 
 
 def _stable_hash(entries: Sequence[str]) -> str:

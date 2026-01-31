@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 from utils.glossary import _normalize_labelmap_glossary
 
@@ -122,3 +123,70 @@ def _yolo_labels_have_polygons_impl(
         except Exception:
             continue
     return False
+
+
+def _resolve_dataset_entry_impl(dataset_id: str, *, list_all_datasets_fn) -> Optional[Dict[str, Any]]:
+    cleaned = (dataset_id or "").strip()
+    if not cleaned:
+        return None
+    for entry in list_all_datasets_fn():
+        if cleaned in (entry.get("id"), entry.get("signature")):
+            return entry
+    return None
+
+
+def _resolve_dataset_legacy_impl(
+    dataset_id: str,
+    *,
+    qwen_root: Path,
+    sam3_root: Path,
+    registry_root: Path,
+    http_exception_cls,
+) -> Path:
+    cleaned = (dataset_id or "").strip().replace("\\", "/")
+    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
+    candidate_qwen = (qwen_root / safe).resolve()
+    if str(candidate_qwen).startswith(str(qwen_root.resolve())) and candidate_qwen.exists():
+        return candidate_qwen
+    candidate_sam3 = (sam3_root / safe).resolve()
+    if str(candidate_sam3).startswith(str(sam3_root.resolve())) and candidate_sam3.exists():
+        return candidate_sam3
+    candidate_registry = (registry_root / safe).resolve()
+    if str(candidate_registry).startswith(str(registry_root.resolve())) and candidate_registry.exists():
+        return candidate_registry
+    raise http_exception_cls(status_code=404, detail="sam3_dataset_not_found")
+
+
+def _resolve_sam3_or_qwen_dataset_impl(
+    dataset_id: str,
+    *,
+    list_all_datasets_fn,
+    resolve_dataset_legacy_fn,
+) -> Path:
+    cleaned = (dataset_id or "").strip()
+    for entry in list_all_datasets_fn():
+        if cleaned in (entry.get("id"), entry.get("signature")):
+            path = Path(entry["dataset_root"]).resolve()
+            if path.exists():
+                return path
+    return resolve_dataset_legacy_fn(dataset_id)
+
+
+def _yolo_resolve_split_paths_impl(dataset_root: Path, layout: Optional[str]) -> Tuple[str, str]:
+    if layout == "split":
+        train_images = dataset_root / "train" / "images"
+        val_images = dataset_root / "val" / "images"
+        train_rel = str(train_images.relative_to(dataset_root))
+        if val_images.exists():
+            val_rel = str(val_images.relative_to(dataset_root))
+        else:
+            val_rel = train_rel
+        return train_rel, val_rel
+    images = dataset_root / "images"
+    train_rel = str(images.relative_to(dataset_root))
+    val_images = dataset_root / "val" / "images"
+    if val_images.exists():
+        val_rel = str(val_images.relative_to(dataset_root))
+    else:
+        val_rel = train_rel
+    return train_rel, val_rel

@@ -4,6 +4,8 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from utils.coords import _qwen_bbox_to_xyxy
+from utils.coords import _xyxy_to_qwen_bbox
+from utils.overlay import _agent_detection_center_px
 
 
 def _agent_grid_col_label(index: int) -> str:
@@ -205,6 +207,25 @@ def _agent_grid_cells(grid: Optional[Mapping[str, Any]]) -> List[str]:
         for col in labels:
             cells.append(f"{col}{row}")
     return cells
+
+
+def _agent_grid_cell_for_detection(
+    det: Mapping[str, Any],
+    img_w: int,
+    img_h: int,
+    grid: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    if not grid:
+        return None
+    cell_hint = det.get("grid_cell") if isinstance(det, Mapping) else None
+    if cell_hint:
+        return str(cell_hint)
+    center = _agent_detection_center_px(dict(det), img_w, img_h)
+    if not center:
+        return None
+    cx, cy = center
+    bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, cx, cy, cx, cy)
+    return _agent_grid_cell_for_window_bbox(grid, bbox_2d)
 
 
 def _agent_quadrant_windows_qwen(overlap_ratio: float = 0.1) -> List[Dict[str, Any]]:

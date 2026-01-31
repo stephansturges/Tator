@@ -1279,3 +1279,464 @@ def _resolve_steps_early_stop_config_impl(payload: Any, *, target_precision: Opt
         "precision_floor": precision_floor,
         "precision_margin": float(cfg["precision_margin"]),
     }
+
+
+def _build_seed_stage_candidate_from_prompt_stat_impl(
+    stat: Dict[str, Any],
+    *,
+    prompt: str,
+    fallback_seed_threshold: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Build a "selected-style" candidate dict for a single prompt from its seed-stage stats.
+
+    This uses the prompt's recommended seed threshold (if available) as the operating point so it can be
+    considered during prompt-subset refinement.
+    """
+    if not isinstance(stat, dict):
+        return None
+    prompt_s = str(prompt or "").strip()
+    if not prompt_s:
+        return None
+
+    try:
+        thr = float(stat.get("seed_threshold_recommended"))
+    except Exception:
+        try:
+            thr = float(stat.get("seed_threshold_base"))
+        except Exception:
+            thr = float(fallback_seed_threshold)
+    thr = max(0.0, min(1.0, float(thr)))
+
+    gt_best_scores = stat.get("gt_best_scores") if isinstance(stat.get("gt_best_scores"), dict) else {}
+    matched_keys: set[int] = set()
+    for k, v in (gt_best_scores or {}).items():
+        try:
+            k_int = int(k)
+        except Exception:
+            continue
+        try:
+            v_f = float(v)
+        except Exception:
+            continue
+        if v_f >= float(thr):
+            matched_keys.add(k_int)
+
+    curve = stat.get("seed_threshold_curve") if isinstance(stat.get("seed_threshold_curve"), list) else []
+    selected_point: Optional[Dict[str, Any]] = None
+    if curve:
+        try:
+            selected_point = min(curve, key=lambda p: abs(float(p.get("threshold") or 0.0) - float(thr)))
+        except Exception:
+            selected_point = None
+    if selected_point is None and isinstance(stat.get("seed_threshold_recommended_point"), dict):
+        selected_point = stat.get("seed_threshold_recommended_point")
+
+    try:
+        matches = int(selected_point.get("matches") or 0) if selected_point else len(matched_keys)
+    except Exception:
+        matches = len(matched_keys)
+    try:
+        fps = int(selected_point.get("fps") or 0) if selected_point else 0
+    except Exception:
+        fps = 0
+    try:
+        precision = float(selected_point.get("precision") or 0.0) if selected_point else float(matches) / float(max(1, matches + fps))
+    except Exception:
+        precision = float(matches) / float(max(1, matches + fps))
+
+    return {
+        **stat,
+        "prompt": prompt_s,
+        "matched_keys": matched_keys,
+        "matches": int(matches),
+        "fps": int(fps),
+        "precision": float(precision),
+        "selected_seed_threshold": float(thr),
+        "selected_seed_threshold_point": selected_point,
+    }
+
+
+def _refine_steps_prompt_subset_seed_stage_impl(
+    prompt_stats: Sequence[Dict[str, Any]],
+    selected: Sequence[Dict[str, Any]],
+    *,
+    max_steps: int,
+    target_precision: Optional[float] = None,
+    max_iters: int = 6,
+    top_k: int = 6,
+    base_seed_threshold: float = 0.05,
+    log_fn: Optional[Callable[[str], None]] = None,
+    build_seed_stage_candidate_fn: Callable[..., Optional[Dict[str, Any]]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Bounded prompt-subset refinement using only seed-stage stats (fast; no extra SAM runs).
+
+    This is intended as a "local search" improvement on top of the greedy set-cover selection:
+      - drop redundant steps (no unique GT coverage)
+      - try a small number of add/swap moves guided by uncovered GT keys
+
+    NOTE: This does not run full expansion/head tuning. It is a cheap approximation to improve step choice.
+    """
+    try:
+        max_steps_i = max(1, int(max_steps))
+    except Exception:
+        max_steps_i = 6
+    try:
+        iters = max(0, int(max_iters))
+    except Exception:
+        iters = 0
+    try:
+        k = max(1, int(top_k))
+    except Exception:
+        k = 6
+    try:
+        base_thr = float(base_seed_threshold)
+    except Exception:
+        base_thr = 0.05
+    base_thr = max(0.0, min(1.0, float(base_thr)))
+
+    tgt: Optional[float]
+    try:
+        tgt = float(target_precision) if target_precision is not None else None
+    except Exception:
+        tgt = None
+    if tgt is not None:
+        tgt = max(0.0, min(1.0, float(tgt)))
+
+    current: List[Dict[str, Any]] = [c for c in (selected or []) if isinstance(c, dict) and str(c.get("prompt") or "").strip()]
+    if not current:
+        return [], {"enabled": False, "reason": "no_selected"}
+
+    # Build a pool of one "default operating point" per prompt for add/swap moves.
+    pool: Dict[str, Dict[str, Any]] = {}
+    for stat in prompt_stats or []:
+        if not isinstance(stat, dict):
+            continue
+        p = str(stat.get("prompt") or "").strip()
+        if not p:
+            continue
+        cand = build_seed_stage_candidate_fn(stat, prompt=p, fallback_seed_threshold=base_thr)
+        if cand:
+            pool[p.lower()] = cand
+
+    start_prompts = [str(c.get("prompt") or "") for c in current]
+
+    def _score(cands: Sequence[Dict[str, Any]]) -> Tuple[int, float, int, float, int]:
+        covered: set[int] = set()
+        fps_total = 0
+        for c in cands:
+            mk = c.get("matched_keys")
+            if isinstance(mk, set):
+                covered |= mk
+            try:
+                fps_total += int(c.get("fps") or 0)
+            except Exception:
+                pass
+        cov = int(len(covered))
+        prec = float(cov) / float(max(1, cov + int(fps_total)))
+        if tgt is not None and cov > 0 and prec >= float(tgt):
+            return (1, float(cov), -int(fps_total), float(prec), -len(cands))
+        return (0, float(prec), int(cov), -int(fps_total), -len(cands))
+
+    def _unique_counts(cands: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[int, int] = {}
+        by_prompt: Dict[str, set[int]] = {}
+        for c in cands:
+            p = str(c.get("prompt") or "").strip()
+            mk = c.get("matched_keys") if isinstance(c.get("matched_keys"), set) else set()
+            by_prompt[p] = mk
+            for k_int in mk:
+                counts[int(k_int)] = counts.get(int(k_int), 0) + 1
+        uniq: Dict[str, int] = {}
+        for p, mk in by_prompt.items():
+            uniq[p] = sum(1 for k_int in mk if counts.get(int(k_int), 0) == 1)
+        return uniq
+
+    history: List[Dict[str, Any]] = []
+
+    # First, drop purely redundant steps deterministically (no unique coverage).
+    changed = True
+    while changed and len(current) > 1:
+        changed = False
+        uniq = _unique_counts(current)
+        redundant = [c for c in current if uniq.get(str(c.get("prompt") or "").strip(), 0) <= 0]
+        if not redundant:
+            break
+        # Drop the most "costly" redundant step first (highest fps, then lowest precision).
+        redundant = sorted(
+            redundant,
+            key=lambda c: (
+                -int(c.get("fps") or 0),
+                float(c.get("precision") or 0.0),
+                str(c.get("prompt") or ""),
+            ),
+        )
+        drop = redundant[0]
+        before = [str(c.get("prompt") or "") for c in current]
+        current = [c for c in current if c is not drop]
+        after = [str(c.get("prompt") or "") for c in current]
+        history.append({"op": "drop_redundant", "dropped": str(drop.get("prompt") or ""), "before": before, "after": after})
+        changed = True
+
+    cur_key = _score(current)
+
+    for _iter in range(iters):
+        prompts_now = {str(c.get("prompt") or "").strip().lower() for c in current}
+        covered_now: set[int] = set()
+        for c in current:
+            mk = c.get("matched_keys")
+            if isinstance(mk, set):
+                covered_now |= mk
+
+        add_pool: List[Dict[str, Any]] = []
+        for p_l, cand in pool.items():
+            if p_l in prompts_now:
+                continue
+            mk = cand.get("matched_keys")
+            if not isinstance(mk, set):
+                continue
+            new_cov = len(mk - covered_now)
+            if new_cov <= 0:
+                continue
+            add_pool.append({**cand, "_new_cov": int(new_cov)})
+        add_pool = sorted(
+            add_pool,
+            key=lambda c: (
+                int(c.get("_new_cov") or 0),
+                float(c.get("precision") or 0.0),
+                -int(c.get("fps") or 0),
+                str(c.get("prompt") or ""),
+            ),
+            reverse=True,
+        )[:k]
+
+        uniq = _unique_counts(current)
+        drop_pool = sorted(
+            current,
+            key=lambda c: (
+                uniq.get(str(c.get("prompt") or "").strip(), 0),
+                -int(c.get("fps") or 0),
+                float(c.get("precision") or 0.0),
+                str(c.get("prompt") or ""),
+            ),
+        )[:k]
+
+        best_move: Optional[Dict[str, Any]] = None
+        best_next: Optional[List[Dict[str, Any]]] = None
+        best_key = cur_key
+
+        def _try(next_cands: List[Dict[str, Any]], move: Dict[str, Any]) -> None:
+            nonlocal best_move, best_next, best_key
+            # Enforce unique prompts + max_steps.
+            if len(next_cands) > max_steps_i:
+                return
+            seen: set[str] = set()
+            for c in next_cands:
+                p = str(c.get("prompt") or "").strip().lower()
+                if not p or p in seen:
+                    return
+                seen.add(p)
+            key = _score(next_cands)
+            if key > best_key:
+                best_key = key
+                best_next = next_cands
+                best_move = move
+
+        # Add moves (only if room).
+        if len(current) < max_steps_i:
+            for add in add_pool:
+                _try(current + [add], {"op": "add", "added": str(add.get("prompt") or "")})
+
+        # Swap moves.
+        for add in add_pool:
+            for drop in drop_pool:
+                next_cands = [c for c in current if c is not drop] + [add]
+                _try(
+                    next_cands,
+                    {"op": "swap", "added": str(add.get("prompt") or ""), "dropped": str(drop.get("prompt") or "")},
+                )
+
+        if best_next is None or best_move is None:
+            break
+
+        before = [str(c.get("prompt") or "") for c in current]
+        current = best_next
+        after = [str(c.get("prompt") or "") for c in current]
+        history.append({**best_move, "before": before, "after": after, "key_before": cur_key, "key_after": best_key})
+        cur_key = best_key
+
+        if log_fn:
+            try:
+                log_fn(f"[steps] refine prompt subset: {history[-1]}")
+            except Exception:
+                pass
+
+    final_prompts = [str(c.get("prompt") or "") for c in current]
+    return current, {
+        "enabled": True,
+        "mode": "seed_stage_local_search",
+        "max_iters": int(iters),
+        "top_k": int(k),
+        "start_steps": start_prompts,
+        "final_steps": final_prompts,
+        "history": history,
+    }
+
+
+def _resolve_steps_prompt_prefilter_config_impl(
+    payload: Any,
+    *,
+    allow_prefilter: bool = True,
+) -> Dict[str, Any]:
+    requested = bool(getattr(payload, "steps_prompt_prefilter", False))
+    enabled = bool(requested and allow_prefilter)
+    disabled_reason = None
+    if requested and not allow_prefilter:
+        disabled_reason = "head_encoder_not_clip"
+    mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower().strip()
+    if mode not in {"conservative", "balanced", "aggressive"}:
+        mode = "balanced"
+    mode_map = {
+        "conservative": {"sample_size": 20, "keep_ratio": 0.6},
+        "balanced": {"sample_size": 40, "keep_ratio": 0.4},
+        "aggressive": {"sample_size": 80, "keep_ratio": 0.25},
+    }
+    cfg = mode_map[mode]
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "sample_size": int(cfg["sample_size"]),
+        "keep_ratio": float(cfg["keep_ratio"]),
+        "requested": requested,
+        "disabled_reason": disabled_reason,
+    }
+
+
+def _resolve_steps_prompt_bg_drop_config_impl(
+    payload: Any,
+    *,
+    allow_drop: bool = True,
+) -> Dict[str, Any]:
+    requested = bool(getattr(payload, "steps_prompt_bg_drop", False))
+    enabled = bool(requested and allow_drop)
+    disabled_reason = None
+    if requested and not allow_drop:
+        disabled_reason = "no_background_classes"
+    mode = str(getattr(payload, "steps_prompt_bg_drop_mode", "balanced") or "balanced").lower().strip()
+    if mode not in {"conservative", "balanced", "aggressive"}:
+        mode = "balanced"
+    mode_map = {
+        "conservative": {"min_checked": 60, "drop_rate": 0.75},
+        "balanced": {"min_checked": 40, "drop_rate": 0.6},
+        "aggressive": {"min_checked": 20, "drop_rate": 0.45},
+    }
+    cfg = mode_map[mode]
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "min_checked": int(cfg["min_checked"]),
+        "drop_rate": float(cfg["drop_rate"]),
+        "requested": requested,
+        "disabled_reason": disabled_reason,
+    }
+
+
+def _resolve_steps_hard_negative_export_config_impl(payload: Any) -> Dict[str, Any]:
+    enabled = bool(getattr(payload, "steps_hard_negative_export", False))
+    try:
+        max_crops = int(getattr(payload, "steps_hard_negative_max_crops", 0) or 0)
+    except Exception:
+        max_crops = 0
+    max_crops = max(0, int(max_crops))
+    try:
+        min_prob = float(getattr(payload, "steps_hard_negative_min_prob", 0.0) or 0.0)
+    except Exception:
+        min_prob = 0.0
+    min_prob = max(0.0, min(1.0, float(min_prob)))
+    enabled = bool(enabled and max_crops > 0)
+    return {
+        "enabled": enabled,
+        "max_crops": int(max_crops),
+        "min_prob": float(min_prob),
+    }
+
+
+def _estimate_steps_speed_factor_impl(payload: Any, *, allow_prefilter: bool = True) -> float:
+    early_enabled = bool(getattr(payload, "steps_early_stop", False))
+    early_mode = str(getattr(payload, "steps_early_stop_mode", "balanced") or "balanced").lower().strip()
+    if early_mode not in {"conservative", "balanced", "aggressive"}:
+        early_mode = "balanced"
+    prefilter_enabled = bool(getattr(payload, "steps_prompt_prefilter", False) and allow_prefilter)
+    prefilter_mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower().strip()
+    if prefilter_mode not in {"conservative", "balanced", "aggressive"}:
+        prefilter_mode = "balanced"
+    bg_drop_enabled = bool(getattr(payload, "steps_prompt_bg_drop", False))
+    bg_drop_mode = str(getattr(payload, "steps_prompt_bg_drop_mode", "balanced") or "balanced").lower().strip()
+    if bg_drop_mode not in {"conservative", "balanced", "aggressive"}:
+        bg_drop_mode = "balanced"
+    early_factor = 1.0
+    if early_enabled:
+        early_factor = 0.9 if early_mode == "conservative" else 0.65 if early_mode == "aggressive" else 0.8
+    prefilter_factor = 1.0
+    if prefilter_enabled:
+        prefilter_factor = 0.85 if prefilter_mode == "conservative" else 0.55 if prefilter_mode == "aggressive" else 0.7
+    bg_drop_factor = 1.0
+    if bg_drop_enabled:
+        bg_drop_factor = 0.92 if bg_drop_mode == "conservative" else 0.7 if bg_drop_mode == "aggressive" else 0.82
+    return float(early_factor * prefilter_factor * bg_drop_factor)
+
+
+def _estimate_agent_global_optimizer_image_evals_impl(
+    *,
+    val_images: int,
+    eval_caps: Sequence[int],
+    keep_ratio: float,
+    rounds: int,
+    max_trials: int,
+    mutations_per_round: int,
+) -> Tuple[int, List[int], bool]:
+    parsed = []
+    for cap in eval_caps or []:
+        try:
+            b = int(cap)
+        except Exception:
+            continue
+        if b > 0:
+            parsed.append(b)
+    budgets = sorted(set(parsed))
+    if not budgets:
+        return 0, [], True
+    try:
+        val_n = max(1, int(val_images))
+    except Exception:
+        val_n = int(max(1, val_images))
+    try:
+        keep = max(0.0, min(1.0, float(keep_ratio)))
+    except Exception:
+        keep = 0.5
+    try:
+        rounds_i = max(1, int(rounds))
+    except Exception:
+        rounds_i = 1
+    try:
+        max_trials_i = max(1, int(max_trials))
+    except Exception:
+        max_trials_i = 1
+    try:
+        mutations_i = max(1, int(mutations_per_round))
+    except Exception:
+        mutations_i = 1
+    candidates_per_round = 1
+    if max_trials_i > 1:
+        max_mut = max(1, min(mutations_i, max_trials_i - 1))
+        candidates_per_round = 1 + max_mut
+    total = 0
+    for _round in range(rounds_i):
+        active = max(1, candidates_per_round)
+        for idx, budget in enumerate(budgets):
+            eff_budget = min(int(budget), val_n)
+            total += int(active) * int(eff_budget)
+            if idx < len(budgets) - 1:
+                active = max(1, int(math.ceil(active * keep)))
+    return int(total), budgets, False

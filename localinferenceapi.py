@@ -111,6 +111,8 @@ from services.datasets import (
     _find_any_file_impl as _find_any_file_impl,
     _count_dir_files_impl as _count_dir_files_impl,
     _dataset_integrity_report_impl as _dataset_integrity_report_impl,
+    _resolve_yolo_training_dataset_impl as _resolve_yolo_training_dataset_impl,
+    _resolve_rfdetr_training_dataset_impl as _resolve_rfdetr_training_dataset_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -11793,129 +11795,34 @@ def _resolve_dataset_entry(dataset_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
-    task = (payload.task or "detect").lower().strip()
-    dataset_id = (payload.dataset_id or "").strip()
-    dataset_root: Optional[Path] = None
-    entry: Optional[Dict[str, Any]] = None
-    if dataset_id:
-        entry = _resolve_dataset_entry(dataset_id)
-        if entry and entry.get("dataset_root"):
-            dataset_root = Path(entry["dataset_root"]).resolve()
-        else:
-            dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
-    elif payload.dataset_root:
-        dataset_root = Path(payload.dataset_root).expanduser().resolve()
-    if not dataset_root or not dataset_root.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
-    dataset_signature = None
-    if entry and entry.get("signature"):
-        dataset_signature = str(entry.get("signature"))
-    if not dataset_signature:
-        dataset_signature = _compute_dir_signature(dataset_root)
-    safe_name = _sanitize_yolo_run_id(entry.get("id") if entry else dataset_root.name)
-    cache_key = _stable_hash([safe_name, dataset_signature, task])[:12]
-    cache_root = (YOLO_DATASET_CACHE_ROOT / f"{safe_name}_{cache_key}").resolve()
-    cache_layout = _detect_yolo_layout(cache_root) if cache_root.exists() else None
-    layout = _detect_yolo_layout(dataset_root)
-    if cache_layout and cache_layout.get("yolo_ready"):
-        prepared_root = cache_root
-        yolo_ready = True
-        yolo_images_dir = cache_layout.get("yolo_images_dir")
-        yolo_labels_dir = cache_layout.get("yolo_labels_dir")
-        yolo_labelmap_path = cache_layout.get("yolo_labelmap_path")
-        yolo_layout = cache_layout.get("yolo_layout")
-        source = "cache"
-    else:
-        prepared_root = dataset_root
-        yolo_ready = bool(layout.get("yolo_ready"))
-        yolo_images_dir = layout.get("yolo_images_dir")
-        yolo_labels_dir = layout.get("yolo_labels_dir")
-        yolo_labelmap_path = layout.get("yolo_labelmap_path")
-        yolo_layout = layout.get("yolo_layout")
-        source = "registry" if entry else "custom"
-    yolo_seg_ready = False
-    if yolo_ready and yolo_labels_dir:
-        yolo_seg_ready = _yolo_labels_have_polygons(Path(yolo_labels_dir))
-    return {
-        "dataset_id": entry.get("id") if entry else dataset_root.name,
-        "dataset_root": str(dataset_root),
-        "prepared_root": str(prepared_root),
-        "signature": dataset_signature,
-        "task": task,
-        "yolo_ready": yolo_ready,
-        "yolo_seg_ready": yolo_seg_ready,
-        "yolo_images_dir": yolo_images_dir,
-        "yolo_labels_dir": yolo_labels_dir,
-        "yolo_labelmap_path": yolo_labelmap_path,
-        "yolo_layout": yolo_layout,
-        "cache_root": str(cache_root),
-        "cache_key": cache_key,
-        "source": source,
-    }
+    return _resolve_yolo_training_dataset_impl(
+        payload,
+        resolve_dataset_entry_fn=_resolve_dataset_entry,
+        resolve_sam3_or_qwen_dataset_fn=_resolve_sam3_or_qwen_dataset,
+        compute_dir_signature_fn=_compute_dir_signature,
+        sanitize_yolo_run_id_fn=_sanitize_yolo_run_id,
+        detect_yolo_layout_fn=_detect_yolo_layout,
+        yolo_labels_have_polygons_fn=_yolo_labels_have_polygons,
+        stable_hash_fn=_stable_hash,
+        yolo_cache_root=YOLO_DATASET_CACHE_ROOT,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _resolve_rfdetr_training_dataset(payload: RfDetrTrainRequest) -> Dict[str, Any]:
-    task = (payload.task or "detect").lower().strip()
-    dataset_id = (payload.dataset_id or "").strip()
-    dataset_root: Optional[Path] = None
-    entry: Optional[Dict[str, Any]] = None
-    if dataset_id:
-        entry = _resolve_dataset_entry(dataset_id)
-        if entry and entry.get("dataset_root"):
-            dataset_root = Path(entry["dataset_root"]).resolve()
-        else:
-            dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
-    elif payload.dataset_root:
-        dataset_root = Path(payload.dataset_root).expanduser().resolve()
-    if not dataset_root or not dataset_root.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
-    meta = _load_sam3_dataset_metadata(dataset_root) or {}
-    coco_train = meta.get("coco_train_json")
-    coco_val = meta.get("coco_val_json")
-    coco_ready = bool(coco_train and coco_val)
-    dataset_type = (entry.get("type") if entry else None) or meta.get("type", "bbox")
-    yolo_layout = _detect_yolo_layout(dataset_root)
-    yolo_seg_ready = False
-    if yolo_layout.get("yolo_ready") and yolo_layout.get("yolo_labels_dir"):
-        yolo_seg_ready = _yolo_labels_have_polygons(Path(yolo_layout["yolo_labels_dir"]))
-        if yolo_seg_ready and dataset_type != "seg":
-            dataset_type = "seg"
-    if task == "segment" and dataset_type != "seg":
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_seg_requires_polygons")
-    if not coco_ready:
-        if entry and entry.get("yolo_ready"):
-            meta = _convert_yolo_dataset_to_coco(dataset_root)
-        elif entry and entry.get("qwen_ready"):
-            meta = _convert_qwen_dataset_to_coco(dataset_root)
-        else:
-            # Attempt to infer from on-disk layout.
-            layout = _detect_yolo_layout(dataset_root)
-            if layout.get("yolo_ready"):
-                meta = _convert_yolo_dataset_to_coco(dataset_root)
-            elif _load_qwen_dataset_metadata(dataset_root):
-                meta = _convert_qwen_dataset_to_coco(dataset_root)
-            else:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_ready")
-        coco_train = meta.get("coco_train_json")
-        coco_val = meta.get("coco_val_json")
-        coco_ready = bool(coco_train and coco_val)
-        dataset_type = meta.get("type", dataset_type)
-    if not coco_ready:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_ready")
-    if coco_train:
-        _ensure_coco_supercategory(Path(coco_train))
-    if coco_val:
-        _ensure_coco_supercategory(Path(coco_val))
-    dataset_label = entry.get("label") if entry else meta.get("label") or dataset_root.name
-    return {
-        "dataset_id": entry.get("id") if entry else dataset_root.name,
-        "dataset_root": str(dataset_root),
-        "dataset_label": dataset_label,
-        "task": task,
-        "coco_train_json": coco_train,
-        "coco_val_json": coco_val,
-        "type": dataset_type,
-    }
+    return _resolve_rfdetr_training_dataset_impl(
+        payload,
+        resolve_dataset_entry_fn=_resolve_dataset_entry,
+        resolve_sam3_or_qwen_dataset_fn=_resolve_sam3_or_qwen_dataset,
+        load_sam3_meta_fn=_load_sam3_dataset_metadata,
+        detect_yolo_layout_fn=_detect_yolo_layout,
+        yolo_labels_have_polygons_fn=_yolo_labels_have_polygons,
+        convert_yolo_dataset_to_coco_fn=_convert_yolo_dataset_to_coco,
+        convert_qwen_dataset_to_coco_fn=_convert_qwen_dataset_to_coco,
+        load_qwen_dataset_metadata_fn=_load_qwen_dataset_metadata,
+        ensure_coco_supercategory_fn=_ensure_coco_supercategory,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _yolo_resolve_split_paths(dataset_root: Path, layout: Optional[str]) -> Tuple[str, str]:

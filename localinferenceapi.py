@@ -126,6 +126,7 @@ from utils.coords import (
     _agent_clip_xyxy,
     _agent_expand_window_xyxy,
     _agent_xyxy_to_xywh,
+    _yolo_to_xyxy,
     _agent_iou_xyxy,
 )
 from collections import OrderedDict
@@ -29952,15 +29953,6 @@ def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict
                 ann_id += 1
     coco_merged["annotations"] = annotations
     return coco_merged, gt_by_image_cat, images
-
-
-def _yolo_to_xyxy(width: int, height: int, bbox: Sequence[float]) -> Tuple[float, float, float, float]:
-    cx, cy, bw, bh = map(float, bbox[:4])
-    x1 = max(0.0, (cx - bw / 2.0) * width)
-    y1 = max(0.0, (cy - bh / 2.0) * height)
-    x2 = min(float(width), (cx + bw / 2.0) * width)
-    y2 = min(float(height), (cy + bh / 2.0) * height)
-    return x1, y1, x2, y2
 
 
 def _xywh_to_xyxy(bbox: Sequence[float]) -> Tuple[float, float, float, float]:

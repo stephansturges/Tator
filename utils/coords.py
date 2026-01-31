@@ -192,3 +192,14 @@ def _agent_expand_window_xyxy(
 
 def _agent_xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> List[float]:
     return [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
+
+
+def _yolo_to_xyxy(width: int, height: int, bbox: Sequence[float]) -> Tuple[float, float, float, float]:
+    if len(bbox) < 4:
+        return 0.0, 0.0, 0.0, 0.0
+    cx, cy, bw, bh = map(float, bbox[:4])
+    x1 = (cx - bw / 2.0) * float(width)
+    y1 = (cy - bh / 2.0) * float(height)
+    x2 = (cx + bw / 2.0) * float(width)
+    y2 = (cy + bh / 2.0) * float(height)
+    return x1, y1, x2, y2

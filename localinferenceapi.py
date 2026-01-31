@@ -242,6 +242,7 @@ from services.classifier import (
     _resolve_agent_clip_classifier_path_impl as _resolve_agent_clip_classifier_path_impl,
     _load_clip_head_from_classifier_impl as _load_clip_head_from_classifier_impl,
     _clip_head_predict_proba_impl as _clip_head_predict_proba_impl,
+    _clip_head_keep_mask_impl as _clip_head_keep_mask_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -15159,53 +15160,15 @@ def _clip_head_keep_mask(
     background_guard: bool = False,
     background_margin: float = 0.0,
 ) -> Optional[np.ndarray]:
-    """Return boolean keep mask for rows in proba."""
-    try:
-        probs = np.asarray(proba, dtype=np.float32)
-    except Exception:
-        return None
-    if probs.ndim != 2 or probs.shape[0] == 0:
-        return None
-    if target_index < 0 or target_index >= probs.shape[1]:
-        return None
-    try:
-        min_prob_f = float(min_prob)
-    except Exception:
-        min_prob_f = 0.0
-    try:
-        margin_f = float(margin)
-    except Exception:
-        margin_f = 0.0
-
-    p_target = probs[:, target_index]
-    keep = p_target >= min_prob_f
-
-    try:
-        bg_margin_f = float(background_margin)
-    except Exception:
-        bg_margin_f = 0.0
-
-    if background_guard:
-        bg_indices: List[int] = []
-        if background_indices:
-            for idx in background_indices:
-                if isinstance(idx, int) and 0 <= idx < probs.shape[1] and idx != target_index:
-                    bg_indices.append(idx)
-        if bg_indices:
-            p_bg = np.max(probs[:, bg_indices], axis=1)
-            keep &= p_target >= (p_bg + max(0.0, bg_margin_f))
-
-    # "Margin" is optional: a value of 0 disables the margin check (i.e., do not require the target
-    # class to be the argmax). When enabled, require p(target) >= p(best_other) + margin.
-    if margin_f > 0.0:
-        if probs.shape[1] > 1:
-            masked = probs.copy()
-            masked[:, target_index] = -1.0
-            p_other = np.max(masked, axis=1)
-        else:
-            p_other = np.zeros_like(p_target)
-        keep &= p_target >= (p_other + margin_f)
-    return keep
+    return _clip_head_keep_mask_impl(
+        proba,
+        target_index=target_index,
+        min_prob=min_prob,
+        margin=margin,
+        background_indices=background_indices,
+        background_guard=background_guard,
+        background_margin=background_margin,
+    )
 
 
 def _save_clip_head_artifacts(

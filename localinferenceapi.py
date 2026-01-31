@@ -207,6 +207,8 @@ from services.datasets import (
     _coerce_dataset_metadata_impl as _coerce_dataset_metadata_impl,
     _load_qwen_dataset_metadata_impl as _load_qwen_dataset_metadata_impl,
     _persist_qwen_dataset_metadata_impl as _persist_qwen_dataset_metadata_impl,
+    _load_sam3_dataset_metadata_impl as _load_sam3_dataset_metadata_impl,
+    _persist_sam3_dataset_metadata_impl as _persist_sam3_dataset_metadata_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
     _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
     _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
@@ -11029,30 +11031,21 @@ def _persist_qwen_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) 
 
 
 def _load_sam3_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
-    meta_path = dataset_dir / SAM3_DATASET_META_NAME
-    data = _load_json_metadata(meta_path)
-    if not data:
-        return None
-    # Backfill defaults for older datasets.
-    updated = False
-    if "id" not in data:
-        data["id"] = dataset_dir.name
-        updated = True
-    if "type" not in data:
-        data["type"] = "bbox"
-        updated = True
-    if updated:
-        _persist_sam3_dataset_metadata(dataset_dir, data)
-    return data
+    return _load_sam3_dataset_metadata_impl(
+        dataset_dir,
+        meta_name=SAM3_DATASET_META_NAME,
+        load_json_metadata_fn=_load_json_metadata,
+        persist_metadata_fn=_persist_sam3_dataset_metadata,
+    )
 
 
 def _persist_sam3_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
-    meta_path = dataset_dir / SAM3_DATASET_META_NAME
-    try:
-        with meta_path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to write SAM3 dataset metadata for %s: %s", dataset_dir, exc)
+    _persist_sam3_dataset_metadata_impl(
+        dataset_dir,
+        metadata,
+        meta_name=SAM3_DATASET_META_NAME,
+        logger=logger,
+    )
 
 
 def _dir_size_bytes(path: Path) -> int:

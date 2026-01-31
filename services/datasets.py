@@ -145,6 +145,45 @@ def _persist_qwen_dataset_metadata_impl(
     write_qwen_metadata_fn(dataset_dir / meta_name, metadata)
 
 
+def _load_sam3_dataset_metadata_impl(
+    dataset_dir: Path,
+    *,
+    meta_name: str,
+    load_json_metadata_fn,
+    persist_metadata_fn,
+) -> Optional[Dict[str, Any]]:
+    meta_path = dataset_dir / meta_name
+    data = load_json_metadata_fn(meta_path)
+    if not data:
+        return None
+    updated = False
+    if "id" not in data:
+        data["id"] = dataset_dir.name
+        updated = True
+    if "type" not in data:
+        data["type"] = "bbox"
+        updated = True
+    if updated:
+        persist_metadata_fn(dataset_dir, data)
+    return data
+
+
+def _persist_sam3_dataset_metadata_impl(
+    dataset_dir: Path,
+    metadata: Dict[str, Any],
+    *,
+    meta_name: str,
+    logger=None,
+) -> None:
+    meta_path = dataset_dir / meta_name
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to write SAM3 dataset metadata for %s: %s", dataset_dir, exc)
+
+
 def _agent_load_labelmap_meta(
     dataset_id: Optional[str],
     *,

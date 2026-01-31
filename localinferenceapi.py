@@ -229,6 +229,11 @@ from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
     _agent_overlay_crop_xyxy as _overlay_crop_xyxy,
 )
+from services.overlay_views import (
+    _view_cell_raw as _view_cell_raw_impl,
+    _view_cell_overlay as _view_cell_overlay_impl,
+    _view_full_overlay as _view_full_overlay_impl,
+)
 from services.detector_merge import (
     _agent_merge_detections as _merge_detections,
     _merge_detections_nms as _merge_detections_nms,
@@ -8047,23 +8052,13 @@ def _agent_tool_view_cell_raw(
     base_img = _AGENT_ACTIVE_GRID_IMAGE
     if base_img is None:
         base_img, _, _ = _agent_resolve_image(image_base64, image_token)
-    x1, y1, x2, y2 = cell_xyxy
-    crop = base_img.crop((x1, y1, x2, y2))
-    crop_np = np.asarray(crop)
-    token = hashlib.md5(crop_np.tobytes()).hexdigest()
-    _store_preloaded_image(token, crop_np, _default_variant(None))
-    agent_view = {
-        "grid_cell": str(grid_cell),
-        "width": int(crop.width),
-        "height": int(crop.height),
-    }
-    return {
-        "image_token": token,
-        "grid_cell": str(grid_cell),
-        "width": int(crop.width),
-        "height": int(crop.height),
-        "__agent_view__": agent_view,
-    }
+    return _view_cell_raw_impl(
+        base_img=base_img,
+        cell_xyxy=cell_xyxy,
+        grid_cell=str(grid_cell),
+        store_preloaded_fn=_store_preloaded_image,
+        default_variant_fn=_default_variant,
+    )
 
 
 @_register_agent_tool("view_cell_overlay")
@@ -8086,45 +8081,32 @@ def _agent_tool_view_cell_overlay(
     base_img = _AGENT_ACTIVE_GRID_IMAGE
     if base_img is None:
         base_img, _, _ = _agent_resolve_image(image_base64, image_token)
-    overlay_img = base_img
     clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
-    if clusters:
-        labels = list(_AGENT_ACTIVE_LABELMAP or [])
-        if not labels:
-            labels = sorted(
-                {
-                    str(cluster.get("label") or "").strip()
-                    for cluster in clusters
-                    if isinstance(cluster, dict) and cluster.get("label")
-                }
-            )
-        label_colors = _agent_current_label_colors(labels)
-        label_prefixes = _agent_current_label_prefixes(labels)
-        overlay_img = _agent_render_detection_overlay(
-            base_img,
-            clusters,
-            label_colors,
-            label_prefixes=label_prefixes,
-            dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
+    labels = list(_AGENT_ACTIVE_LABELMAP or [])
+    if not labels:
+        labels = sorted(
+            {
+                str(cluster.get("label") or "").strip()
+                for cluster in clusters
+                if isinstance(cluster, dict) and cluster.get("label")
+            }
         )
+    result, overlay_img = _view_cell_overlay_impl(
+        base_img=base_img,
+        cell_xyxy=cell_xyxy,
+        grid_cell=str(grid_cell),
+        clusters=clusters,
+        labelmap=labels,
+        label_colors_fn=_agent_current_label_colors,
+        label_prefixes_fn=_agent_current_label_prefixes,
+        render_overlay_fn=_agent_render_detection_overlay,
+        dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
+        store_preloaded_fn=_store_preloaded_image,
+        default_variant_fn=_default_variant,
+    )
+    if overlay_img is not None:
         _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_img
-    x1, y1, x2, y2 = cell_xyxy
-    crop = overlay_img.crop((x1, y1, x2, y2))
-    crop_np = np.asarray(crop)
-    token = hashlib.md5(crop_np.tobytes()).hexdigest()
-    _store_preloaded_image(token, crop_np, _default_variant(None))
-    agent_view = {
-        "grid_cell": str(grid_cell),
-        "width": int(crop.width),
-        "height": int(crop.height),
-    }
-    return {
-        "image_token": token,
-        "grid_cell": str(grid_cell),
-        "width": int(crop.width),
-        "height": int(crop.height),
-        "__agent_view__": agent_view,
-    }
+    return result
 
 
 @_register_agent_tool("view_full_overlay")
@@ -8137,31 +8119,24 @@ def _agent_tool_view_full_overlay(
         base_img, _, _ = _agent_resolve_image(image_base64, image_token)
     clusters = list(_AGENT_ACTIVE_CLUSTERS or [])
     labels = _agent_overlay_labels(clusters, _AGENT_ACTIVE_LABELMAP or [])
-    label_colors = _agent_current_label_colors(labels) if labels else {}
-    label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
-    overlay_img = base_img
-    if clusters:
-        overlay_img = _agent_render_detection_overlay(
-            base_img,
-            clusters,
-            label_colors,
-            dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
-            label_prefixes=label_prefixes,
-        )
+    result, overlay_img = _view_full_overlay_impl(
+        base_img=base_img,
+        clusters=clusters,
+        labels=labels,
+        label_colors_fn=_agent_current_label_colors,
+        label_prefixes_fn=_agent_current_label_prefixes,
+        render_overlay_fn=_agent_render_detection_overlay,
+        dot_radius=_AGENT_ACTIVE_OVERLAY_DOT_RADIUS,
+        grid=_AGENT_ACTIVE_GRID,
+        grid_usage=_AGENT_GRID_TOOL_USAGE,
+        grid_usage_last=_AGENT_GRID_TOOL_LAST,
+        grid_usage_rows_fn=_agent_grid_usage_rows,
+        grid_usage_text_fn=_agent_grid_usage_text,
+        overlay_key_fn=_agent_overlay_key_text,
+    )
+    if overlay_img is not None:
         _AGENT_ACTIVE_OVERLAY_IMAGE = overlay_img
-    usage_rows = _agent_grid_usage_rows(_AGENT_ACTIVE_GRID, _AGENT_GRID_TOOL_USAGE, _AGENT_GRID_TOOL_LAST)
-    usage_text = _agent_grid_usage_text(usage_rows)
-    agent_view = {
-        "grid_usage": usage_rows,
-        "grid_usage_text": usage_text,
-        "total_cells": len(usage_rows),
-        "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
-    }
-    return {
-        "width": int(overlay_img.width),
-        "height": int(overlay_img.height),
-        "__agent_view__": agent_view,
-    }
+    return result
 
 
 @_register_agent_tool("get_tile_context")

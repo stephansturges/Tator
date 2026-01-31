@@ -249,6 +249,8 @@ from services.classifier import (
     _load_clip_head_artifacts_impl as _load_clip_head_artifacts_impl,
     _resolve_clip_head_background_settings_impl as _resolve_clip_head_background_settings_impl,
     _infer_clip_model_from_embedding_dim_impl as _infer_clip_model_from_embedding_dim_impl,
+    _clip_auto_predict_label_impl as _clip_auto_predict_label_impl,
+    _clip_auto_predict_details_impl as _clip_auto_predict_details_impl,
 )
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
@@ -15210,52 +15212,15 @@ def _clip_auto_predict_label(
     *,
     background_guard: bool = False,
 ) -> Tuple[str, Optional[float], Optional[str]]:
-    """Return (label, probability, error) for auto-classification using the active CLIP head."""
-    if clf is None:
-        return "unknown", None, "clip_unavailable"
-    head = active_classifier_head if isinstance(active_classifier_head, dict) else None
-    classes_raw = getattr(clf, "classes_", None)
-    if head is not None:
-        classes = [str(c) for c in list(head.get("classes") or [])]
-    elif classes_raw is None and isinstance(clf, dict):
-        classes = [str(c) for c in list(clf.get("classes") or [])]
-    else:
-        classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
-    proba_arr: Optional[np.ndarray] = None
-    if head is not None:
-        proba_arr = _clip_head_predict_proba(feats_np, head)
-    elif hasattr(clf, "predict_proba"):
-        try:
-            proba = clf.predict_proba(feats_np)
-            proba_arr = np.asarray(proba, dtype=np.float32)
-        except Exception:
-            proba_arr = None
-    elif isinstance(clf, dict):
-        proba_arr = _clip_head_predict_proba(feats_np, clf)
-    if proba_arr is not None and proba_arr.ndim == 2 and proba_arr.shape[0] >= 1 and proba_arr.shape[1] == len(classes):
-        row = proba_arr[0]
-        bg_indices = _clip_head_background_indices(classes)
-        if bg_indices:
-            non_bg_indices = [idx for idx in range(len(classes)) if idx not in bg_indices]
-            if not non_bg_indices:
-                return "unknown", float(np.max(row)) if row.size else None, "clip_background"
-            best_non_bg = non_bg_indices[int(np.argmax(row[non_bg_indices]))]
-            p_non_bg = float(row[best_non_bg])
-            if background_guard:
-                p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
-                if p_bg >= p_non_bg:
-                    return "unknown", p_bg, "clip_background"
-            return str(classes[best_non_bg]), p_non_bg, None
-        best_idx = int(np.argmax(row))
-        return str(classes[best_idx]), float(row[best_idx]), None
-    try:
-        pred_cls = clf.predict(feats_np)[0]
-    except Exception as exc:  # noqa: BLE001
-        return "unknown", None, f"classifier_error:{exc}"
-    label = str(pred_cls)
-    if _is_background_class_name(label):
-        return "unknown", None, "clip_background"
-    return label, None, None
+    return _clip_auto_predict_label_impl(
+        feats_np,
+        clf_obj=clf,
+        active_head=active_classifier_head if isinstance(active_classifier_head, dict) else None,
+        background_guard=background_guard,
+        clip_head_predict_proba_fn=_clip_head_predict_proba,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        is_background_class_name_fn=_is_background_class_name,
+    )
 
 
 def _clip_auto_predict_details(
@@ -15263,121 +15228,14 @@ def _clip_auto_predict_details(
     *,
     background_guard: bool = False,
 ) -> Dict[str, Optional[object]]:
-    if clf is None:
-        return {
-            "label": "unknown",
-            "proba": None,
-            "second_label": None,
-            "second_proba": None,
-            "margin": None,
-            "error": "clip_unavailable",
-        }
-    head = active_classifier_head if isinstance(active_classifier_head, dict) else None
-    classes_raw = getattr(clf, "classes_", None)
-    if head is not None:
-        classes = [str(c) for c in list(head.get("classes") or [])]
-    elif classes_raw is None and isinstance(clf, dict):
-        classes = [str(c) for c in list(clf.get("classes") or [])]
-    else:
-        classes = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
-    proba_arr: Optional[np.ndarray] = None
-    if head is not None:
-        proba_arr = _clip_head_predict_proba(feats_np, head)
-    elif hasattr(clf, "predict_proba"):
-        try:
-            proba = clf.predict_proba(feats_np)
-            proba_arr = np.asarray(proba, dtype=np.float32)
-        except Exception:
-            proba_arr = None
-    elif isinstance(clf, dict):
-        proba_arr = _clip_head_predict_proba(feats_np, clf)
-    if proba_arr is not None and proba_arr.ndim == 2 and proba_arr.shape[0] >= 1 and proba_arr.shape[1] == len(classes):
-        row = proba_arr[0]
-        bg_indices = _clip_head_background_indices(classes)
-
-        def _best_two(indices: Sequence[int]) -> Tuple[Optional[int], Optional[float], Optional[int], Optional[float]]:
-            if not indices:
-                return None, None, None, None
-            ordered = sorted(indices, key=lambda i: float(row[i]), reverse=True)
-            best_idx = ordered[0]
-            second_idx = ordered[1] if len(ordered) > 1 else None
-            best_val = float(row[best_idx])
-            second_val = float(row[second_idx]) if second_idx is not None else None
-            return best_idx, best_val, second_idx, second_val
-
-        if bg_indices:
-            non_bg = [idx for idx in range(len(classes)) if idx not in bg_indices]
-            best_idx, best_val, second_idx, second_val = _best_two(non_bg)
-            if best_idx is None:
-                return {
-                    "label": "unknown",
-                    "proba": float(np.max(row)) if row.size else None,
-                    "second_label": None,
-                    "second_proba": None,
-                    "margin": None,
-                    "error": "clip_background",
-                }
-            if background_guard:
-                p_bg = float(np.max(row[bg_indices])) if bg_indices else -1.0
-                if p_bg >= best_val:
-                    return {
-                        "label": "unknown",
-                        "proba": p_bg,
-                        "second_label": str(classes[best_idx]),
-                        "second_proba": best_val,
-                        "margin": float(p_bg - best_val),
-                        "error": "clip_background",
-                    }
-            margin = float(best_val - second_val) if second_val is not None else None
-            return {
-                "label": str(classes[best_idx]),
-                "proba": best_val,
-                "second_label": str(classes[second_idx]) if second_idx is not None else None,
-                "second_proba": second_val,
-                "margin": margin,
-                "error": None,
-            }
-
-        best_idx, best_val, second_idx, second_val = _best_two(range(len(classes)))
-        margin = float(best_val - second_val) if second_val is not None and best_val is not None else None
-        return {
-            "label": str(classes[best_idx]) if best_idx is not None else "unknown",
-            "proba": best_val,
-            "second_label": str(classes[second_idx]) if second_idx is not None else None,
-            "second_proba": second_val,
-            "margin": margin,
-            "error": None,
-        }
-
-    try:
-        pred_cls = clf.predict(feats_np)[0]
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "label": "unknown",
-            "proba": None,
-            "second_label": None,
-            "second_proba": None,
-            "margin": None,
-            "error": f"classifier_error:{exc}",
-        }
-    label = str(pred_cls)
-    if _is_background_class_name(label):
-        return {
-            "label": "unknown",
-            "proba": None,
-            "second_label": None,
-            "second_proba": None,
-            "margin": None,
-            "error": "clip_background",
-        }
-    return {
-        "label": label,
-        "proba": None,
-        "second_label": None,
-        "second_proba": None,
-        "margin": None,
-        "error": None,
-    }
+    return _clip_auto_predict_details_impl(
+        feats_np,
+        clf_obj=clf,
+        active_head=active_classifier_head if isinstance(active_classifier_head, dict) else None,
+        background_guard=background_guard,
+        clip_head_predict_proba_fn=_clip_head_predict_proba,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+    )
 
 
 def _score_detections_with_clip_head(

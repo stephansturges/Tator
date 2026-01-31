@@ -52,6 +52,16 @@ from utils.io import (
 from utils.image import _load_image_size
 from utils.labels import _read_labelmap_lines, _load_labelmap_file
 from utils.parsing import _coerce_int, _coerce_float, _normalise_optional_path, _parse_bool, _safe_run_name
+from utils.glossary import (
+    _glossary_label_key,
+    _extract_glossary_synonyms,
+    _parse_glossary_mapping,
+    _parse_glossary_synonyms,
+    _split_synonym_terms,
+    _clean_sam3_synonym,
+    _normalize_synonym_list,
+    _dedupe_synonyms,
+)
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -6111,115 +6121,6 @@ _SAM3_SYNONYM_CACHE_ORDER: deque[str] = deque()
 _SAM3_SYNONYM_CACHE_LIMIT = 8
 
 
-def _glossary_label_key(label: str) -> str:
-    return _normalize_class_name_for_match(label)
-
-
-def _extract_glossary_synonyms(text: str) -> List[str]:
-    if not text:
-        return []
-    cleaned = re.sub(r"[()]", " ", str(text))
-    parts = re.split(r"[;,/]|\\band\\b|\\bor\\b", cleaned, flags=re.IGNORECASE)
-    synonyms: List[str] = []
-    for part in parts:
-        term = part.strip()
-        if not term:
-            continue
-        term = re.sub(
-            r"^(all kinds of|all kind of|all|including|include|including the|including those|such as|other)\\s+",
-            "",
-            term,
-            flags=re.IGNORECASE,
-        ).strip()
-        term = term.strip(" .")
-        if term:
-            synonyms.append(term)
-    return synonyms
-
-
-def _parse_glossary_synonyms(glossary: str, labelmap: Sequence[str]) -> Dict[str, List[str]]:
-    if not glossary:
-        return {}
-    norm_to_label = {_glossary_label_key(lbl): lbl for lbl in labelmap if str(lbl).strip()}
-    mapping: Dict[str, List[str]] = {}
-    for line in str(glossary).splitlines():
-        raw = line.strip()
-        if not raw:
-            continue
-        key = None
-        rest = None
-        if "->" in raw:
-            key, rest = raw.split("->", 1)
-        elif ":" in raw:
-            key, rest = raw.split(":", 1)
-        elif "=" in raw:
-            key, rest = raw.split("=", 1)
-        elif " - " in raw:
-            key, rest = raw.split(" - ", 1)
-        else:
-            match = re.match(r"^(\\w+)\\s*\\((.+)\\)$", raw)
-            if match:
-                key, rest = match.group(1), match.group(2)
-        if not key or rest is None:
-            continue
-        label = norm_to_label.get(_glossary_label_key(key))
-        if not label:
-            continue
-        synonyms = _extract_glossary_synonyms(rest)
-        if synonyms:
-            mapping.setdefault(label, []).extend(synonyms)
-    return mapping
-
-
-def _parse_glossary_mapping(glossary: str, labelmap: Sequence[str]) -> Dict[str, List[str]]:
-    text = str(glossary or "").strip()
-    if not text:
-        return {}
-    norm_to_label = {_glossary_label_key(lbl): lbl for lbl in labelmap if str(lbl).strip()}
-    parsed: Any = None
-    if text.startswith("{") or text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
-    mapping: Dict[str, List[str]] = {}
-    if isinstance(parsed, dict):
-        for key, value in parsed.items():
-            label = norm_to_label.get(_glossary_label_key(key))
-            if not label:
-                continue
-            terms: List[str] = []
-            if isinstance(value, (list, tuple)):
-                terms = [str(item) for item in value]
-            elif isinstance(value, str):
-                terms = _split_synonym_terms(value)
-            cleaned = _normalize_synonym_list(terms)
-            if cleaned:
-                mapping[label] = cleaned
-    elif isinstance(parsed, list):
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            key = item.get("label") or item.get("name")
-            if not key:
-                continue
-            label = norm_to_label.get(_glossary_label_key(key))
-            if not label:
-                continue
-            raw_terms = item.get("terms") or item.get("synonyms") or item.get("glossary")
-            terms: List[str] = []
-            if isinstance(raw_terms, (list, tuple)):
-                terms = [str(term) for term in raw_terms]
-            elif isinstance(raw_terms, str):
-                terms = _split_synonym_terms(raw_terms)
-            cleaned = _normalize_synonym_list(terms)
-            if cleaned:
-                mapping[label] = cleaned
-    if mapping:
-        return mapping
-    return _parse_glossary_synonyms(glossary, labelmap)
-
-
 def _sam3_synonym_cache_key(labelmap: Sequence[str], glossary: str, max_synonyms: Optional[int]) -> str:
     joined = ",".join([str(lbl).strip() for lbl in labelmap if str(lbl).strip()])
     limit = "none" if max_synonyms is None else str(int(max_synonyms))
@@ -6249,62 +6150,6 @@ def _set_cached_sam3_synonyms(cache_key: str, mapping: Dict[str, List[str]]) -> 
     while len(_SAM3_SYNONYM_CACHE_ORDER) > _SAM3_SYNONYM_CACHE_LIMIT:
         evict = _SAM3_SYNONYM_CACHE_ORDER.popleft()
         _SAM3_SYNONYM_CACHE.pop(evict, None)
-
-
-def _split_synonym_terms(text: str) -> List[str]:
-    if not text:
-        return []
-    parts = re.split(r"[;,/]|\\band\\b|\\bor\\b", str(text), flags=re.IGNORECASE)
-    return [part.strip() for part in parts if part.strip()]
-
-
-def _clean_sam3_synonym(term: str) -> str:
-    if not term:
-        return ""
-    cleaned = str(term).strip()
-    cleaned = re.sub(r"[\"']", "", cleaned).strip()
-    cleaned = re.sub(
-        r"^(all kinds of|all kind of|all|including|include|including the|including those|such as|other|and|or)\\s+",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    ).strip()
-    cleaned = cleaned.strip(" .")
-    if not cleaned:
-        return ""
-    if len(cleaned) > 40:
-        return ""
-    if "->" in cleaned or ":" in cleaned:
-        return ""
-    return cleaned
-
-
-def _normalize_synonym_list(terms: Sequence[str]) -> List[str]:
-    normalized: List[str] = []
-    seen: Set[str] = set()
-    for term in terms:
-        for part in _split_synonym_terms(term):
-            cleaned = _clean_sam3_synonym(part)
-            if not cleaned:
-                continue
-            key = cleaned.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            normalized.append(cleaned)
-    return normalized
-
-
-def _dedupe_synonyms(terms: Sequence[str]) -> List[str]:
-    output: List[str] = []
-    seen: Set[str] = set()
-    for term in terms:
-        key = str(term).strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        output.append(term)
-    return output
 
 
 def _agent_generate_sam3_synonyms(

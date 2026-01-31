@@ -145,6 +145,11 @@ from services.prompt_helper_presets import (
 )
 from services.prompt_helper import _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl
 from services.classifier_jobs import _serialize_clip_job_impl as _serialize_clip_job_impl
+from services.detector_jobs import (
+    _serialize_rfdetr_job_impl as _serialize_rfdetr_job_impl,
+    _serialize_yolo_head_graft_job_impl as _serialize_yolo_head_graft_job_impl,
+    _serialize_yolo_job_impl as _serialize_yolo_job_impl,
+)
 from services.qwen_jobs import _serialize_qwen_job_impl as _serialize_qwen_job_impl
 from services.sam3_jobs import _serialize_sam3_job_impl as _serialize_sam3_job_impl
 from services.segmentation import _serialize_seg_job_impl as _serialize_seg_job_impl
@@ -10628,34 +10633,11 @@ def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:
 
 
 def _serialize_yolo_job(job: YoloTrainingJob) -> Dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "config": job.config,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "result": job.result,
-        "error": job.error,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-    }
+    return _serialize_yolo_job_impl(job)
 
 
 def _serialize_yolo_head_graft_job(job: YoloHeadGraftJob) -> Dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "config": job.config,
-        "logs": job.logs,
-        "result": job.result,
-        "error": job.error,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-    }
+    return _serialize_yolo_head_graft_job_impl(job)
 
 
 def _yolo_job_update(
@@ -10794,19 +10776,7 @@ def _yolo_job_append_metric(job: YoloTrainingJob, metric: Dict[str, Any]) -> Non
 
 
 def _serialize_rfdetr_job(job: RfDetrTrainingJob) -> Dict[str, Any]:
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "config": job.config,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "result": job.result,
-        "error": job.error,
-        "created_at": job.created_at,
-        "updated_at": job.updated_at,
-    }
+    return _serialize_rfdetr_job_impl(job)
 
 
 def _rfdetr_job_update(

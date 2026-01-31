@@ -160,6 +160,7 @@ from services.datasets import (
     _resolve_rfdetr_training_dataset_impl as _resolve_rfdetr_training_dataset_impl,
     _compute_labelmap_hash_impl as _compute_labelmap_hash_impl,
     _compute_dataset_signature_impl as _compute_dataset_signature_impl,
+    _purge_dataset_artifacts_impl as _purge_dataset_artifacts_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -10460,27 +10461,13 @@ AGENT_MINING_CASCADES_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _purge_dataset_artifacts(dataset_id: str) -> None:
-    """Remove per-dataset agent/prompt-helper artifacts."""
-    safe_dataset = _normalise_relative_path(dataset_id)
-    for derived_root in (
-        AGENT_MINING_META_ROOT / safe_dataset,
-        AGENT_MINING_DET_CACHE_ROOT / safe_dataset,
-    ):
-        try:
-            shutil.rmtree(derived_root, ignore_errors=True)
-        except Exception:
-            pass
-    try:
-        for preset_path in PROMPT_HELPER_PRESET_ROOT.glob("*.json"):
-            try:
-                with preset_path.open("r", encoding="utf-8") as handle:
-                    preset_data = json.load(handle)
-                if preset_data.get("dataset_id") in {dataset_id, safe_dataset}:
-                    preset_path.unlink(missing_ok=True)
-            except Exception:
-                continue
-    except Exception:
-        pass
+    return _purge_dataset_artifacts_impl(
+        dataset_id,
+        normalise_relative_path_fn=_normalise_relative_path,
+        agent_mining_meta_root=AGENT_MINING_META_ROOT,
+        agent_mining_det_cache_root=AGENT_MINING_DET_CACHE_ROOT,
+        prompt_helper_preset_root=PROMPT_HELPER_PRESET_ROOT,
+    )
 CLIP_DATASET_JOBS: Dict[str, ClipDatasetUploadJob] = {}
 CLIP_DATASET_JOBS_LOCK = threading.Lock()
 QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}

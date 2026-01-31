@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple, List
 
@@ -64,6 +66,37 @@ def _agent_load_labelmap_meta(
     if not glossary and labelmap:
         glossary = default_glossary_fn(labelmap)
     return labelmap, glossary
+
+
+def _purge_dataset_artifacts_impl(
+    dataset_id: str,
+    *,
+    normalise_relative_path_fn,
+    agent_mining_meta_root: Path,
+    agent_mining_det_cache_root: Path,
+    prompt_helper_preset_root: Path,
+) -> None:
+    """Remove per-dataset agent/prompt-helper artifacts."""
+    safe_dataset = normalise_relative_path_fn(dataset_id)
+    for derived_root in (
+        agent_mining_meta_root / safe_dataset,
+        agent_mining_det_cache_root / safe_dataset,
+    ):
+        try:
+            shutil.rmtree(derived_root, ignore_errors=True)
+        except Exception:
+            pass
+    try:
+        for preset_path in prompt_helper_preset_root.glob("*.json"):
+            try:
+                with preset_path.open("r", encoding="utf-8") as handle:
+                    preset_data = json.load(handle)
+                if preset_data.get("dataset_id") in {dataset_id, safe_dataset}:
+                    preset_path.unlink(missing_ok=True)
+            except Exception:
+                continue
+    except Exception:
+        pass
 
 
 def _detect_yolo_layout_impl(dataset_root: Path) -> dict:

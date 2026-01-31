@@ -94,6 +94,32 @@ def _yolo_job_log_impl(
         pass
 
 
+def _yolo_head_graft_job_log_impl(
+    job,
+    message: str,
+    *,
+    max_logs: int,
+    audit_fn=None,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > max_logs:
+        job.logs[:] = job.logs[-max_logs:]
+    job.updated_at = time.time()
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    try:
+        logger.info("[yolo-graft %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+    if audit_fn is not None:
+        try:
+            audit_fn(job, message, level="info")
+        except Exception:
+            pass
+
+
 def _yolo_job_append_metric_impl(job, metric: Dict[str, Any], *, max_points: int) -> None:
     if not metric:
         return
@@ -152,3 +178,42 @@ def _rfdetr_job_append_metric_impl(job, metric: Dict[str, Any], *, max_points: i
     if len(job.metrics) > max_points:
         job.metrics[:] = job.metrics[-max_points:]
     job.updated_at = time.time()
+
+
+def _yolo_head_graft_job_update_impl(
+    job,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    audit_fn=None,
+) -> None:
+    previous_status = job.status
+    if status is not None:
+        job.status = status
+    if message is not None:
+        job.message = message
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, progress))
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
+    if audit_fn is not None and status is not None and status != previous_status:
+        try:
+            audit_fn(
+                job,
+                f"status:{previous_status}->{status}",
+                event="status",
+                extra={"from": previous_status, "to": status},
+            )
+        except Exception:
+            pass
+    if audit_fn is not None and error is not None:
+        try:
+            audit_fn(job, f"error:{error}", level="error", event="error")
+        except Exception:
+            pass

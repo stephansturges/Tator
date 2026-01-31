@@ -160,6 +160,8 @@ from services.detector_jobs import (
     _yolo_job_append_metric_impl as _yolo_job_append_metric_impl,
     _yolo_job_log_impl as _yolo_job_log_impl,
     _yolo_job_update_impl as _yolo_job_update_impl,
+    _yolo_head_graft_job_log_impl as _yolo_head_graft_job_log_impl,
+    _yolo_head_graft_job_update_impl as _yolo_head_graft_job_update_impl,
 )
 from services.qwen_jobs import (
     _log_qwen_get_request_impl as _log_qwen_get_request_impl,
@@ -10650,40 +10652,25 @@ def _yolo_head_graft_job_update(
     error: Optional[str] = None,
     result: Optional[Dict[str, Any]] = None,
 ) -> None:
-    previous_status = job.status
-    if status is not None:
-        job.status = status
-    if message is not None:
-        job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if result is not None:
-        job.result = result
-    job.updated_at = time.time()
-    if status is not None and status != previous_status:
-        _yolo_head_graft_audit(
-            job,
-            f"status:{previous_status}->{status}",
-            event="status",
-            extra={"from": previous_status, "to": status},
-        )
-    if error is not None:
-        _yolo_head_graft_audit(job, f"error:{error}", level="error", event="error")
+    _yolo_head_graft_job_update_impl(
+        job,
+        status=status,
+        message=message,
+        progress=progress,
+        error=error,
+        result=result,
+        audit_fn=_yolo_head_graft_audit,
+    )
 
 
 def _yolo_head_graft_job_log(job: YoloHeadGraftJob, message: str) -> None:
-    entry = {"timestamp": time.time(), "message": message}
-    job.logs.append(entry)
-    if len(job.logs) > YOLO_MAX_LOG_LINES:
-        job.logs[:] = job.logs[-YOLO_MAX_LOG_LINES:]
-    job.updated_at = time.time()
-    try:
-        logger.info("[yolo-graft %s] %s", job.job_id[:8], message)
-    except Exception:
-        pass
-    _yolo_head_graft_audit(job, message, level="info")
+    _yolo_head_graft_job_log_impl(
+        job,
+        message,
+        max_logs=YOLO_MAX_LOG_LINES,
+        audit_fn=_yolo_head_graft_audit,
+        logger=logger,
+    )
 
 
 def _yolo_head_graft_audit(

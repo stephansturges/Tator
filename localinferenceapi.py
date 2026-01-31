@@ -95,7 +95,11 @@ from utils.glossary import (
 from utils.datasets import _iter_yolo_images
 from services.prepass_config import _normalize_recipe_thresholds
 from services.prepass_recipes import _write_prepass_recipe_meta, _load_prepass_recipe_meta
-from services.datasets import _load_dataset_glossary, _load_qwen_labelmap
+from services.datasets import (
+    _load_dataset_glossary,
+    _load_qwen_labelmap,
+    _agent_load_labelmap_meta as _load_labelmap_meta,
+)
 from services.prepass import (
     _agent_merge_prepass_detections,
     _agent_filter_scoreless_detections,
@@ -6425,31 +6429,18 @@ def _agent_tool_look_and_inspect(
 
 
 def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str]:
-    labelmap: List[str] = []
-    glossary = ""
-    if dataset_id:
-        dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
-        yolo_labels = _discover_yolo_labelmap(dataset_root)
-        if yolo_labels:
-            labelmap = yolo_labels
-        else:
-            labelmap = _load_qwen_labelmap(
-                dataset_root,
-                load_qwen_meta=_load_qwen_dataset_metadata,
-                collect_labels=_collect_labels_from_qwen_jsonl,
-            )
-        meta = _load_sam3_dataset_metadata(dataset_root) or _load_qwen_dataset_metadata(dataset_root) or {}
-        glossary = _normalize_labelmap_glossary(
-            meta.get("labelmap_glossary") or meta.get("glossary") or meta.get("labelmap_ontology")
-        )
-        if not glossary and labelmap:
-            glossary = _default_agent_glossary_for_labelmap(labelmap)
-        return labelmap, glossary
-    if active_label_list:
-        labelmap = list(active_label_list)
-    if not glossary and labelmap:
-        glossary = _default_agent_glossary_for_labelmap(labelmap)
-    return labelmap, glossary
+    return _load_labelmap_meta(
+        dataset_id,
+        active_label_list=active_label_list,
+        resolve_dataset=_resolve_sam3_or_qwen_dataset,
+        discover_yolo_labelmap=_discover_yolo_labelmap,
+        load_qwen_labelmap=_load_qwen_labelmap,
+        load_sam3_meta=_load_sam3_dataset_metadata,
+        load_qwen_meta=_load_qwen_dataset_metadata,
+        normalize_glossary=_normalize_labelmap_glossary,
+        default_glossary_fn=_default_agent_glossary_for_labelmap,
+        collect_labels=_collect_labels_from_qwen_jsonl,
+    )
 
 
 def _agent_current_label_colors(labels: Sequence[str]) -> Dict[str, str]:

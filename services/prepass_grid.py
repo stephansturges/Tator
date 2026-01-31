@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from utils.coords import _qwen_bbox_to_xyxy
@@ -208,6 +209,70 @@ def _agent_grid_cells(grid: Optional[Mapping[str, Any]]) -> List[str]:
         for col in labels:
             cells.append(f"{col}{row}")
     return cells
+
+
+def _agent_tool_grid_cell_from_args(
+    tool_args: Mapping[str, Any],
+    tool_result: Any,
+    *,
+    grid: Optional[Mapping[str, Any]],
+    cluster_index: Mapping[int, Mapping[str, Any]],
+) -> Optional[str]:
+    if not grid:
+        return None
+    grid_cell = tool_args.get("grid_cell")
+    if grid_cell:
+        return str(grid_cell)
+    cluster_id = tool_args.get("cluster_id")
+    if cluster_id is not None:
+        cluster = cluster_index.get(int(cluster_id))
+        if cluster and cluster.get("grid_cell"):
+            return str(cluster.get("grid_cell"))
+    if isinstance(tool_result, dict):
+        agent_view = tool_result.get("__agent_view__")
+        if isinstance(agent_view, dict) and agent_view.get("grid_cell"):
+            return str(agent_view.get("grid_cell"))
+    window_bbox_2d = tool_args.get("window_bbox_2d")
+    if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
+        return _agent_grid_cell_for_window_bbox(grid, window_bbox_2d)
+    window_arg = tool_args.get("window")
+    if isinstance(window_arg, dict):
+        window_bbox_2d = window_arg.get("bbox_2d")
+        if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
+            return _agent_grid_cell_for_window_bbox(grid, window_bbox_2d)
+    return None
+
+
+def _agent_record_grid_tool_usage(
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    tool_result: Any,
+    *,
+    grid: Optional[Mapping[str, Any]],
+    cluster_index: Mapping[int, Mapping[str, Any]],
+    usage: Dict[str, Dict[str, int]],
+    usage_last: Dict[str, Dict[str, Any]],
+    track_tools: Optional[Sequence[str]] = None,
+) -> None:
+    if not grid:
+        return
+    if track_tools is None:
+        track_tools = (
+            "look_and_inspect",
+            "classify_crop",
+            "view_cell_raw",
+            "view_cell_overlay",
+        )
+    if tool_name not in set(track_tools):
+        return
+    cell = _agent_tool_grid_cell_from_args(
+        tool_args, tool_result, grid=grid, cluster_index=cluster_index
+    )
+    if not cell:
+        return
+    cell_usage = usage.setdefault(cell, {})
+    cell_usage[tool_name] = int(cell_usage.get(tool_name, 0)) + 1
+    usage_last[cell] = {"tool": tool_name, "ts": time.time()}
 
 
 def _agent_grid_cell_for_detection(

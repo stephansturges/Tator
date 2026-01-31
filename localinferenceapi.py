@@ -128,6 +128,8 @@ from services.prepass_grid import (
     _agent_grid_usage_text,
     _agent_grid_label_counts,
     _agent_quadrant_windows_qwen,
+    _agent_tool_grid_cell_from_args as _grid_cell_from_args,
+    _agent_record_grid_tool_usage as _record_grid_usage,
 )
 from services.glossary_library import (
     _normalize_glossary_name,
@@ -6593,33 +6595,12 @@ def _agent_tool_grid_cell_from_args(
     tool_args: Mapping[str, Any],
     tool_result: Any,
 ) -> Optional[str]:
-    if not _AGENT_ACTIVE_GRID:
-        return None
-    grid_cell = tool_args.get("grid_cell")
-    if grid_cell:
-        return str(grid_cell)
-    cluster_id = tool_args.get("cluster_id")
-    if cluster_id is not None:
-        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cluster_id))
-        if cluster and cluster.get("grid_cell"):
-            return str(cluster.get("grid_cell"))
-    if isinstance(tool_result, dict):
-        agent_view = tool_result.get("__agent_view__")
-        if isinstance(agent_view, dict) and agent_view.get("grid_cell"):
-            return str(agent_view.get("grid_cell"))
-    window_bbox_2d = tool_args.get("window_bbox_2d")
-    if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
-        cell = _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID, window_bbox_2d)
-        if cell:
-            return str(cell)
-    window_arg = tool_args.get("window")
-    if isinstance(window_arg, dict):
-        window_bbox_2d = window_arg.get("bbox_2d")
-        if isinstance(window_bbox_2d, (list, tuple)) and len(window_bbox_2d) >= 4:
-            cell = _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID, window_bbox_2d)
-            if cell:
-                return str(cell)
-    return None
+    return _grid_cell_from_args(
+        tool_args,
+        tool_result,
+        grid=_AGENT_ACTIVE_GRID,
+        cluster_index=_AGENT_ACTIVE_CLUSTER_INDEX,
+    )
 
 
 def _agent_record_grid_tool_usage(
@@ -6627,28 +6608,15 @@ def _agent_record_grid_tool_usage(
     tool_args: Mapping[str, Any],
     tool_result: Any,
 ) -> None:
-    if not _AGENT_ACTIVE_GRID:
-        return
-    track_tools = {
-        "look_and_inspect",
-        "image_zoom_in_tool",
-        "zoom_and_detect",
-        "run_detector",
-        "sam3_text",
-        "sam3_similarity",
-        "qwen_infer",
-        "classify_crop",
-        "view_cell_raw",
-        "view_cell_overlay",
-    }
-    if tool_name not in track_tools:
-        return
-    cell = _agent_tool_grid_cell_from_args(tool_args, tool_result)
-    if not cell:
-        return
-    usage = _AGENT_GRID_TOOL_USAGE.setdefault(cell, {})
-    usage[tool_name] = int(usage.get(tool_name, 0)) + 1
-    _AGENT_GRID_TOOL_LAST[cell] = {"tool": tool_name, "ts": time.time()}
+    _record_grid_usage(
+        tool_name,
+        tool_args,
+        tool_result,
+        grid=_AGENT_ACTIVE_GRID,
+        cluster_index=_AGENT_ACTIVE_CLUSTER_INDEX,
+        usage=_AGENT_GRID_TOOL_USAGE,
+        usage_last=_AGENT_GRID_TOOL_LAST,
+    )
 
 
 

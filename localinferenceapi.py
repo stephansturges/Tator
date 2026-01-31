@@ -48,6 +48,8 @@ from utils.io import (
     _atomic_write_text,
     _atomic_write_json,
     _read_csv_last_row,
+    _sanitize_yolo_run_id as _sanitize_yolo_run_id_impl,
+    _compute_dir_signature as _compute_dir_signature_impl,
 )
 from utils.image import _load_image_size, _slice_image_sahi
 from utils.labels import (
@@ -11431,10 +11433,7 @@ def _delete_run_scope(run_dir: Path, scope: str) -> Tuple[List[str], int]:
 
 
 def _sanitize_yolo_run_id(raw: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", (raw or "").strip()).strip("-_.")
-    if cleaned:
-        return cleaned
-    return uuid.uuid4().hex[:12]
+    return _sanitize_yolo_run_id_impl(raw)
 
 
 def _yolo_run_dir(run_id: str, *, create: bool = False) -> Path:
@@ -12924,22 +12923,7 @@ def _decode_image_base64(
 
 
 def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = None) -> str:
-    """Return a stable signature for all files under ``root``."""
-    entries: List[str] = []
-    if not root.exists():
-        return ""
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if allowed_exts is not None and path.suffix.lower() not in allowed_exts:
-            continue
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        rel = path.relative_to(root)
-        entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
-    return _stable_hash(entries)
+    return _compute_dir_signature_impl(root, allowed_exts=allowed_exts)
 
 
 def _path_is_within_root(path: Path, root: Path) -> bool:

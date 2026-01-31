@@ -4,9 +4,10 @@ import csv
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from fastapi import HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST
@@ -62,6 +63,32 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+
+
+def _sanitize_yolo_run_id(raw: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", (raw or "").strip()).strip("-_.")
+    if cleaned:
+        return cleaned
+    return uuid.uuid4().hex[:12]
+
+
+def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = None) -> str:
+    """Return a stable signature for all files under ``root``."""
+    entries: List[str] = []
+    if not root.exists():
+        return ""
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if allowed_exts is not None and path.suffix.lower() not in allowed_exts:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        rel = path.relative_to(root)
+        entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
+    return _stable_hash(entries)
 def _read_csv_last_row(path: Path) -> Optional[Dict[str, str]]:
     if not path.exists():
         return None

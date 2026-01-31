@@ -212,6 +212,10 @@ from services.classifier_select import (
     _agent_classifier_matches_labelmap as _classifier_matches_labelmap,
     _agent_classifier_classes_for_path as _classifier_classes_for_path,
 )
+from services.classifier_batch import (
+    _resolve_classifier_batch_size as _resolve_classifier_batch,
+    _predict_proba_batched as _predict_proba_batch,
+)
 from services.overlay_tools import (
     _agent_overlay_base_image as _overlay_base_image,
     _agent_overlay_crop_xyxy as _overlay_crop_xyxy,
@@ -6712,13 +6716,7 @@ def _agent_merge_detections(
 
 
 def _resolve_classifier_batch_size() -> int:
-    raw = os.environ.get("AGENT_CLASSIFIER_BATCH_SIZE")
-    try:
-        if raw is not None and str(raw).strip():
-            return max(1, min(int(raw), 512))
-    except Exception:
-        pass
-    return 64
+    return _resolve_classifier_batch()
 
 
 def _predict_proba_batched(
@@ -6727,40 +6725,19 @@ def _predict_proba_batched(
     *,
     batch_size: int,
 ) -> Optional[np.ndarray]:
-    if not crops:
-        return None
-    results: List[np.ndarray] = []
-    idx = 0
-    bs = max(1, batch_size)
-    while idx < len(crops):
-        chunk = list(crops[idx : idx + bs])
-        feats = _encode_pil_batch_for_head(chunk, head=head, batch_size_override=bs)
-        if feats is None:
-            if bs > 1:
-                bs = max(1, bs // 2)
-                if torch.cuda.is_available():
-                    try:
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-                continue
-            return None
-        proba = _clip_head_predict_proba(feats, head)
-        if proba is None or proba.ndim != 2 or proba.shape[0] != len(chunk):
-            if bs > 1:
-                bs = max(1, bs // 2)
-                if torch.cuda.is_available():
-                    try:
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-                continue
-            return None
-        results.append(proba)
-        idx += len(chunk)
-    if not results:
-        return None
-    return np.vstack(results)
+    empty_cache_fn = None
+    if torch.cuda.is_available():
+        empty_cache_fn = torch.cuda.empty_cache
+    return _predict_proba_batch(
+        crops,
+        head,
+        batch_size=batch_size,
+        encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
+            items, head=head_obj, batch_size_override=bs
+        ),
+        predict_proba_fn=_clip_head_predict_proba,
+        empty_cache_fn=empty_cache_fn,
+    )
 
 
 def _agent_classifier_review(

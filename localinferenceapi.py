@@ -106,6 +106,7 @@ from services.prepass import (
     _agent_label_counts_summary,
     _agent_compact_tool_result,
 )
+from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.prepass_grid import (
     _agent_grid_col_label,
     _agent_grid_col_index,
@@ -6718,16 +6719,7 @@ def _agent_register_detections(
 
 
 def _agent_cluster_label_counts(cluster_ids: Sequence[int]) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for cid in cluster_ids:
-        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
-        if not cluster:
-            continue
-        label = str(cluster.get("label") or "").strip()
-        if not label:
-            continue
-        counts[label] = counts.get(label, 0) + 1
-    return counts
+    return _cluster_label_counts(cluster_ids, _AGENT_ACTIVE_CLUSTER_INDEX)
 
 
 def _agent_cluster_summaries(
@@ -6736,27 +6728,14 @@ def _agent_cluster_summaries(
     max_items: int = 0,
     include_ids: bool = True,
 ) -> Dict[str, Any]:
-    items: List[Dict[str, Any]] = []
-    for cid in cluster_ids:
-        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
-        if not cluster:
-            continue
-        item = {
-            "handle": _agent_cluster_handle(cluster),
-            "label": cluster.get("label"),
-            "grid_cell": cluster.get("grid_cell"),
-            "score": cluster.get("score"),
-            "score_source": cluster.get("score_source") or cluster.get("source"),
-            "bbox_2d": _agent_round_bbox_2d(cluster.get("bbox_2d")),
-        }
-        if include_ids:
-            item["cluster_id"] = int(cluster.get("cluster_id"))
-        items.append(item)
-    total = len(items)
-    if max_items <= 0:
-        return {"items": items, "total": total, "truncated": False}
-    truncated = total > max_items
-    return {"items": items[:max_items], "total": total, "truncated": truncated}
+    return _cluster_summaries(
+        cluster_ids,
+        _AGENT_ACTIVE_CLUSTER_INDEX,
+        handle_fn=_agent_cluster_handle,
+        round_bbox_fn=_agent_round_bbox_2d,
+        max_items=max_items,
+        include_ids=include_ids,
+    )
 
 
 def _agent_overlay_base_image() -> Optional[Image.Image]:

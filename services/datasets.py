@@ -65,6 +65,67 @@ def _find_qwen_dataset_by_signature_impl(
     return None
 
 
+def _load_registry_dataset_metadata_impl(dataset_dir: Path, *, load_json_metadata_fn, meta_name: str) -> Optional[Dict[str, Any]]:
+    return load_json_metadata_fn(dataset_dir / meta_name)
+
+
+def _persist_dataset_metadata_impl(
+    dataset_dir: Path,
+    metadata: Dict[str, Any],
+    *,
+    meta_name: str,
+    logger=None,
+) -> None:
+    meta_path = dataset_dir / meta_name
+    try:
+        with meta_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to write dataset metadata for %s: %s", dataset_dir, exc)
+
+
+def _coerce_dataset_metadata_impl(
+    dataset_dir: Path,
+    raw_meta: Optional[Dict[str, Any]],
+    source: str,
+    *,
+    dataset_context_key: str = "dataset_context",
+    compute_dir_signature_fn=None,
+    persist_metadata_fn=None,
+) -> Dict[str, Any]:
+    meta = dict(raw_meta or {})
+    updated = False
+    if "id" not in meta:
+        meta["id"] = dataset_dir.name
+        updated = True
+    if "label" not in meta:
+        meta["label"] = meta["id"]
+        updated = True
+    dataset_type = meta.get("type") or meta.get("dataset_type") or "bbox"
+    meta["type"] = dataset_type
+    if "classes" not in meta:
+        meta["classes"] = []
+        updated = True
+    if "context" not in meta and meta.get(dataset_context_key):
+        meta["context"] = meta.get(dataset_context_key) or ""
+        updated = True
+    if "created_at" not in meta:
+        meta["created_at"] = dataset_dir.stat().st_mtime
+        updated = True
+    if "source" not in meta:
+        meta["source"] = source
+        updated = True
+    signature = meta.get("signature")
+    if not signature and compute_dir_signature_fn is not None:
+        signature = compute_dir_signature_fn(dataset_dir)
+        meta["signature"] = signature
+        updated = True
+    if source == "registry" and updated and persist_metadata_fn is not None:
+        persist_metadata_fn(dataset_dir, meta)
+    return meta
+
+
 def _agent_load_labelmap_meta(
     dataset_id: Optional[str],
     *,

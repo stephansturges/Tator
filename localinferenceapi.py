@@ -202,6 +202,9 @@ from services.datasets import (
     _purge_dataset_artifacts_impl as _purge_dataset_artifacts_impl,
     _ensure_qwen_dataset_signature_impl as _ensure_qwen_dataset_signature_impl,
     _find_qwen_dataset_by_signature_impl as _find_qwen_dataset_by_signature_impl,
+    _load_registry_dataset_metadata_impl as _load_registry_dataset_metadata_impl,
+    _persist_dataset_metadata_impl as _persist_dataset_metadata_impl,
+    _coerce_dataset_metadata_impl as _coerce_dataset_metadata_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
     _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
     _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
@@ -10819,49 +10822,31 @@ def _find_qwen_dataset_by_signature(signature: str) -> Optional[Path]:
 
 
 def _load_registry_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
-    return _load_json_metadata(dataset_dir / DATASET_META_NAME)
+    return _load_registry_dataset_metadata_impl(
+        dataset_dir,
+        load_json_metadata_fn=_load_json_metadata,
+        meta_name=DATASET_META_NAME,
+    )
 
 
 def _persist_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
-    meta_path = dataset_dir / DATASET_META_NAME
-    try:
-        with meta_path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to write dataset metadata for %s: %s", dataset_dir, exc)
+    _persist_dataset_metadata_impl(
+        dataset_dir,
+        metadata,
+        meta_name=DATASET_META_NAME,
+        logger=logger,
+    )
 
 
 def _coerce_dataset_metadata(dataset_dir: Path, raw_meta: Optional[Dict[str, Any]], source: str) -> Dict[str, Any]:
-    meta = dict(raw_meta or {})
-    updated = False
-    if "id" not in meta:
-        meta["id"] = dataset_dir.name
-        updated = True
-    if "label" not in meta:
-        meta["label"] = meta["id"]
-        updated = True
-    dataset_type = meta.get("type") or meta.get("dataset_type") or "bbox"
-    meta["type"] = dataset_type
-    if "classes" not in meta:
-        meta["classes"] = []
-        updated = True
-    if "context" not in meta and meta.get("dataset_context"):
-        meta["context"] = meta.get("dataset_context") or ""
-        updated = True
-    if "created_at" not in meta:
-        meta["created_at"] = dataset_dir.stat().st_mtime
-        updated = True
-    if "source" not in meta:
-        meta["source"] = source
-        updated = True
-    signature = meta.get("signature")
-    if not signature:
-        signature = _compute_dir_signature(dataset_dir)
-        meta["signature"] = signature
-        updated = True
-    if source == "registry" and updated:
-        _persist_dataset_metadata(dataset_dir, meta)
-    return meta
+    return _coerce_dataset_metadata_impl(
+        dataset_dir,
+        raw_meta,
+        source,
+        dataset_context_key="dataset_context",
+        compute_dir_signature_fn=_compute_dir_signature,
+        persist_metadata_fn=_persist_dataset_metadata,
+    )
 
 
 def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:

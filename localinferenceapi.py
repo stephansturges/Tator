@@ -203,7 +203,7 @@ from services.prepass_provenance import (
     _agent_attach_provenance,
     _agent_finalize_provenance,
 )
-from services.sam3_synonyms import _agent_generate_sam3_synonyms
+from services.sam3_synonyms import _agent_generate_sam3_synonyms, _sam3_prompt_variants
 from services.cluster_handles import (
     _agent_refresh_handle_index as _refresh_handle_index,
     _agent_cluster_handle as _cluster_handle,
@@ -5968,7 +5968,13 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
                     default_synonyms=_DEFAULT_SAM3_SYNONYMS,
                     label_key_fn=_glossary_label_key,
                 )
-                prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=1)
+                prompts = _sam3_prompt_variants(
+                    label,
+                    synonym_map,
+                    max_prompts=1,
+                    default_synonyms=_DEFAULT_SAM3_SYNONYMS,
+                    label_key_fn=_glossary_label_key,
+                )
                 if prompts:
                     args["prompt"] = prompts[0]
                 else:
@@ -6094,43 +6100,6 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
 def _agent_load_labelmap(dataset_id: Optional[str]) -> List[str]:
     labelmap, _ = _agent_load_labelmap_meta(dataset_id)
     return labelmap
-
-
-def _sam3_prompt_variants(
-    label: str,
-    synonym_map: Mapping[str, List[str]],
-    *,
-    max_prompts: int = 6,
-) -> List[str]:
-    if not label:
-        return []
-    canonical = str(label).strip()
-    label_norm = _glossary_label_key(canonical)
-    prompts: List[str] = []
-    seen: Set[str] = set()
-
-    def add(term: str) -> None:
-        text = str(term).strip()
-        if not text:
-            return
-        key = text.lower()
-        if key in seen:
-            return
-        seen.add(key)
-        prompts.append(text)
-
-    if "_" in canonical:
-        add(canonical.replace("_", " "))
-    add(canonical)
-    expanded_terms = synonym_map.get(canonical, [])
-    for term in expanded_terms:
-        add(term)
-    if not expanded_terms:
-        for term in _DEFAULT_SAM3_SYNONYMS.get(label_norm, []):
-            add(term)
-    if max_prompts > 0:
-        prompts = prompts[:max_prompts]
-    return prompts
 
 
 @_register_agent_tool("look_and_inspect")
@@ -9393,7 +9362,13 @@ def _agent_run_prepass(
                 base_terms = term_meta.get(label, {}).get("base_terms", [])
                 expanded_terms = term_meta.get(label, {}).get("expanded_terms", [])
                 max_prompts = max(2, len(synonym_map.get(label, [])) + 2)
-                prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=max_prompts)
+                prompts = _sam3_prompt_variants(
+                    label,
+                    synonym_map,
+                    max_prompts=max_prompts,
+                    default_synonyms=_DEFAULT_SAM3_SYNONYMS,
+                    label_key_fn=_glossary_label_key,
+                )
                 if not prompts:
                     prompts = [str(label).replace("_", " ").strip() or str(label).strip()]
                 for prompt in prompts:
@@ -10248,7 +10223,13 @@ def _agent_run_deep_prepass_part_a(
             base_terms = term_meta.get(label, {}).get("base_terms", [])
             expanded_terms = term_meta.get(label, {}).get("expanded_terms", [])
             max_prompts = max(2, len(synonym_map.get(label, [])) + 2)
-            prompts = _sam3_prompt_variants(label, synonym_map, max_prompts=max_prompts)
+            prompts = _sam3_prompt_variants(
+                label,
+                synonym_map,
+                max_prompts=max_prompts,
+                default_synonyms=_DEFAULT_SAM3_SYNONYMS,
+                label_key_fn=_glossary_label_key,
+            )
             if not prompts:
                 prompts = [str(label).replace("_", " ").strip() or str(label).strip()]
             for prompt in prompts:

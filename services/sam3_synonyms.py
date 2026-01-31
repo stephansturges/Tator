@@ -129,3 +129,42 @@ def _agent_generate_sam3_synonyms(
         }
         mapping[label] = expanded_terms
     return mapping, term_meta
+
+
+def _sam3_prompt_variants(
+    label: str,
+    synonym_map: Mapping[str, List[str]],
+    *,
+    max_prompts: int = 6,
+    default_synonyms: Optional[Mapping[str, List[str]]] = None,
+    label_key_fn=None,
+) -> List[str]:
+    if not label:
+        return []
+    canonical = str(label).strip()
+    prompts: List[str] = []
+    seen: set[str] = set()
+
+    def add(term: str) -> None:
+        text = str(term).strip()
+        if not text:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        prompts.append(text)
+
+    if "_" in canonical:
+        add(canonical.replace("_", " "))
+    add(canonical)
+    expanded_terms = synonym_map.get(canonical, [])
+    for term in expanded_terms:
+        add(term)
+    if not expanded_terms and default_synonyms and label_key_fn:
+        label_norm = label_key_fn(canonical)
+        for term in default_synonyms.get(label_norm, []):
+            add(term)
+    if max_prompts > 0:
+        prompts = prompts[:max_prompts]
+    return prompts

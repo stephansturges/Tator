@@ -267,6 +267,10 @@ from services.calibration_helpers import (
     _calibration_prepass_worker as _calibration_prepass_worker_impl,
 )
 from services.qwen import (
+    _extract_balanced_json as _extract_balanced_json_impl,
+    _generate_qwen_text as _generate_qwen_text_impl,
+    _parse_prompt_candidates as _parse_prompt_candidates_impl,
+    _generate_prompt_text as _generate_prompt_text_impl,
     _caption_glossary_map as _caption_glossary_map_impl,
     _caption_preferred_label as _caption_preferred_label_impl,
     _build_qwen_caption_prompt as _build_qwen_caption_prompt_impl,
@@ -314,19 +318,7 @@ def _message_text_for_tool_parse(message: Any) -> str:
 
 
 def _extract_balanced_json(text: str, start_char: str, end_char: str) -> Optional[str]:
-    start = text.find(start_char)
-    if start < 0:
-        return None
-    depth = 0
-    for idx in range(start, len(text)):
-        ch = text[idx]
-        if ch == start_char:
-            depth += 1
-        elif ch == end_char:
-            depth -= 1
-            if depth == 0:
-                return text[start : idx + 1]
-    return None
+    return _extract_balanced_json_impl(text, start_char, end_char)
 
 
 def _parse_tool_call_payload(payload: str) -> Optional[Dict[str, Any]]:
@@ -4607,66 +4599,19 @@ def _generate_qwen_text(
     use_system_prompt: bool = True,
 ) -> str:
     """Text-only generation with Qwen for small helper tasks (no images)."""
-    model, processor = _ensure_qwen_ready()
-    messages: List[Dict[str, Any]] = []
-    sys_prompt = (active_qwen_metadata or {}).get("system_prompt")
-    if use_system_prompt and sys_prompt:
-        messages.append(
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": sys_prompt}],
-            }
-        )
-    messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = processor(
-        text=[text],
-        padding=True,
-        return_tensors="pt",
+    return _generate_qwen_text_impl(
+        prompt,
+        max_new_tokens=max_new_tokens,
+        use_system_prompt=use_system_prompt,
+        system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
+        ensure_qwen_ready_fn=_ensure_qwen_ready,
+        resolve_qwen_device_fn=_resolve_qwen_device,
     )
-    device = qwen_device or _resolve_qwen_device()
-    inputs = inputs.to(device)
-    with torch.inference_mode():
-        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, temperature=0.0, top_p=1.0)
-    input_len = inputs["input_ids"].shape[1]
-    generated_ids = outputs[:, input_len:]
-    decoded = processor.batch_decode(
-        generated_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
-    return decoded.strip()
 
 
 def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
     """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
-    if not raw:
-        return []
-    parts = re.split(r"[,;\n]+", raw)
-    parsed: List[str] = []
-    for part in parts:
-        cand = part.strip().strip('"').strip("'")
-        cand = re.sub(r"(?i)^assistant\s+final[:\s]+", "", cand)
-        if not cand:
-            continue
-        if cand.upper() == "STOP":
-            break
-        # Must be letters/spaces/hyphens only.
-        if re.search(r"[^A-Za-z\s\-]", cand):
-            continue
-        words = cand.split()
-        if not (1 <= len(words) <= 4):
-            continue
-        if any(len(w) < 2 for w in words):
-            continue
-        key = cand.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        parsed.append(cand)
-        if limit and len(parsed) >= limit:
-            break
-    return parsed
+    return _parse_prompt_candidates_impl(raw, seen, limit)
 
 
 def _generate_prompt_text(
@@ -4678,19 +4623,11 @@ def _generate_prompt_text(
     Text-only helper for prompt brainstorming/critique.
     Uses Qwen (text-only) and returns empty string on failure.
     """
-    try:
-        helper_prompt = (
-            "You generate short noun-phrase candidates for open-vocabulary detection. "
-            "Respond with a comma-separated list only (no prose). "
-            "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no quotes, no JSON. "
-            "If no valid candidates, return an empty list.\n\n"
-            f"Task: {prompt}"
-        )
-        text = _generate_qwen_text(helper_prompt, max_new_tokens=max_new_tokens, use_system_prompt=False)
-        return text.strip()
-    except Exception:
-        pass
-    return ""
+    return _generate_prompt_text_impl(
+        prompt,
+        max_new_tokens=max_new_tokens,
+        generate_text_fn=lambda text, tokens: _generate_qwen_text(text, max_new_tokens=tokens, use_system_prompt=False),
+    )
 
 
 def resolve_image_payload(

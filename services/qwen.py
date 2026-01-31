@@ -5,7 +5,113 @@ import re
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import torch
+
 from utils.glossary import _normalize_labelmap_glossary, _parse_glossary_mapping
+
+
+def _extract_balanced_json(text: str, start_char: str, end_char: str) -> Optional[str]:
+    start = text.find(start_char)
+    if start < 0:
+        return None
+    depth = 0
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == start_char:
+            depth += 1
+        elif ch == end_char:
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return None
+
+
+def _generate_qwen_text(
+    prompt: str,
+    *,
+    max_new_tokens: int,
+    use_system_prompt: bool,
+    system_prompt: Optional[str],
+    ensure_qwen_ready_fn: Callable[[], Tuple[Any, Any]],
+    resolve_qwen_device_fn: Callable[[], Any],
+) -> str:
+    model, processor = ensure_qwen_ready_fn()
+    messages: List[Dict[str, Any]] = []
+    if use_system_prompt:
+        sys_prompt = system_prompt
+        if sys_prompt:
+            messages.append({"role": "system", "content": [{"type": "text", "text": sys_prompt}]})
+    messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = processor(text=[text], padding=True, return_tensors="pt")
+    device = resolve_qwen_device_fn()
+    inputs = inputs.to(device)
+    with torch.inference_mode():
+        outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, temperature=0.0, top_p=1.0)
+    input_len = inputs["input_ids"].shape[1]
+    generated_ids = outputs[:, input_len:]
+    decoded = processor.batch_decode(
+        generated_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    return decoded.strip()
+
+
+def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
+    """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
+    if not raw:
+        return []
+    parts = re.split(r"[,;\n]+", raw)
+    parsed: List[str] = []
+    for part in parts:
+        cand = part.strip().strip('"').strip("'")
+        cand = re.sub(r"(?i)^assistant\\s+final[:\\s]+", "", cand)
+        if not cand:
+            continue
+        if cand.upper() == "STOP":
+            break
+        # Must be letters/spaces/hyphens only.
+        if re.search(r"[^A-Za-z\\s\\-]", cand):
+            continue
+        words = cand.split()
+        if not (1 <= len(words) <= 4):
+            continue
+        if any(len(w) < 2 for w in words):
+            continue
+        key = cand.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed.append(cand)
+        if limit and len(parsed) >= limit:
+            break
+    return parsed
+
+
+def _generate_prompt_text(
+    prompt: str,
+    *,
+    max_new_tokens: int,
+    generate_text_fn: Callable[[str, int], str],
+) -> str:
+    """
+    Text-only helper for prompt brainstorming/critique.
+    Uses Qwen (text-only) and returns empty string on failure.
+    """
+    try:
+        helper_prompt = (
+            "You generate short noun-phrase candidates for open-vocabulary detection. "
+            "Respond with a comma-separated list only (no prose). "
+            "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no quotes, no JSON. "
+            "If no valid candidates, return an empty list.\n\n"
+            f"Task: {prompt}"
+        )
+        text = generate_text_fn(helper_prompt, max_new_tokens)
+        return text.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _caption_glossary_map(labelmap_glossary: Optional[str], labels: Sequence[str]) -> Dict[str, List[str]]:

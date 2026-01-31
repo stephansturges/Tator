@@ -107,6 +107,7 @@ from services.prepass import (
     _agent_compact_tool_result,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
+from services.context_store import _context_store, _context_chunk
 from services.prepass_grid import (
     _agent_grid_col_label,
     _agent_grid_col_index,
@@ -6876,29 +6877,13 @@ def _agent_context_store(
     kind: str,
     max_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
-    raw = json.dumps(payload, ensure_ascii=True)
-    raw_bytes = raw.encode("utf-8", errors="ignore")
-    byte_size = len(raw_bytes)
-    limit = int(max_bytes or PREPASS_CONTEXT_CHUNK_BYTES)
-    if limit <= 0 or byte_size <= limit:
-        return {"payload": payload, "byte_size": byte_size, "chunked": False}
-    chunk_size = max(1, limit)
-    chunks: List[str] = []
-    for idx in range(0, byte_size, chunk_size):
-        chunk = raw_bytes[idx : idx + chunk_size].decode("utf-8", errors="ignore")
-        chunks.append(chunk)
-    handle = f"{kind}_{uuid.uuid4().hex[:10]}"
-    store = {"chunks": chunks, "byte_size": byte_size}
-    if kind == "tile":
-        _AGENT_TILE_CONTEXT_STORE[handle] = store
-    else:
-        _AGENT_GLOBAL_CONTEXT_STORE[handle] = store
-    return {
-        "chunked": True,
-        "context_handle": handle,
-        "chunk_total": len(chunks),
-        "byte_size": byte_size,
-    }
+    return _context_store(
+        payload,
+        kind=kind,
+        max_bytes=int(max_bytes or PREPASS_CONTEXT_CHUNK_BYTES),
+        tile_store=_AGENT_TILE_CONTEXT_STORE,
+        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
+    )
 
 
 def _agent_context_chunk(
@@ -6907,22 +6892,13 @@ def _agent_context_chunk(
     chunk_index: int,
     kind: str,
 ) -> Dict[str, Any]:
-    store = _AGENT_TILE_CONTEXT_STORE if kind == "tile" else _AGENT_GLOBAL_CONTEXT_STORE
-    entry = store.get(handle)
-    if not entry:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="context_handle_missing")
-    chunks = entry.get("chunks") or []
-    total = len(chunks)
-    idx = int(chunk_index)
-    if idx < 0 or idx >= total:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_invalid")
-    return {
-        "context_handle": handle,
-        "chunk_index": idx,
-        "chunk_total": total,
-        "payload_chunk": chunks[idx],
-        "byte_size": entry.get("byte_size"),
-    }
+    return _context_chunk(
+        handle,
+        chunk_index=chunk_index,
+        kind=kind,
+        tile_store=_AGENT_TILE_CONTEXT_STORE,
+        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
+    )
 
 
 def _agent_overlay_crop_xyxy(

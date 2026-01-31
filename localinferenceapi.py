@@ -160,7 +160,12 @@ from services.qwen_jobs import (
     _qwen_job_update_impl as _qwen_job_update_impl,
     _serialize_qwen_job_impl as _serialize_qwen_job_impl,
 )
-from services.sam3_jobs import _serialize_sam3_job_impl as _serialize_sam3_job_impl
+from services.sam3_jobs import (
+    _sam3_job_append_metric_impl as _sam3_job_append_metric_impl,
+    _sam3_job_log_impl as _sam3_job_log_impl,
+    _sam3_job_update_impl as _sam3_job_update_impl,
+    _serialize_sam3_job_impl as _serialize_sam3_job_impl,
+)
 from services.segmentation import _serialize_seg_job_impl as _serialize_seg_job_impl
 from services.datasets import (
     _load_dataset_glossary,
@@ -10563,25 +10568,11 @@ def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
 
 
 def _sam3_job_log(job: Sam3TrainingJob, message: str) -> None:
-    job.log_seq += 1
-    entry = {"timestamp": time.time(), "message": message, "seq": job.log_seq}
-    job.logs.append(entry)
-    if len(job.logs) > SAM3_MAX_LOG_LINES:
-        job.logs[:] = job.logs[-SAM3_MAX_LOG_LINES:]
-    job.updated_at = time.time()
-    try:
-        logger.info("[sam3-train %s] %s", job.job_id[:8], message)
-    except Exception:
-        pass
+    _sam3_job_log_impl(job, message, max_logs=SAM3_MAX_LOG_LINES, logger=logger)
 
 
 def _sam3_job_append_metric(job: Sam3TrainingJob, metric: Dict[str, Any]) -> None:
-    if not metric:
-        return
-    job.metrics.append(metric)
-    if SAM3_MAX_METRIC_POINTS and len(job.metrics) > SAM3_MAX_METRIC_POINTS:
-        job.metrics[:] = job.metrics[-SAM3_MAX_METRIC_POINTS :]
-    job.updated_at = time.time()
+    _sam3_job_append_metric_impl(job, metric, max_points=SAM3_MAX_METRIC_POINTS)
 
 
 def _sam3_job_update(
@@ -10594,22 +10585,17 @@ def _sam3_job_update(
     result: Optional[Dict[str, Any]] = None,
     log_message: bool = True,
 ) -> None:
-    if status is not None:
-        job.status = status
-    if message is not None:
-        if message != job.message:
-            job.message = message
-            if log_message:
-                _sam3_job_log(job, message)
-        else:
-            job.message = message
-    if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
-    if error is not None:
-        job.error = error
-    if result is not None:
-        job.result = result
-    job.updated_at = time.time()
+    _sam3_job_update_impl(
+        job,
+        status=status,
+        message=message,
+        progress=progress,
+        error=error,
+        result=result,
+        log_message=log_message,
+        max_logs=SAM3_MAX_LOG_LINES,
+        logger=logger,
+    )
 
 
 def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:

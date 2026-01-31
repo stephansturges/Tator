@@ -264,6 +264,29 @@ from services.calibration_helpers import (
     _calibration_write_record_atomic as _calibration_write_record_atomic_impl,
     _calibration_update as _calibration_update_impl,
     _calibration_cache_image as _calibration_cache_image_impl,
+    _calibration_prepass_worker as _calibration_prepass_worker_impl,
+)
+from services.qwen import (
+    _caption_glossary_map as _caption_glossary_map_impl,
+    _caption_preferred_label as _caption_preferred_label_impl,
+    _build_qwen_caption_prompt as _build_qwen_caption_prompt_impl,
+    _collapse_whitespace as _collapse_whitespace_impl,
+    _extract_caption_from_text as _extract_caption_from_text_impl,
+    _caption_needs_english_rewrite as _caption_needs_english_rewrite_impl,
+    _caption_starts_generic as _caption_starts_generic_impl,
+    _caption_missing_labels as _caption_missing_labels_impl,
+    _caption_needs_refine as _caption_needs_refine_impl,
+    _sanitize_qwen_caption as _sanitize_qwen_caption_impl,
+    _thinking_caption_needs_cleanup as _thinking_caption_needs_cleanup_impl,
+    _caption_needs_completion as _caption_needs_completion_impl,
+    _caption_has_meta as _caption_has_meta_impl,
+    _caption_needs_short_form as _caption_needs_short_form_impl,
+    _resolve_qwen_caption_decode as _resolve_qwen_caption_decode_impl,
+    _adjust_prompt_for_thinking as _adjust_prompt_for_thinking_impl,
+    _run_qwen_caption_cleanup as _run_qwen_caption_cleanup_impl,
+    _run_qwen_caption_merge as _run_qwen_caption_merge_impl,
+    _resolve_qwen_window_size as _resolve_qwen_window_size_impl,
+    _resolve_qwen_window_overlap as _resolve_qwen_window_overlap_impl,
 )
 from collections import OrderedDict
 try:
@@ -1414,6 +1437,14 @@ active_sam3_metadata: Dict[str, Any] = {
     "source": "env",
     "enable_segmentation": True,
 }
+
+
+def _set_sam3_device_pref(device_index: int) -> None:
+    global SAM3_DEVICE_PREF
+    if torch.cuda.is_available():
+        SAM3_DEVICE_PREF = f"cuda:{device_index}"
+    else:
+        SAM3_DEVICE_PREF = "cpu"
 
 
 def _resolve_sam3_device() -> torch.device:
@@ -3607,22 +3638,11 @@ def _strip_qwen_model_suffix(model_id: str) -> Optional[str]:
 
 
 def _caption_glossary_map(labelmap_glossary: Optional[str], labels: Sequence[str]) -> Dict[str, List[str]]:
-    if not labelmap_glossary:
-        return {}
-    return _parse_glossary_mapping(_normalize_labelmap_glossary(labelmap_glossary), list(labels))
+    return _caption_glossary_map_impl(labelmap_glossary, labels)
 
 
 def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[str]]] = None) -> str:
-    label = str(label or "").strip()
-    if not label:
-        return ""
-    terms = (glossary_map or {}).get(label) or []
-    for term in terms:
-        if term and "_" not in term:
-            return str(term)
-    if "_" in label:
-        return label.replace("_", " ")
-    return label
+    return _caption_preferred_label_impl(label, glossary_map)
 
 
 def _build_qwen_caption_prompt(
@@ -3637,166 +3657,30 @@ def _build_qwen_caption_prompt(
     restrict_to_labels: bool = True,
     labelmap_glossary: Optional[str] = None,
 ) -> Tuple[str, Dict[str, int], int, bool]:
-    safe_width = max(1, int(image_width))
-    safe_height = max(1, int(image_height))
-    counts: Dict[str, int] = dict(Counter([hint.label for hint in label_hints if hint.label]))
-    def _bbox_to_qwen_2d(bbox: Sequence[float]) -> List[int]:
-        x1, y1, x2, y2 = bbox
-        scale = 1000.0
-        nx1 = int(round((x1 / safe_width) * scale))
-        ny1 = int(round((y1 / safe_height) * scale))
-        nx2 = int(round((x2 / safe_width) * scale))
-        ny2 = int(round((y2 / safe_height) * scale))
-        return [
-            max(0, min(1000, nx1)),
-            max(0, min(1000, ny1)),
-            max(0, min(1000, nx2)),
-            max(0, min(1000, ny2)),
-        ]
-    hints_payload = []
-    for hint in label_hints:
-        bbox = hint.bbox or []
-        if len(bbox) == 4:
-            x1, y1, x2, y2 = bbox
-            x1 = max(0.0, min(float(x1), safe_width))
-            y1 = max(0.0, min(float(y1), safe_height))
-            x2 = max(0.0, min(float(x2), safe_width))
-            y2 = max(0.0, min(float(y2), safe_height))
-            if x2 <= x1 or y2 <= y1:
-                continue
-        else:
-            x1 = y1 = x2 = y2 = None
-        hints_payload.append(
-            {
-                "label": hint.label,
-                "bbox": [x1, y1, x2, y2] if x1 is not None else None,
-                "bbox_2d": _bbox_to_qwen_2d([x1, y1, x2, y2]) if x1 is not None else None,
-                "confidence": hint.confidence if hint.confidence is not None else None,
-                "area": (x2 - x1) * (y2 - y1) if x1 is not None else 0.0,
-            }
-        )
-    if max_boxes <= 0:
-        selected = sorted(
-            hints_payload,
-            key=lambda entry: (
-                -(entry["confidence"] if entry["confidence"] is not None else 0.0),
-                -entry["area"],
-            ),
-        )
-        truncated = False
-    else:
-        sorted_hints = sorted(
-            hints_payload,
-            key=lambda entry: (
-                -(entry["confidence"] if entry["confidence"] is not None else 0.0),
-                -entry["area"],
-            ),
-        )
-        selected = sorted_hints[:max_boxes]
-        truncated = len(sorted_hints) > len(selected)
-    lines: List[str] = []
-    if user_prompt:
-        lines.append(f"User hint: {user_prompt}")
-        if "style inspirations" in user_prompt.lower():
-            lines.append(
-                "Style guidance: use inspirations for tone/angle only. Rephrase, do not copy wording."
-            )
-    lines.append(f"Image size: {safe_width}x{safe_height} pixels.")
-    glossary_map = _caption_glossary_map(
-        labelmap_glossary,
-        list(counts.keys()) or [hint.label for hint in label_hints if hint.label],
+    return _build_qwen_caption_prompt_impl(
+        user_prompt,
+        label_hints,
+        image_width,
+        image_height,
+        include_counts,
+        include_coords,
+        max_boxes,
+        detailed_mode,
+        restrict_to_labels=restrict_to_labels,
+        labelmap_glossary=labelmap_glossary,
     )
-
-    # Build a forbidden token list for labelmap tags that should not appear verbatim.
-    forbidden_labels: List[str] = []
-    for lbl in sorted(set([hint.label for hint in label_hints if hint.label])):
-        preferred = _caption_preferred_label(lbl, glossary_map)
-        if "_" in lbl or (preferred and preferred.lower() != str(lbl).lower()):
-            forbidden_labels.append(str(lbl))
-
-    if include_counts and counts:
-        counts_text = ", ".join(
-            f"{_caption_preferred_label(label, glossary_map)}: {count}" for label, count in counts.items()
-        )
-        if restrict_to_labels:
-            lines.append(f"COUNTS (use exactly): {counts_text}.")
-            lines.append(
-                "State these counts without qualifiers (avoid words like 'visible', 'roughly', or 'approximately')."
-            )
-        else:
-            lines.append(f"COUNTS (use as hints; may be incomplete): {counts_text}.")
-    elif counts:
-        lines.append("Use the label hints to mention the main objects you see.")
-    if counts and restrict_to_labels:
-        allowed = ", ".join(sorted(_caption_preferred_label(lbl, glossary_map) for lbl in counts.keys()))
-        if allowed:
-            lines.append(
-                f"Only mention these classes if they appear: {allowed}. Do not invent other entity types."
-            )
-    elif counts and not restrict_to_labels:
-        lines.append("Label hints are suggestions; you may mention other visible objects too.")
-    if selected:
-        if include_coords:
-            lines.append(
-                "Labeled boxes (bbox_2d=[x1,y1,x2,y2], coords 0–1000 relative to this image/window):"
-            )
-            compact = [
-                {"label": entry["label"], "bbox_2d": entry["bbox_2d"]}
-                for entry in selected
-                if entry["bbox_2d"] is not None
-            ]
-            if compact:
-                lines.append(json.dumps(compact, separators=(",", ":")))
-            lines.append("Use relative positions (e.g., top-left, center) when describing layout.")
-        else:
-            labels_only = ", ".join(_caption_preferred_label(entry["label"], glossary_map) for entry in selected)
-            lines.append(f"Labeled objects (one per box): {labels_only}.")
-    if forbidden_labels:
-        lines.append(
-            "Forbidden label tokens (do NOT output these exact strings): "
-            + ", ".join(forbidden_labels)
-            + ". Use natural synonyms instead."
-        )
-    elif hints_payload and not include_counts:
-        lines.append("Labels provided but box details omitted.")
-    if truncated:
-        lines.append("Note: Only a subset of boxes is shown; counts reflect all hints.")
-    lines.append(
-        "Write a detailed caption. Use the image as truth and incorporate the label hints; "
-        "if hints conflict with the image, mention the uncertainty briefly."
-    )
-    lines.append("Describe what the main objects are doing or how they are arranged when it is visible.")
-    lines.append(
-        "Be maximally descriptive: longer captions are acceptable when there is a lot to see. "
-        "The labeled boxes are especially important and should be mentioned explicitly unless counts are overwhelming "
-        "(e.g., summarize many cars as a parking lot)."
-    )
-    return "\n".join(lines), counts, len(selected), truncated
 
 
 def _collapse_whitespace(text: str) -> str:
-    return " ".join(text.split())
+    return _collapse_whitespace_impl(text)
 
 
 def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple[str, bool]:
-    cleaned = text.strip()
-    marker_found = False
-    if marker:
-        match = re.search(rf"{marker}\\s*:?\\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
-        if match:
-            cleaned = match.group(1)
-            marker_found = True
-    if not marker_found:
-        match = re.search(r"FINAL\\s*:?\\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
-        if match:
-            cleaned = match.group(1)
-            marker_found = True
-    cleaned = _collapse_whitespace(cleaned) if cleaned else text.strip()
-    return cleaned, marker_found
+    return _extract_caption_from_text_impl(text, marker)
 
 
 def _caption_needs_english_rewrite(text: str) -> bool:
-    return bool(re.search(r"[^\x00-\x7F]", text))
+    return _caption_needs_english_rewrite_impl(text)
 
 _CAPTION_GENERIC_OPENERS = (
     "an aerial view",
@@ -3809,8 +3693,7 @@ _CAPTION_GENERIC_OPENERS = (
 
 
 def _caption_starts_generic(text: str) -> bool:
-    lowered = text.strip().lower()
-    return any(lowered.startswith(prefix) for prefix in _CAPTION_GENERIC_OPENERS)
+    return _caption_starts_generic_impl(text)
 
 
 def _caption_missing_labels(
@@ -3818,22 +3701,7 @@ def _caption_missing_labels(
     counts: Dict[str, int],
     glossary_map: Optional[Dict[str, List[str]]] = None,
 ) -> List[str]:
-    if not text:
-        return list(counts.keys())
-    lowered = text.lower()
-    missing = []
-    for label, count in counts.items():
-        if count <= 0:
-            continue
-        label_terms = [str(label)]
-        if "_" in label:
-            label_terms.append(label.replace("_", " "))
-        if glossary_map and glossary_map.get(label):
-            label_terms.extend(glossary_map[label])
-        label_terms = [term.strip() for term in label_terms if term and term.strip()]
-        if not any(term.lower() in lowered for term in label_terms):
-            missing.append(label)
-    return missing
+    return _caption_missing_labels_impl(text, counts, glossary_map)
 
 
 def _caption_needs_refine(
@@ -3843,16 +3711,7 @@ def _caption_needs_refine(
     include_counts: bool,
     glossary_map: Optional[Dict[str, List[str]]] = None,
 ) -> Tuple[bool, List[str]]:
-    words = caption.split() if caption else []
-    min_words = 12 if detailed_mode else 8
-    if len(words) < min_words:
-        return True, []
-    missing = _caption_missing_labels(caption, counts, glossary_map) if include_counts else []
-    if missing:
-        return True, missing
-    if _caption_starts_generic(caption) and detailed_mode:
-        return True, []
-    return False, []
+    return _caption_needs_refine_impl(caption, counts, detailed_mode, include_counts, glossary_map)
 
 def _format_qwen_load_error(exc: Exception) -> str:
     msg = str(exc)
@@ -3873,21 +3732,7 @@ def _format_qwen_load_error(exc: Exception) -> str:
 
 
 def _sanitize_qwen_caption(text: str) -> str:
-    if not text:
-        return text
-    cleaned = text.strip()
-    final_match = re.search(r"<final>(.*?)</final>", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    if final_match:
-        cleaned = final_match.group(1).strip()
-    if re.search(r"</think>", cleaned, flags=re.IGNORECASE):
-        parts = re.split(r"</think>", cleaned, flags=re.IGNORECASE)
-        cleaned = parts[-1].strip()
-    if re.search(r"\bFINAL\b", cleaned, flags=re.IGNORECASE):
-        cleaned, _ = _extract_caption_from_text(cleaned, marker="FINAL")
-    cleaned = cleaned.strip()
-    if cleaned.startswith(":"):
-        cleaned = cleaned.lstrip(":").strip()
-    return cleaned
+    return _sanitize_qwen_caption_impl(text)
 
 
 _QWEN_THINKING_REASONING_RE = re.compile(
@@ -3901,73 +3746,27 @@ _QWEN_CAPTION_META_RE = re.compile(
 
 
 def _thinking_caption_needs_cleanup(cleaned: str, raw: Optional[str]) -> bool:
-    if not cleaned:
-        return True
-    if len(cleaned.split()) < 6:
-        return True
-    if raw and not re.search(r"<final>|\bFINAL\b", raw, re.IGNORECASE):
-        return True
-    if _QWEN_THINKING_REASONING_RE.search(cleaned):
-        return True
-    return False
+    return _thinking_caption_needs_cleanup_impl(cleaned, raw)
 
 
 def _caption_needs_completion(caption: str) -> bool:
-    if not caption:
-        return True
-    trimmed = caption.strip()
-    if not trimmed:
-        return True
-    return trimmed[-1] not in ".!?"
+    return _caption_needs_completion_impl(caption)
 
 
 def _caption_has_meta(caption: str) -> bool:
-    if not caption:
-        return False
-    return _QWEN_CAPTION_META_RE.search(caption) is not None
+    return _caption_has_meta_impl(caption)
 
 
 def _caption_needs_short_form(caption: str, max_words: int = 80, max_sentences: int = 2) -> bool:
-    if not caption:
-        return False
-    words = caption.split()
-    if len(words) > max_words:
-        return True
-    sentences = [s.strip() for s in re.split(r"[.!?]+", caption) if s.strip()]
-    return len(sentences) > max_sentences
+    return _caption_needs_short_form_impl(caption, max_words=max_words, max_sentences=max_sentences)
 
 
 def _resolve_qwen_caption_decode(payload: QwenCaptionRequest, is_thinking: bool) -> Dict[str, Any]:
-    use_sampling = payload.use_sampling if payload.use_sampling is not None else True
-    if not use_sampling:
-        return {"do_sample": False}
-    defaults = {
-        "temperature": 1.0 if is_thinking else 0.7,
-        "top_p": 0.95 if is_thinking else 0.8,
-        "top_k": 20,
-        "presence_penalty": 0.0 if is_thinking else 1.5,
-    }
-    temperature = payload.temperature if payload.temperature is not None else defaults["temperature"]
-    top_p = payload.top_p if payload.top_p is not None else defaults["top_p"]
-    top_k = payload.top_k if payload.top_k is not None else defaults["top_k"]
-    presence_penalty = (
-        payload.presence_penalty if payload.presence_penalty is not None else defaults["presence_penalty"]
-    )
-    return {
-        "do_sample": True,
-        "temperature": temperature,
-        "top_p": top_p,
-        "top_k": top_k,
-        "presence_penalty": presence_penalty,
-    }
+    return _resolve_qwen_caption_decode_impl(payload, is_thinking)
 
 
 def _adjust_prompt_for_thinking(prompt_text: str) -> str:
-    if not prompt_text:
-        return prompt_text
-    lines = prompt_text.splitlines()
-    filtered = [line for line in lines if not line.startswith("Write a concise caption")]
-    return "\n".join(filtered)
+    return _adjust_prompt_for_thinking_impl(prompt_text)
 
 
 def _run_qwen_caption_cleanup(
@@ -3982,40 +3781,22 @@ def _run_qwen_caption_cleanup(
     strict: bool = False,
     minimal_edit: bool = False,
 ) -> str:
-    allowed_note = ""
-    if allowed_labels:
-        allowed_note = (
-            f"Only mention these classes if they appear: {', '.join(sorted(set(allowed_labels)))}. "
-            "Do not introduce any other entity types. "
-        )
-    strict_note = "Return exactly one complete sentence. " if strict else ""
-    minimal_note = (
-        "Edit the draft with minimal changes. Do not introduce new objects or actions. "
-        if minimal_edit
-        else ""
-    )
-    cleanup_system = (
-        "You are a captioning assistant. Respond in English only. "
-        "Return only <final>...</final> and nothing else."
-    )
-    cleanup_prompt = (
-        f"{strict_note}{allowed_note}{minimal_note}"
-        "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
-        "Keep the caption grounded in the image.\n"
-        f"Draft caption: {prompt}"
-    )
-    cleanup_model = model_id_override or _resolve_qwen_variant_model_id(base_model_id, "Instruct")
-    qwen_text, _, _ = _run_qwen_inference(
-        cleanup_prompt,
+    return _run_qwen_caption_cleanup_impl(
+        prompt,
         pil_img,
-        max_new_tokens=max_new_tokens,
-        system_prompt_override=cleanup_system,
-        model_id_override=cleanup_model if use_caption_cache and runtime_override is None else None,
+        max_new_tokens,
+        base_model_id,
+        use_caption_cache,
+        model_id_override=model_id_override,
         runtime_override=runtime_override,
-        decode_override={"do_sample": False},
+        allowed_labels=allowed_labels,
+        strict=strict,
+        minimal_edit=minimal_edit,
+        run_qwen_inference_fn=_run_qwen_inference,
+        resolve_variant_fn=_resolve_qwen_variant_model_id,
+        extract_caption_fn=_extract_caption_from_text,
+        sanitize_caption_fn=_sanitize_qwen_caption,
     )
-    caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
-    return _sanitize_qwen_caption(caption_text)
 
 
 def _run_qwen_caption_merge(
@@ -4028,41 +3809,19 @@ def _run_qwen_caption_merge(
     max_new_tokens: int,
     glossary_line: Optional[str] = None,
 ) -> str:
-    if not draft_caption or not windowed_captions:
-        return draft_caption
-    window_lines = ["Window observations (do NOT invent objects):"]
-    for x0, y0, size, caption in windowed_captions:
-        if caption:
-            window_lines.append(f"- {caption}")
-    if len(window_lines) == 1:
-        return draft_caption
-    merge_prompt = (
-        "Revise the draft caption so it includes all distinct object details "
-        "from the window observations that are missing in the draft. "
-        "Do not invent new objects. Use multiple sentences if needed. "
-        "Preserve specific counts, actions, and notable attributes from the windows; "
-        "do not drop any concrete window detail unless it clearly conflicts with the full image. "
-        "Do not mention labels, hints, or coordinates.\n"
-        f"Draft caption: {draft_caption}\n"
-        + "\n".join(window_lines)
-    )
-    if glossary_line:
-        merge_prompt = f"{merge_prompt}\n{glossary_line}"
-    merge_system = (
-        "You are a caption editor. Return only the revised caption in English."
-    )
-    merge_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
-    qwen_text, _, _ = _run_qwen_inference(
-        merge_prompt,
-        pil_img,
+    return _run_qwen_caption_merge_impl(
+        draft_caption,
+        windowed_captions,
+        pil_img=pil_img,
+        base_model_id=base_model_id,
+        runtime_resolver=runtime_resolver,
         max_new_tokens=max_new_tokens,
-        system_prompt_override=merge_system,
-        runtime_override=runtime_resolver(merge_model),
-        decode_override={"do_sample": False},
+        glossary_line=glossary_line,
+        run_qwen_inference_fn=_run_qwen_inference,
+        resolve_variant_fn=_resolve_qwen_variant_model_id,
+        extract_caption_fn=_extract_caption_from_text,
+        sanitize_caption_fn=_sanitize_qwen_caption,
     )
-    merged, _ = _extract_caption_from_text(qwen_text, marker=None)
-    merged = _sanitize_qwen_caption(merged)
-    return merged or draft_caption
 
 
 def _resolve_qwen_window_size(
@@ -4072,27 +3831,18 @@ def _resolve_qwen_window_size(
     *,
     overlap: Optional[float] = None,
 ) -> int:
-    if requested is None:
-        overlap_val = _resolve_qwen_window_overlap(overlap)
-        base_dim = max(1, min(int(image_width), int(image_height)))
-        # 2x2 grid with overlap -> window = dim / (2 - overlap)
-        base = base_dim / max(1.0, 2.0 - overlap_val)
-    else:
-        base = requested
-    try:
-        base = int(base)
-    except (TypeError, ValueError):
-        base = QWEN_WINDOW_DEFAULT_SIZE
-    base = max(128, min(base, 4096))
-    return max(64, min(base, int(image_width), int(image_height)))
+    return _resolve_qwen_window_size_impl(
+        requested,
+        image_width,
+        image_height,
+        overlap=overlap,
+        default_size=QWEN_WINDOW_DEFAULT_SIZE,
+        default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
+    )
 
 
 def _resolve_qwen_window_overlap(requested: Optional[float]) -> float:
-    try:
-        overlap = float(requested) if requested is not None else QWEN_WINDOW_DEFAULT_OVERLAP
-    except (TypeError, ValueError):
-        overlap = QWEN_WINDOW_DEFAULT_OVERLAP
-    return max(0.0, min(overlap, 0.2))
+    return _resolve_qwen_window_overlap_impl(requested, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP)
 
 
 def _window_positions(
@@ -27993,67 +27743,22 @@ def _calibration_prepass_worker(
     cancel_event: Optional[Any],
     progress_queue: Optional[Any],
 ) -> None:
-    # NOTE: This runs in a separate process; re-bind device prefs here.
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.set_device(device_index)
-    except Exception:
-        pass
-    try:
-        global SAM3_DEVICE_PREF
-        SAM3_DEVICE_PREF = f"cuda:{device_index}" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        pass
-    try:
-        prepass_payload = QwenPrepassRequest(**prepass_payload_dict)
-    except Exception:
-        return
-    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
-    for image_name, cache_path in tasks:
-        if cancel_event is not None and cancel_event.is_set():
-            break
-        img_path = None
-        for split in ("val", "train"):
-            candidate = dataset_root / split / image_name
-            if candidate.exists():
-                img_path = candidate
-                break
-        if img_path is None:
-            if progress_queue is not None:
-                progress_queue.put(1)
-            continue
-        try:
-            with Image.open(img_path) as img:
-                pil_img = img.convert("RGB")
-        except Exception:
-            if progress_queue is not None:
-                progress_queue.put(1)
-            continue
-        try:
-            image_token = _calibration_cache_image(pil_img, prepass_payload.sam_variant)
-            result = _agent_run_deep_prepass(
-                prepass_payload,
-                pil_img=pil_img,
-                image_token=image_token,
-                labelmap=labelmap,
-                glossary=glossary,
-                trace_writer=None,
-                trace_full_writer=None,
-                trace_readable=None,
-            )
-            detections = list(result.get("detections") or [])
-            warnings = list(result.get("warnings") or [])
-            record = {
-                "image": image_name,
-                "dataset_id": dataset_id,
-                "detections": detections,
-                "warnings": warnings,
-            }
-            _calibration_write_record_atomic(Path(cache_path), record)
-        except Exception:
-            pass
-        if progress_queue is not None:
-            progress_queue.put(1)
+    return _calibration_prepass_worker_impl(
+        device_index,
+        tasks,
+        dataset_id,
+        labelmap,
+        glossary,
+        prepass_payload_dict,
+        cancel_event=cancel_event,
+        progress_queue=progress_queue,
+        resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
+        prepass_request_cls=QwenPrepassRequest,
+        cache_image_fn=_calibration_cache_image,
+        run_prepass_fn=_agent_run_deep_prepass,
+        write_record_fn=_calibration_write_record_atomic,
+        set_device_pref_fn=lambda idx: _set_sam3_device_pref(idx),
+    )
 
 
 def _calibration_list_images(dataset_id: str) -> List[str]:

@@ -7,10 +7,11 @@ import random
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
+import torch
 
 
 def _calibration_sample_images(images: List[str], *, max_images: int, seed: int) -> List[str]:
@@ -92,3 +93,82 @@ def _calibration_cache_image(
     token = hashlib.md5(np_img.tobytes()).hexdigest()
     store_preloaded_fn(token, np_img, default_variant_fn(sam_variant))
     return token
+
+
+def _calibration_prepass_worker(
+    device_index: int,
+    tasks: List[Tuple[str, str]],
+    dataset_id: str,
+    labelmap: List[str],
+    glossary: str,
+    prepass_payload_dict: Dict[str, Any],
+    *,
+    cancel_event: Optional[Any],
+    progress_queue: Optional[Any],
+    resolve_dataset_fn: Callable[[str], Path],
+    prepass_request_cls: Any,
+    cache_image_fn: Callable[[Image.Image, Optional[str]], str],
+    run_prepass_fn: Callable[..., Dict[str, Any]],
+    write_record_fn: Callable[[Path, Dict[str, Any]], None],
+    set_device_pref_fn: Optional[Callable[[int], None]] = None,
+) -> None:
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(device_index)
+    except Exception:
+        pass
+    if set_device_pref_fn is not None:
+        try:
+            set_device_pref_fn(device_index)
+        except Exception:
+            pass
+    try:
+        prepass_payload = prepass_request_cls(**prepass_payload_dict)
+    except Exception:
+        return
+    dataset_root = resolve_dataset_fn(dataset_id)
+    for image_name, cache_path in tasks:
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        img_path = None
+        for split in ("val", "train"):
+            candidate = dataset_root / split / image_name
+            if candidate.exists():
+                img_path = candidate
+                break
+        if img_path is None:
+            if progress_queue is not None:
+                progress_queue.put(1)
+            continue
+        try:
+            with Image.open(img_path) as img:
+                pil_img = img.convert("RGB")
+        except Exception:
+            if progress_queue is not None:
+                progress_queue.put(1)
+            continue
+        try:
+            image_token = cache_image_fn(pil_img, prepass_payload.sam_variant)
+            result = run_prepass_fn(
+                prepass_payload,
+                pil_img=pil_img,
+                image_token=image_token,
+                labelmap=labelmap,
+                glossary=glossary,
+                trace_writer=None,
+                trace_full_writer=None,
+                trace_readable=None,
+            )
+            detections = list(result.get("detections") or [])
+            warnings = list(result.get("warnings") or [])
+            record = {
+                "image": image_name,
+                "dataset_id": dataset_id,
+                "detections": detections,
+                "warnings": warnings,
+            }
+            write_record_fn(Path(cache_path), record)
+        except Exception:
+            pass
+        if progress_queue is not None:
+            progress_queue.put(1)

@@ -198,6 +198,13 @@ from services.prepass_provenance import (
     _agent_finalize_provenance,
 )
 from services.sam3_synonyms import _agent_generate_sam3_synonyms
+from services.cluster_handles import (
+    _agent_refresh_handle_index as _refresh_handle_index,
+    _agent_cluster_handle as _cluster_handle,
+    _agent_cluster_id_from_handle as _cluster_id_from_handle,
+    _agent_handles_from_cluster_ids as _handles_from_cluster_ids,
+    _agent_cluster_ids_from_handles as _cluster_ids_from_handles,
+)
 from collections import OrderedDict
 try:
     from scipy.spatial import ConvexHull
@@ -6347,48 +6354,32 @@ def _agent_current_label_prefixes(labels: Sequence[str]) -> Dict[str, str]:
 
 def _agent_refresh_handle_index() -> None:
     global _AGENT_HANDLE_INDEX
-    handle_index: Dict[str, int] = {}
-    for cluster in list(_AGENT_ACTIVE_CLUSTERS or []):
-        if not isinstance(cluster, dict):
-            continue
-        handle = _agent_cluster_handle(cluster)
-        cid = cluster.get("cluster_id")
-        if handle and cid is not None:
-            handle_index[str(handle)] = int(cid)
-    _AGENT_HANDLE_INDEX = handle_index
+    _AGENT_HANDLE_INDEX = _refresh_handle_index(
+        list(_AGENT_ACTIVE_CLUSTERS or []),
+        handle_fn=_agent_cluster_handle,
+    )
 
 
 def _agent_cluster_handle(cluster: Mapping[str, Any]) -> Optional[str]:
-    cluster_id = cluster.get("cluster_id") or cluster.get("candidate_id")
-    if cluster_id is None:
-        return None
-    label = str(cluster.get("label") or "").strip()
-    prefix = None
-    if label:
-        prefix = (_AGENT_ACTIVE_LABEL_PREFIXES or {}).get(label)
-        if prefix is None:
-            labels = list(_AGENT_ACTIVE_LABELMAP or [])
-            if not labels:
-                labels = [label]
-            prefix_map = _agent_current_label_prefixes(labels)
-            prefix = prefix_map.get(label)
-    if prefix:
-        return f"{prefix}{int(cluster_id)}"
-    return str(cluster_id)
+    return _cluster_handle(
+        cluster,
+        label_prefixes=_AGENT_ACTIVE_LABEL_PREFIXES,
+        labelmap=_AGENT_ACTIVE_LABELMAP or [],
+        label_prefix_map_fn=_agent_current_label_prefixes,
+    )
 
 
 def _agent_cluster_id_from_handle(handle: Optional[str]) -> Optional[int]:
-    if not handle:
-        return None
-    text = str(handle).strip()
+    cid = _cluster_id_from_handle(
+        handle,
+        handle_index=_AGENT_HANDLE_INDEX,
+        cluster_index=_AGENT_ACTIVE_CLUSTER_INDEX,
+    )
+    if cid is not None:
+        return cid
+    text = str(handle or "").strip()
     if not text:
         return None
-    if text in _AGENT_HANDLE_INDEX:
-        return int(_AGENT_HANDLE_INDEX[text])
-    if text.isdigit():
-        cid = int(text)
-        if cid in _AGENT_ACTIVE_CLUSTER_INDEX:
-            return cid
     match = re.search(r"(\\d+)$", text)
     if match:
         cid = int(match.group(1))
@@ -6399,24 +6390,19 @@ def _agent_cluster_id_from_handle(handle: Optional[str]) -> Optional[int]:
 
 
 def _agent_handles_from_cluster_ids(cluster_ids: Sequence[int]) -> List[str]:
-    handles: List[str] = []
-    for cid in cluster_ids:
-        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
-        if not cluster:
-            continue
-        handle = _agent_cluster_handle(cluster)
-        if handle:
-            handles.append(handle)
-    return handles
+    return _handles_from_cluster_ids(
+        cluster_ids,
+        cluster_index=_AGENT_ACTIVE_CLUSTER_INDEX,
+        handle_fn=_agent_cluster_handle,
+    )
 
 
 def _agent_cluster_ids_from_handles(handles: Sequence[str]) -> List[int]:
-    ids: List[int] = []
-    for handle in handles:
-        cid = _agent_cluster_id_from_handle(handle)
-        if cid is not None:
-            ids.append(int(cid))
-    return ids
+    return _cluster_ids_from_handles(
+        handles,
+        handle_index=_AGENT_HANDLE_INDEX,
+        cluster_index=_AGENT_ACTIVE_CLUSTER_INDEX,
+    )
 
 
 def _agent_register_detections(

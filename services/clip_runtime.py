@@ -60,3 +60,33 @@ def _resume_clip_backbone_impl(
             logger.warning("Failed to reload CLIP backbone %s: %s", clip_name, exc)
         finally:
             state["_clip_reload_needed"] = False
+
+
+def _ensure_clip_backbone_for_mining_impl(
+    *,
+    state: Dict[str, Any],
+    lock: Any,
+    clip_module: Any,
+    device: Any,
+    default_model: str,
+    logger: Any,
+) -> tuple:
+    """Ensure a CLIP backbone is available for exemplar embedding/fp guard (raw CLIP, no classifier required)."""
+    if clip_module is None:
+        return None, None
+    with lock:
+        if state.get("clip_model") is None or state.get("clip_preprocess") is None:
+            clip_name = state.get("clip_model_name") or default_model
+            try:
+                clip_model, clip_preprocess = clip_module.load(clip_name, device=device)
+                state["clip_model"] = clip_model
+                state["clip_preprocess"] = clip_preprocess
+                state["clip_model_name"] = clip_name
+                state["clip_initialized"] = bool(clip_model is not None)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Agent mining could not load CLIP backbone: %s", exc)
+                state["clip_model"] = None
+                state["clip_preprocess"] = None
+                state["clip_initialized"] = False
+                return None, None
+    return state.get("clip_model"), state.get("clip_preprocess")

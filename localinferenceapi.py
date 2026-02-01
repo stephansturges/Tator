@@ -214,6 +214,7 @@ from services.dinov3_runtime import (
 from services.clip_runtime import (
     _suspend_clip_backbone_impl as _suspend_clip_backbone_impl,
     _resume_clip_backbone_impl as _resume_clip_backbone_impl,
+    _ensure_clip_backbone_for_mining_impl as _ensure_clip_backbone_for_mining_impl,
 )
 from services.classifier_runtime import (
     _resume_classifier_backbone_impl as _resume_classifier_backbone_impl,
@@ -1610,22 +1611,25 @@ def _resume_classifier_backbone() -> None:
 def _ensure_clip_backbone_for_mining() -> Tuple[Optional[Any], Optional[Any]]:
     """Ensure a CLIP backbone is available for exemplar embedding/fp guard (raw CLIP, no classifier required)."""
     global clip_model, clip_preprocess, clip_model_name, clip_initialized
-    if clip is None:
-        return None, None
-    with clip_lock:
-        if clip_model is None or clip_preprocess is None:
-            clip_name = clip_model_name or DEFAULT_CLIP_MODEL
-            try:
-                clip_model, clip_preprocess = clip.load(clip_name, device=device)
-                clip_model_name = clip_name
-                clip_initialized = bool(clip_model is not None)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Agent mining could not load CLIP backbone: %s", exc)
-                clip_model = None
-                clip_preprocess = None
-                clip_initialized = False
-                return None, None
-    return clip_model, clip_preprocess
+    state = {
+        "clip_model": clip_model,
+        "clip_preprocess": clip_preprocess,
+        "clip_model_name": clip_model_name,
+        "clip_initialized": clip_initialized,
+    }
+    clip_model_local, clip_preprocess_local = _ensure_clip_backbone_for_mining_impl(
+        state=state,
+        lock=clip_lock,
+        clip_module=clip,
+        device=device,
+        default_model=DEFAULT_CLIP_MODEL,
+        logger=logger,
+    )
+    clip_model = state["clip_model"]
+    clip_preprocess = state["clip_preprocess"]
+    clip_model_name = state["clip_model_name"]
+    clip_initialized = state["clip_initialized"]
+    return clip_model_local, clip_preprocess_local
 
 # 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_h")

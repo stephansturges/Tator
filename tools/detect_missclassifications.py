@@ -1,6 +1,5 @@
 import os
 import sys
-import signal
 import argparse
 
 import numpy as np      #  <-- MOVE UP
@@ -12,7 +11,6 @@ import joblib
 import json
 import copy
 from collections import defaultdict
-from tqdm import tqdm
 from PIL import Image
 
 '''
@@ -891,4 +889,3 @@ def main():
 
 if __name__=="__main__":
     main()
-

@@ -179,6 +179,7 @@ from services.qwen_runtime import (
     _reset_qwen_runtime_impl as _reset_qwen_runtime_impl,
     _unload_qwen_runtime_impl as _unload_qwen_runtime_impl,
     _evict_qwen_caption_entry_impl as _evict_qwen_caption_entry_impl,
+    _resolve_qwen_device_impl as _resolve_qwen_device_impl,
 )
 from services.sam3_jobs import (
     _sam3_job_append_metric_impl as _sam3_job_append_metric_impl,
@@ -2522,20 +2523,7 @@ class SamPreloadManager:
 
 
 def _resolve_qwen_device() -> str:
-    if QWEN_DEVICE_PREF and QWEN_DEVICE_PREF != "auto":
-        if QWEN_DEVICE_PREF.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError("cuda_requested_but_unavailable")
-        if QWEN_DEVICE_PREF.startswith("mps"):
-            mps_backend = getattr(torch.backends, "mps", None)
-            if not mps_backend or not mps_backend.is_available():  # type: ignore[attr-defined]
-                raise RuntimeError("mps_requested_but_unavailable")
-        return QWEN_DEVICE_PREF
-    if torch.cuda.is_available():
-        return "cuda"
-    mps_backend = getattr(torch.backends, "mps", None)
-    if mps_backend and mps_backend.is_available():  # type: ignore[attr-defined]
-        return "mps"
-    return "cpu"
+    return _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
 
 
 def _get_qwen_prompt_config() -> QwenPromptConfig:

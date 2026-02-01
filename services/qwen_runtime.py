@@ -64,6 +64,27 @@ def _unload_qwen_runtime_impl(
         )
 
 
+def _resolve_qwen_device_impl(
+    qwen_device_pref: str,
+    *,
+    torch_module: Any,
+) -> str:
+    if qwen_device_pref and qwen_device_pref != "auto":
+        if qwen_device_pref.startswith("cuda") and not torch_module.cuda.is_available():
+            raise RuntimeError("cuda_requested_but_unavailable")
+        if qwen_device_pref.startswith("mps"):
+            mps_backend = getattr(torch_module.backends, "mps", None)
+            if not mps_backend or not mps_backend.is_available():  # type: ignore[attr-defined]
+                raise RuntimeError("mps_requested_but_unavailable")
+        return qwen_device_pref
+    if torch_module.cuda.is_available():
+        return "cuda"
+    mps_backend = getattr(torch_module.backends, "mps", None)
+    if mps_backend and mps_backend.is_available():  # type: ignore[attr-defined]
+        return "mps"
+    return "cpu"
+
+
 def _evict_qwen_caption_entry_impl(
     cache_key: str,
     cache_entry: Optional[tuple],

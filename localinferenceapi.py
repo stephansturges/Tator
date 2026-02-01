@@ -264,7 +264,6 @@ from services.datasets import (
     _persist_dataset_metadata_impl as _persist_dataset_metadata_impl,
     _coerce_dataset_metadata_impl as _coerce_dataset_metadata_impl,
     _load_qwen_dataset_metadata_impl as _load_qwen_dataset_metadata_impl,
-    _persist_qwen_dataset_metadata_impl as _persist_qwen_dataset_metadata_impl,
     _load_sam3_dataset_metadata_impl as _load_sam3_dataset_metadata_impl,
     _persist_sam3_dataset_metadata_impl as _persist_sam3_dataset_metadata_impl,
     _count_dataset_images_impl as _count_dataset_images_impl,
@@ -10086,15 +10085,6 @@ def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
         dataset_dir,
         meta_name=QWEN_METADATA_FILENAME,
         load_json_metadata_fn=_load_json_metadata,
-    )
-
-
-def _persist_qwen_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
-    _persist_qwen_dataset_metadata_impl(
-        dataset_dir,
-        metadata,
-        meta_name=QWEN_METADATA_FILENAME,
-        write_qwen_metadata_fn=_write_qwen_metadata,
     )
 
 

@@ -14182,18 +14182,6 @@ def _write_coco_annotations(
     )
 
 
-def _image_path_for_label(labels_dir: Path, images_dir: Path, label_file: Path, image_exts: set[str]) -> Optional[Path]:
-    return _image_path_for_label_impl(labels_dir, images_dir, label_file, image_exts)
-
-
-def _resolve_coco_image_path(file_name: str, images_dir: Path, split_name: str, dataset_root: Path) -> Optional[Path]:
-    return _resolve_coco_image_path_impl(file_name, images_dir, split_name, dataset_root)
-
-
-def _label_relpath_for_image(file_name: str) -> Path:
-    return _label_relpath_for_image_impl(file_name)
-
-
 def _ensure_coco_info_fields(path: Path, dataset_id: str, categories: List[Dict[str, Any]]) -> str:
     return _ensure_coco_info_fields_impl(path, dataset_id, categories)
 

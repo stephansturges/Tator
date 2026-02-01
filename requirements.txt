@@ -32,7 +32,7 @@ git+https://github.com/openai/CLIP.git
 # Segment Anything (SAM)
 git+https://github.com/facebookresearch/segment-anything.git
 
-# Segment Anything 3 (SAM3) — optional (see sam3integration.txt for usage)
+# Segment Anything 3 (SAM3) — optional (see README for usage)
 # git+https://github.com/facebookresearch/sam3.git
 
 # SAM3 training dependencies

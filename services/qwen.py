@@ -1024,6 +1024,32 @@ def _set_qwen_prompt_config_impl(config: Any, new_config: Any, lock: Any) -> Any
     return config
 
 
+def _render_qwen_prompt_impl(
+    prompt_type: str,
+    *,
+    items: Optional[str],
+    image_type: Optional[str],
+    extra_context: Optional[str],
+    get_config_fn: Any,
+    http_exception_cls: Any,
+    http_422: int,
+) -> str:
+    if not items:
+        raise http_exception_cls(status_code=http_422, detail="qwen_items_required")
+    config = get_config_fn()
+    section_name = "bbox" if prompt_type in {"bbox", "bbox_sam"} else prompt_type
+    section = getattr(config, section_name)
+    template = (section.base_prompt or "{items}").strip()
+    image_value = (image_type or section.default_image_type or "image").strip() or "image"
+    extra_value = extra_context if extra_context is not None and extra_context.strip() else section.default_extra_context
+    formatted = template.format(
+        image_type=image_value,
+        items=items.strip(),
+        extra_context=(extra_value or "").strip(),
+    )
+    return formatted.strip()
+
+
 def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
     base = str(model_id or "")
     if not base:

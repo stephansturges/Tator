@@ -523,6 +523,7 @@ from services.qwen import (
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _get_qwen_prompt_config_impl as _get_qwen_prompt_config_impl,
     _set_qwen_prompt_config_impl as _set_qwen_prompt_config_impl,
+    _render_qwen_prompt_impl as _render_qwen_prompt_impl,
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _humanize_class_name_impl as _humanize_class_name_impl,
@@ -2544,20 +2545,15 @@ def _render_qwen_prompt(
     image_type: Optional[str],
     extra_context: Optional[str],
 ) -> str:
-    if not items:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_items_required")
-    config = _get_qwen_prompt_config()
-    section_name = "bbox" if prompt_type in {"bbox", "bbox_sam"} else prompt_type
-    section = getattr(config, section_name)
-    template = (section.base_prompt or "{items}").strip()
-    image_value = (image_type or section.default_image_type or "image").strip() or "image"
-    extra_value = extra_context if extra_context is not None and extra_context.strip() else section.default_extra_context
-    formatted = template.format(
-        image_type=image_value,
-        items=items.strip(),
-        extra_context=(extra_value or "").strip(),
+    return _render_qwen_prompt_impl(
+        prompt_type,
+        items=items,
+        image_type=image_type,
+        extra_context=extra_context,
+        get_config_fn=_get_qwen_prompt_config,
+        http_exception_cls=HTTPException,
+        http_422=HTTP_422_UNPROCESSABLE_ENTITY,
     )
-    return formatted.strip()
 
 
 def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:

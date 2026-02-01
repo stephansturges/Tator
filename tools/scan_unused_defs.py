@@ -41,7 +41,7 @@ def _collect_defs(path: pathlib.Path) -> list[tuple[str, int]]:
 
 
 def _count_occurrences(name: str, corpus: str) -> int:
-    pattern = re.compile(rf"\\b{name}\\b")
+    pattern = re.compile(rf"\b{name}\b")
     return len(pattern.findall(corpus))
 
 

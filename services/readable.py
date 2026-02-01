@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import re
 import logging
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from services.prepass_grid import _agent_grid_cell_for_detection
 
@@ -115,7 +114,6 @@ def _agent_readable_format_bbox(bbox: Any) -> str:
         else:
             values.append(f"{num:.1f}")
     return "[" + ", ".join(values) + "]"
-
 
 
 

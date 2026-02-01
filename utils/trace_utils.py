@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional
 
 
 def _agent_trace_sanitize_payload(payload: Any, image_token: Optional[str]) -> Dict[str, Any]:

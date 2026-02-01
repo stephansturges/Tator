@@ -4,10 +4,9 @@ import hashlib
 import json
 import logging
 import re
-import shutil
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple, List
+from typing import Any, Dict, Optional, Sequence, Tuple, List
 
 from fastapi import HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 
 def _agent_classifier_classes_for_path(path: Path, *, load_model_fn) -> List[str]:

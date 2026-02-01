@@ -181,6 +181,13 @@ from services.sam3_jobs import (
     _sam3_job_update_impl as _sam3_job_update_impl,
     _serialize_sam3_job_impl as _serialize_sam3_job_impl,
 )
+from services.sam3_runs import (
+    _active_run_paths_for_variant_impl as _active_run_paths_for_variant_impl,
+    _describe_run_dir_impl as _describe_run_dir_impl,
+    _list_sam3_runs_impl as _list_sam3_runs_impl,
+    _run_dir_for_request_impl as _run_dir_for_request_impl,
+    _delete_run_scope_impl as _delete_run_scope_impl,
+)
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
     _seg_job_update_impl as _seg_job_update_impl,
@@ -10849,139 +10856,50 @@ def _dir_size_bytes(path: Path) -> int:
 
 
 def _active_run_paths_for_variant(variant: str) -> set[Path]:
-    paths: set[Path] = set()
-    with SAM3_TRAINING_JOBS_LOCK:
-        jobs = list(SAM3_TRAINING_JOBS.values())
-    for job in jobs:
-        if job.status not in {"running", "queued", "cancelling"}:
-            continue
-        exp_dir = None
-        try:
-            exp_dir = job.config.get("paths", {}).get("experiment_log_dir")
-        except Exception:
-            exp_dir = None
-        if exp_dir:
-            try:
-                paths.add(Path(exp_dir).resolve())
-            except Exception:
-                continue
-    return paths
+    return _active_run_paths_for_variant_impl(
+        variant=variant,
+        jobs_lock=SAM3_TRAINING_JOBS_LOCK,
+        jobs=SAM3_TRAINING_JOBS,
+    )
 
 
 def _describe_run_dir(run_dir: Path, variant: str, active_paths: set[Path]) -> Dict[str, Any]:
-    checkpoints_dir = run_dir / "checkpoints"
-    logs_dir = run_dir / "logs"
-    tensorboard_dir = run_dir / "tensorboard"
-    dumps_dir = run_dir / "dumps"
-    marker_path = run_dir / ".promoted"
-    promoted = False
-    promoted_at: Optional[float] = None
-    if marker_path.exists():
-        promoted = True
-        try:
-            meta = json.loads(marker_path.read_text())
-            promoted_at = meta.get("timestamp")
-        except Exception:
-            promoted_at = None
-    checkpoints: List[Dict[str, Any]] = []
-    if checkpoints_dir.exists():
-        for ckpt in sorted(checkpoints_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
-            if ckpt.is_file():
-                try:
-                    stat = ckpt.stat()
-                    checkpoints.append(
-                        {
-                            "file": ckpt.name,
-                            "path": str(ckpt),
-                            "size_bytes": stat.st_size,
-                            "updated_at": stat.st_mtime,
-                        }
-                    )
-                except Exception:
-                    continue
-    try:
-        dir_stat = run_dir.stat()
-        created_at = dir_stat.st_ctime
-        updated_at = dir_stat.st_mtime
-    except Exception:
-        created_at = time.time()
-        updated_at = created_at
-    entry = {
-        "id": run_dir.name,
-        "variant": variant,
-        "path": str(run_dir),
-        "created_at": created_at,
-        "updated_at": updated_at,
-        "size_bytes": _dir_size_bytes(run_dir),
-        "checkpoints_size_bytes": _dir_size_bytes(checkpoints_dir),
-        "logs_size_bytes": _dir_size_bytes(logs_dir),
-        "tensorboard_size_bytes": _dir_size_bytes(tensorboard_dir),
-        "dumps_size_bytes": _dir_size_bytes(dumps_dir),
-        "checkpoints": checkpoints,
-        "active": run_dir.resolve() in active_paths,
-        "promoted": promoted,
-        "promoted_at": promoted_at,
-    }
-    return entry
+    return _describe_run_dir_impl(
+        run_dir=run_dir,
+        variant=variant,
+        active_paths=active_paths,
+        dir_size_fn=_dir_size_bytes,
+    )
 
 
 def _list_sam3_runs(variant: str) -> List[Dict[str, Any]]:
-    root = SAM3_JOB_ROOT
-    if not root.exists():
-        return []
-    active_paths = _active_run_paths_for_variant(variant)
-    runs: List[Dict[str, Any]] = []
-    for child in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
-        if not child.is_dir():
-            continue
-        # Skip dataset folder and other non-run directories under the root
-        if variant == "sam3" and child.resolve() == SAM3_DATASET_ROOT.resolve():
-            continue
-        if child.name.lower() == "datasets":
-            continue
-        try:
-            runs.append(_describe_run_dir(child, variant, active_paths))
-        except Exception:
-            continue
-    return runs
+    return _list_sam3_runs_impl(
+        variant=variant,
+        job_root=SAM3_JOB_ROOT,
+        dataset_root=SAM3_DATASET_ROOT,
+        active_paths_fn=_active_run_paths_for_variant,
+        describe_fn=_describe_run_dir,
+    )
 
 
 def _run_dir_for_request(run_id: str, variant: str) -> Path:
-    root = SAM3_JOB_ROOT
-    candidate = (root / run_id).resolve()
-    if not str(candidate).startswith(str(root.resolve())):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_run_id")
-    if not candidate.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_run_not_found")
-    return candidate
+    return _run_dir_for_request_impl(
+        run_id=run_id,
+        variant=variant,
+        job_root=SAM3_JOB_ROOT,
+        http_exception_cls=HTTPException,
+        http_400=HTTP_400_BAD_REQUEST,
+        http_404=HTTP_404_NOT_FOUND,
+    )
 
 
 def _delete_run_scope(run_dir: Path, scope: str) -> Tuple[List[str], int]:
-    targets: List[Path] = []
-    if scope == "all":
-        targets.append(run_dir)
-    else:
-        mapping = {
-            "checkpoints": run_dir / "checkpoints",
-            "logs": run_dir / "logs",
-            "tensorboard": run_dir / "tensorboard",
-            "dumps": run_dir / "dumps",
-        }
-        target = mapping.get(scope)
-        if target:
-            targets.append(target)
-    deleted: List[str] = []
-    freed = 0
-    for target in targets:
-        if not target.exists():
-            continue
-        freed += _dir_size_bytes(target)
-        try:
-            shutil.rmtree(target)
-        except Exception:
-            continue
-        deleted.append(str(target))
-    return deleted, freed
+    return _delete_run_scope_impl(
+        run_dir=run_dir,
+        scope=scope,
+        dir_size_fn=_dir_size_bytes,
+        rmtree_fn=shutil.rmtree,
+    )
 
 
 def _sanitize_yolo_run_id(raw: str) -> str:

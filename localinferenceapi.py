@@ -200,6 +200,13 @@ from services.sam3_runtime import (
     _reset_sam3_runtime_impl as _reset_sam3_runtime_impl,
     _build_backend_for_variant_impl as _build_backend_for_variant_impl,
 )
+from services.runtime_unload import (
+    _unload_sam3_text_runtime_impl as _unload_sam3_text_runtime_impl,
+    _unload_dinov3_backbone_impl as _unload_dinov3_backbone_impl,
+    _unload_detector_inference_impl as _unload_detector_inference_impl,
+    _unload_non_qwen_runtimes_impl as _unload_non_qwen_runtimes_impl,
+    _unload_inference_runtimes_impl as _unload_inference_runtimes_impl,
+)
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
     _seg_job_update_impl as _seg_job_update_impl,
@@ -1208,111 +1215,87 @@ def _reset_qwen_runtime() -> None:
 def _unload_sam3_text_runtime() -> None:
     """Release SAM3 text prompt model to free device memory."""
     global sam3_text_model, sam3_text_processor, sam3_text_device
-    with sam3_text_lock:
-        try:
-            del sam3_text_model
-        except Exception:
-            pass
-        try:
-            del sam3_text_processor
-        except Exception:
-            pass
-        sam3_text_model = None
-        sam3_text_processor = None
-        sam3_text_device = None
+    state = {
+        "sam3_text_model": sam3_text_model,
+        "sam3_text_processor": sam3_text_processor,
+        "sam3_text_device": sam3_text_device,
+    }
+    _unload_sam3_text_runtime_impl(state=state, lock=sam3_text_lock)
+    sam3_text_model = state["sam3_text_model"]
+    sam3_text_processor = state["sam3_text_processor"]
+    sam3_text_device = state["sam3_text_device"]
 
 
 def _unload_dinov3_backbone() -> None:
     """Release DINOv3 encoder + per-device caches."""
     global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
-    with dinov3_lock:
-        try:
-            del dinov3_model
-        except Exception:
-            pass
-        try:
-            del dinov3_processor
-        except Exception:
-            pass
-        dinov3_model = None
-        dinov3_processor = None
-        dinov3_model_name = None
-        dinov3_model_device = None
-        dinov3_initialized = False
-    try:
-        with _agent_dinov3_backbones_lock:
-            _agent_dinov3_backbones.clear()
-            _agent_dinov3_locks.clear()
-    except Exception:
-        pass
+    state = {
+        "dinov3_model": dinov3_model,
+        "dinov3_processor": dinov3_processor,
+        "dinov3_model_name": dinov3_model_name,
+        "dinov3_model_device": dinov3_model_device,
+        "dinov3_initialized": dinov3_initialized,
+    }
+    _unload_dinov3_backbone_impl(
+        state=state,
+        lock=dinov3_lock,
+        agent_backbones=_agent_dinov3_backbones,
+        agent_locks=_agent_dinov3_locks,
+    )
+    dinov3_model = state["dinov3_model"]
+    dinov3_processor = state["dinov3_processor"]
+    dinov3_model_name = state["dinov3_model_name"]
+    dinov3_model_device = state["dinov3_model_device"]
+    dinov3_initialized = state["dinov3_initialized"]
 
 
 def _unload_detector_inference() -> None:
     """Release detector inference models (YOLO/RF-DETR) to free GPU memory."""
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
     global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
-    try:
-        del yolo_infer_model
-    except Exception:
-        pass
-    yolo_infer_model = None
-    yolo_infer_path = None
-    yolo_infer_labelmap = []
-    yolo_infer_task = None
-    try:
-        del rfdetr_infer_model
-    except Exception:
-        pass
-    rfdetr_infer_model = None
-    rfdetr_infer_path = None
-    rfdetr_infer_labelmap = []
-    rfdetr_infer_task = None
-    rfdetr_infer_variant = None
+    state = {
+        "yolo_infer_model": yolo_infer_model,
+        "yolo_infer_path": yolo_infer_path,
+        "yolo_infer_labelmap": yolo_infer_labelmap,
+        "yolo_infer_task": yolo_infer_task,
+        "rfdetr_infer_model": rfdetr_infer_model,
+        "rfdetr_infer_path": rfdetr_infer_path,
+        "rfdetr_infer_labelmap": rfdetr_infer_labelmap,
+        "rfdetr_infer_task": rfdetr_infer_task,
+        "rfdetr_infer_variant": rfdetr_infer_variant,
+    }
+    _unload_detector_inference_impl(state=state)
+    yolo_infer_model = state["yolo_infer_model"]
+    yolo_infer_path = state["yolo_infer_path"]
+    yolo_infer_labelmap = state["yolo_infer_labelmap"]
+    yolo_infer_task = state["yolo_infer_task"]
+    rfdetr_infer_model = state["rfdetr_infer_model"]
+    rfdetr_infer_path = state["rfdetr_infer_path"]
+    rfdetr_infer_labelmap = state["rfdetr_infer_labelmap"]
+    rfdetr_infer_task = state["rfdetr_infer_task"]
+    rfdetr_infer_variant = state["rfdetr_infer_variant"]
 
 
 def _unload_non_qwen_runtimes() -> None:
     """Free heavy inference runtimes except Qwen (SAM, detectors, classifier backbones)."""
-    try:
-        predictor_manager.unload_all()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to unload SAM predictors: %s", exc)
-    _unload_sam3_text_runtime()
-    _suspend_clip_backbone()
-    _unload_dinov3_backbone()
-    _unload_detector_inference()
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
+    _unload_non_qwen_runtimes_impl(
+        predictor_manager=predictor_manager,
+        unload_sam3_text_fn=_unload_sam3_text_runtime,
+        suspend_clip_fn=_suspend_clip_backbone,
+        unload_dinov3_fn=_unload_dinov3_backbone,
+        unload_detector_fn=_unload_detector_inference,
+        torch_module=torch,
+        logger=logger,
+    )
 
 
 def _unload_inference_runtimes() -> None:
     """Free heavy inference runtimes (SAM, detectors, Qwen, classifier backbones)."""
-    _unload_non_qwen_runtimes()
-    _unload_qwen_runtime()
-    if torch.cuda.is_available():
-        try:
-            device_count = torch.cuda.device_count()
-            if device_count > 1:
-                current = torch.cuda.current_device()
-                for idx in range(device_count):
-                    try:
-                        torch.cuda.set_device(idx)
-                        torch.cuda.empty_cache()
-                        torch.cuda.ipc_collect()
-                    except Exception:
-                        continue
-                try:
-                    torch.cuda.set_device(current)
-                except Exception:
-                    pass
-            else:
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-        except Exception:  # noqa: BLE001
-            pass
+    _unload_inference_runtimes_impl(
+        unload_non_qwen_fn=_unload_non_qwen_runtimes,
+        unload_qwen_fn=_unload_qwen_runtime,
+        torch_module=torch,
+    )
 
 
 def _prepare_for_training() -> None:

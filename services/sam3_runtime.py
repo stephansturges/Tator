@@ -66,6 +66,26 @@ def _resolve_sam3_mining_devices_impl(
     return devices
 
 
+def _reset_sam3_runtime_impl(
+    *,
+    state: dict,
+    predictor_manager: Any,
+    torch_module: Any,
+) -> None:
+    state["sam3_text_model"] = None
+    state["sam3_text_processor"] = None
+    state["sam3_text_device"] = None
+    try:
+        predictor_manager.unload_all()
+    except Exception:
+        pass
+    if torch_module.cuda.is_available():
+        try:
+            torch_module.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _sam3_clear_device_pinned_caches_impl(model: Any) -> None:
     """
     SAM3 upstream precomputes some internal caches on `cuda` (i.e. cuda:0) during module

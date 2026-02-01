@@ -193,6 +193,7 @@ from services.sam3_runtime import (
     _set_sam3_device_pref_impl as _set_sam3_device_pref_impl,
     _resolve_sam3_device_impl as _resolve_sam3_device_impl,
     _resolve_sam3_mining_devices_impl as _resolve_sam3_mining_devices_impl,
+    _reset_sam3_runtime_impl as _reset_sam3_runtime_impl,
 )
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
@@ -1690,18 +1691,19 @@ def _require_sam3_for_prepass(enable_text: bool, enable_similarity: bool) -> Non
 
 def _reset_sam3_runtime() -> None:
     global sam3_text_model, sam3_text_processor, sam3_text_device
-    sam3_text_model = None
-    sam3_text_processor = None
-    sam3_text_device = None
-    try:
-        predictor_manager.unload_all()
-    except Exception:
-        pass
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception:  # noqa: BLE001
-            pass
+    state = {
+        "sam3_text_model": sam3_text_model,
+        "sam3_text_processor": sam3_text_processor,
+        "sam3_text_device": sam3_text_device,
+    }
+    _reset_sam3_runtime_impl(
+        state=state,
+        predictor_manager=predictor_manager,
+        torch_module=torch,
+    )
+    sam3_text_model = state["sam3_text_model"]
+    sam3_text_processor = state["sam3_text_processor"]
+    sam3_text_device = state["sam3_text_device"]
 
 
 def _resolve_sam1_devices() -> List[torch.device]:

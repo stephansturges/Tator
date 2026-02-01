@@ -1,3 +1,5 @@
+"""DINOv3 runtime helpers."""
+
 from __future__ import annotations
 
 

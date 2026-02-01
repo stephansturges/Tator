@@ -1,3 +1,5 @@
+"""Cluster handle/index utilities."""
+
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, List

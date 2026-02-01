@@ -1,3 +1,5 @@
+"""SAM3 run registry helpers."""
+
 from __future__ import annotations
 
 import json

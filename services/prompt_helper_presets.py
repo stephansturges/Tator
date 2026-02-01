@@ -1,3 +1,5 @@
+"""Prompt helper preset utilities."""
+
 from __future__ import annotations
 
 import json

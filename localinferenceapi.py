@@ -9267,11 +9267,6 @@ RFDETR_KEEP_FILES = {
     RFDETR_RUN_META_NAME,
 }
 
-GLOSSARY_LIBRARY_ROOT = Path(os.environ.get("GLOSSARY_ROOT", "./uploads/glossaries"))
-GLOSSARY_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
-GLOSSARY_LIBRARY_PATH = GLOSSARY_LIBRARY_ROOT / "glossaries.json"
-GLOSSARY_LIBRARY_LOCK = threading.Lock()
-
 YOLO_INFER_LOCK = threading.RLock()
 yolo_infer_model: Any = None
 yolo_infer_path: Optional[str] = None

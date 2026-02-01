@@ -1,3 +1,5 @@
+"""Dataset loading + labelmap/glossary helpers."""
+
 from __future__ import annotations
 
 import hashlib

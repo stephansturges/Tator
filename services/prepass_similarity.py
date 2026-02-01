@@ -1,3 +1,5 @@
+"""SAM3 similarity expansion helpers."""
+
 from __future__ import annotations
 
 import time

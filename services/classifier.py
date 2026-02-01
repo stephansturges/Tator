@@ -1,3 +1,5 @@
+"""Classifier inference + CLIP head utilities."""
+
 from __future__ import annotations
 
 import os

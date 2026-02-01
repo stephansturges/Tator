@@ -1,3 +1,5 @@
+"""Window helpers for SAM3 text/similarity prepass runs."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence

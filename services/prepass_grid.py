@@ -1,3 +1,5 @@
+"""Grid helpers for tile/window bookkeeping and usage summaries."""
+
 from __future__ import annotations
 
 import re

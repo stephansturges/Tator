@@ -1,3 +1,5 @@
+"""Calibration metrics helpers (prompt evaluation + IoU scoring)."""
+
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -406,7 +408,6 @@ def _build_prompt_recipe_impl(
                 }
             )
     return recipe, coverage_by_image
-
 
 
 

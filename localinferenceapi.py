@@ -336,6 +336,10 @@ from utils.coords import (
     _xyxy_to_yolo_norm,
     _agent_det_payload,
     _agent_iou_xyxy,
+    _extract_numeric_sequence,
+    _scale_coord,
+    _scale_bbox_to_image,
+    _scale_point_to_image,
 )
 from utils.overlay import (
     _agent_detection_center_px,
@@ -2563,67 +2567,6 @@ def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     if not detections:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_parse_error:no_json_block_found")
     return snippet, detections
-
-
-def _extract_numeric_sequence(value: Any, *, length: int) -> Optional[List[float]]:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(value, (list, tuple)) or len(value) < length:
-        return None
-    numbers: List[float] = []
-    for idx in range(length):
-        try:
-            numbers.append(float(value[idx]))
-        except (TypeError, ValueError):
-            return None
-    return numbers
-
-
-def _scale_coord(value: float, src: int, dst: int) -> float:
-    if src <= 0:
-        return float(value)
-    return float(value) * (float(dst) / float(src))
-
-
-def _scale_bbox_to_image(
-    bbox: List[float],
-    proc_w: int,
-    proc_h: int,
-    full_w: int,
-    full_h: int,
-) -> Optional[Tuple[int, int, int, int]]:
-    if len(bbox) < 4:
-        return None
-    left = _scale_coord(bbox[0], proc_w, full_w)
-    top = _scale_coord(bbox[1], proc_h, full_h)
-    right = _scale_coord(bbox[2], proc_w, full_w)
-    bottom = _scale_coord(bbox[3], proc_h, full_h)
-    left_i = max(0, min(full_w, int(round(left))))
-    top_i = max(0, min(full_h, int(round(top))))
-    right_i = max(0, min(full_w, int(round(right))))
-    bottom_i = max(0, min(full_h, int(round(bottom))))
-    if right_i <= left_i or bottom_i <= top_i:
-        return None
-    return left_i, top_i, right_i, bottom_i
-
-
-def _scale_point_to_image(
-    point: List[float],
-    proc_w: int,
-    proc_h: int,
-    full_w: int,
-    full_h: int,
-) -> Optional[Tuple[float, float]]:
-    if len(point) < 2:
-        return None
-    x = _scale_coord(point[0], proc_w, full_w)
-    y = _scale_coord(point[1], proc_h, full_h)
-    x = float(min(max(x, 0.0), float(full_w)))
-    y = float(min(max(y, 0.0), float(full_h)))
-    return x, y
 
 
 def _qwen_items_from_payload(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

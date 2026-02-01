@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Optional, Sequence, Tuple, List
 
 
@@ -48,6 +49,67 @@ def _normalize_window_xyxy(window: Optional[Any], img_w: int, img_h: int) -> Opt
     if isinstance(window, (list, tuple)) and len(window) >= 4:
         x1, y1, x2, y2 = map(float, window[:4])
         return max(0.0, x1), max(0.0, y1), min(float(img_w), x2), min(float(img_h), y2)
+
+
+def _extract_numeric_sequence(value: Any, *, length: int) -> Optional[List[float]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, (list, tuple)) or len(value) < length:
+        return None
+    numbers: List[float] = []
+    for idx in range(length):
+        try:
+            numbers.append(float(value[idx]))
+        except (TypeError, ValueError):
+            return None
+    return numbers
+
+
+def _scale_coord(value: float, src: int, dst: int) -> float:
+    if src <= 0:
+        return float(value)
+    return float(value) * (float(dst) / float(src))
+
+
+def _scale_bbox_to_image(
+    bbox: List[float],
+    proc_w: int,
+    proc_h: int,
+    full_w: int,
+    full_h: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    if len(bbox) < 4:
+        return None
+    left = _scale_coord(bbox[0], proc_w, full_w)
+    top = _scale_coord(bbox[1], proc_h, full_h)
+    right = _scale_coord(bbox[2], proc_w, full_w)
+    bottom = _scale_coord(bbox[3], proc_h, full_h)
+    left_i = max(0, min(full_w, int(round(left))))
+    top_i = max(0, min(full_h, int(round(top))))
+    right_i = max(0, min(full_w, int(round(right))))
+    bottom_i = max(0, min(full_h, int(round(bottom))))
+    if right_i <= left_i or bottom_i <= top_i:
+        return None
+    return left_i, top_i, right_i, bottom_i
+
+
+def _scale_point_to_image(
+    point: List[float],
+    proc_w: int,
+    proc_h: int,
+    full_w: int,
+    full_h: int,
+) -> Optional[Tuple[float, float]]:
+    if len(point) < 2:
+        return None
+    x = _scale_coord(point[0], proc_w, full_w)
+    y = _scale_coord(point[1], proc_h, full_h)
+    x = float(min(max(x, 0.0), float(full_w)))
+    y = float(min(max(y, 0.0), float(full_h)))
+    return x, y
     if isinstance(window, dict):
         if "bbox_2d" in window:
             x1, y1, x2, y2 = _qwen_bbox_to_xyxy(img_w, img_h, window.get("bbox_2d") or [])

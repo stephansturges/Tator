@@ -166,6 +166,8 @@ from services.detector_jobs import (
     _yolo_job_update_impl as _yolo_job_update_impl,
     _yolo_head_graft_job_log_impl as _yolo_head_graft_job_log_impl,
     _yolo_head_graft_job_update_impl as _yolo_head_graft_job_update_impl,
+    _yolo_head_graft_audit_impl as _yolo_head_graft_audit_impl,
+    _yolo_head_graft_force_stop_impl as _yolo_head_graft_force_stop_impl,
 )
 from services.qwen_jobs import (
     _log_qwen_get_request_impl as _log_qwen_get_request_impl,
@@ -10357,43 +10359,18 @@ def _yolo_head_graft_audit(
     event: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
-    try:
-        run_dir_value = (job.config or {}).get("paths", {}).get("run_dir")
-        if not run_dir_value:
-            return
-        run_dir = Path(run_dir_value)
-        if not run_dir.exists():
-            return
-        payload = {
-            "timestamp": time.time(),
-            "level": level,
-            "event": event or "log",
-            "message": message,
-        }
-        if extra:
-            payload["extra"] = extra
-        audit_path = run_dir / "head_graft_audit.jsonl"
-        with audit_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
-    except Exception:
-        return
+    _yolo_head_graft_audit_impl(
+        job,
+        message,
+        level=level,
+        event=event,
+        extra=extra,
+        time_fn=time.time,
+    )
 
 
 def _yolo_head_graft_force_stop(job: YoloHeadGraftJob) -> bool:
-    ident = job.thread_ident
-    if not ident:
-        return False
-    try:
-        import ctypes
-        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), ctypes.py_object(SystemExit))
-        if res == 0:
-            return False
-        if res > 1:
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), None)
-            return False
-        return True
-    except Exception:
-        return False
+    return _yolo_head_graft_force_stop_impl(job)
 
 
 def _yolo_job_append_metric(job: YoloTrainingJob, metric: Dict[str, Any]) -> None:

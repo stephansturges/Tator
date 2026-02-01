@@ -281,7 +281,6 @@ from services.datasets import (
     _count_caption_labels_impl as _count_caption_labels_impl,
     _list_all_datasets_impl as _list_all_datasets_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
-    _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
     _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
     _convert_yolo_dataset_to_coco_impl as _convert_yolo_dataset_to_coco_impl,
     _convert_qwen_dataset_to_coco_impl as _convert_qwen_dataset_to_coco_impl,
@@ -5944,13 +5943,13 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
         dataset_id,
         active_label_list=active_label_list,
         resolve_dataset=_resolve_sam3_or_qwen_dataset,
-        discover_yolo_labelmap=_discover_yolo_labelmap,
+        discover_yolo_labelmap=_discover_yolo_labelmap_impl,
         load_qwen_labelmap=_load_qwen_labelmap,
         load_sam3_meta=_load_sam3_dataset_metadata,
         load_qwen_meta=_load_qwen_dataset_metadata,
         normalize_glossary=_normalize_labelmap_glossary,
         default_glossary_fn=_default_agent_glossary_for_labelmap,
-        collect_labels=_collect_labels_from_qwen_jsonl,
+        collect_labels=_collect_labels_from_qwen_jsonl_impl,
     )
 
 
@@ -14136,21 +14135,6 @@ def get_segmentation_build_job(job_id: str):
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="segmentation_job_not_found")
     return _serialize_seg_job(job)
-
-
-def _collect_labels_from_qwen_jsonl(jsonl_path: Path) -> List[str]:
-    return _collect_labels_from_qwen_jsonl_impl(
-        jsonl_path,
-        extract_detections_fn=_extract_qwen_detections_from_payload,
-    )
-
-
-def _extract_qwen_detections_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return _extract_qwen_detections_from_payload_impl(payload)
-
-
-def _discover_yolo_labelmap(dataset_root: Path) -> List[str]:
-    return _discover_yolo_labelmap_impl(dataset_root, load_labelmap_file_fn=_load_labelmap_file)
 
 
 def _coco_info_block(dataset_id: str) -> Dict[str, Any]:

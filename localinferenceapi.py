@@ -553,7 +553,6 @@ def _try_import_qwen_agent() -> Tuple[Optional[Any], Optional[Any], Optional[Any
     try:
         from qwen_agent.agents import FnCallAgent as _QwenFnCallAgent  # type: ignore
         from qwen_agent.llm.schema import Message as QwenAgentMessage, ContentItem as QwenAgentContentItem  # type: ignore
-        import qwen_agent.settings as qwen_settings  # type: ignore
         from qwen_agent_llm import LocalQwenVLChatModel  # type: ignore
         from qwen_agent_tools import build_local_agent_tools  # type: ignore
         return _QwenFnCallAgent, QwenAgentMessage, QwenAgentContentItem, (LocalQwenVLChatModel, build_local_agent_tools), None

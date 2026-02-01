@@ -12,6 +12,11 @@ python -m py_compile \
   utils/*.py \
   tools/*.py
 
+if [[ "${RUN_UNUSED_SCAN:-0}" == "1" ]]; then
+  echo "==> Unused-def scan"
+  python tools/scan_unused_defs.py
+fi
+
 echo "==> Tier-0/Tier-1 fuzz (skip_gpu=${SKIP_GPU})"
 if [[ "${SKIP_GPU}" == "1" ]]; then
   SKIP_GPU=1 BASE_URL="${BASE_URL}" tools/run_fuzz_fast.sh

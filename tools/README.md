@@ -12,6 +12,7 @@ Tools
 
 - Refactor validation (py_compile + Tier-0/Tier-1 fuzz)
   - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_refactor_validation.sh`
+  - Add `RUN_UNUSED_SCAN=1` to include the unused-def scan.
 
 - Fuzz smoke + lite (Tier-0/Tier-1)
   - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_fuzz_fast.sh`

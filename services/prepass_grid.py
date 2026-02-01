@@ -177,26 +177,6 @@ def _agent_grid_cell_for_window_bbox(
     return f"{col_labels[col_idx]}{row_idx + 1}"
 
 
-def _agent_grid_prompt_text(grid: Optional[Mapping[str, Any]]) -> str:
-    if not grid:
-        return ""
-    cols = int(grid.get("cols") or 0)
-    rows = int(grid.get("rows") or 0)
-    labels = grid.get("col_labels") or []
-    if not cols or not rows or not labels:
-        return ""
-    first = str(labels[0])
-    last = str(labels[-1])
-    cell_w = float(grid.get("cell_w") or 0.0)
-    cell_h = float(grid.get("cell_h") or 0.0)
-    return (
-        f"Grid: columns {first}-{last}, rows 1-{rows}. "
-        f"Cell size ~{cell_w:.0f}x{cell_h:.0f} px. "
-        "Use grid_cell like C2 (column C, row 2, top-left origin) for windowed tools; "
-        "do not use numeric coordinates when the grid is enabled."
-    )
-
-
 def _agent_grid_cells(grid: Optional[Mapping[str, Any]]) -> List[str]:
     if not grid:
         return []
@@ -292,42 +272,6 @@ def _agent_grid_cell_for_detection(
     cx, cy = center
     bbox_2d = _xyxy_to_qwen_bbox(img_w, img_h, cx, cy, cx, cy)
     return _agent_grid_cell_for_window_bbox(grid, bbox_2d)
-
-
-def _agent_quadrant_windows_qwen(overlap_ratio: float = 0.1) -> List[Dict[str, Any]]:
-    overlap_ratio = max(0.0, min(float(overlap_ratio), 0.4))
-    base = 1000.0
-    if overlap_ratio <= 0.0:
-        win = 500.0
-    else:
-        win = base / (2.0 - overlap_ratio)
-    start = base - win
-    x0 = 0.0
-    y0 = 0.0
-    x1 = max(0.0, min(base, start))
-    y1 = max(0.0, min(base, start))
-    win = max(1.0, min(base, win))
-    windows = [
-        {"name": "top_left", "bbox_2d": [x0, y0, x0 + win, y0 + win]},
-        {"name": "top_right", "bbox_2d": [x1, y0, x1 + win, y0 + win]},
-        {"name": "bottom_left", "bbox_2d": [x0, y1, x0 + win, y0 + win]},
-        {"name": "bottom_right", "bbox_2d": [x1, y1, x1 + win, y1 + win]},
-    ]
-    clipped = []
-    for window in windows:
-        x1w, y1w, x2w, y2w = window["bbox_2d"]
-        clipped.append(
-            {
-                "name": window["name"],
-                "bbox_2d": [
-                    max(0.0, min(base, x1w)),
-                    max(0.0, min(base, y1w)),
-                    max(0.0, min(base, x2w)),
-                    max(0.0, min(base, y2w)),
-                ],
-            }
-        )
-    return clipped
 
 
 def _agent_grid_usage_rows(

@@ -93,40 +93,6 @@ def _agent_detection_summary_lines(
     return lines
 
 
-def _agent_readable_detection_line(
-    det: Mapping[str, Any],
-    *,
-    grid: Optional[Mapping[str, Any]] = None,
-    img_w: int,
-    img_h: int,
-) -> str:
-    label = str(det.get("label") or det.get("class_name") or "unknown")
-    bbox = None
-    if isinstance(det.get("bbox_xyxy_px"), (list, tuple)) and len(det.get("bbox_xyxy_px")) >= 4:
-        bbox = det.get("bbox_xyxy_px")
-    elif isinstance(det.get("bbox_2d"), (list, tuple)) and len(det.get("bbox_2d")) >= 4:
-        bbox = det.get("bbox_2d")
-    bbox_text = _agent_readable_format_bbox(bbox) if bbox else "[]"
-    score = det.get("score")
-    if score is None:
-        score_text = "score=n/a"
-    else:
-        try:
-            score_text = f"score={float(score):.3f}"
-        except (TypeError, ValueError):
-            score_text = "score=n/a"
-    source = str(det.get("source") or det.get("score_source") or "").strip()
-    source_text = f" source={source}" if source else ""
-    cluster_id = det.get("cluster_id")
-    id_text = f"id={cluster_id} " if cluster_id is not None else ""
-    cell_text = ""
-    if grid:
-        cell = _agent_grid_cell_for_detection(det, img_w, img_h, grid)
-        if cell:
-            cell_text = f" cell={cell}"
-    return f"{id_text}label={label} bbox={bbox_text} {score_text}{source_text}{cell_text}"
-
-
 def _agent_clean_observation_text(text: Optional[str], max_len: int = 160) -> str:
     if not text:
         return ""
@@ -406,27 +372,6 @@ def _agent_readable_tool_result_summary(tool_name: str, result: Any) -> str:
             suffix = f": {details}" if details else ""
             return f"{tool} returned {len(items)} {key}{suffix}"
     return f"{tool} result"
-
-
-def _agent_readable_line(
-    event_type: str,
-    *,
-    step_id: Optional[int] = None,
-    tool_name: Optional[str] = None,
-    args: Optional[Dict[str, Any]] = None,
-    result: Any = None,
-    output_text: Optional[str] = None,
-) -> str:
-    prefix = f"step{step_id}: " if step_id is not None else ""
-    if event_type == "tool_call" and tool_name:
-        return prefix + _agent_readable_tool_call_summary(tool_name, args)
-    if event_type == "tool_result" and tool_name:
-        return prefix + _agent_readable_tool_result_summary(tool_name, result)
-    if event_type == "model_output" and output_text:
-        return prefix + f"model output \"{_agent_readable_trim(output_text)}\""
-    if event_type == "prepass" and tool_name:
-        return prefix + _agent_readable_tool_result_summary(tool_name, result)
-    return ""
 
 
 def _agent_readable_candidates_summary(items: List[Dict[str, Any]], limit: int = 8) -> str:

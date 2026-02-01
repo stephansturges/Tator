@@ -1142,35 +1142,6 @@ def _prepass_recipe_dir_impl(
     return path
 
 
-def _prepass_recipe_meta_path_impl(
-    recipe_id: str,
-    *,
-    recipes_root: Path,
-    meta_filename: str,
-    sanitize_id_fn,
-) -> Path:
-    return _prepass_recipe_dir_impl(recipe_id, create=False, recipes_root=recipes_root, sanitize_id_fn=sanitize_id_fn) / meta_filename
-
-
-def _prepass_recipe_assets_dir_impl(
-    recipe_id: str,
-    *,
-    create: bool,
-    recipes_root: Path,
-    assets_dirname: str,
-    sanitize_id_fn,
-) -> Path:
-    path = _prepass_recipe_dir_impl(
-        recipe_id,
-        create=create,
-        recipes_root=recipes_root,
-        sanitize_id_fn=sanitize_id_fn,
-    ) / assets_dirname
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _sha256_path_impl(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -1236,50 +1207,6 @@ def _list_prepass_recipes_impl(
         )
     recipes.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or 0, reverse=True)
     return recipes
-
-
-def _unique_prepass_recipe_name_impl(
-    name: str,
-    *,
-    list_recipes_fn,
-) -> Tuple[str, Optional[str]]:
-    cleaned = (name or "").strip() or "Imported recipe"
-    existing = {str(entry.get("name") or "").strip() for entry in list_recipes_fn()}
-    if cleaned not in existing:
-        return cleaned, None
-    base = cleaned
-    idx = 2
-    while f"{base} ({idx})" in existing:
-        idx += 1
-    return f"{base} ({idx})", base
-
-
-def _validate_prepass_recipe_manifest_impl(
-    manifest: Dict[str, Any],
-    extract_dir: Path,
-    *,
-    sha256_fn=_sha256_path_impl,
-    path_is_within_root_fn=None,
-) -> None:
-    assets = manifest.get("assets") or {}
-    copied = assets.get("copied") or []
-    extract_root = extract_dir.resolve()
-    if not isinstance(copied, list):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
-    for entry in copied:
-        if not isinstance(entry, dict):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
-        rel = entry.get("path")
-        if not isinstance(rel, str) or not rel:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
-        target = (extract_root / rel).resolve()
-        if path_is_within_root_fn is not None:
-            if not path_is_within_root_fn(target, extract_root):
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid_path")
-        if not target.exists():
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing_asset")
-        if entry.get("sha256") and sha256_fn(target) != entry.get("sha256"):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_hash_mismatch")
 
 
 def _collect_recipe_assets_impl(

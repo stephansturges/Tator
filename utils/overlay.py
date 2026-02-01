@@ -135,9 +135,3 @@ def _agent_render_grid_overlay(
         draw.text((2, y), str(row_idx + 1), fill=text_color, font=font)
     combined = Image.alpha_composite(base, overlay)
     return combined.convert("RGB")
-
-
-def _agent_image_to_data_uri(pil_img: Image.Image) -> str:
-    buf = BytesIO()
-    pil_img.save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")

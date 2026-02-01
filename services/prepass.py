@@ -43,43 +43,6 @@ def _agent_label_counts_summary(detections: Sequence[Dict[str, Any]], limit: int
     return ", ".join(parts)
 
 
-def _agent_compact_tool_result(result: Dict[str, Any], max_items: int = 0) -> Dict[str, Any]:
-    if not isinstance(result, dict):
-        return {"summary": "tool_result_invalid"}
-    if max_items <= 0:
-        return result
-    detections = result.get("detections")
-    if not isinstance(detections, list):
-        candidates = result.get("candidates")
-        if not isinstance(candidates, list):
-            return result
-        total = len(candidates)
-        if total <= max_items:
-            return result
-        trimmed = candidates[:max_items]
-        return {
-            **{k: v for k, v in result.items() if k != "candidates"},
-            "candidates": trimmed,
-            "candidate_count": total,
-            "truncated": True,
-        }
-    total = len(detections)
-    if total <= max_items:
-        return result
-    classes = {}
-    for det in detections:
-        label = str(det.get("label") or det.get("class") or "unknown")
-        classes[label] = classes.get(label, 0) + 1
-    trimmed = detections[:max_items]
-    return {
-        **{k: v for k, v in result.items() if k != "detections"},
-        "detections": trimmed,
-        "detection_count": total,
-        "class_counts": classes,
-        "truncated": True,
-    }
-
-
 def _agent_merge_prepass_detections(
     detections: List[Dict[str, Any]],
     *,
@@ -170,20 +133,6 @@ def _agent_filter_scoreless_detections(
                 continue
         filtered.append(det)
     return filtered, removed
-
-
-def _agent_detection_has_source(det: Dict[str, Any], sources: Set[str]) -> bool:
-    if not det or not sources:
-        return False
-    source = str(det.get("source") or det.get("score_source") or "")
-    if source and source in sources:
-        return True
-    source_list = det.get("source_list")
-    if isinstance(source_list, (list, tuple)):
-        for item in source_list:
-            if str(item) in sources:
-                return True
-    return False
 
 
 def _agent_det_score(det: Dict[str, Any]) -> Optional[float]:

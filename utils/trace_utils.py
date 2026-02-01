@@ -13,27 +13,6 @@ def _agent_trace_sanitize_payload(payload: Any, image_token: Optional[str]) -> D
     return data
 
 
-def _agent_trace_sanitize_messages(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    sanitized: List[Dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        item = dict(msg)
-        content = item.get("content")
-        if isinstance(content, list):
-            stripped = []
-            for entry in content:
-                if isinstance(entry, dict) and entry.get("image"):
-                    stripped.append({"type": "image"})
-                elif isinstance(entry, dict) and "text" in entry:
-                    stripped.append({"text": entry.get("text")})
-                else:
-                    stripped.append(entry)
-            item["content"] = stripped
-        sanitized.append(item)
-    return sanitized
-
-
 def _agent_trace_full_jsonable(value: Any, *, _depth: int = 0) -> Any:
     if _depth > 6:
         return str(value)

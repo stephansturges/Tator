@@ -37,12 +37,6 @@ def _qwen_bbox_to_xyxy(width: int, height: int, bbox_2d: Sequence[float]) -> Tup
     return x1, y1, x2, y2
 
 
-def _remap_window_xyxy_to_full(xyxy: Sequence[float], window_xyxy: Sequence[float]) -> Tuple[float, float, float, float]:
-    x1, y1, x2, y2 = map(float, xyxy[:4])
-    wx1, wy1, wx2, wy2 = map(float, window_xyxy[:4])
-    return x1 + wx1, y1 + wy1, x2 + wx1, y2 + wy1
-
-
 def _normalize_window_xyxy(window: Optional[Any], img_w: int, img_h: int) -> Optional[Tuple[float, float, float, float]]:
     if not window:
         return None

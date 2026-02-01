@@ -65,23 +65,6 @@ def _normalize_device_list(devices: Optional[list[Any]]) -> list[int]:
     return [value for value in cleaned if value >= 0]
 
 
-def _parse_device_ids_string(raw: Optional[str]) -> Optional[list[int]]:
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return []
-    parts = [part.strip() for part in text.split(",") if part.strip()]
-    if not parts:
-        return []
-    ids: list[int] = []
-    for part in parts:
-        if not part.isdigit():
-            raise ValueError(f"invalid_device_token:{part}")
-        ids.append(int(part))
-    return ids
-
-
 def _agent_extract_json_array(text: str) -> Optional[list[Any]]:
     if not text:
         return None

@@ -563,6 +563,8 @@ from services.detectors import (
     _rfdetr_parse_log_series_impl as _rfdetr_parse_log_series_impl,
     _rfdetr_sanitize_metric_impl as _rfdetr_sanitize_metric_impl,
     _rfdetr_normalize_aug_policy_impl as _rfdetr_normalize_aug_policy_impl,
+    _rfdetr_install_augmentations_impl as _rfdetr_install_augmentations_impl,
+    _rfdetr_restore_augmentations_impl as _rfdetr_restore_augmentations_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -10932,82 +10934,11 @@ def _rfdetr_normalize_aug_policy(raw: Optional[Dict[str, Any]]) -> Optional[Dict
 
 
 def _rfdetr_install_augmentations(policy: Optional[Dict[str, Any]]) -> Optional[Tuple[Any, Any]]:
-    if not policy:
-        return None
-    try:
-        import random as _random
-        import torchvision.transforms as tvt
-        import rfdetr.datasets.coco as coco_mod
-    except Exception:
-        return None
-
-    class _ImageOnlyTransform:
-        def __init__(self, transform, p: float = 1.0) -> None:
-            self.transform = transform
-            self.p = float(p)
-
-        def __call__(self, img, target):
-            if self.p < 1.0 and _random.random() > self.p:
-                return img, target
-            return self.transform(img), target
-
-    aug_transforms = []
-    hsv_h = float(policy.get("hsv_h") or 0.0)
-    hsv_s = float(policy.get("hsv_s") or 0.0)
-    hsv_v = float(policy.get("hsv_v") or 0.0)
-    if hsv_h > 0 or hsv_s > 0 or hsv_v > 0:
-        color_jitter = tvt.ColorJitter(
-            brightness=hsv_v,
-            contrast=hsv_v,
-            saturation=hsv_s,
-            hue=min(0.5, hsv_h),
-        )
-        aug_transforms.append(_ImageOnlyTransform(color_jitter, p=1.0))
-    gray_prob = float(policy.get("gray_prob") or 0.0)
-    if gray_prob > 0:
-        aug_transforms.append(_ImageOnlyTransform(tvt.RandomGrayscale(p=1.0), p=gray_prob))
-    blur_prob = float(policy.get("blur_prob") or 0.0)
-    blur_kernel = int(policy.get("blur_kernel") or 0)
-    if blur_prob > 0 and blur_kernel >= 3:
-        blur_kernel = blur_kernel if blur_kernel % 2 == 1 else blur_kernel + 1
-        blur = tvt.GaussianBlur(kernel_size=blur_kernel, sigma=(0.1, 2.0))
-        aug_transforms.append(_ImageOnlyTransform(blur, p=blur_prob))
-
-    if not aug_transforms:
-        return None
-
-    original_make = coco_mod.make_coco_transforms
-    original_make_square = coco_mod.make_coco_transforms_square_div_64
-
-    def _wrap_make(make_func):
-        def _wrapped(*args, **kwargs):
-            base = make_func(*args, **kwargs)
-            try:
-                if hasattr(base, "transforms") and isinstance(base.transforms, list):
-                    insert_idx = max(0, len(base.transforms) - 1)
-                    base.transforms[insert_idx:insert_idx] = list(aug_transforms)
-            except Exception:
-                pass
-            return base
-        return _wrapped
-
-    coco_mod.make_coco_transforms = _wrap_make(original_make)
-    coco_mod.make_coco_transforms_square_div_64 = _wrap_make(original_make_square)
-    return (original_make, original_make_square)
+    return _rfdetr_install_augmentations_impl(policy)
 
 
 def _rfdetr_restore_augmentations(restore: Optional[Tuple[Any, Any]]) -> None:
-    if not restore:
-        return
-    try:
-        import rfdetr.datasets.coco as coco_mod
-    except Exception:
-        return
-    try:
-        coco_mod.make_coco_transforms = restore[0]
-        coco_mod.make_coco_transforms_square_div_64 = restore[1]
-    except Exception:
-        pass
+    _rfdetr_restore_augmentations_impl(restore)
 
 
 def _rfdetr_latest_checkpoint_epoch(run_dir: Path) -> Optional[int]:

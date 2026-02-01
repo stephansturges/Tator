@@ -1,3 +1,5 @@
+"""Prepass pipeline helpers (detectors + SAM3 + dedupe orchestration)."""
+
 from __future__ import annotations
 
 import time

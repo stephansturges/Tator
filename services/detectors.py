@@ -1,3 +1,5 @@
+"""Detector runtime helpers for YOLO/RF-DETR inference and training metadata."""
+
 from __future__ import annotations
 
 import csv

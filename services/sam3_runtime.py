@@ -98,6 +98,59 @@ def _build_backend_for_variant_impl(
     return sam1_backend_cls()
 
 
+def _ensure_sam3_text_runtime_impl(
+    *,
+    state: dict,
+    lock: Any,
+    resolve_device_fn: Any,
+    sam3_import_error: Optional[str],
+    build_model_fn: Any,
+    processor_cls: Any,
+    sam3_checkpoint: Optional[str],
+    sam3_bpe_path: Any,
+    clear_caches_fn: Any,
+    http_exception_cls: Any,
+    http_503: int,
+    http_500: int,
+) -> tuple:
+    with lock:
+        if (
+            state.get("sam3_text_model") is not None
+            and state.get("sam3_text_processor") is not None
+            and state.get("sam3_text_device") is not None
+        ):
+            return state["sam3_text_model"], state["sam3_text_processor"], state["sam3_text_device"]
+        device = resolve_device_fn()
+        if sam3_import_error is not None or build_model_fn is None or processor_cls is None:
+            detail = f"sam3_text_unavailable:{sam3_import_error}"
+            raise http_exception_cls(status_code=http_503, detail=detail)
+        try:
+            device_str = str(device) if getattr(device, "type", None) == "cuda" else "cpu"
+            enable_seg = True
+            if sam3_checkpoint:
+                model = build_model_fn(
+                    checkpoint_path=sam3_checkpoint,
+                    device=device_str,
+                    load_from_HF=False,
+                    enable_segmentation=enable_seg,
+                    bpe_path=str(sam3_bpe_path),
+                ).to(device)
+            else:
+                model = build_model_fn(
+                    device=device_str,
+                    enable_segmentation=enable_seg,
+                    bpe_path=str(sam3_bpe_path),
+                ).to(device)
+            clear_caches_fn(model)
+            processor = processor_cls(model, device=device_str)
+        except Exception as exc:  # noqa: BLE001
+            raise http_exception_cls(status_code=http_500, detail=f"sam3_text_load_failed:{exc}") from exc
+        state["sam3_text_model"] = model
+        state["sam3_text_processor"] = processor
+        state["sam3_text_device"] = device
+        return state["sam3_text_model"], state["sam3_text_processor"], state["sam3_text_device"]
+
+
 def _sam3_clear_device_pinned_caches_impl(model: Any) -> None:
     """
     SAM3 upstream precomputes some internal caches on `cuda` (i.e. cuda:0) during module

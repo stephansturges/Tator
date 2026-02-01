@@ -200,6 +200,7 @@ from services.sam3_runtime import (
     _resolve_sam3_mining_devices_impl as _resolve_sam3_mining_devices_impl,
     _reset_sam3_runtime_impl as _reset_sam3_runtime_impl,
     _build_backend_for_variant_impl as _build_backend_for_variant_impl,
+    _ensure_sam3_text_runtime_impl as _ensure_sam3_text_runtime_impl,
 )
 from services.runtime_unload import (
     _unload_sam3_text_runtime_impl as _unload_sam3_text_runtime_impl,
@@ -1819,41 +1820,29 @@ def _sam3_clear_device_pinned_caches(model: Any) -> None:
 
 def _ensure_sam3_text_runtime():
     global sam3_text_model, sam3_text_processor, sam3_text_device
-    with sam3_text_lock:
-        if sam3_text_model is not None and sam3_text_processor is not None and sam3_text_device is not None:
-            return sam3_text_model, sam3_text_processor, sam3_text_device
-        device = _resolve_sam3_device()
-        if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None or Sam3ImageProcessor is None:
-            detail = f"sam3_text_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}"
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
-        try:
-            # Preserve explicit CUDA indices (e.g. "cuda:1") so the processor's internal tensors
-            # and transforms land on the same device as the model.
-            device_str = str(device) if device.type == "cuda" else "cpu"
-            # Force segmentation head on for text prompting so pred_masks and related keys exist.
-            enable_seg = True
-            if active_sam3_checkpoint:
-                model = build_sam3_image_model(
-                    checkpoint_path=active_sam3_checkpoint,
-                    device=device_str,
-                    load_from_HF=False,
-                    enable_segmentation=enable_seg,
-                    bpe_path=str(SAM3_BPE_PATH),
-                ).to(device)
-            else:
-                model = build_sam3_image_model(
-                    device=device_str,
-                    enable_segmentation=enable_seg,
-                    bpe_path=str(SAM3_BPE_PATH),
-                ).to(device)
-            _sam3_clear_device_pinned_caches(model)
-            processor = Sam3ImageProcessor(model, device=device_str)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_load_failed:{exc}") from exc
-        sam3_text_model = model
-        sam3_text_processor = processor
-        sam3_text_device = device
-        return sam3_text_model, sam3_text_processor, sam3_text_device
+    state = {
+        "sam3_text_model": sam3_text_model,
+        "sam3_text_processor": sam3_text_processor,
+        "sam3_text_device": sam3_text_device,
+    }
+    model, processor, device = _ensure_sam3_text_runtime_impl(
+        state=state,
+        lock=sam3_text_lock,
+        resolve_device_fn=_resolve_sam3_device,
+        sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
+        build_model_fn=build_sam3_image_model,
+        processor_cls=Sam3ImageProcessor,
+        sam3_checkpoint=active_sam3_checkpoint,
+        sam3_bpe_path=SAM3_BPE_PATH,
+        clear_caches_fn=_sam3_clear_device_pinned_caches,
+        http_exception_cls=HTTPException,
+        http_503=HTTP_503_SERVICE_UNAVAILABLE,
+        http_500=HTTP_500_INTERNAL_SERVER_ERROR,
+    )
+    sam3_text_model = state["sam3_text_model"]
+    sam3_text_processor = state["sam3_text_processor"]
+    sam3_text_device = state["sam3_text_device"]
+    return model, processor, device
 
 
 class PredictorSlot:

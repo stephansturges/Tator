@@ -207,6 +207,8 @@ from services.runtime_unload import (
     _unload_detector_inference_impl as _unload_detector_inference_impl,
     _unload_non_qwen_runtimes_impl as _unload_non_qwen_runtimes_impl,
     _unload_inference_runtimes_impl as _unload_inference_runtimes_impl,
+    _prepare_for_training_impl as _prepare_for_training_impl,
+    _finalize_training_environment_impl as _finalize_training_environment_impl,
 )
 from services.dinov3_runtime import (
     _dinov3_resolve_device_impl as _dinov3_resolve_device_impl,
@@ -1312,16 +1314,14 @@ def _unload_inference_runtimes() -> None:
 
 def _prepare_for_training() -> None:
     """Free heavy inference runtimes before starting a training job."""
-    _unload_inference_runtimes()
+    _prepare_for_training_impl(unload_inference_runtimes_fn=_unload_inference_runtimes)
 
 
 def _finalize_training_environment() -> None:
-    _resume_classifier_backbone()
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception:  # noqa: BLE001
-            pass
+    _finalize_training_environment_impl(
+        resume_classifier_fn=_resume_classifier_backbone,
+        torch_module=torch,
+    )
 
 
 sam3_text_model = None

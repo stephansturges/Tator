@@ -116,3 +116,21 @@ def _unload_inference_runtimes_impl(
                 torch_module.cuda.empty_cache()
             except Exception:
                 continue
+
+
+def _prepare_for_training_impl(*, unload_inference_runtimes_fn: Callable[[], None]) -> None:
+    """Free heavy inference runtimes before starting a training job."""
+    unload_inference_runtimes_fn()
+
+
+def _finalize_training_environment_impl(
+    *,
+    resume_classifier_fn: Callable[[], None],
+    torch_module: Any,
+) -> None:
+    resume_classifier_fn()
+    if torch_module.cuda.is_available():
+        try:
+            torch_module.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass

@@ -53,7 +53,7 @@ from utils.io import (
     _dir_size_bytes as _dir_size_bytes_impl,
 )
 from utils.network import _find_free_port_impl as _find_free_port_impl
-from utils.image import _load_image_size, _slice_image_sahi
+from utils.image import _load_image_size, _slice_image_sahi, _decode_image_base64_impl
 from utils.labels import (
     _read_labelmap_lines,
     _load_labelmap_file,
@@ -11497,39 +11497,12 @@ def _decode_image_base64(
     max_dim: Optional[int] = BASE64_IMAGE_MAX_DIM,
     allow_downscale: bool = True,
 ) -> Tuple[Image.Image, np.ndarray]:
-    """Decode base64 image with size/dimension guards and optional downscale."""
-    if not image_base64:
-        raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_payload_missing")
-    raw = image_base64
-    if raw.startswith("data:") and "," in raw:
-        raw = raw.split(",", 1)[1]
-    if max_bytes:
-        est_bytes = (len(raw) * 3) // 4
-        if est_bytes > max_bytes * 2:
-            raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="image_base64_too_large")
-    try:
-        data = base64.b64decode(raw)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_base64:{exc}") from exc
-    if max_bytes and len(data) > max_bytes:
-        raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="image_bytes_too_large")
-    try:
-        pil_img = Image.open(BytesIO(data)).convert("RGB")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_image:{exc}") from exc
-    if max_dim:
-        width, height = pil_img.size
-        if width > max_dim or height > max_dim:
-            if not allow_downscale:
-                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="image_too_large_dim")
-            try:
-                resample = getattr(Image, "Resampling", Image).LANCZOS  # Pillow 10 compat
-            except Exception:
-                resample = Image.LANCZOS
-            pil_img = pil_img.copy()
-            pil_img.thumbnail((max_dim, max_dim), resample)
-    np_img = np.array(pil_img)
-    return pil_img, np_img
+    return _decode_image_base64_impl(
+        image_base64,
+        max_bytes=max_bytes,
+        max_dim=max_dim,
+        allow_downscale=allow_downscale,
+    )
 
 
 def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = None) -> str:

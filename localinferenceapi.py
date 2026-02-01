@@ -9877,55 +9877,6 @@ YOLO_MAX_LOG_LINES = 300
 YOLO_HEAD_GRAFT_PATCHED = False
 
 
-def _prepass_recipe_dir(recipe_id: str, *, create: bool = False) -> Path:
-    return _prepass_recipe_dir_impl(
-        recipe_id,
-        create=create,
-        recipes_root=PREPASS_RECIPE_ROOT,
-        sanitize_id_fn=_sanitize_yolo_run_id,
-    )
-
-
-def _prepass_recipe_meta_path(recipe_id: str) -> Path:
-    return _prepass_recipe_meta_path_impl(
-        recipe_id,
-        recipes_root=PREPASS_RECIPE_ROOT,
-        meta_filename=PREPASS_RECIPE_META,
-        sanitize_id_fn=_sanitize_yolo_run_id,
-    )
-
-
-def _prepass_recipe_assets_dir(recipe_id: str, *, create: bool = False) -> Path:
-    return _prepass_recipe_assets_dir_impl(
-        recipe_id,
-        create=create,
-        recipes_root=PREPASS_RECIPE_ROOT,
-        assets_dirname=PREPASS_RECIPE_ASSETS,
-        sanitize_id_fn=_sanitize_yolo_run_id,
-    )
-
-
-def _sha256_path(path: Path) -> str:
-    return _sha256_path_impl(path)
-
-
-def _copy_tree_filtered(src: Path, dest: Path, *, keep_files: Optional[set[str]] = None) -> List[Dict[str, Any]]:
-    return _copy_tree_filtered_impl(src, dest, keep_files=keep_files, sha256_fn=_sha256_path)
-
-
-def _unique_prepass_recipe_name(name: str) -> Tuple[str, Optional[str]]:
-    return _unique_prepass_recipe_name_impl(name, list_recipes_fn=_list_prepass_recipes)
-
-
-def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Path) -> None:
-    return _validate_prepass_recipe_manifest_impl(
-        manifest,
-        extract_dir,
-        sha256_fn=_sha256_path,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
 def _list_prepass_recipes() -> List[Dict[str, Any]]:
     return _list_prepass_recipes_impl(recipes_root=PREPASS_RECIPE_ROOT, meta_filename=PREPASS_RECIPE_META)
 

@@ -464,6 +464,8 @@ from services.qwen import (
     _caption_needs_completion as _caption_needs_completion_impl,
     _caption_has_meta as _caption_has_meta_impl,
     _caption_needs_short_form as _caption_needs_short_form_impl,
+    _allowed_caption_labels_impl as _allowed_caption_labels_impl,
+    _caption_is_degenerate_impl as _caption_is_degenerate_impl,
     _resolve_qwen_caption_decode as _resolve_qwen_caption_decode_impl,
     _adjust_prompt_for_thinking as _adjust_prompt_for_thinking_impl,
     _run_qwen_caption_cleanup as _run_qwen_caption_cleanup_impl,
@@ -4059,50 +4061,11 @@ def _window_positions(
 
 
 def _allowed_caption_labels(label_hints: Sequence[QwenCaptionHint]) -> List[str]:
-    labels = [hint.label for hint in label_hints if hint.label]
-    return sorted(set(str(label) for label in labels if str(label).strip()))
+    return _allowed_caption_labels_impl(label_hints)
 
 
 def _caption_is_degenerate(caption: str) -> bool:
-    if not caption:
-        return True
-    trimmed = caption.strip()
-    if not trimmed:
-        return True
-    if _QWEN_THINKING_REASONING_RE.search(trimmed):
-        return True
-    compact = re.sub(r"\\s+", "", trimmed)
-    if compact:
-        alnum = re.findall(r"[A-Za-z0-9]", compact)
-        if not alnum and len(compact) > 10:
-            return True
-        if len(compact) >= 20:
-            ratio = len(alnum) / max(1, len(compact))
-            if ratio < 0.2:
-                return True
-        if re.fullmatch(r"[^A-Za-z0-9]+", compact):
-            return True
-        if re.search(r"([!?.<>\\-_=])\\1{20,}", compact):
-            return True
-    words = caption.split()
-    if len(words) < 8:
-        return True
-    sentences = [s.strip().lower() for s in re.split(r"[.!?]+", caption) if s.strip()]
-    if sentences:
-        counts = Counter(sentences)
-        most_common = counts.most_common(1)[0][1]
-        if most_common >= 3:
-            return True
-        if most_common / max(1, len(sentences)) > 0.45:
-            return True
-    if len(words) > 40:
-        tokens = [w.lower() for w in words]
-        bigrams = list(zip(tokens, tokens[1:]))
-        if bigrams:
-            unique_ratio = len(set(bigrams)) / len(bigrams)
-            if unique_ratio < 0.55:
-                return True
-    return False
+    return _caption_is_degenerate_impl(caption)
 
 
 def _group_hints_by_window(

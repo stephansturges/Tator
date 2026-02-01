@@ -739,6 +739,61 @@ def _caption_needs_short_form(caption: str, max_words: int = 80, max_sentences: 
     return len(sentences) > max_sentences
 
 
+def _allowed_caption_labels_impl(label_hints: Sequence[Dict[str, Any]]) -> List[str]:
+    labels = []
+    for entry in label_hints or []:
+        try:
+            label = str(entry.get("label") or "").strip()
+        except Exception:
+            label = ""
+        if not label:
+            continue
+        labels.append(label)
+    return sorted(set(labels))
+
+
+def _caption_is_degenerate_impl(caption: str) -> bool:
+    if not caption:
+        return True
+    trimmed = caption.strip()
+    if not trimmed:
+        return True
+    if _QWEN_THINKING_REASONING_RE.search(trimmed):
+        return True
+    compact = re.sub(r"\\s+", "", trimmed)
+    if compact:
+        alnum = re.findall(r"[A-Za-z0-9]", compact)
+        if not alnum and len(compact) > 10:
+            return True
+        if len(compact) >= 20:
+            ratio = len(alnum) / max(1, len(compact))
+            if ratio < 0.2:
+                return True
+        if re.fullmatch(r"[^A-Za-z0-9]+", compact):
+            return True
+        if re.search(r"([!?.<>\\-_=])\\1{20,}", compact):
+            return True
+    words = caption.split()
+    if len(words) < 8:
+        return True
+    sentences = [s.strip().lower() for s in re.split(r"[.!?]+", caption) if s.strip()]
+    if sentences:
+        counts = Counter(sentences)
+        most_common = counts.most_common(1)[0][1]
+        if most_common >= 3:
+            return True
+        if most_common / max(1, len(sentences)) > 0.45:
+            return True
+    if len(words) > 40:
+        tokens = [w.lower() for w in words]
+        bigrams = list(zip(tokens, tokens[1:]))
+        if bigrams:
+            unique_ratio = len(set(bigrams)) / len(bigrams)
+            if unique_ratio < 0.55:
+                return True
+    return False
+
+
 def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, Any]:
     use_sampling = payload.use_sampling if getattr(payload, "use_sampling", None) is not None else True
     if not use_sampling:

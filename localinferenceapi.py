@@ -9699,14 +9699,6 @@ def _qwen_job_update(
     )
 
 
-def _serialize_job(job: ClipTrainingJob) -> Dict[str, Any]:
-    return _serialize_clip_job_impl(job)
-
-
-def _serialize_qwen_job(job: QwenTrainingJob) -> Dict[str, Any]:
-    return _serialize_qwen_job_impl(job)
-
-
 def _sam3_job_log(job: Sam3TrainingJob, message: str) -> None:
     _sam3_job_log_impl(job, message, max_logs=SAM3_MAX_LOG_LINES, logger=logger)
 
@@ -16079,7 +16071,7 @@ def list_training_jobs():
 @app.get("/clip/train/{job_id}")
 def get_training_job(job_id: str):
     job = _validate_job_exists(job_id)
-    return _serialize_job(job)
+    return _serialize_clip_job_impl(job)
 
 
 @app.post("/clip/train/{job_id}/cancel")
@@ -17380,14 +17372,14 @@ def list_qwen_training_jobs(request: Request):
     with QWEN_TRAINING_JOBS_LOCK:
         jobs = sorted(QWEN_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
         _log_qwen_get_request(str(request.url.path), jobs)
-        return [_serialize_qwen_job(job) for job in jobs]
+        return [_serialize_qwen_job_impl(job) for job in jobs]
 
 
 @app.get("/qwen/train/jobs/{job_id}")
 def get_qwen_training_job(job_id: str, request: Request):
     job = _get_qwen_job(job_id)
     _log_qwen_get_request(str(request.url.path), [job])
-    return _serialize_qwen_job(job)
+    return _serialize_qwen_job_impl(job)
 
 
 @app.post("/qwen/train/jobs/{job_id}/cancel")

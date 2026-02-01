@@ -9,7 +9,6 @@ import torch
 import clip
 import joblib
 import json
-import copy
 from collections import defaultdict
 from PIL import Image
 

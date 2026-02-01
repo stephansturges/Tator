@@ -3,7 +3,6 @@ import argparse
 import base64
 import json
 from pathlib import Path
-import sys
 import urllib.request
 from urllib.error import URLError, HTTPError
 

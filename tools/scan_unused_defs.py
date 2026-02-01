@@ -30,12 +30,14 @@ def _iter_py_files(root: pathlib.Path) -> Iterable[pathlib.Path]:
         yield path
 
 
-def _collect_defs(path: pathlib.Path) -> list[tuple[str, int]]:
+def _collect_defs(path: pathlib.Path, include_decorated: bool) -> list[tuple[str, int]]:
     text = path.read_text()
     tree = ast.parse(text, filename=str(path))
     defs: list[tuple[str, int]] = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.decorator_list and not include_decorated:
+                continue
             defs.append((node.name, node.lineno))
     return defs
 
@@ -46,12 +48,14 @@ def _count_occurrences(name: str, corpus: str) -> int:
 
 
 def main() -> int:
-    root = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(".")
+    include_decorated = "--include-decorated" in sys.argv
+    args = [arg for arg in sys.argv[1:] if arg != "--include-decorated"]
+    root = pathlib.Path(args[0]) if args else pathlib.Path(".")
     files = list(_iter_py_files(root))
     corpus = "\n".join(path.read_text() for path in files)
     candidates: list[tuple[str, pathlib.Path, int, int]] = []
     for path in files:
-        for name, lineno in _collect_defs(path):
+        for name, lineno in _collect_defs(path, include_decorated):
             if len(name) < 4:
                 continue
             if name.startswith("_"):

@@ -10,9 +10,22 @@ import sys
 from typing import Iterable
 
 
+EXCLUDE_DIRS = {
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "Qwen-Agent",
+    "Qwen3-VL",
+    "rf-detr",
+    "sam3",
+    "sahi",
+    "SAM3-UNet",
+}
+
+
 def _iter_py_files(root: pathlib.Path) -> Iterable[pathlib.Path]:
     for path in root.rglob("*.py"):
-        if any(part in {".venv", "__pycache__", "node_modules"} for part in path.parts):
+        if any(part in EXCLUDE_DIRS for part in path.parts):
             continue
         yield path
 
@@ -21,7 +34,7 @@ def _collect_defs(path: pathlib.Path) -> list[tuple[str, int]]:
     text = path.read_text()
     tree = ast.parse(text, filename=str(path))
     defs: list[tuple[str, int]] = []
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             defs.append((node.name, node.lineno))
     return defs
@@ -49,8 +62,11 @@ def main() -> int:
 
     candidates.sort(key=lambda item: (item[3], str(item[1]), item[2]))
     print("Likely-unused defs (count<=1):")
-    for name, path, lineno, count in candidates:
-        print(f"- {name} ({path}:{lineno}) count={count}")
+    try:
+        for name, path, lineno, count in candidates:
+            print(f"- {name} ({path}:{lineno}) count={count}")
+    except BrokenPipeError:
+        return 0
     return 0
 
 

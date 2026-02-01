@@ -5388,6 +5388,30 @@ def _agent_classifier_matches_labelmap(path: Path, labelmap: Sequence[str]) -> b
     )
 
 
+def _resolve_agent_clip_classifier_path(path_str: Optional[str]) -> Optional[Path]:
+    return _resolve_agent_clip_classifier_path_impl(
+        path_str,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root,
+        http_exception_cls=HTTPException,
+    )
+
+
+def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str, Any]]:
+    return _load_clip_head_from_classifier_impl(
+        classifier_path,
+        joblib_load_fn=joblib.load,
+        http_exception_cls=HTTPException,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings,
+        infer_clip_model_fn=_infer_clip_model_from_embedding_dim,
+        active_clip_model_name=active_clip_model_name,
+        default_clip_model=DEFAULT_CLIP_MODEL,
+        logger=logger,
+    )
+
+
 _AgentToolRunner = None  # legacy tool runner removed
 
 

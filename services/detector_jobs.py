@@ -1,3 +1,5 @@
+"""Detector training/head-graft job tracking + serialization."""
+
 from __future__ import annotations
 
 import logging

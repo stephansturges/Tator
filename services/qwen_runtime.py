@@ -1,3 +1,5 @@
+"""Qwen runtime load/unload helpers + caption cache management."""
+
 from __future__ import annotations
 
 from typing import Any, Callable, Optional

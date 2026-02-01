@@ -1,3 +1,5 @@
+"""Calibration helpers for caching + prepass worker orchestration."""
+
 from __future__ import annotations
 
 import hashlib

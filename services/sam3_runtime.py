@@ -1,3 +1,5 @@
+"""SAM3 runtime management + model caching."""
+
 from __future__ import annotations
 
 from typing import Any

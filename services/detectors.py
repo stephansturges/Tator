@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import time
 from pathlib import Path
@@ -374,6 +375,20 @@ def _rfdetr_prune_run_dir_impl(
         except Exception:
             continue
     return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+
+
+def _yolo_device_arg_impl(devices: Optional[List[int]]) -> Optional[str]:
+    if not devices:
+        return None
+    cleaned = [str(int(d)) for d in devices if isinstance(d, (int, str)) and str(d).strip().isdigit()]
+    return ",".join(cleaned) if cleaned else None
+
+
+def _yolo_p2_scale_impl(model_id: str) -> Optional[str]:
+    match = re.match(r"^yolov8([nsmlx])-p2$", model_id)
+    if match:
+        return match.group(1)
+    return None
 
 
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:

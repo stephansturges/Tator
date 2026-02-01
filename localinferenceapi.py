@@ -556,6 +556,8 @@ from services.detectors import (
     _yolo_load_run_meta_impl as _yolo_load_run_meta_impl,
     _yolo_write_run_meta_impl as _yolo_write_run_meta_impl,
     _yolo_prune_run_dir_impl as _yolo_prune_run_dir_impl,
+    _yolo_device_arg_impl as _yolo_device_arg_impl,
+    _yolo_p2_scale_impl as _yolo_p2_scale_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -11179,17 +11181,11 @@ def _yolo_write_data_yaml(run_dir: Path, dataset_root: Path, layout: Optional[st
 
 
 def _yolo_device_arg(devices: Optional[List[int]]) -> Optional[str]:
-    if not devices:
-        return None
-    cleaned = [str(int(d)) for d in devices if isinstance(d, (int, str)) and str(d).strip().isdigit()]
-    return ",".join(cleaned) if cleaned else None
+    return _yolo_device_arg_impl(devices)
 
 
 def _yolo_p2_scale(model_id: str) -> Optional[str]:
-    match = re.match(r"^yolov8([nsmlx])-p2$", model_id)
-    if match:
-        return match.group(1)
-    return None
+    return _yolo_p2_scale_impl(model_id)
 
 
 class ConcatHead(torch.nn.Module):

@@ -96,6 +96,7 @@ from utils.parsing import (
     _parse_device_ids_string,
     _agent_extract_json_array,
 )
+from utils.gpu import _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl
 from utils.errors import _agent_error_payload, _agent_error_from_detail
 from utils.hashing import _stable_hash_impl as _stable_hash_impl
 from utils.glossary import (
@@ -14906,6 +14907,12 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             device_ids = _normalize_device_list(config.get("devices"))
             if not device_ids and torch.cuda.is_available():
                 device_ids = list(range(torch.cuda.device_count()))
+            if device_ids:
+                _validate_cuda_device_ids_impl(
+                    device_ids,
+                    torch_module=torch,
+                    http_exception_cls=HTTPException,
+                )
             cuda_visible = ",".join(str(d) for d in device_ids) if device_ids else None
             prev_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
             if cuda_visible:

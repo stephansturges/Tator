@@ -10,6 +10,12 @@ Tools
 - Qwen prepass smoke test (10-image baseline)
   - Run: `bash tools/run_qwen_prepass_smoke.sh --count 10 --seed 42 --dataset qwen_dataset`
 
+- Refactor validation (py_compile + Tier-0/Tier-1 fuzz)
+  - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_refactor_validation.sh`
+
+- Fuzz smoke + lite (Tier-0/Tier-1)
+  - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_fuzz_fast.sh`
+
 Planned consolidation
 - Dataset utilities (mismatch detection, dataset checks) live in `tools/`.
 - Optional: unify CLIs with Typer and package entry points.

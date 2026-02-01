@@ -85,6 +85,7 @@ from utils.parsing import (
     _agent_extract_json_array,
 )
 from utils.errors import _agent_error_payload, _agent_error_from_detail
+from utils.hashing import _stable_hash_impl as _stable_hash_impl
 from utils.glossary import (
     _glossary_label_key,
     _extract_glossary_synonyms,
@@ -11486,10 +11487,7 @@ def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
 
 
 def _stable_hash(entries: Sequence[str]) -> str:
-    digest = hashlib.sha256()
-    for item in entries:
-        digest.update(item.encode("utf-8"))
-    return digest.hexdigest()
+    return _stable_hash_impl(entries)
 
 
 def _decode_image_base64(

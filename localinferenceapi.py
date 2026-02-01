@@ -60,6 +60,7 @@ from utils.coco import (
     _ensure_coco_supercategory_impl,
     _write_coco_annotations_impl,
 )
+from utils.gpu import _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl
 from utils.image import _load_image_size, _slice_image_sahi, _decode_image_base64_impl
 from utils.labels import (
     _read_labelmap_lines,
@@ -14231,17 +14232,11 @@ def _rfdetr_prepare_dataset(dataset_root: Path, run_dir: Path, coco_train: str, 
 
 
 def _validate_cuda_device_ids(device_ids: Sequence[int]) -> None:
-    if not device_ids:
-        return
-    if not torch.cuda.is_available():
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_devices_unavailable")
-    max_id = torch.cuda.device_count() - 1
-    invalid = [device for device in device_ids if device < 0 or device > max_id]
-    if invalid:
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST,
-            detail=f"qwen_invalid_devices:available=0-{max_id}",
-        )
+    _validate_cuda_device_ids_impl(
+        device_ids,
+        torch_module=torch,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _find_free_port() -> int:

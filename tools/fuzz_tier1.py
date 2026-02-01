@@ -8,6 +8,19 @@ import urllib.request
 from urllib.error import URLError, HTTPError
 
 
+def _get(url: str) -> dict:
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8") if exc.fp else ""
+        raise RuntimeError(f"HTTP {exc.code} for {url}: {body}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"URL error for {url}: {exc}") from exc
+    return json.loads(data)
+
+
 def _post(url: str, payload: dict) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -106,6 +119,40 @@ def main() -> int:
     summary["steps"].append({"name": "caption_windowed", "result": _post(args.base_url + "/qwen/caption", caption_win)})
 
     # Calibration: tiny job with max_images=1 (uses cached prepass)
+    classifier_id = None
+    try:
+        classifiers = _get(args.base_url + "/clip/classifiers")
+        entries = classifiers.get("classifiers", [])
+        if isinstance(entries, list) and entries:
+            first = entries[0]
+            if isinstance(first, dict):
+                classifier_id = first.get("path") or first.get("id")
+            elif isinstance(first, str):
+                classifier_id = first
+    except Exception as exc:
+        summary["steps"].append(
+            {
+                "name": "calibration",
+                "skipped": True,
+                "reason": f"classifier_lookup_failed:{exc}",
+            }
+        )
+        Path(args.out).write_text(json.dumps(summary, indent=2))
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    if not classifier_id:
+        summary["steps"].append(
+            {
+                "name": "calibration",
+                "skipped": True,
+                "reason": "classifier_required",
+            }
+        )
+        Path(args.out).write_text(json.dumps(summary, indent=2))
+        print(json.dumps(summary, indent=2))
+        return 0
+
     cal_payload = {
         "dataset_id": "fuzz_pack",
         "max_images": 1,
@@ -113,6 +160,7 @@ def main() -> int:
         "enable_rfdetr": True,
         "label_iou": 0.5,
         "eval_iou": 0.75,
+        "classifier_id": classifier_id,
     }
     summary["steps"].append({"name": "calibration", "result": _post(args.base_url + "/calibration/jobs", cal_payload)})
 

@@ -303,7 +303,6 @@ from services.prepass import (
     _agent_run_deep_prepass_part_a_impl,
     _agent_run_deep_prepass_impl,
     _agent_run_deep_prepass_caption_impl,
-    _agent_run_prepass_impl,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import (
@@ -5315,14 +5314,6 @@ def _register_agent_tool(name: str):
     return _wrap
 
 
-def _agent_set_active_detections(detections: Optional[Sequence[Dict[str, Any]]]) -> None:
-    global _AGENT_ACTIVE_DETECTIONS
-    if not detections:
-        _AGENT_ACTIVE_DETECTIONS = []
-        return
-    _AGENT_ACTIVE_DETECTIONS = [dict(det) for det in detections if isinstance(det, dict)]
-
-
 def _agent_set_active_clusters(clusters: Optional[Sequence[Dict[str, Any]]]) -> None:
     global _AGENT_ACTIVE_CLUSTERS, _AGENT_ACTIVE_DETECTIONS, _AGENT_ACTIVE_CLUSTER_INDEX
     if not clusters:
@@ -6372,68 +6363,6 @@ def _agent_classifier_review(
         readable_write_fn=_agent_readable_write,
         readable_format_bbox_fn=_agent_readable_format_bbox,
     )
-
-
-def _agent_finalize_detections(
-    detections: List[Dict[str, Any]],
-    *,
-    pil_img: Optional[Image.Image] = None,
-    classifier_head: Optional[Dict[str, Any]] = None,
-    img_w: int,
-    img_h: int,
-    labelmap: List[str],
-    background: Optional[Sequence[str]],
-    iou_thr: float,
-    cross_iou: Optional[float],
-    max_det: Optional[int],
-) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    cleaned, rejected = _agent_sanitize_detection_items(
-        detections,
-        pil_img=pil_img,
-        classifier_head=None,
-        img_w=img_w,
-        img_h=img_h,
-        labelmap=labelmap,
-        background=background,
-    )
-    filtered_scoreless = 0
-    scoreless_iou = _AGENT_ACTIVE_SCORELESS_IOU or 0.0
-    if scoreless_iou > 0:
-        cleaned, filtered_scoreless = _agent_filter_scoreless_detections(
-            cleaned,
-            iou_thr=scoreless_iou,
-        )
-        if filtered_scoreless:
-            _agent_readable_write(
-                f"scoreless_filter: removed={filtered_scoreless} "
-                f"iou>={scoreless_iou:.2f}"
-            )
-    reviewed, classifier_counts = _agent_classifier_review(
-        cleaned,
-        pil_img=pil_img,
-        classifier_head=classifier_head,
-    )
-    merged = _agent_merge_detections(
-        reviewed,
-        iou_thr=iou_thr,
-        max_det=max_det,
-        cross_iou=cross_iou,
-    )
-    if classifier_counts.get("classifier_checked") or classifier_counts.get("classifier_unavailable"):
-        _agent_readable_write(
-            "final_review: "
-            f"accepted={len(merged)} "
-            f"rejected_classifier={classifier_counts.get('classifier_rejected', 0)} "
-            f"classifier_unavailable={classifier_counts.get('classifier_unavailable', 0)}"
-        )
-    counts = {
-        "input": len(detections),
-        "accepted": len(merged),
-        "rejected": int(rejected),
-        "filtered_scoreless": int(filtered_scoreless),
-        **classifier_counts,
-    }
-    return merged, counts
 
 
 def _agent_sanitize_detection_items(
@@ -8511,86 +8440,6 @@ def _agent_readable_write(line: str) -> None:
         to_console=PREPASS_READABLE_TO_CONSOLE,
     )
 
-
-def _agent_run_prepass(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-    image_token: str,
-    labelmap: List[str],
-    glossary: str,
-    as_tool_messages: bool = True,
-    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    model_id_override: Optional[str] = None,
-) -> Tuple[
-    List[Any],
-    List[Dict[str, Any]],
-    List[str],
-    List[AgentTraceEvent],
-    bool,
-    bool,
-    Optional[str],
-    Optional[str],
-    Optional[str],
-    Optional[str],
-    List[Dict[str, Any]],
-]:
-    return _agent_run_prepass_impl(
-        payload,
-        pil_img=pil_img,
-        image_token=image_token,
-        labelmap=labelmap,
-        glossary=glossary,
-        as_tool_messages=as_tool_messages,
-        trace_writer=trace_writer,
-        trace_full_writer=trace_full_writer,
-        model_id_override=model_id_override,
-        agent_message_cls=QwenAgentMessage,
-        content_item_cls=QwenAgentContentItem,
-        agent_trace_event_cls=AgentTraceEvent,
-        grid_spec_for_payload_fn=_agent_grid_spec_for_payload,
-        readable_detection_line_fn=_agent_readable_detection_line,
-        readable_write_fn=_agent_readable_write,
-        tool_run_detector_fn=_agent_tool_run_detector,
-        generate_sam3_synonyms_fn=_agent_generate_sam3_synonyms,
-        generate_text_fn=_generate_qwen_text,
-        extract_json_fn=_extract_balanced_json,
-        default_synonyms=_DEFAULT_SAM3_SYNONYMS,
-        label_key_fn=_glossary_label_key,
-        sam3_prompt_variants_fn=_sam3_prompt_variants,
-        tool_sam3_text_fn=_agent_tool_sam3_text,
-        tool_sam3_similarity_fn=_agent_tool_sam3_similarity,
-        quadrant_windows_fn=_agent_quadrant_windows_qwen,
-        tool_look_and_inspect_fn=_agent_tool_look_and_inspect,
-        tool_qwen_infer_fn=_agent_tool_qwen_infer,
-        qwen_bbox_to_xyxy_fn=_qwen_bbox_to_xyxy,
-        resolve_window_overlap_fn=_resolve_qwen_window_overlap,
-        resolve_window_size_fn=_resolve_qwen_window_size,
-        window_positions_fn=_window_positions,
-        run_qwen_inference_fn=_run_qwen_inference,
-        extract_caption_fn=_extract_caption_from_text,
-        sanitize_caption_fn=_sanitize_qwen_caption,
-        caption_is_degenerate_fn=_caption_is_degenerate,
-        caption_needs_completion_fn=_caption_needs_completion,
-        caption_has_meta_fn=_caption_has_meta,
-        qwen_caption_fn=qwen_caption,
-        caption_request_cls=QwenCaptionRequest,
-        qwen_caption_cleanup_fn=_run_qwen_caption_cleanup,
-        resolve_qwen_variant_fn=_resolve_qwen_variant_model_id,
-        unload_qwen_fn=_unload_qwen_runtime,
-        det_source_summary_fn=_agent_format_source_counts,
-        det_label_counts_fn=_agent_label_counts_summary,
-        detection_has_source_fn=_agent_detection_has_source,
-        source_counts_fn=_agent_source_counts,
-        format_source_counts_fn=_agent_format_source_counts,
-        merge_prepass_fn=_agent_merge_prepass_detections,
-        compact_tool_result_fn=_agent_compact_tool_result,
-        active_detector_conf=_AGENT_ACTIVE_DETECTOR_CONF,
-        active_sam3_score_thr=_AGENT_ACTIVE_SAM3_SCORE_THR,
-        active_sam3_mask_thr=_AGENT_ACTIVE_SAM3_MASK_THR,
-        trace_readable_enabled=_AGENT_TRACE_READABLE_WRITER is not None,
-    )
 
 def _agent_run_deep_prepass_part_a(
     payload: QwenPrepassRequest,

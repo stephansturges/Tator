@@ -11509,26 +11509,6 @@ def _path_is_within_root(path: Path, root: Path) -> bool:
     return _path_is_within_root_impl(path, root)
 
 
-def _agent_mining_meta_dir(dataset_id: str) -> Path:
-    cleaned = (dataset_id or "").strip().replace("\\", "/").strip("/")
-    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
-    meta_dir = (AGENT_MINING_META_ROOT / safe).resolve()
-    if not _path_is_within_root(meta_dir, AGENT_MINING_META_ROOT.resolve()):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_dataset_invalid")
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    return meta_dir
-
-
-def _agent_mining_cache_dir(dataset_id: str) -> Path:
-    cleaned = (dataset_id or "").strip().replace("\\", "/").strip("/")
-    safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
-    cache_dir = (AGENT_MINING_DET_CACHE_ROOT / safe).resolve()
-    if not _path_is_within_root(cache_dir, AGENT_MINING_DET_CACHE_ROOT.resolve()):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_dataset_invalid")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
-
-
 def _normalize_agent_recipe_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return _normalize_agent_recipe_steps_impl(steps)
 

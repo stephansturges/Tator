@@ -577,6 +577,24 @@ def _rfdetr_restore_augmentations_impl(
         return
 
 
+def _rfdetr_latest_checkpoint_epoch_impl(run_dir: Path) -> Optional[int]:
+    try:
+        best = None
+        for path in run_dir.glob("checkpoint*.pth"):
+            name = path.name
+            if not name.startswith("checkpoint") or not name.endswith(".pth"):
+                continue
+            token = name[len("checkpoint") : -len(".pth")]
+            if not token.isdigit():
+                continue
+            value = int(token)
+            if best is None or value > best:
+                best = value
+        return best
+    except Exception:
+        return None
+
+
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),

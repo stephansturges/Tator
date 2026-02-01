@@ -565,6 +565,7 @@ from services.detectors import (
     _rfdetr_normalize_aug_policy_impl as _rfdetr_normalize_aug_policy_impl,
     _rfdetr_install_augmentations_impl as _rfdetr_install_augmentations_impl,
     _rfdetr_restore_augmentations_impl as _rfdetr_restore_augmentations_impl,
+    _rfdetr_latest_checkpoint_epoch_impl as _rfdetr_latest_checkpoint_epoch_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -10942,21 +10943,7 @@ def _rfdetr_restore_augmentations(restore: Optional[Tuple[Any, Any]]) -> None:
 
 
 def _rfdetr_latest_checkpoint_epoch(run_dir: Path) -> Optional[int]:
-    try:
-        best = None
-        for path in run_dir.glob("checkpoint*.pth"):
-            name = path.name
-            if not name.startswith("checkpoint") or not name.endswith(".pth"):
-                continue
-            token = name[len("checkpoint") : -len(".pth")]
-            if not token.isdigit():
-                continue
-            value = int(token)
-            if best is None or value > best:
-                best = value
-        return best
-    except Exception:
-        return None
+    return _rfdetr_latest_checkpoint_epoch_impl(run_dir)
 
 
 def _rfdetr_monitor_training(job: RfDetrTrainingJob, run_dir: Path, total_epochs: int, stop_event: threading.Event) -> None:

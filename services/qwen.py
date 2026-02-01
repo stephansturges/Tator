@@ -961,3 +961,22 @@ def _resolve_qwen_window_overlap(requested: Optional[float], *, default_overlap:
     except (TypeError, ValueError):
         overlap = default_overlap
     return max(0.0, min(overlap, 0.2))
+
+
+def _window_positions_impl(
+    total: int,
+    window: int,
+    overlap: float,
+    *,
+    force_two: bool = False,
+) -> List[int]:
+    if total <= window:
+        return [0]
+    if force_two:
+        return [0, max(0, total - window)]
+    step = max(1, int(round(window * (1.0 - overlap))))
+    positions = list(range(0, max(1, total - window + 1), step))
+    last = total - window
+    if positions[-1] != last:
+        positions.append(last)
+    return sorted(set(positions))

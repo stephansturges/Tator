@@ -467,6 +467,7 @@ from services.qwen import (
     _allowed_caption_labels_impl as _allowed_caption_labels_impl,
     _caption_is_degenerate_impl as _caption_is_degenerate_impl,
     _resolve_qwen_caption_decode as _resolve_qwen_caption_decode_impl,
+    _window_positions_impl as _window_positions_impl,
     _adjust_prompt_for_thinking as _adjust_prompt_for_thinking_impl,
     _run_qwen_caption_cleanup as _run_qwen_caption_cleanup_impl,
     _run_qwen_caption_merge as _run_qwen_caption_merge_impl,
@@ -4048,16 +4049,7 @@ def _window_positions(
     *,
     force_two: bool = False,
 ) -> List[int]:
-    if total <= window:
-        return [0]
-    if force_two:
-        return [0, max(0, total - window)]
-    step = max(1, int(round(window * (1.0 - overlap))))
-    positions = list(range(0, max(1, total - window + 1), step))
-    last = total - window
-    if positions[-1] != last:
-        positions.append(last)
-    return sorted(set(positions))
+    return _window_positions_impl(total, window, overlap, force_two=force_two)
 
 
 def _allowed_caption_labels(label_hints: Sequence[QwenCaptionHint]) -> List[str]:

@@ -122,3 +122,35 @@ def _image_path_for_label_impl(
         if candidate.suffix.lower() in image_exts:
             return candidate
     return None
+
+
+def _resolve_coco_image_path_impl(
+    file_name: str,
+    images_dir: Path,
+    split_name: str,
+    dataset_root: Path,
+) -> Optional[Path]:
+    if not file_name:
+        return None
+    rel_path = Path(file_name)
+    candidates: List[Path] = []
+    if rel_path.is_absolute():
+        candidates.append(rel_path)
+    candidates.append(images_dir / rel_path)
+    candidates.append(images_dir / rel_path.name)
+    candidates.append(dataset_root / rel_path)
+    candidates.append(dataset_root / split_name / "images" / rel_path.name)
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return None
+
+
+def _label_relpath_for_image_impl(file_name: str) -> Path:
+    rel_path = Path(file_name)
+    if rel_path.is_absolute():
+        rel_path = Path(rel_path.name)
+    if "images" in rel_path.parts:
+        idx = rel_path.parts.index("images")
+        rel_path = Path(*rel_path.parts[idx + 1 :])
+    return rel_path.with_suffix(".txt")

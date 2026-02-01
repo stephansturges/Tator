@@ -68,6 +68,8 @@ from utils.image import (
     _slice_image_sahi,
     _decode_image_base64_impl,
     _image_path_for_label_impl,
+    _resolve_coco_image_path_impl,
+    _label_relpath_for_image_impl,
 )
 from utils.labels import (
     _read_labelmap_lines,
@@ -14228,6 +14230,14 @@ def _image_path_for_label(labels_dir: Path, images_dir: Path, label_file: Path, 
     return _image_path_for_label_impl(labels_dir, images_dir, label_file, image_exts)
 
 
+def _resolve_coco_image_path(file_name: str, images_dir: Path, split_name: str, dataset_root: Path) -> Optional[Path]:
+    return _resolve_coco_image_path_impl(file_name, images_dir, split_name, dataset_root)
+
+
+def _label_relpath_for_image(file_name: str) -> Path:
+    return _label_relpath_for_image_impl(file_name)
+
+
 def _ensure_coco_info_fields(path: Path, dataset_id: str, categories: List[Dict[str, Any]]) -> str:
     return _ensure_coco_info_fields_impl(path, dataset_id, categories)
 
@@ -14789,31 +14799,6 @@ def _convert_coco_dataset_to_yolo(dataset_root: Path) -> Dict[str, Any]:
     labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
     cat_id_to_idx = {cid: idx for idx, cid in enumerate(sorted_ids)}
 
-    def _resolve_image_path(file_name: str, images_dir: Path, split_name: str) -> Optional[Path]:
-        if not file_name:
-            return None
-        rel_path = Path(file_name)
-        candidates: List[Path] = []
-        if rel_path.is_absolute():
-            candidates.append(rel_path)
-        candidates.append(images_dir / rel_path)
-        candidates.append(images_dir / rel_path.name)
-        candidates.append(dataset_root / rel_path)
-        candidates.append(dataset_root / split_name / "images" / rel_path.name)
-        for cand in candidates:
-            if cand.exists():
-                return cand
-        return None
-
-    def _label_relpath_for_image(file_name: str) -> Path:
-        rel_path = Path(file_name)
-        if rel_path.is_absolute():
-            rel_path = Path(rel_path.name)
-        if "images" in rel_path.parts:
-            idx = rel_path.parts.index("images")
-            rel_path = Path(*rel_path.parts[idx + 1 :])
-        return rel_path.with_suffix(".txt")
-
     dataset_type = "seg" if has_segmentation else "bbox"
     for split_name, ann_path, images_dir in ann_paths:
         labels_dir = dataset_root / split_name / "labels"
@@ -14837,7 +14822,7 @@ def _convert_coco_dataset_to_yolo(dataset_root: Path) -> Dict[str, Any]:
             except Exception:
                 continue
             file_name = str(img.get("file_name") or "")
-            img_path = _resolve_image_path(file_name, images_dir, split_name)
+            img_path = _resolve_coco_image_path(file_name, images_dir, split_name, dataset_root)
             if img_path is None:
                 logger.warning("COCO->YOLO: missing image for %s in %s", file_name, dataset_root)
                 continue

@@ -190,6 +190,9 @@ from services.sam3_runs import (
 )
 from services.sam3_runtime import (
     _sam3_clear_device_pinned_caches_impl as _sam3_clear_device_pinned_caches_impl,
+    _set_sam3_device_pref_impl as _set_sam3_device_pref_impl,
+    _resolve_sam3_device_impl as _resolve_sam3_device_impl,
+    _resolve_sam3_mining_devices_impl as _resolve_sam3_mining_devices_impl,
 )
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
@@ -1653,47 +1656,26 @@ active_sam3_metadata: Dict[str, Any] = {
 
 def _set_sam3_device_pref(device_index: int) -> None:
     global SAM3_DEVICE_PREF
-    if torch.cuda.is_available():
-        SAM3_DEVICE_PREF = f"cuda:{device_index}"
-    else:
-        SAM3_DEVICE_PREF = "cpu"
+    state = {"device_pref": SAM3_DEVICE_PREF}
+    _set_sam3_device_pref_impl(device_index, torch_module=torch, state=state)
+    SAM3_DEVICE_PREF = state["device_pref"]
 
 
 def _resolve_sam3_device() -> torch.device:
-    if SAM3_DEVICE_PREF in {"", "auto"}:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    try:
-        return torch.device(SAM3_DEVICE_PREF)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_sam3_device:{SAM3_DEVICE_PREF}:{exc}") from exc
+    return _resolve_sam3_device_impl(
+        SAM3_DEVICE_PREF,
+        torch_module=torch,
+        http_exception_cls=HTTPException,
+        http_400=HTTP_400_BAD_REQUEST,
+    )
 
 
 def _resolve_sam3_mining_devices() -> List[torch.device]:
-    """
-    Resolve the list of devices to use for agent mining. If SAM3_DEVICE specifies an explicit device
-    (or comma-separated list), honor it; otherwise fan out across all available CUDA devices, falling
-    back to CPU when needed.
-    """
-    devices: List[torch.device] = []
-    if SAM3_DEVICE_PREF not in {"", "auto"}:
-        for part in SAM3_DEVICE_PREF.split(","):
-            name = part.strip()
-            if not name:
-                continue
-            try:
-                devices.append(torch.device(name))
-            except Exception:
-                logger.warning("Invalid SAM3 device in SAM3_DEVICE=%s", name)
-    if not devices and torch.cuda.is_available():
-        try:
-            for idx in range(torch.cuda.device_count()):
-                devices.append(torch.device(f"cuda:{idx}"))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to enumerate CUDA devices for mining: %s", exc)
-            devices = []
-    if not devices:
-        devices = [torch.device("cpu")]
-    return devices
+    return _resolve_sam3_mining_devices_impl(
+        SAM3_DEVICE_PREF,
+        torch_module=torch,
+        logger=logger,
+    )
 
 
 def _require_sam3_for_prepass(enable_text: bool, enable_similarity: bool) -> None:

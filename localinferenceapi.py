@@ -50,6 +50,7 @@ from utils.io import (
     _read_csv_last_row,
     _sanitize_yolo_run_id as _sanitize_yolo_run_id_impl,
     _compute_dir_signature as _compute_dir_signature_impl,
+    _dir_size_bytes as _dir_size_bytes_impl,
 )
 from utils.image import _load_image_size, _slice_image_sahi
 from utils.labels import (
@@ -11059,16 +11060,7 @@ def _count_caption_labels(dataset_root: Path) -> Tuple[int, bool]:
 
 
 def _dir_size_bytes(path: Path) -> int:
-    if not path.exists():
-        return 0
-    total = 0
-    for root, _, files in os.walk(path):
-        for name in files:
-            try:
-                total += (Path(root) / name).stat().st_size
-            except Exception:
-                continue
-    return total
+    return _dir_size_bytes_impl(path)
 
 
 def _active_run_paths_for_variant(variant: str) -> set[Path]:

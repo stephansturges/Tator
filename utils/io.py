@@ -89,6 +89,19 @@ def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = Non
         rel = path.relative_to(root)
         entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
     return _stable_hash(entries)
+
+
+def _dir_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except Exception:
+                continue
+    return total
 def _read_csv_last_row(path: Path) -> Optional[Dict[str, str]]:
     if not path.exists():
         return None

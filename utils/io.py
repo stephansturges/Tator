@@ -12,6 +12,8 @@ from typing import Any, Dict, Optional, List
 from fastapi import HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST
 
+from utils.hashing import _stable_hash
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +91,14 @@ def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = Non
         rel = path.relative_to(root)
         entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
     return _stable_hash(entries)
+
+
+def _path_is_within_root_impl(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
 
 
 def _dir_size_bytes(path: Path) -> int:

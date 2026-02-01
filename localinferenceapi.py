@@ -51,6 +51,7 @@ from utils.io import (
     _sanitize_yolo_run_id as _sanitize_yolo_run_id_impl,
     _compute_dir_signature as _compute_dir_signature_impl,
     _dir_size_bytes as _dir_size_bytes_impl,
+    _path_is_within_root_impl as _path_is_within_root_impl,
 )
 from utils.network import _find_free_port_impl as _find_free_port_impl
 from utils.coco import (
@@ -11516,11 +11517,7 @@ def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = Non
 
 
 def _path_is_within_root(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except Exception:
-        return False
+    return _path_is_within_root_impl(path, root)
 
 
 def _agent_mining_meta_dir(dataset_id: str) -> Path:

@@ -577,6 +577,12 @@ from services.detectors import (
     _rfdetr_remap_coco_ids_impl as _rfdetr_remap_coco_ids_impl,
     _rfdetr_prepare_dataset_impl as _rfdetr_prepare_dataset_impl,
     _yolo_write_data_yaml_impl as _yolo_write_data_yaml_impl,
+    _yolo_resolve_model_source_impl as _yolo_resolve_model_source_impl,
+    _yolo_variant_base_yaml_impl as _yolo_variant_base_yaml_impl,
+    _yolo_write_variant_yaml_impl as _yolo_write_variant_yaml_impl,
+    _yolo_write_head_graft_yaml_impl as _yolo_write_head_graft_yaml_impl,
+    _yolo_find_detect_modules_impl as _yolo_find_detect_modules_impl,
+    _yolo_detect_layer_index_impl as _yolo_detect_layer_index_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -11285,102 +11291,66 @@ def _yolo_resolve_model_source(
     from_scratch: bool,
     base_weights: Optional[str],
 ) -> Tuple[str, str]:
-    model_id = (variant or "yolov8n").strip()
-    if _yolo_p2_scale(model_id):
-        return "cfg", "yolov8-p2.yaml"
-    if base_weights:
-        return "custom", base_weights
-    if from_scratch:
-        suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
-        return "cfg", f"{model_id}{suffix}.yaml"
-    if task == "segment" and "seg" not in model_id:
-        model_id = f"{model_id}-seg"
-    return "weights", f"{model_id}.pt"
+    return _yolo_resolve_model_source_impl(
+        variant,
+        task,
+        from_scratch,
+        base_weights,
+        p2_scale_fn=_yolo_p2_scale,
+    )
 
 
 def _yolo_variant_base_yaml(variant: str, task: str, *, run_dir: Optional[Path] = None) -> Path:
-    try:
-        import ultralytics  # type: ignore
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"yolo_unavailable:{exc}") from exc
-    model_id = (variant or "yolov8n").strip()
-    p2_scale = _yolo_p2_scale(model_id)
-    base_cfg_dir = Path(ultralytics.__file__).resolve().parent / "cfg" / "models" / "v8"
-    if p2_scale:
-        base_cfg = base_cfg_dir / "yolov8-p2.yaml"
-        cfg_payload = yaml.safe_load(base_cfg.read_text())
-        cfg_payload["scale"] = p2_scale
-        target_dir = run_dir or Path(tempfile.mkdtemp(prefix="yolo_p2_cfg_", dir=str(UPLOAD_ROOT)))
-        target = target_dir / f"yolov8{p2_scale}-p2.yaml"
-        target.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
-        return target
-    suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
-    base_cfg = base_cfg_dir / f"{model_id}{suffix}.yaml"
-    if not base_cfg.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_variant_yaml_missing")
-    return base_cfg
+    return _yolo_variant_base_yaml_impl(
+        variant,
+        task,
+        run_dir=run_dir,
+        http_exception_cls=HTTPException,
+        import_ultralytics_fn=lambda: __import__("ultralytics"),  # type: ignore
+        yaml_load_fn=yaml.safe_load,
+        yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
+        upload_root=UPLOAD_ROOT,
+        p2_scale_fn=_yolo_p2_scale,
+    )
 
 
 def _yolo_write_variant_yaml(run_dir: Path, variant: str, task: str, nc: int) -> Path:
-    base_cfg = _yolo_variant_base_yaml(variant, task, run_dir=run_dir)
-    cfg_payload = yaml.safe_load(base_cfg.read_text())
-    cfg_payload["nc"] = int(nc)
-    target = run_dir / f"{Path(base_cfg).stem}_nc{nc}.yaml"
-    target.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
-    return target
+    return _yolo_write_variant_yaml_impl(
+        run_dir,
+        variant,
+        task,
+        nc,
+        variant_base_yaml_fn=_yolo_variant_base_yaml,
+        yaml_load_fn=yaml.safe_load,
+        yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
+    )
 
 
 def _yolo_write_head_graft_yaml(run_dir: Path, variant: str, base_nc: int, new_nc: int) -> Path:
-    base_cfg = _yolo_variant_base_yaml(variant, "detect", run_dir=run_dir)
-    cfg_payload = yaml.safe_load(base_cfg.read_text())
-    head = cfg_payload.get("head") or []
-    detect_idx = None
-    for idx, entry in enumerate(head):
-        if len(entry) >= 3 and entry[2] == "Detect":
-            detect_idx = idx
-            break
-    if detect_idx is None:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_detect_layer_missing")
-    detect_entry = list(head[detect_idx])
-    detect_args = list(detect_entry[3]) if isinstance(detect_entry[3], list) else [detect_entry[3]]
-    if detect_args:
-        detect_args[0] = int(base_nc)
-    else:
-        detect_args = [int(base_nc)]
-    detect_entry[3] = detect_args
-    head[detect_idx] = detect_entry
-    new_detect_args = list(detect_args)
-    new_detect_args[0] = int(new_nc)
-    new_detect = [detect_entry[0], detect_entry[1], "Detect", new_detect_args]
-    head.append(new_detect)
-    head.append([[-2, -1], 1, "ConcatHead", [int(base_nc), int(new_nc)]])
-    cfg_payload["head"] = head
-    cfg_payload["nc"] = int(base_nc + new_nc)
-    target = run_dir / f"{Path(base_cfg).stem}_2xhead.yaml"
-    target.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
-    return target
+    return _yolo_write_head_graft_yaml_impl(
+        run_dir,
+        variant,
+        base_nc,
+        new_nc,
+        variant_base_yaml_fn=_yolo_variant_base_yaml,
+        yaml_load_fn=yaml.safe_load,
+        yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
+        http_exception_cls=HTTPException,
+    )
 
 
 def _yolo_find_detect_modules(model: Any) -> List[Any]:
-    try:
-        from ultralytics.nn.tasks import Detect  # type: ignore
-    except Exception:
-        return []
-    modules: List[Any] = []
-    for m in getattr(model, "model", []):
-        if isinstance(m, Detect):
-            modules.append(m)
-    return modules
+    return _yolo_find_detect_modules_impl(
+        model,
+        import_detect_cls_fn=lambda: __import__("ultralytics.nn.tasks", fromlist=["Detect"]).Detect,  # type: ignore
+    )
 
 
 def _yolo_detect_layer_index(model: Any) -> int:
-    detects = _yolo_find_detect_modules(model)
-    if not detects:
-        return max(0, len(getattr(model, "model", [])) - 1)
-    for idx, m in enumerate(getattr(model, "model", [])):
-        if m is detects[0]:
-            return idx
-    return max(0, len(getattr(model, "model", [])) - 1)
+    return _yolo_detect_layer_index_impl(
+        model,
+        find_detect_modules_fn=_yolo_find_detect_modules,
+    )
 
 
 def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:

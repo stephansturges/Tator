@@ -5,6 +5,7 @@ import json
 import math
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -962,6 +963,150 @@ def _yolo_write_data_yaml_impl(
         except Exception:
             pass
     return data_path
+
+
+def _yolo_resolve_model_source_impl(
+    variant: Optional[str],
+    task: str,
+    from_scratch: bool,
+    base_weights: Optional[str],
+    *,
+    p2_scale_fn: Callable[[str], Optional[str]],
+) -> Tuple[str, str]:
+    model_id = (variant or "yolov8n").strip()
+    if p2_scale_fn(model_id):
+        return "cfg", "yolov8-p2.yaml"
+    if base_weights:
+        return "custom", base_weights
+    if from_scratch:
+        suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
+        return "cfg", f"{model_id}{suffix}.yaml"
+    if task == "segment" and "seg" not in model_id:
+        model_id = f"{model_id}-seg"
+    return "weights", f"{model_id}.pt"
+
+
+def _yolo_variant_base_yaml_impl(
+    variant: str,
+    task: str,
+    *,
+    run_dir: Optional[Path],
+    http_exception_cls: Any,
+    import_ultralytics_fn: Callable[[], Any],
+    yaml_load_fn: Callable[[str], Any],
+    yaml_dump_fn: Callable[[Any], str],
+    upload_root: Path,
+    p2_scale_fn: Callable[[str], Optional[str]],
+) -> Path:
+    try:
+        ultralytics = import_ultralytics_fn()
+    except Exception as exc:  # noqa: BLE001
+        raise http_exception_cls(status_code=503, detail=f"yolo_unavailable:{exc}") from exc
+    model_id = (variant or "yolov8n").strip()
+    p2_scale = p2_scale_fn(model_id)
+    base_cfg_dir = Path(ultralytics.__file__).resolve().parent / "cfg" / "models" / "v8"
+    if p2_scale:
+        base_cfg = base_cfg_dir / "yolov8-p2.yaml"
+        cfg_payload = yaml_load_fn(base_cfg.read_text())
+        cfg_payload["scale"] = p2_scale
+        target_dir = run_dir or Path(tempfile.mkdtemp(prefix="yolo_p2_cfg_", dir=str(upload_root)))
+        target = target_dir / f"yolov8{p2_scale}-p2.yaml"
+        target.write_text(yaml_dump_fn(cfg_payload))
+        return target
+    suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
+    base_cfg = base_cfg_dir / f"{model_id}{suffix}.yaml"
+    if not base_cfg.exists():
+        raise http_exception_cls(status_code=404, detail="yolo_variant_yaml_missing")
+    return base_cfg
+
+
+def _yolo_write_variant_yaml_impl(
+    run_dir: Path,
+    variant: str,
+    task: str,
+    nc: int,
+    *,
+    variant_base_yaml_fn: Callable[..., Path],
+    yaml_load_fn: Callable[[str], Any],
+    yaml_dump_fn: Callable[[Any], str],
+) -> Path:
+    base_cfg = variant_base_yaml_fn(variant, task, run_dir=run_dir)
+    cfg_payload = yaml_load_fn(base_cfg.read_text())
+    cfg_payload["nc"] = int(nc)
+    target = run_dir / f"{Path(base_cfg).stem}_nc{nc}.yaml"
+    target.write_text(yaml_dump_fn(cfg_payload))
+    return target
+
+
+def _yolo_write_head_graft_yaml_impl(
+    run_dir: Path,
+    variant: str,
+    base_nc: int,
+    new_nc: int,
+    *,
+    variant_base_yaml_fn: Callable[..., Path],
+    yaml_load_fn: Callable[[str], Any],
+    yaml_dump_fn: Callable[[Any], str],
+    http_exception_cls: Any,
+) -> Path:
+    base_cfg = variant_base_yaml_fn(variant, "detect", run_dir=run_dir)
+    cfg_payload = yaml_load_fn(base_cfg.read_text())
+    head = cfg_payload.get("head") or []
+    detect_idx = None
+    for idx, entry in enumerate(head):
+        if len(entry) >= 3 and entry[2] == "Detect":
+            detect_idx = idx
+            break
+    if detect_idx is None:
+        raise http_exception_cls(status_code=400, detail="yolo_detect_layer_missing")
+    detect_entry = list(head[detect_idx])
+    detect_args = list(detect_entry[3]) if isinstance(detect_entry[3], list) else [detect_entry[3]]
+    if detect_args:
+        detect_args[0] = int(base_nc)
+    else:
+        detect_args = [int(base_nc)]
+    detect_entry[3] = detect_args
+    head[detect_idx] = detect_entry
+    new_detect_args = list(detect_args)
+    new_detect_args[0] = int(new_nc)
+    new_detect = [detect_entry[0], detect_entry[1], "Detect", new_detect_args]
+    head.append(new_detect)
+    head.append([[-2, -1], 1, "ConcatHead", [int(base_nc), int(new_nc)]])
+    cfg_payload["head"] = head
+    cfg_payload["nc"] = int(base_nc + new_nc)
+    target = run_dir / f"{Path(base_cfg).stem}_2xhead.yaml"
+    target.write_text(yaml_dump_fn(cfg_payload))
+    return target
+
+
+def _yolo_find_detect_modules_impl(
+    model: Any,
+    *,
+    import_detect_cls_fn: Callable[[], Any],
+) -> List[Any]:
+    try:
+        detect_cls = import_detect_cls_fn()
+    except Exception:
+        return []
+    modules: List[Any] = []
+    for m in getattr(model, "model", []):
+        if isinstance(m, detect_cls):
+            modules.append(m)
+    return modules
+
+
+def _yolo_detect_layer_index_impl(
+    model: Any,
+    *,
+    find_detect_modules_fn: Callable[[Any], List[Any]],
+) -> int:
+    detects = find_detect_modules_fn(model)
+    if not detects:
+        return max(0, len(getattr(model, "model", [])) - 1)
+    for idx, m in enumerate(getattr(model, "model", [])):
+        if m is detects[0]:
+            return idx
+    return max(0, len(getattr(model, "model", [])) - 1)
 
 
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:

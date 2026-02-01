@@ -184,6 +184,53 @@ def _persist_sam3_dataset_metadata_impl(
             logger.warning("Failed to write SAM3 dataset metadata for %s: %s", dataset_dir, exc)
 
 
+def _count_dataset_images_impl(dataset_root: Path, *, iter_images_fn) -> int:
+    train_dir = dataset_root / "train" / "images"
+    val_dir = dataset_root / "val" / "images"
+    if train_dir.exists() or val_dir.exists():
+        return len(iter_images_fn(train_dir)) + len(iter_images_fn(val_dir))
+    root_images = dataset_root / "images"
+    if root_images.exists():
+        return len(iter_images_fn(root_images))
+    return len(iter_images_fn(dataset_root))
+
+
+def _count_caption_labels_impl(
+    dataset_root: Path,
+    *,
+    label_dirs: Sequence[str] = ("text_labels", "captions", "caption_labels"),
+    allowed_exts: Sequence[str] = (".txt", ".json", ".jsonl"),
+) -> Tuple[int, bool]:
+    total = 0
+    present = False
+    allowed = {ext.lower() for ext in allowed_exts}
+    for name in label_dirs:
+        path = dataset_root / name
+        if not path.exists():
+            continue
+        present = True
+        if path.is_dir():
+            for entry in path.rglob("*"):
+                if not entry.is_file():
+                    continue
+                if allowed and entry.suffix.lower() not in allowed:
+                    continue
+                total += 1
+        elif path.is_file():
+            if not allowed or path.suffix.lower() in allowed:
+                total += 1
+    jsonl_path = dataset_root / "captions.jsonl"
+    if jsonl_path.exists():
+        present = True
+        try:
+            with jsonl_path.open("r", encoding="utf-8") as handle:
+                for _ in handle:
+                    total += 1
+        except Exception:
+            pass
+    return total, present
+
+
 def _agent_load_labelmap_meta(
     dataset_id: Optional[str],
     *,

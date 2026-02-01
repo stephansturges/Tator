@@ -209,6 +209,8 @@ from services.datasets import (
     _persist_qwen_dataset_metadata_impl as _persist_qwen_dataset_metadata_impl,
     _load_sam3_dataset_metadata_impl as _load_sam3_dataset_metadata_impl,
     _persist_sam3_dataset_metadata_impl as _persist_sam3_dataset_metadata_impl,
+    _count_dataset_images_impl as _count_dataset_images_impl,
+    _count_caption_labels_impl as _count_caption_labels_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
     _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
     _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
@@ -11046,6 +11048,14 @@ def _persist_sam3_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) 
         meta_name=SAM3_DATASET_META_NAME,
         logger=logger,
     )
+
+
+def _count_dataset_images(dataset_root: Path) -> int:
+    return _count_dataset_images_impl(dataset_root, iter_images_fn=_iter_yolo_images)
+
+
+def _count_caption_labels(dataset_root: Path) -> Tuple[int, bool]:
+    return _count_caption_labels_impl(dataset_root)
 
 
 def _dir_size_bytes(path: Path) -> int:

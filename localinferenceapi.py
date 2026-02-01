@@ -55,7 +55,9 @@ from utils.io import (
 )
 from utils.network import _find_free_port_impl as _find_free_port_impl
 from utils.coco import (
+    _coco_has_invalid_image_refs_impl,
     _coco_info_block_impl,
+    _coco_missing_segmentation_impl,
     _ensure_coco_info_fields_impl,
     _ensure_coco_supercategory_impl,
     _write_coco_annotations_impl,
@@ -14192,6 +14194,14 @@ def _coco_info_block(dataset_id: str) -> Dict[str, Any]:
     return _coco_info_block_impl(dataset_id)
 
 
+def _coco_has_invalid_image_refs(path: Path) -> bool:
+    return _coco_has_invalid_image_refs_impl(path)
+
+
+def _coco_missing_segmentation(path: Path) -> bool:
+    return _coco_missing_segmentation_impl(path)
+
+
 def _write_coco_annotations(
     output_path: Path,
     *,
@@ -14319,56 +14329,6 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     dataset_type = (existing_meta or {}).get("type", "bbox")
     dataset_label = (existing_meta or {}).get("label", dataset_root.name)
     dataset_source = (existing_meta or {}).get("source", "yolo")
-    def _coco_has_invalid_image_refs(path: Path) -> bool:
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except Exception:
-            return True
-        if not isinstance(data, dict):
-            return True
-        images = data.get("images")
-        anns = data.get("annotations")
-        if not isinstance(images, list) or not isinstance(anns, list):
-            return True
-        image_ids = set()
-        for img in images:
-            if not isinstance(img, dict):
-                continue
-            try:
-                image_ids.add(int(img.get("id")))
-            except Exception:
-                continue
-        for ann in anns:
-            if not isinstance(ann, dict):
-                continue
-            try:
-                img_id = int(ann.get("image_id"))
-            except Exception:
-                continue
-            if img_id not in image_ids:
-                return True
-        return False
-
-    def _coco_missing_segmentation(path: Path) -> bool:
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except Exception:
-            return True
-        if not isinstance(data, dict):
-            return True
-        anns = data.get("annotations")
-        if not isinstance(anns, list):
-            return True
-        for ann in anns:
-            if not isinstance(ann, dict):
-                continue
-            seg = ann.get("segmentation")
-            if seg is not None and seg != []:
-                return False
-        return True
-
     if (
         existing_meta
         and existing_meta.get("signature") == signature

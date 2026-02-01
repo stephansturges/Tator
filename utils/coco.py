@@ -9,6 +9,58 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+def _coco_has_invalid_image_refs_impl(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return True
+    if not isinstance(data, dict):
+        return True
+    images = data.get("images")
+    anns = data.get("annotations")
+    if not isinstance(images, list) or not isinstance(anns, list):
+        return True
+    image_ids = set()
+    for img in images:
+        if not isinstance(img, dict):
+            continue
+        try:
+            image_ids.add(int(img.get("id")))
+        except Exception:
+            continue
+    for ann in anns:
+        if not isinstance(ann, dict):
+            continue
+        try:
+            img_id = int(ann.get("image_id"))
+        except Exception:
+            continue
+        if img_id not in image_ids:
+            return True
+    return False
+
+
+def _coco_missing_segmentation_impl(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return True
+    if not isinstance(data, dict):
+        return True
+    anns = data.get("annotations")
+    if not isinstance(anns, list):
+        return True
+    for ann in anns:
+        if not isinstance(ann, dict):
+            continue
+        seg = ann.get("segmentation")
+        if seg is not None and seg != []:
+            return False
+    return True
+
+
 def _coco_info_block_impl(dataset_id: str) -> Dict[str, Any]:
     """Minimal COCO info section to keep pycocotools happy."""
     return {

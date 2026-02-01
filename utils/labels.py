@@ -8,7 +8,11 @@ import colorsys
 
 import joblib
 from fastapi import HTTPException
-from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
+from starlette.status import (
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+    HTTP_412_PRECONDITION_FAILED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,45 @@ def _normalize_labelmap_entries(values: Sequence[str]) -> List[str]:
         norm = _normalize_class_name_for_match(text)
         normalized.append(norm or text.lower())
     return normalized
+
+
+def _apply_expected_labelmap_warnings(
+    expected: Optional[Sequence[str]],
+    labelmap: Sequence[str],
+    warnings: List[str],
+) -> None:
+    if expected and not labelmap:
+        warnings.append("labelmap_missing")
+    elif expected and labelmap and list(expected) != list(labelmap):
+        warnings.append("labelmap_mismatch")
+
+
+def _labelmaps_match(expected: Sequence[str], actual: Sequence[str]) -> bool:
+    if not expected or not actual:
+        return True
+    exp_norm = _normalize_labelmap_entries(expected)
+    act_norm = _normalize_labelmap_entries(actual)
+    if len(exp_norm) != len(act_norm):
+        return False
+    for exp, act in zip(exp_norm, act_norm):
+        if exp != act:
+            return False
+    return True
+
+
+def _raise_on_labelmap_mismatch(
+    *,
+    expected: Optional[Sequence[str]],
+    actual: Optional[Sequence[str]],
+    context: str,
+) -> None:
+    if not expected or not actual:
+        return
+    if not _labelmaps_match(expected, actual):
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail=f"detector_labelmap_mismatch:{context}",
+        )
 
 
 def _agent_label_prefix_candidates(label: str) -> List[str]:

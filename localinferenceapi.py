@@ -58,6 +58,9 @@ from utils.labels import (
     _load_labelmap_file,
     _normalize_class_name_for_match,
     _normalize_labelmap_entries,
+    _apply_expected_labelmap_warnings,
+    _labelmaps_match,
+    _raise_on_labelmap_mismatch,
     _agent_label_prefix_candidates,
     _agent_label_color_map,
     _agent_label_prefix_map,
@@ -9827,41 +9830,6 @@ class RfDetrWindowedRequest(BaseModel):
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_required")
         return values
-
-
-def _apply_expected_labelmap_warnings(expected: Optional[List[str]], labelmap: List[str], warnings: List[str]) -> None:
-    if expected and not labelmap:
-        warnings.append("labelmap_missing")
-    elif expected and labelmap and expected != labelmap:
-        warnings.append("labelmap_mismatch")
-
-
-def _labelmaps_match(expected: Sequence[str], actual: Sequence[str]) -> bool:
-    if not expected or not actual:
-        return True
-    exp_norm = _normalize_labelmap_entries(expected)
-    act_norm = _normalize_labelmap_entries(actual)
-    if len(exp_norm) != len(act_norm):
-        return False
-    for exp, act in zip(exp_norm, act_norm):
-        if exp != act:
-            return False
-    return True
-
-
-def _raise_on_labelmap_mismatch(
-    *,
-    expected: Optional[Sequence[str]],
-    actual: Optional[Sequence[str]],
-    context: str,
-) -> None:
-    if not expected or not actual:
-        return
-    if not _labelmaps_match(expected, actual):
-            raise HTTPException(
-                status_code=HTTP_412_PRECONDITION_FAILED,
-                detail=f"detector_labelmap_mismatch:{context}",
-            )
 
 
 def _clamp_conf_value(conf: float, warnings: List[str]) -> float:

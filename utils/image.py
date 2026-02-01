@@ -96,3 +96,29 @@ def _decode_image_base64_impl(
             pil_img.thumbnail((max_dim, max_dim), resample)
     np_img = np.array(pil_img)
     return pil_img, np_img
+
+
+def _image_path_for_label_impl(
+    labels_dir: Path,
+    images_dir: Path,
+    label_file: Path,
+    image_exts: set[str],
+) -> Optional[Path]:
+    stem = label_file.stem
+    try:
+        rel_label = label_file.relative_to(labels_dir)
+    except Exception:
+        rel_label = Path(label_file.name)
+    # Prefer mirrored subdirectory structure when present.
+    for ext in image_exts:
+        candidate = images_dir / rel_label.with_suffix(ext)
+        if candidate.exists():
+            return candidate
+    for ext in image_exts:
+        candidate = images_dir / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+    for candidate in images_dir.rglob(f"{stem}.*"):
+        if candidate.suffix.lower() in image_exts:
+            return candidate
+    return None

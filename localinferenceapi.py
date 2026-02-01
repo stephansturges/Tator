@@ -63,7 +63,12 @@ from utils.coco import (
     _write_coco_annotations_impl,
 )
 from utils.gpu import _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl
-from utils.image import _load_image_size, _slice_image_sahi, _decode_image_base64_impl
+from utils.image import (
+    _load_image_size,
+    _slice_image_sahi,
+    _decode_image_base64_impl,
+    _image_path_for_label_impl,
+)
 from utils.labels import (
     _read_labelmap_lines,
     _load_labelmap_file,
@@ -14219,6 +14224,10 @@ def _write_coco_annotations(
     )
 
 
+def _image_path_for_label(labels_dir: Path, images_dir: Path, label_file: Path, image_exts: set[str]) -> Optional[Path]:
+    return _image_path_for_label_impl(labels_dir, images_dir, label_file, image_exts)
+
+
 def _ensure_coco_info_fields(path: Path, dataset_id: str, categories: List[Dict[str, Any]]) -> str:
     return _ensure_coco_info_fields_impl(path, dataset_id, categories)
 
@@ -14353,26 +14362,6 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
     annotation_id = 1
     image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
-    def _image_path_for_label(labels_dir: Path, images_dir: Path, label_file: Path) -> Optional[Path]:
-        stem = label_file.stem
-        try:
-            rel_label = label_file.relative_to(labels_dir)
-        except Exception:
-            rel_label = Path(label_file.name)
-        # Prefer mirrored subdirectory structure when present.
-        for ext in image_exts:
-            candidate = images_dir / rel_label.with_suffix(ext)
-            if candidate.exists():
-                return candidate
-        for ext in image_exts:
-            candidate = images_dir / f"{stem}{ext}"
-            if candidate.exists():
-                return candidate
-        for candidate in images_dir.rglob(f"{stem}.*"):
-            if candidate.suffix.lower() in image_exts:
-                return candidate
-        return None
-
     def _convert_split(split_images: Path, split_labels: Path, split_name: str) -> str:
         nonlocal image_id_counter, annotation_id, dataset_type
         images: List[Dict[str, Any]] = []
@@ -14439,7 +14428,7 @@ def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
             return [out]
 
         for label_file in sorted(split_labels.rglob("*.txt")):
-            image_path = _image_path_for_label(split_labels, split_images, label_file)
+            image_path = _image_path_for_label(split_labels, split_images, label_file, image_exts)
             if image_path is None:
                 logger.warning("No matching image for label file %s", label_file)
                 continue

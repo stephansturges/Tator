@@ -55,14 +55,9 @@ from utils.io import (
 )
 from utils.network import _find_free_port_impl as _find_free_port_impl
 from utils.coco import (
-    _coco_has_invalid_image_refs_impl,
-    _coco_info_block_impl,
-    _coco_missing_segmentation_impl,
-    _ensure_coco_info_fields_impl,
     _ensure_coco_supercategory_impl,
     _write_coco_annotations_impl,
 )
-from utils.gpu import _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl
 from utils.image import (
     _load_image_size,
     _slice_image_sahi,
@@ -132,7 +127,6 @@ from services.prepass_recipes import (
     _save_exemplar_crop_impl as _save_exemplar_crop_impl,
     _delete_agent_recipe_impl as _delete_agent_recipe_impl,
     _list_agent_recipes_impl as _list_agent_recipes_impl,
-    _normalize_agent_recipe_steps_impl as _normalize_agent_recipe_steps_impl,
     _persist_agent_recipe_impl as _persist_agent_recipe_impl,
     _load_agent_recipe_impl as _load_agent_recipe_impl,
     _load_agent_recipe_json_only_impl as _load_agent_recipe_json_only_impl,
@@ -240,7 +234,6 @@ from services.dinov3_runtime import (
 from services.clip_runtime import (
     _suspend_clip_backbone_impl as _suspend_clip_backbone_impl,
     _resume_clip_backbone_impl as _resume_clip_backbone_impl,
-    _ensure_clip_backbone_for_mining_impl as _ensure_clip_backbone_for_mining_impl,
 )
 from services.classifier_runtime import (
     _resume_classifier_backbone_impl as _resume_classifier_backbone_impl,
@@ -267,9 +260,6 @@ from services.datasets import (
     _resolve_rfdetr_training_dataset_impl as _resolve_rfdetr_training_dataset_impl,
     _compute_labelmap_hash_impl as _compute_labelmap_hash_impl,
     _compute_dataset_signature_impl as _compute_dataset_signature_impl,
-    _purge_dataset_artifacts_impl as _purge_dataset_artifacts_impl,
-    _ensure_qwen_dataset_signature_impl as _ensure_qwen_dataset_signature_impl,
-    _find_qwen_dataset_by_signature_impl as _find_qwen_dataset_by_signature_impl,
     _load_registry_dataset_metadata_impl as _load_registry_dataset_metadata_impl,
     _persist_dataset_metadata_impl as _persist_dataset_metadata_impl,
     _coerce_dataset_metadata_impl as _coerce_dataset_metadata_impl,
@@ -489,7 +479,6 @@ from services.calibration import (
     _cancel_calibration_job as _cancel_calibration_job_impl,
 )
 from services.calibration_metrics import (
-    _expand_midpoints_impl as _expand_midpoints_impl,
     _build_gt_index_for_class_impl as _build_gt_index_for_class_impl,
     _evaluate_prompt_for_class_impl as _evaluate_prompt_for_class_impl,
     _evaluate_prompt_candidate_impl as _evaluate_prompt_candidate_impl,
@@ -517,7 +506,6 @@ from services.calibration_metrics import (
     _collect_clip_prefilter_crops_impl as _collect_clip_prefilter_crops_impl,
     _normalize_steps_for_head_tuning_impl as _normalize_steps_for_head_tuning_impl,
     _prefilter_prompts_with_clip_impl as _prefilter_prompts_with_clip_impl,
-    _export_hard_negative_replay_impl as _export_hard_negative_replay_impl,
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
@@ -552,7 +540,6 @@ from services.qwen import (
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _get_qwen_prompt_config_impl as _get_qwen_prompt_config_impl,
-    _set_qwen_prompt_config_impl as _set_qwen_prompt_config_impl,
     _render_qwen_prompt_impl as _render_qwen_prompt_impl,
     _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
@@ -561,8 +548,6 @@ from services.qwen import (
     _sanitize_prompts_impl as _sanitize_prompts_impl,
     _generate_prompt_variants_for_class_impl as _generate_prompt_variants_for_class_impl,
     _expand_prompts_with_prompt_llm_impl as _expand_prompts_with_prompt_llm_impl,
-    _refine_prompts_with_qwen_impl as _refine_prompts_with_qwen_impl,
-    _qwen_self_filter_prompts_impl as _qwen_self_filter_prompts_impl,
 )
 from services.detectors import (
     _agent_tool_run_detector_impl as _agent_tool_run_detector_impl,
@@ -617,8 +602,6 @@ from services.detectors import (
     _yolo_extract_detections_impl as _yolo_extract_detections_impl,
     _rfdetr_extract_detections_impl as _rfdetr_extract_detections_impl,
     _resolve_detector_image_impl as _resolve_detector_image_impl,
-    _flatten_metrics_impl as _flatten_metrics_impl,
-    _lookup_metric_impl as _lookup_metric_impl,
     _yolo_metrics_summary_impl as _yolo_metrics_summary_impl,
     _rfdetr_metrics_summary_impl as _rfdetr_metrics_summary_impl,
     _clean_metric_summary_impl as _clean_metric_summary_impl,
@@ -633,91 +616,9 @@ except Exception:  # noqa: BLE001
 from segment_anything import sam_model_registry, SamPredictor
 
 
-def _message_text_for_tool_parse(message: Any) -> str:
-    content = getattr(message, "content", None)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: List[str] = []
-        for item in content:
-            try:
-                item_type, item_value = item.get_type_and_value()
-            except Exception:
-                continue
-            if item_type == "text" and item_value:
-                parts.append(str(item_value))
-        return "\n".join(parts)
-    return ""
-
-
 def _extract_balanced_json(text: str, start_char: str, end_char: str) -> Optional[str]:
     return _extract_balanced_json_impl(text, start_char, end_char)
 
-
-def _parse_tool_call_payload(payload: str) -> Optional[Dict[str, Any]]:
-    candidate = (payload or "").strip()
-    if not candidate:
-        return None
-    for parser in ("json", "json5"):
-        try:
-            if parser == "json":
-                return json.loads(candidate)
-            import json5  # type: ignore
-            return json5.loads(candidate)
-        except Exception:
-            continue
-    for start_char, end_char in (("{", "}"), ("[", "]")):
-        snippet = _extract_balanced_json(candidate, start_char, end_char)
-        if not snippet:
-            continue
-        for parser in ("json", "json5"):
-            try:
-                if parser == "json":
-                    return json.loads(snippet)
-                import json5  # type: ignore
-                return json5.loads(snippet)
-            except Exception:
-                continue
-    return None
-
-
-def _extract_tool_call_from_text(text: str) -> Optional[Tuple[str, Any]]:
-    if not text:
-        return None
-    lower_text = text.lower()
-    if "<tool_call>" in lower_text:
-        start = lower_text.find("<tool_call>")
-        end = lower_text.find("</tool_call>", start + 11)
-        if end > start:
-            payload = text[start + len("<tool_call>") : end].strip()
-            parsed = _parse_tool_call_payload(payload)
-            if isinstance(parsed, dict):
-                name = str(parsed.get("name") or "").strip()
-                args = parsed.get("arguments", {})
-                if name:
-                    return name, args
-    if "✿function✿" in lower_text and "✿args✿" in lower_text:
-        fn_idx = text.find("✿FUNCTION✿")
-        args_idx = text.find("✿ARGS✿", fn_idx + 1)
-        if fn_idx >= 0 and args_idx > fn_idx:
-            name_chunk = text[fn_idx + len("✿FUNCTION✿") : args_idx]
-            if ":" in name_chunk:
-                name_chunk = name_chunk.split(":", 1)[1]
-            name = name_chunk.strip().splitlines()[0].strip()
-            args_chunk = text[args_idx + len("✿ARGS✿") :]
-            stop_tokens = ["✿RESULT✿", "✿RETURN✿"]
-            stop_pos = [args_chunk.find(tok) for tok in stop_tokens if tok in args_chunk]
-            if stop_pos:
-                args_chunk = args_chunk[: min(stop_pos)]
-            parsed = _parse_tool_call_payload(args_chunk)
-            if name:
-                return name, parsed if parsed is not None else args_chunk.strip()
-    parsed = _parse_tool_call_payload(text)
-    if isinstance(parsed, dict):
-        name = str(parsed.get("name") or "").strip()
-        if name:
-            return name, parsed.get("arguments", {})
-    return None
 import threading
 import queue
 import itertools
@@ -1166,47 +1067,6 @@ def _is_qwen_moe_model_id(model_id: str) -> bool:
     lowered = model_id.lower()
     return "a3b" in lowered or "moe" in lowered
 
-
-def _infer_qwen_model_size(model_id: str) -> Optional[str]:
-    for size in ("2B", "4B", "8B", "32B"):
-        if size in model_id:
-            return size
-    return None
-
-
-def _estimate_qwen_vram_mb(
-    model_id: str,
-    training_mode: str,
-    *,
-    max_pixels: Optional[int] = None,
-    batch_size: Optional[int] = None,
-) -> Tuple[Optional[float], Optional[str]]:
-    size = _infer_qwen_model_size(model_id)
-    if not size:
-        return None, None
-    mode = training_mode if training_mode in QWEN_VRAM_ESTIMATE_GB else "official_lora"
-    base_gb = QWEN_VRAM_ESTIMATE_GB.get(mode, {}).get(size)
-    if base_gb is None:
-        return None, None
-    scale = 1.0
-    if "Thinking" in model_id:
-        scale *= QWEN_VRAM_THINKING_SCALE
-    if max_pixels:
-        try:
-            pixel_scale = max_pixels / max(1, QWEN_VRAM_PIXEL_BASE)
-        except Exception:
-            pixel_scale = 1.0
-        pixel_scale = min(QWEN_VRAM_PIXEL_SCALE_MAX, max(QWEN_VRAM_PIXEL_SCALE_MIN, pixel_scale))
-        scale *= pixel_scale
-    if batch_size and batch_size > 1:
-        scale *= float(batch_size)
-    estimate_mb = base_gb * 1024.0 * scale
-    note = None
-    if mode == "official_lora" and size in {"8B", "32B"}:
-        note = "Official LoRA is very VRAM-hungry; 8B/32B often exceed 48GB even at smaller pixel budgets."
-    if mode == "trl_qlora" and size == "32B" and "Thinking" in model_id:
-        note = "32B Thinking QLoRA is experimental; some setups hit device-map gradient issues."
-    return estimate_mb, note
 
 qwen_model = None
 qwen_processor = None
@@ -1679,29 +1539,6 @@ def _resume_classifier_backbone() -> None:
     clip_model_name = state["clip_model_name"]
     _clip_reload_needed = state["_clip_reload_needed"]
 
-
-def _ensure_clip_backbone_for_mining() -> Tuple[Optional[Any], Optional[Any]]:
-    """Ensure a CLIP backbone is available for exemplar embedding/fp guard (raw CLIP, no classifier required)."""
-    global clip_model, clip_preprocess, clip_model_name, clip_initialized
-    state = {
-        "clip_model": clip_model,
-        "clip_preprocess": clip_preprocess,
-        "clip_model_name": clip_model_name,
-        "clip_initialized": clip_initialized,
-    }
-    clip_model_local, clip_preprocess_local = _ensure_clip_backbone_for_mining_impl(
-        state=state,
-        lock=clip_lock,
-        clip_module=clip,
-        device=device,
-        default_model=DEFAULT_CLIP_MODEL,
-        logger=logger,
-    )
-    clip_model = state["clip_model"]
-    clip_preprocess = state["clip_preprocess"]
-    clip_model_name = state["clip_model_name"]
-    clip_initialized = state["clip_initialized"]
-    return clip_model_local, clip_preprocess_local
 
 # 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_h")
@@ -2593,11 +2430,6 @@ def _resolve_qwen_device() -> str:
 
 def _get_qwen_prompt_config() -> QwenPromptConfig:
     return _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock)
-
-
-def _set_qwen_prompt_config(config: QwenPromptConfig) -> None:
-    global qwen_prompt_config
-    qwen_prompt_config = _set_qwen_prompt_config_impl(qwen_prompt_config, config, qwen_config_lock)
 
 
 def _render_qwen_prompt(
@@ -3856,45 +3688,6 @@ def _group_hints_by_window(
             )
         )
     return grouped
-
-
-def _filter_hints_for_window(
-    label_hints: Sequence[QwenCaptionHint],
-    x0: int,
-    y0: int,
-    window: int,
-    image_width: int,
-    image_height: int,
-) -> List[QwenCaptionHint]:
-    # Deprecated: use _group_hints_by_window to avoid duplicates.
-    window_hints: List[QwenCaptionHint] = []
-    x1 = x0 + window
-    y1 = y0 + window
-    for hint in label_hints:
-        if not hint.bbox or len(hint.bbox) != 4:
-            continue
-        bx1, by1, bx2, by2 = hint.bbox
-        try:
-            cx = (float(bx1) + float(bx2)) * 0.5
-            cy = (float(by1) + float(by2)) * 0.5
-        except (TypeError, ValueError):
-            continue
-        if cx < x0 or cx > x1 or cy < y0 or cy > y1:
-            continue
-        nx1 = max(0.0, min(float(bx1) - x0, window))
-        ny1 = max(0.0, min(float(by1) - y0, window))
-        nx2 = max(0.0, min(float(bx2) - x0, window))
-        ny2 = max(0.0, min(float(by2) - y0, window))
-        if nx2 <= nx1 or ny2 <= ny1:
-            continue
-        window_hints.append(
-            QwenCaptionHint(
-                label=hint.label,
-                bbox=[nx1, ny1, nx2, ny2],
-                confidence=hint.confidence,
-            )
-        )
-    return window_hints
 
 
 def _run_qwen_inference(
@@ -6342,26 +6135,6 @@ def _predict_proba_batched(
         ),
         predict_proba_fn=_clip_head_predict_proba,
         empty_cache_fn=empty_cache_fn,
-    )
-
-
-def _agent_classifier_review(
-    detections: List[Dict[str, Any]],
-    *,
-    pil_img: Optional[Image.Image],
-    classifier_head: Optional[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    return _agent_classifier_review_impl(
-        detections,
-        pil_img=pil_img,
-        classifier_head=classifier_head,
-        resolve_batch_size_fn=_resolve_classifier_batch_size,
-        predict_proba_fn=lambda crops, head, bs: _predict_proba_batched(crops, head, batch_size=bs),
-        clip_head_background_indices_fn=_clip_head_background_indices,
-        find_target_index_fn=_find_clip_head_target_index,
-        clip_head_keep_mask_fn=_clip_head_keep_mask,
-        readable_write_fn=_agent_readable_write,
-        readable_format_bbox_fn=_agent_readable_format_bbox,
     )
 
 
@@ -9978,37 +9751,6 @@ def _prune_job_registry(registry: Dict[str, Any], lock: threading.Lock, ttl_hour
             registry.pop(job_id, None)
 
 
-def _purge_staging_dirs(
-    root: Path,
-    *,
-    ttl_hours: Optional[int] = None,
-    active_roots: Optional[set[str]] = None,
-    prefix: Optional[str] = None,
-) -> Dict[str, int]:
-    """Delete old staging directories that are not active. Returns stats."""
-    stats = {"deleted": 0, "bytes": 0}
-    if ttl_hours is None:
-        ttl_hours = STAGING_TTL_HOURS
-    if not root.exists() or ttl_hours <= 0:
-        return stats
-    cutoff = time.time() - ttl_hours * 3600
-    active_roots = active_roots or set()
-    for entry in root.iterdir():
-        try:
-            if not entry.is_dir():
-                continue
-            if prefix and not entry.name.startswith(prefix):
-                continue
-            if str(entry.resolve()) in active_roots:
-                continue
-            mtime = entry.stat().st_mtime
-            if mtime > cutoff:
-                continue
-            stats["bytes"] += _purge_directory(entry)
-            stats["deleted"] += 1
-        except Exception:
-            continue
-    return stats
 JOB_REGISTRY_TTL_HOURS = _env_int("JOB_REGISTRY_TTL_HOURS", 72)
 STAGING_TTL_HOURS = _env_int("STAGING_TTL_HOURS", 24)
 AGENT_MINING_ROOT = UPLOAD_ROOT / "agent_mining"
@@ -10027,14 +9769,6 @@ AGENT_MINING_CASCADES_ROOT = AGENT_MINING_ROOT / "cascades"
 AGENT_MINING_CASCADES_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _purge_dataset_artifacts(dataset_id: str) -> None:
-    return _purge_dataset_artifacts_impl(
-        dataset_id,
-        normalise_relative_path_fn=_normalise_relative_path,
-        agent_mining_meta_root=AGENT_MINING_META_ROOT,
-        agent_mining_det_cache_root=AGENT_MINING_DET_CACHE_ROOT,
-        prompt_helper_preset_root=PROMPT_HELPER_PRESET_ROOT,
-    )
 CLIP_DATASET_JOBS: Dict[str, ClipDatasetUploadJob] = {}
 CLIP_DATASET_JOBS_LOCK = threading.Lock()
 QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}
@@ -10298,24 +10032,6 @@ def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:
     return _summarize_qwen_metric_impl(metric)
 
 
-def _ensure_qwen_dataset_signature(dataset_dir: Path, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
-    return _ensure_qwen_dataset_signature_impl(
-        dataset_dir,
-        metadata,
-        compute_dir_signature_fn=_compute_dir_signature,
-        persist_metadata_fn=_persist_qwen_dataset_metadata,
-    )
-
-
-def _find_qwen_dataset_by_signature(signature: str) -> Optional[Path]:
-    return _find_qwen_dataset_by_signature_impl(
-        signature,
-        dataset_root=QWEN_DATASET_ROOT,
-        load_metadata_fn=_load_qwen_dataset_metadata,
-        ensure_signature_fn=_ensure_qwen_dataset_signature,
-    )
-
-
 def _load_registry_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
     return _load_registry_dataset_metadata_impl(
         dataset_dir,
@@ -10540,14 +10256,6 @@ def _collect_rfdetr_artifacts(run_dir: Path) -> Dict[str, bool]:
     return _collect_rfdetr_artifacts_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
 
 
-def _flatten_metrics(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    return _flatten_metrics_impl(obj, prefix=prefix, out=out)
-
-
-def _lookup_metric(flat: Dict[str, Any], keys: List[str]) -> Optional[float]:
-    return _lookup_metric_impl(flat, keys)
-
-
 def _yolo_metrics_summary(run_dir: Path) -> Dict[str, float]:
     return _yolo_metrics_summary_impl(run_dir, read_csv_last_row_fn=_read_csv_last_row)
 
@@ -10671,53 +10379,6 @@ def _yolo_load_run_labelmap(run_dir: Path) -> List[str]:
         yolo_load_labelmap_fn=_yolo_load_labelmap,
         yaml_load_fn=yaml.safe_load,
     )
-
-
-def _validate_yolo_label_ids(labels_dir: Path, label_count: int) -> None:
-    if label_count <= 0:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_empty")
-    if not labels_dir.exists():
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labels_dir_missing")
-    for label_path in labels_dir.rglob("*.txt"):
-        rel_name = None
-        try:
-            rel_name = str(label_path.relative_to(labels_dir))
-        except Exception:
-            rel_name = str(label_path.name)
-        try:
-            with label_path.open("r", encoding="utf-8", errors="ignore") as handle:
-                for line_no, line in enumerate(handle, 1):
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    parts = stripped.split()
-                    if not parts:
-                        continue
-                    try:
-                        raw = float(parts[0])
-                    except Exception:
-                        raise HTTPException(
-                            status_code=HTTP_400_BAD_REQUEST,
-                            detail=f"labelmap_class_id_invalid:{rel_name}:{line_no}",
-                        )
-                    idx = int(raw)
-                    if abs(raw - idx) > 1e-6:
-                        raise HTTPException(
-                            status_code=HTTP_400_BAD_REQUEST,
-                            detail=f"labelmap_class_id_non_int:{rel_name}:{line_no}",
-                        )
-                    if idx < 0 or idx >= label_count:
-                        raise HTTPException(
-                            status_code=HTTP_400_BAD_REQUEST,
-                            detail=f"labelmap_class_id_out_of_range:{idx}/{label_count}:{rel_name}:{line_no}",
-                        )
-        except HTTPException:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail=f"labelmap_label_read_failed:{rel_name}:{exc}",
-            ) from exc
 
 
 def _rfdetr_load_labelmap(dataset_root: Path, coco_train_json: Optional[str] = None) -> List[str]:
@@ -11358,10 +11019,6 @@ def _path_is_within_root(path: Path, root: Path) -> bool:
     return _path_is_within_root_impl(path, root)
 
 
-def _normalize_agent_recipe_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return _normalize_agent_recipe_steps_impl(steps)
-
-
 def _parse_agent_recipe_schema_version(recipe_obj: Dict[str, Any]) -> Optional[int]:
     return _parse_agent_recipe_schema_version_impl(recipe_obj)
 
@@ -11400,28 +11057,6 @@ def _save_exemplar_crop(
         crop_dir=crop_dir,
         step_idx=step_idx,
         crop_name=crop_name,
-    )
-
-
-def _export_hard_negative_replay(
-    *,
-    dataset_id: str,
-    class_id: int,
-    class_name: str,
-    entries: Sequence[Dict[str, Any]],
-    max_crops: int,
-    log_fn: Optional[Callable[[str], None]] = None,
-) -> Optional[Dict[str, Any]]:
-    return _export_hard_negative_replay_impl(
-        dataset_id=dataset_id,
-        class_id=class_id,
-        class_name=class_name,
-        entries=entries,
-        max_crops=max_crops,
-        replay_root=CLIP_NEGATIVE_REPLAY_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-        time_fn=time.time,
-        log_fn=log_fn,
     )
 
 
@@ -11566,32 +11201,6 @@ def _import_agent_cascade_zip_bytes(zip_bytes: bytes) -> Dict[str, Any]:
 
 def _sanitize_prompts(prompts: List[str]) -> List[str]:
     return _sanitize_prompts_impl(prompts)
-
-
-def _refine_prompts_with_qwen(prompts: List[str]) -> List[str]:
-    if not prompts or Qwen3VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
-        return _sanitize_prompts(prompts)
-    return _refine_prompts_with_qwen_impl(
-        prompts,
-        generate_prompt_text_fn=lambda prompt_text, tokens: _generate_prompt_text(prompt_text, max_new_tokens=tokens),
-        sanitize_prompts_fn=_sanitize_prompts,
-    )
-
-
-def _qwen_self_filter_prompts(class_name: str, prompts: List[str]) -> List[str]:
-    if not prompts or Qwen3VLForConditionalGeneration is None or QWEN_IMPORT_ERROR:
-        return _sanitize_prompts(prompts)
-    return _qwen_self_filter_prompts_impl(
-        class_name,
-        prompts,
-        generate_prompt_text_fn=lambda prompt_text, tokens: _generate_prompt_text(prompt_text, max_new_tokens=tokens),
-        sanitize_prompts_fn=_sanitize_prompts,
-        humanize_class_name_fn=_humanize_class_name,
-    )
-
-
-def _expand_midpoints(values: List[float], *, fine_step: float = 0.05, clamp: Tuple[float, float] = (0.0, 1.0), limit: int = 20) -> List[float]:
-    return _expand_midpoints_impl(values, fine_step=fine_step, clamp=clamp, limit=limit)
 
 
 def _build_gt_index_for_class(
@@ -13966,18 +13575,6 @@ def get_segmentation_build_job(job_id: str):
     return _serialize_seg_job(job)
 
 
-def _coco_info_block(dataset_id: str) -> Dict[str, Any]:
-    return _coco_info_block_impl(dataset_id)
-
-
-def _coco_has_invalid_image_refs(path: Path) -> bool:
-    return _coco_has_invalid_image_refs_impl(path)
-
-
-def _coco_missing_segmentation(path: Path) -> bool:
-    return _coco_missing_segmentation_impl(path)
-
-
 def _write_coco_annotations(
     output_path: Path,
     *,
@@ -13995,10 +13592,6 @@ def _write_coco_annotations(
     )
 
 
-def _ensure_coco_info_fields(path: Path, dataset_id: str, categories: List[Dict[str, Any]]) -> str:
-    return _ensure_coco_info_fields_impl(path, dataset_id, categories)
-
-
 def _ensure_coco_supercategory(path: Path, default: str = "object") -> bool:
     return _ensure_coco_supercategory_impl(path, default)
 
@@ -14014,14 +13607,6 @@ def _rfdetr_prepare_dataset(dataset_root: Path, run_dir: Path, coco_train: str, 
         coco_train,
         coco_val,
         remap_ids_fn=_rfdetr_remap_coco_ids,
-    )
-
-
-def _validate_cuda_device_ids(device_ids: Sequence[int]) -> None:
-    _validate_cuda_device_ids_impl(
-        device_ids,
-        torch_module=torch,
-        http_exception_cls=HTTPException,
     )
 
 
@@ -14084,10 +13669,6 @@ def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
 
 def _convert_coco_dataset_to_yolo(dataset_root: Path) -> Dict[str, Any]:
     return _convert_coco_dataset_to_yolo_impl(dataset_root)
-
-
-def _list_sam3_datasets() -> List[Dict[str, Any]]:
-    return _list_all_datasets()
 
 
 def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
@@ -15722,31 +15303,6 @@ def encode_binary_mask(mask: np.ndarray) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return {"size": [int(height), int(width)], "counts": encoded}
-
-
-def _prune_detections_for_response(dets: List[Any], warnings: Optional[List[str]] = None) -> List[Any]:
-    """Clamp response payload size by limiting detection count and mask payloads."""
-    if not dets:
-        return dets
-    limited: List[Any] = list(dets[: MAX_RESPONSE_DETECTIONS]) if MAX_RESPONSE_DETECTIONS > 0 else list(dets)
-    if warnings is not None and MAX_RESPONSE_DETECTIONS > 0 and len(dets) > MAX_RESPONSE_DETECTIONS:
-        warnings.append("detections_pruned")
-    mask_budget = MAX_RESPONSE_MASKS if MAX_RESPONSE_MASKS > 0 else None
-    masks_used = 0
-    for det in limited:
-        mask_val = getattr(det, "mask", None)
-        if mask_val is not None and mask_budget is not None:
-            if masks_used >= mask_budget:
-                try:
-                    det.mask = None  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                else:
-                    if warnings is not None:
-                        warnings.append("masks_pruned")
-            else:
-                masks_used += 1
-    return limited
 
 
 def decode_binary_mask(payload: Dict[str, Any]) -> Optional[np.ndarray]:

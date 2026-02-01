@@ -1564,3 +1564,122 @@ def _resolve_sam3_dataset_meta_impl(dataset_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
     meta["dataset_root"] = str(dataset_root)
     return meta
+
+
+def _load_coco_index_impl(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
+    dataset_root = dataset_root.resolve()
+    coco_paths: List[Path] = []
+    meta = _load_sam3_dataset_metadata_impl(dataset_root) or {}
+    coco_train = meta.get("coco_train_json")
+    coco_val = meta.get("coco_val_json")
+    if coco_train:
+        coco_paths.append(Path(coco_train))
+    if coco_val:
+        coco_paths.append(Path(coco_val))
+    if not coco_paths:
+        annotations_path = dataset_root / "train" / "annotations.jsonl"
+        train_images = dataset_root / "train" / "images"
+        train_labels = dataset_root / "train" / "labels"
+        if annotations_path.exists():
+            meta = _convert_qwen_dataset_to_coco_impl(dataset_root)
+        elif train_images.exists() and train_labels.exists():
+            meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
+        else:
+            ann_path, _images_dir = _find_coco_split_impl(dataset_root)
+            meta = {"coco_train_json": str(ann_path)}
+        coco_train = meta.get("coco_train_json")
+        coco_val = meta.get("coco_val_json")
+        if coco_train:
+            coco_paths.append(Path(coco_train))
+        if coco_val:
+            coco_paths.append(Path(coco_val))
+    if not coco_paths:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_annotations_missing")
+
+    combined: Dict[str, Any] = {"images": [], "annotations": [], "categories": []}
+    images_by_id: Dict[int, Dict[str, Any]] = {}
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]] = {}
+    used_image_ids: set[int] = set()
+    used_ann_ids: set[int] = set()
+    next_image_id = 1
+    next_ann_id = 1
+
+    for coco_path in coco_paths:
+        if not coco_path.exists():
+            continue
+        try:
+            data = json.loads(coco_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+        categories = data.get("categories")
+        if isinstance(categories, list) and categories:
+            if not combined["categories"]:
+                combined["categories"] = categories
+        images = data.get("images", []) or []
+        annotations = data.get("annotations", []) or []
+        images_dir = coco_path.parent / "images"
+        if not images_dir.exists():
+            images_dir = coco_path.parent
+        split_name = images_dir.parent.name if images_dir.name == "images" else ""
+        id_map: Dict[int, int] = {}
+        for img in images:
+            if not isinstance(img, dict):
+                continue
+            try:
+                old_id = int(img.get("id", next_image_id))
+            except Exception:
+                old_id = next_image_id
+            new_id = old_id
+            if new_id in used_image_ids:
+                new_id = next_image_id
+            next_image_id = max(next_image_id, new_id + 1)
+            used_image_ids.add(new_id)
+            id_map[old_id] = new_id
+            file_name = str(img.get("file_name") or "")
+            width = img.get("width")
+            height = img.get("height")
+            resolved_path = _resolve_coco_image_path_impl(file_name, images_dir, split_name, dataset_root)
+            entry = {
+                "id": new_id,
+                "file_name": file_name,
+                "width": width,
+                "height": height,
+                "path": str(resolved_path) if resolved_path else None,
+            }
+            images_by_id[new_id] = entry
+            combined["images"].append({k: v for k, v in entry.items() if k != "path"})
+        for ann in annotations:
+            if not isinstance(ann, dict):
+                continue
+            try:
+                old_ann_id = int(ann.get("id", next_ann_id))
+            except Exception:
+                old_ann_id = next_ann_id
+            ann_id = old_ann_id
+            if ann_id in used_ann_ids:
+                ann_id = next_ann_id
+            next_ann_id = max(next_ann_id, ann_id + 1)
+            used_ann_ids.add(ann_id)
+            try:
+                old_img_id = int(ann.get("image_id"))
+            except Exception:
+                continue
+            new_img_id = id_map.get(old_img_id, old_img_id)
+            try:
+                cat_id = int(ann.get("category_id"))
+            except Exception:
+                continue
+            bbox = ann.get("bbox") or []
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                try:
+                    x, y, w, h = map(float, bbox[:4])
+                except (TypeError, ValueError):
+                    x = y = w = h = None
+                if x is not None and w is not None:
+                    gt_by_image_cat.setdefault(new_img_id, {}).setdefault(cat_id, []).append([x, y, x + w, y + h])
+            ann_copy = dict(ann)
+            ann_copy["id"] = ann_id
+            ann_copy["image_id"] = new_img_id
+            combined["annotations"].append(ann_copy)
+
+    return combined, gt_by_image_cat, images_by_id

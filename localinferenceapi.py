@@ -287,6 +287,7 @@ from services.datasets import (
     _convert_qwen_dataset_to_coco_impl as _convert_qwen_dataset_to_coco_impl,
     _convert_coco_dataset_to_yolo_impl as _convert_coco_dataset_to_yolo_impl,
     _resolve_sam3_dataset_meta_impl as _resolve_sam3_dataset_meta_impl,
+    _load_coco_index_impl as _load_coco_index_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -14339,6 +14340,10 @@ def _list_sam3_datasets() -> List[Dict[str, Any]]:
 
 def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
     return _resolve_sam3_dataset_meta_impl(dataset_id)
+
+
+def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
+    return _load_coco_index_impl(dataset_root)
 
 
 def _prepare_sam3_training_split(

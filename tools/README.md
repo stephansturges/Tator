@@ -17,7 +17,7 @@ Tools
   - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_fuzz_fast.sh`
 
 - Unused-def scanner (heuristic, module-level only)
-  - Run: `python tools/scan_unused_defs.py` (add `--include-decorated` to include route handlers)
+  - Run: `python tools/scan_unused_defs.py` (add `--include-decorated` to include route handlers, `--include-tests` to scan tests)
 
 Planned consolidation
 - Dataset utilities (mismatch detection, dataset checks) live in `tools/`.

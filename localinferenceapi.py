@@ -1,3 +1,5 @@
+"""Unified FastAPI backend and inference orchestration."""
+
 from __future__ import annotations
 
 import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue

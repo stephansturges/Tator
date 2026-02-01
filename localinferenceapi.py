@@ -215,6 +215,9 @@ from services.clip_runtime import (
     _suspend_clip_backbone_impl as _suspend_clip_backbone_impl,
     _resume_clip_backbone_impl as _resume_clip_backbone_impl,
 )
+from services.classifier_runtime import (
+    _resume_classifier_backbone_impl as _resume_classifier_backbone_impl,
+)
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
     _seg_job_update_impl as _seg_job_update_impl,
@@ -1575,42 +1578,33 @@ def _resume_classifier_backbone() -> None:
     """Reload the active encoder backbone after training, based on user-selected classifier."""
     global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
     global clip_model_name, _clip_reload_needed
-    encoder_type = str(active_encoder_type or "clip").strip().lower()
-    if encoder_type == "dinov3":
-        model_name = str(active_encoder_model or "").strip()
-        if not model_name:
-            dinov3_initialized = False
-            return
-        target_device = _dinov3_resolve_device(device)
-        with dinov3_lock:
-            if dinov3_model is not None and dinov3_processor is not None and dinov3_model_name == model_name:
-                if dinov3_cuda_disabled and not dinov3_model_device:
-                    pass
-                elif dinov3_model_device and dinov3_model_device != target_device:
-                    pass
-                else:
-                    dinov3_initialized = True
-                    return
-            model, processor = _load_dinov3_backbone(model_name, target_device)
-            if model is None or processor is None:
-                dinov3_model = None
-                dinov3_processor = None
-                dinov3_model_name = None
-                dinov3_model_device = None
-                dinov3_initialized = False
-                return
-            dinov3_model = model
-            dinov3_processor = processor
-            dinov3_model_name = model_name
-            dinov3_model_device = target_device
-            dinov3_initialized = True
-        return
-    if encoder_type != "clip":
-        _clip_reload_needed = False
-        return
-    if active_encoder_model:
-        clip_model_name = active_encoder_model
-    _resume_clip_backbone()
+    state = {
+        "dinov3_model": dinov3_model,
+        "dinov3_processor": dinov3_processor,
+        "dinov3_model_name": dinov3_model_name,
+        "dinov3_model_device": dinov3_model_device,
+        "dinov3_initialized": dinov3_initialized,
+        "clip_model_name": clip_model_name,
+        "_clip_reload_needed": _clip_reload_needed,
+        "active_encoder_type": active_encoder_type,
+        "active_encoder_model": active_encoder_model,
+    }
+    _resume_classifier_backbone_impl(
+        state=state,
+        device=device,
+        dinov3_lock=dinov3_lock,
+        dinov3_cuda_disabled=dinov3_cuda_disabled,
+        dinov3_resolve_device_fn=_dinov3_resolve_device,
+        load_dinov3_fn=_load_dinov3_backbone,
+        resume_clip_fn=_resume_clip_backbone,
+    )
+    dinov3_model = state["dinov3_model"]
+    dinov3_processor = state["dinov3_processor"]
+    dinov3_model_name = state["dinov3_model_name"]
+    dinov3_model_device = state["dinov3_model_device"]
+    dinov3_initialized = state["dinov3_initialized"]
+    clip_model_name = state["clip_model_name"]
+    _clip_reload_needed = state["_clip_reload_needed"]
 
 
 def _ensure_clip_backbone_for_mining() -> Tuple[Optional[Any], Optional[Any]]:

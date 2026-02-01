@@ -391,6 +391,51 @@ def _yolo_p2_scale_impl(model_id: str) -> Optional[str]:
     return None
 
 
+def _rfdetr_variant_info_impl(
+    task: str,
+    variant: Optional[str],
+    *,
+    variants: Sequence[Dict[str, Any]],
+    http_exception_cls: Any,
+) -> Dict[str, Any]:
+    task_norm = (task or "detect").lower().strip()
+    variant_norm = (variant or "").strip().lower()
+    if task_norm == "segment":
+        variant_norm = "rfdetr-seg-preview"
+    if not variant_norm:
+        variant_norm = "rfdetr-medium" if task_norm == "detect" else "rfdetr-seg-preview"
+    variant_map = {entry["id"]: entry for entry in variants}
+    info = variant_map.get(variant_norm)
+    if not info:
+        raise http_exception_cls(status_code=400, detail="rfdetr_variant_unknown")
+    if task_norm == "segment" and info.get("task") != "segment":
+        variant_norm = "rfdetr-seg-preview"
+        info = variant_map.get(variant_norm)
+    return info or {}
+
+
+def _rfdetr_best_checkpoint_impl(run_dir: Path) -> Optional[str]:
+    for name in ("checkpoint_best_total.pth", "checkpoint_best_ema.pth", "checkpoint_best_regular.pth"):
+        path = run_dir / name
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _rfdetr_parse_log_series_impl(log_path: Path) -> List[Dict[str, Any]]:
+    if not log_path.exists():
+        return []
+    series: List[Dict[str, Any]] = []
+    for line in log_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            series.append(json.loads(line))
+        except Exception:
+            continue
+    return series
+
+
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),

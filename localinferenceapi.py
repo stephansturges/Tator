@@ -558,6 +558,9 @@ from services.detectors import (
     _yolo_prune_run_dir_impl as _yolo_prune_run_dir_impl,
     _yolo_device_arg_impl as _yolo_device_arg_impl,
     _yolo_p2_scale_impl as _yolo_p2_scale_impl,
+    _rfdetr_variant_info_impl as _rfdetr_variant_info_impl,
+    _rfdetr_best_checkpoint_impl as _rfdetr_best_checkpoint_impl,
+    _rfdetr_parse_log_series_impl as _rfdetr_parse_log_series_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -10902,42 +10905,20 @@ def _rfdetr_load_labelmap(dataset_root: Path, coco_train_json: Optional[str] = N
 
 
 def _rfdetr_variant_info(task: str, variant: Optional[str]) -> Dict[str, Any]:
-    task_norm = (task or "detect").lower().strip()
-    variant_norm = (variant or "").strip().lower()
-    if task_norm == "segment":
-        variant_norm = "rfdetr-seg-preview"
-    if not variant_norm:
-        variant_norm = "rfdetr-medium" if task_norm == "detect" else "rfdetr-seg-preview"
-    variant_map = {entry["id"]: entry for entry in RFDETR_VARIANTS}
-    info = variant_map.get(variant_norm)
-    if not info:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_variant_unknown")
-    if task_norm == "segment" and info.get("task") != "segment":
-        variant_norm = "rfdetr-seg-preview"
-        info = variant_map.get(variant_norm)
-    return info or {}
+    return _rfdetr_variant_info_impl(
+        task,
+        variant,
+        variants=RFDETR_VARIANTS,
+        http_exception_cls=HTTPException,
+    )
 
 
 def _rfdetr_best_checkpoint(run_dir: Path) -> Optional[str]:
-    for name in ("checkpoint_best_total.pth", "checkpoint_best_ema.pth", "checkpoint_best_regular.pth"):
-        path = run_dir / name
-        if path.exists():
-            return str(path)
-    return None
+    return _rfdetr_best_checkpoint_impl(run_dir)
 
 
 def _rfdetr_parse_log_series(log_path: Path) -> List[Dict[str, Any]]:
-    if not log_path.exists():
-        return []
-    series: List[Dict[str, Any]] = []
-    for line in log_path.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            series.append(json.loads(line))
-        except Exception:
-            continue
-    return series
+    return _rfdetr_parse_log_series_impl(log_path)
 
 
 def _rfdetr_sanitize_metric(metric: Dict[str, Any]) -> Dict[str, Any]:

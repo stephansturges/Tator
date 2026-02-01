@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
+SKIP_GPU="${SKIP_GPU:-1}"
+
+echo "==> PyCompile core modules"
+python -m py_compile \
+  localinferenceapi.py \
+  app/__init__.py \
+  services/*.py \
+  utils/*.py \
+  tools/*.py
+
+echo "==> Tier-0/Tier-1 fuzz (skip_gpu=${SKIP_GPU})"
+if [[ "${SKIP_GPU}" == "1" ]]; then
+  SKIP_GPU=1 BASE_URL="${BASE_URL}" tools/run_fuzz_fast.sh
+else
+  SKIP_GPU=0 BASE_URL="${BASE_URL}" tools/run_fuzz_fast.sh
+fi
+
+echo "==> Refactor validation complete"

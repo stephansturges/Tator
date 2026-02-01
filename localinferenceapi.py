@@ -521,6 +521,8 @@ from services.qwen import (
     _resolve_qwen_variant_model_id_impl as _resolve_qwen_variant_model_id_impl,
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
+    _get_qwen_prompt_config_impl as _get_qwen_prompt_config_impl,
+    _set_qwen_prompt_config_impl as _set_qwen_prompt_config_impl,
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _humanize_class_name_impl as _humanize_class_name_impl,
@@ -2527,14 +2529,12 @@ def _resolve_qwen_device() -> str:
 
 
 def _get_qwen_prompt_config() -> QwenPromptConfig:
-    with qwen_config_lock:
-        return qwen_prompt_config.copy(deep=True)
+    return _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock)
 
 
 def _set_qwen_prompt_config(config: QwenPromptConfig) -> None:
     global qwen_prompt_config
-    with qwen_config_lock:
-        qwen_prompt_config = config.copy(deep=True)
+    qwen_prompt_config = _set_qwen_prompt_config_impl(qwen_prompt_config, config, qwen_config_lock)
 
 
 def _render_qwen_prompt(

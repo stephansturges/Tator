@@ -1013,6 +1013,17 @@ def _format_qwen_load_error_impl(exc: Exception, *, torch_module: Any) -> str:
     return msg
 
 
+def _get_qwen_prompt_config_impl(config: Any, lock: Any) -> Any:
+    with lock:
+        return config.copy(deep=True)
+
+
+def _set_qwen_prompt_config_impl(config: Any, new_config: Any, lock: Any) -> Any:
+    with lock:
+        config = new_config.copy(deep=True)
+    return config
+
+
 def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
     base = str(model_id or "")
     if not base:

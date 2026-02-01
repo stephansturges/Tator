@@ -211,6 +211,10 @@ from services.runtime_unload import (
 from services.dinov3_runtime import (
     _dinov3_resolve_device_impl as _dinov3_resolve_device_impl,
 )
+from services.clip_runtime import (
+    _suspend_clip_backbone_impl as _suspend_clip_backbone_impl,
+    _resume_clip_backbone_impl as _resume_clip_backbone_impl,
+)
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
     _seg_job_update_impl as _seg_job_update_impl,
@@ -1523,47 +1527,48 @@ def _dinov3_resolve_device(requested: str) -> str:
 
 def _suspend_clip_backbone() -> None:
     global clip_model, clip_preprocess, clip_initialized, _clip_reload_needed
-    with clip_lock:
-        if clip_model is None:
-            return
-        if str(active_encoder_type or "clip").strip().lower() == "clip":
-            logger.info("Suspending CLIP backbone to free GPU memory for training.")
-        else:
-            logger.debug("Suspending CLIP backbone (inactive classifier) to free GPU memory for training.")
-        clip_model = None
-        clip_preprocess = None
-        clip_initialized = False
-        _clip_reload_needed = True
-    # Also clear any per-device mining CLIP backbones to free VRAM.
-    try:
-        with _agent_clip_backbones_lock:
-            _agent_clip_backbones.clear()
-            _agent_clip_locks.clear()
-    except Exception:
-        pass
+    state = {
+        "clip_model": clip_model,
+        "clip_preprocess": clip_preprocess,
+        "clip_initialized": clip_initialized,
+        "_clip_reload_needed": _clip_reload_needed,
+        "active_encoder_type": active_encoder_type,
+    }
+    _suspend_clip_backbone_impl(
+        state=state,
+        lock=clip_lock,
+        agent_backbones=_agent_clip_backbones,
+        agent_locks=_agent_clip_locks,
+        logger=logger,
+    )
+    clip_model = state["clip_model"]
+    clip_preprocess = state["clip_preprocess"]
+    clip_initialized = state["clip_initialized"]
+    _clip_reload_needed = state["_clip_reload_needed"]
 
 
 def _resume_clip_backbone() -> None:
     global clip_model, clip_preprocess, clip_initialized, _clip_reload_needed
-    if not _clip_reload_needed:
-        return
-    with clip_lock:
-        if clip_model is not None:
-            _clip_reload_needed = False
-            clip_initialized = True
-            return
-        clip_name = clip_model_name or DEFAULT_CLIP_MODEL
-        try:
-            clip_model, clip_preprocess = clip.load(clip_name, device=device)
-            clip_initialized = bool(clf is not None and clip_model is not None)
-            logger.info("Reloaded CLIP backbone %s after training.", clip_name)
-        except Exception as exc:  # noqa: BLE001
-            clip_model = None
-            clip_preprocess = None
-            clip_initialized = False
-            logger.warning("Failed to reload CLIP backbone %s: %s", clip_name, exc)
-        finally:
-            _clip_reload_needed = False
+    state = {
+        "clip_model": clip_model,
+        "clip_preprocess": clip_preprocess,
+        "clip_initialized": clip_initialized,
+        "_clip_reload_needed": _clip_reload_needed,
+        "clip_model_name": clip_model_name,
+    }
+    _resume_clip_backbone_impl(
+        state=state,
+        lock=clip_lock,
+        clip_module=clip,
+        device=device,
+        default_model=DEFAULT_CLIP_MODEL,
+        clf=clf,
+        logger=logger,
+    )
+    clip_model = state["clip_model"]
+    clip_preprocess = state["clip_preprocess"]
+    clip_initialized = state["clip_initialized"]
+    _clip_reload_needed = state["_clip_reload_needed"]
 
 
 def _resume_classifier_backbone() -> None:

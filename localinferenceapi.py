@@ -319,15 +319,6 @@ from services.prepass_grid import (
     _agent_tool_grid_cell_from_args as _grid_cell_from_args,
     _agent_record_grid_tool_usage as _record_grid_usage,
 )
-from services.glossary_library import (
-    _normalize_glossary_name,
-    _glossary_key,
-    _load_glossary_library,
-    _persist_glossary_library,
-    _find_glossary_entry,
-    _upsert_glossary_entry_impl as _upsert_glossary_entry_impl,
-    _delete_glossary_entry_impl as _delete_glossary_entry_impl,
-)
 from utils.coords import (
     _xyxy_to_qwen_bbox,
     _qwen_bbox_to_xyxy,

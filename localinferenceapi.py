@@ -494,6 +494,8 @@ from services.detectors import (
     _agent_tool_run_detector_impl as _agent_tool_run_detector_impl,
     _ensure_yolo_inference_runtime_impl as _ensure_yolo_inference_runtime_impl,
     _ensure_rfdetr_inference_runtime_impl as _ensure_rfdetr_inference_runtime_impl,
+    _set_yolo_infer_state_impl as _set_yolo_infer_state_impl,
+    _set_rfdetr_infer_state_impl as _set_rfdetr_infer_state_impl,
     _load_yolo_active_impl as _load_yolo_active_impl,
     _save_yolo_active_impl as _save_yolo_active_impl,
     _load_rfdetr_active_impl as _load_rfdetr_active_impl,
@@ -10029,10 +10031,17 @@ def _set_yolo_infer_state(
     task: Optional[str],
 ) -> None:
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
-    yolo_infer_model = model
-    yolo_infer_path = path
-    yolo_infer_labelmap = labelmap
-    yolo_infer_task = task
+    state = {
+        "model": yolo_infer_model,
+        "path": yolo_infer_path,
+        "labelmap": yolo_infer_labelmap,
+        "task": yolo_infer_task,
+    }
+    _set_yolo_infer_state_impl(model, path, labelmap, task, state=state)
+    yolo_infer_model = state["model"]
+    yolo_infer_path = state["path"]
+    yolo_infer_labelmap = state["labelmap"]
+    yolo_infer_task = state["task"]
 
 
 def _set_rfdetr_infer_state(
@@ -10043,11 +10052,19 @@ def _set_rfdetr_infer_state(
     variant: Optional[str],
 ) -> None:
     global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
-    rfdetr_infer_model = model
-    rfdetr_infer_path = path
-    rfdetr_infer_labelmap = labelmap
-    rfdetr_infer_task = task
-    rfdetr_infer_variant = variant
+    state = {
+        "model": rfdetr_infer_model,
+        "path": rfdetr_infer_path,
+        "labelmap": rfdetr_infer_labelmap,
+        "task": rfdetr_infer_task,
+        "variant": rfdetr_infer_variant,
+    }
+    _set_rfdetr_infer_state_impl(model, path, labelmap, task, variant, state=state)
+    rfdetr_infer_model = state["model"]
+    rfdetr_infer_path = state["path"]
+    rfdetr_infer_labelmap = state["labelmap"]
+    rfdetr_infer_task = state["task"]
+    rfdetr_infer_variant = state["variant"]
 YOLO_VARIANTS = [
     {"id": "yolov8n", "label": "YOLOv8 Nano", "task": "detect"},
     {"id": "yolov8s", "label": "YOLOv8 Small", "task": "detect"},

@@ -8,6 +8,36 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
+def _set_yolo_infer_state_impl(
+    model: Any,
+    path: Optional[str],
+    labelmap: List[str],
+    task: Optional[str],
+    *,
+    state: Dict[str, Any],
+) -> None:
+    state["model"] = model
+    state["path"] = path
+    state["labelmap"] = labelmap
+    state["task"] = task
+
+
+def _set_rfdetr_infer_state_impl(
+    model: Any,
+    path: Optional[str],
+    labelmap: List[str],
+    task: Optional[str],
+    variant: Optional[str],
+    *,
+    state: Dict[str, Any],
+) -> None:
+    state["model"] = model
+    state["path"] = path
+    state["labelmap"] = labelmap
+    state["task"] = task
+    state["variant"] = variant
+
+
 def _ensure_yolo_inference_runtime_impl(
     *,
     load_active_fn: Callable[[], Dict[str, Any]],

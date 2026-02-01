@@ -9730,18 +9730,6 @@ def _sam3_job_update(
     )
 
 
-def _serialize_sam3_job(job: Sam3TrainingJob) -> Dict[str, Any]:
-    return _serialize_sam3_job_impl(job)
-
-
-def _serialize_yolo_job(job: YoloTrainingJob) -> Dict[str, Any]:
-    return _serialize_yolo_job_impl(job)
-
-
-def _serialize_yolo_head_graft_job(job: YoloHeadGraftJob) -> Dict[str, Any]:
-    return _serialize_yolo_head_graft_job_impl(job)
-
-
 def _yolo_job_update(
     job: YoloTrainingJob,
     *,
@@ -9819,10 +9807,6 @@ def _yolo_head_graft_force_stop(job: YoloHeadGraftJob) -> bool:
 
 def _yolo_job_append_metric(job: YoloTrainingJob, metric: Dict[str, Any]) -> None:
     _yolo_job_append_metric_impl(job, metric, max_points=2000)
-
-
-def _serialize_rfdetr_job(job: RfDetrTrainingJob) -> Dict[str, Any]:
-    return _serialize_rfdetr_job_impl(job)
 
 
 def _rfdetr_job_update(
@@ -16335,13 +16319,13 @@ def list_sam3_training_jobs():
     _prune_job_registry(SAM3_TRAINING_JOBS, SAM3_TRAINING_JOBS_LOCK)
     with SAM3_TRAINING_JOBS_LOCK:
         jobs = sorted(SAM3_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
-        return [_serialize_sam3_job(job) for job in jobs]
+        return [_serialize_sam3_job_impl(job) for job in jobs]
 
 
 @app.get("/sam3/train/jobs/{job_id}")
 def get_sam3_training_job(job_id: str):
     job = _get_sam3_job(job_id)
-    return _serialize_sam3_job(job)
+    return _serialize_sam3_job_impl(job)
 
 
 @app.post("/sam3/train/jobs/{job_id}/cancel")
@@ -16403,13 +16387,13 @@ def list_yolo_training_jobs():
     _prune_job_registry(YOLO_TRAINING_JOBS, YOLO_TRAINING_JOBS_LOCK)
     with YOLO_TRAINING_JOBS_LOCK:
         jobs = sorted(YOLO_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
-        return [_serialize_yolo_job(job) for job in jobs]
+        return [_serialize_yolo_job_impl(job) for job in jobs]
 
 
 @app.get("/yolo/train/jobs/{job_id}")
 def get_yolo_training_job(job_id: str):
     job = _get_yolo_job(job_id)
-    return _serialize_yolo_job(job)
+    return _serialize_yolo_job_impl(job)
 
 
 @app.post("/yolo/train/jobs/{job_id}/cancel")
@@ -16459,7 +16443,7 @@ def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
         {"job_id": job_id, "status": job.status, "message": job.message, "config": job.config},
     )
     _start_yolo_head_graft_worker(job)
-    return _serialize_yolo_head_graft_job(job)
+    return _serialize_yolo_head_graft_job_impl(job)
 
 
 @app.post("/yolo/head_graft/dry_run")
@@ -16510,7 +16494,7 @@ def list_yolo_head_graft_jobs():
     _prune_job_registry(YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK)
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
         jobs = sorted(YOLO_HEAD_GRAFT_JOBS.values(), key=lambda job: job.created_at, reverse=True)
-    return [_serialize_yolo_head_graft_job(job) for job in jobs]
+    return [_serialize_yolo_head_graft_job_impl(job) for job in jobs]
 
 
 @app.get("/yolo/head_graft/jobs/{job_id}")
@@ -16519,7 +16503,7 @@ def get_yolo_head_graft_job(job_id: str):
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
         job = YOLO_HEAD_GRAFT_JOBS.get(job_id)
     if job:
-        return _serialize_yolo_head_graft_job(job)
+        return _serialize_yolo_head_graft_job_impl(job)
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
 
 
@@ -16579,13 +16563,13 @@ def list_rfdetr_training_jobs():
     _prune_job_registry(RFDETR_TRAINING_JOBS, RFDETR_TRAINING_JOBS_LOCK)
     with RFDETR_TRAINING_JOBS_LOCK:
         jobs = sorted(RFDETR_TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
-        return [_serialize_rfdetr_job(job) for job in jobs]
+        return [_serialize_rfdetr_job_impl(job) for job in jobs]
 
 
 @app.get("/rfdetr/train/jobs/{job_id}")
 def get_rfdetr_training_job(job_id: str):
     job = _get_rfdetr_job(job_id)
-    return _serialize_rfdetr_job(job)
+    return _serialize_rfdetr_job_impl(job)
 
 
 @app.post("/rfdetr/train/jobs/{job_id}/cancel")

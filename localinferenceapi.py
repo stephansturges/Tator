@@ -567,6 +567,9 @@ from services.detectors import (
     _rfdetr_restore_augmentations_impl as _rfdetr_restore_augmentations_impl,
     _rfdetr_latest_checkpoint_epoch_impl as _rfdetr_latest_checkpoint_epoch_impl,
     _rfdetr_monitor_training_impl as _rfdetr_monitor_training_impl,
+    _yolo_build_aug_args_impl as _yolo_build_aug_args_impl,
+    _yolo_parse_results_csv_impl as _yolo_parse_results_csv_impl,
+    _yolo_monitor_training_impl as _yolo_monitor_training_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -11462,92 +11465,23 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
 
 
 def _yolo_build_aug_args(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not aug:
-        return {}
-    payload = dict(aug)
-    mapping = {
-        "flip_lr": "fliplr",
-        "flip_ud": "flipud",
-        "hsv_h": "hsv_h",
-        "hsv_s": "hsv_s",
-        "hsv_v": "hsv_v",
-        "mosaic": "mosaic",
-        "mixup": "mixup",
-        "copy_paste": "copy_paste",
-        "scale": "scale",
-        "translate": "translate",
-        "degrees": "degrees",
-        "shear": "shear",
-        "perspective": "perspective",
-        "erasing": "erasing",
-    }
-    aug_args: Dict[str, Any] = {}
-    for key, dest in mapping.items():
-        if key in payload:
-            aug_args[dest] = payload[key]
-    return {k: v for k, v in aug_args.items() if v is not None}
+    return _yolo_build_aug_args_impl(aug)
 
 
 def _yolo_parse_results_csv(results_path: Path) -> List[Dict[str, Any]]:
-    if not results_path.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    try:
-        with results_path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for idx, raw in enumerate(reader):
-                if not raw:
-                    continue
-                parsed: Dict[str, Any] = {}
-                for key, value in raw.items():
-                    if key is None or value is None:
-                        continue
-                    name = str(key).strip()
-                    if not name:
-                        continue
-                    text = str(value).strip()
-                    if text == "":
-                        continue
-                    try:
-                        num = float(text)
-                    except ValueError:
-                        continue
-                    if name == "epoch":
-                        parsed["epoch"] = int(num) if float(num).is_integer() else num
-                    else:
-                        parsed[name] = num
-                if "epoch" not in parsed:
-                    parsed["epoch"] = idx + 1
-                if parsed:
-                    rows.append(parsed)
-    except Exception:  # noqa: BLE001
-        return []
-    return rows
+    return _yolo_parse_results_csv_impl(results_path)
 
 
 def _yolo_monitor_training(job: YoloTrainingJob, run_dir: Path, total_epochs: int, stop_event: threading.Event) -> None:
-    results_path = run_dir / "train" / "results.csv"
-    last_len = 0
-    while not stop_event.is_set():
-        if job.cancel_event.is_set() or job.status not in {"running", "queued"}:
-            break
-        series = _yolo_parse_results_csv(results_path)
-        if series and len(series) > last_len:
-            new_entries = series[last_len:]
-            for metric in new_entries:
-                _yolo_job_append_metric(job, metric)
-            last_len = len(series)
-            latest = series[-1]
-            epoch = latest.get("epoch")
-            if isinstance(epoch, (int, float)):
-                try:
-                    epoch_idx = int(epoch)
-                except Exception:
-                    epoch_idx = None
-                if epoch_idx is not None and total_epochs > 0:
-                    progress = max(0.0, min(0.99, epoch_idx / total_epochs))
-                    _yolo_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
-        stop_event.wait(12.0)
+    _yolo_monitor_training_impl(
+        job,
+        run_dir,
+        total_epochs,
+        stop_event,
+        parse_results_fn=_yolo_parse_results_csv,
+        job_append_metric_fn=_yolo_job_append_metric,
+        job_update_fn=_yolo_job_update,
+    )
 
 
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:

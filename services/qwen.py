@@ -368,64 +368,6 @@ def _expand_prompts_with_prompt_llm_impl(
     return final_new
 
 
-def _refine_prompts_with_qwen_impl(
-    prompts: List[str],
-    *,
-    generate_prompt_text_fn: Callable[[str, int], str],
-    sanitize_prompts_fn: Callable[[List[str]], List[str]],
-) -> List[str]:
-    prompts = sanitize_prompts_fn(prompts)
-    if not prompts:
-        return prompts
-    try:
-        prompt_text = (
-            "You are validating candidate noun phrases for open-vocabulary object detection. "
-            "Keep only entries that are concrete object-like noun phrases (1-4 words, nouns included). "
-            "Reject fragments, verbs, partial words, or unrelated terms. "
-            "Respond ONLY as a comma-separated list, no numbering, no explanations, ending with STOP.\n"
-            f"Candidates: {', '.join(prompts)}"
-        )
-        text = generate_prompt_text_fn(prompt_text, 160)
-        if not text:
-            return prompts
-        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip() and t.strip().upper() != "STOP"]
-        cleaned = sanitize_prompts_fn(parts)
-        return cleaned or prompts
-    except Exception:
-        return prompts
-
-
-def _qwen_self_filter_prompts_impl(
-    class_name: str,
-    prompts: List[str],
-    *,
-    generate_prompt_text_fn: Callable[[str, int], str],
-    sanitize_prompts_fn: Callable[[List[str]], List[str]],
-    humanize_class_name_fn: Callable[[str], str],
-) -> List[str]:
-    """Ask Qwen to self-critique the candidate prompts against the target class and return only credible entries."""
-    prompts = sanitize_prompts_fn(prompts)
-    if not prompts:
-        return prompts
-    try:
-        prompt_text = (
-            "You are double-checking candidate noun phrases for object detection. "
-            f"Target class: '{humanize_class_name_fn(class_name)}'. "
-            "From the list, keep ONLY phrases that clearly describe that class (synonyms or sub-types). "
-            "Drop anything ambiguous, misspelled, or unrelated. "
-            "Return ONLY a comma-separated list, no explanations, ending with STOP.\n"
-            f"Candidates: {', '.join(prompts)}"
-        )
-        text = generate_prompt_text_fn(prompt_text, 160)
-        if not text:
-            return prompts
-        parts = [t.strip() for t in re.split(r"[,\\n]+", text) if t.strip() and t.strip().upper() != "STOP"]
-        cleaned = sanitize_prompts_fn(parts)
-        return cleaned or prompts
-    except Exception:
-        return prompts
-
-
 def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[str]]] = None) -> str:
     label = str(label or "").strip()
     if not label:
@@ -1016,12 +958,6 @@ def _format_qwen_load_error_impl(exc: Exception, *, torch_module: Any) -> str:
 def _get_qwen_prompt_config_impl(config: Any, lock: Any) -> Any:
     with lock:
         return config.copy(deep=True)
-
-
-def _set_qwen_prompt_config_impl(config: Any, new_config: Any, lock: Any) -> Any:
-    with lock:
-        config = new_config.copy(deep=True)
-    return config
 
 
 def _render_qwen_prompt_impl(

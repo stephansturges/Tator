@@ -65,27 +65,6 @@ def _ensure_qwen_dataset_signature_impl(
     return metadata, signature
 
 
-def _find_qwen_dataset_by_signature_impl(
-    signature: str,
-    *,
-    dataset_root: Path,
-    load_metadata_fn,
-    ensure_signature_fn,
-) -> Optional[Path]:
-    if not signature:
-        return None
-    for path in dataset_root.iterdir():
-        if not path.is_dir():
-            continue
-        meta = load_metadata_fn(path)
-        if not meta:
-            continue
-        _, sig = ensure_signature_fn(path, meta)
-        if sig == signature:
-            return path
-    return None
-
-
 def _load_registry_dataset_metadata_impl(dataset_dir: Path, *, load_json_metadata_fn, meta_name: str) -> Optional[Dict[str, Any]]:
     return load_json_metadata_fn(dataset_dir / meta_name)
 
@@ -470,37 +449,6 @@ def _agent_load_labelmap_meta(
     if not glossary and labelmap:
         glossary = default_glossary_fn(labelmap)
     return labelmap, glossary
-
-
-def _purge_dataset_artifacts_impl(
-    dataset_id: str,
-    *,
-    normalise_relative_path_fn,
-    agent_mining_meta_root: Path,
-    agent_mining_det_cache_root: Path,
-    prompt_helper_preset_root: Path,
-) -> None:
-    """Remove per-dataset agent/prompt-helper artifacts."""
-    safe_dataset = normalise_relative_path_fn(dataset_id)
-    for derived_root in (
-        agent_mining_meta_root / safe_dataset,
-        agent_mining_det_cache_root / safe_dataset,
-    ):
-        try:
-            shutil.rmtree(derived_root, ignore_errors=True)
-        except Exception:
-            pass
-    try:
-        for preset_path in prompt_helper_preset_root.glob("*.json"):
-            try:
-                with preset_path.open("r", encoding="utf-8") as handle:
-                    preset_data = json.load(handle)
-                if preset_data.get("dataset_id") in {dataset_id, safe_dataset}:
-                    preset_path.unlink(missing_ok=True)
-            except Exception:
-                continue
-    except Exception:
-        pass
 
 
 def _extract_qwen_detections_from_payload_impl(payload: Dict[str, Any]) -> List[Dict[str, Any]]:

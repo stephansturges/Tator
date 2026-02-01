@@ -479,6 +479,33 @@ def _rfdetr_extract_detections_impl(
     return detections, labelmap_shifted
 
 
+def _resolve_detector_image_impl(
+    image_base64: Optional[str],
+    image_token: Optional[str],
+    *,
+    fetch_preloaded_fn: Callable[[str, str], Optional[Any]],
+    decode_image_fn: Callable[[Optional[str]], Tuple[Any, Any]],
+    store_preloaded_fn: Callable[[str, Any, str], None],
+    hash_fn: Callable[[bytes], str],
+) -> Tuple[Any, Any, str]:
+    if image_token:
+        for variant in ("sam1", "sam3"):
+            cached = fetch_preloaded_fn(image_token, variant)
+            if cached is not None:
+                pil_img = __import__("PIL").Image.fromarray(cached)
+                return pil_img, cached, image_token
+        if image_base64:
+            pil_img, np_img = decode_image_fn(image_base64)
+            token = hash_fn(np_img.tobytes())
+            store_preloaded_fn(token, np_img, "sam1")
+            return pil_img, np_img, token
+        raise RuntimeError("image_token_not_found")
+    pil_img, np_img = decode_image_fn(image_base64)
+    token = hash_fn(np_img.tobytes())
+    store_preloaded_fn(token, np_img, "sam1")
+    return pil_img, np_img, token
+
+
 def _flatten_metrics_impl(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if out is None:
         out = {}

@@ -564,6 +564,7 @@ from services.detectors import (
     _collect_rfdetr_artifacts_impl as _collect_rfdetr_artifacts_impl,
     _yolo_extract_detections_impl as _yolo_extract_detections_impl,
     _rfdetr_extract_detections_impl as _rfdetr_extract_detections_impl,
+    _resolve_detector_image_impl as _resolve_detector_image_impl,
     _flatten_metrics_impl as _flatten_metrics_impl,
     _lookup_metric_impl as _lookup_metric_impl,
     _yolo_metrics_summary_impl as _yolo_metrics_summary_impl,
@@ -18974,22 +18975,20 @@ def _resolve_detector_image(
     image_base64: Optional[str],
     image_token: Optional[str],
 ) -> Tuple[Image.Image, np.ndarray, str]:
-    if image_token:
-        for variant in ("sam1", "sam3"):
-            cached = _fetch_preloaded_image(image_token, variant)
-            if cached is not None:
-                pil_img = Image.fromarray(cached)
-                return pil_img, cached, image_token
-        if image_base64:
-            pil_img, np_img = _decode_image_base64(image_base64)
-            token = hashlib.md5(np_img.tobytes()).hexdigest()
-            _store_preloaded_image(token, np_img, "sam1")
-            return pil_img, np_img, token
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
-    pil_img, np_img = _decode_image_base64(image_base64)
-    token = hashlib.md5(np_img.tobytes()).hexdigest()
-    _store_preloaded_image(token, np_img, "sam1")
-    return pil_img, np_img, token
+    try:
+        return _resolve_detector_image_impl(
+            image_base64,
+            image_token,
+            fetch_preloaded_fn=_fetch_preloaded_image,
+            decode_image_fn=_decode_image_base64,
+            store_preloaded_fn=_store_preloaded_image,
+            hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+        )
+    except RuntimeError as exc:  # noqa: BLE001
+        detail = str(exc)
+        if "image_token_not_found" in detail:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found") from exc
+        raise
 
 
 @app.post("/yolo/predict_full", response_model=YoloRegionResponse)

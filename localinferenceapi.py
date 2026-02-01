@@ -52,6 +52,7 @@ from utils.io import (
     _compute_dir_signature as _compute_dir_signature_impl,
     _dir_size_bytes as _dir_size_bytes_impl,
 )
+from utils.network import _find_free_port_impl as _find_free_port_impl
 from utils.image import _load_image_size, _slice_image_sahi
 from utils.labels import (
     _read_labelmap_lines,
@@ -14304,9 +14305,7 @@ def _validate_cuda_device_ids(device_ids: Sequence[int]) -> None:
 
 
 def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("", 0))
-        return int(sock.getsockname()[1])
+    return _find_free_port_impl()
 
 
 def _rfdetr_ddp_worker(

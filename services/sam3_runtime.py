@@ -86,6 +86,18 @@ def _reset_sam3_runtime_impl(
             pass
 
 
+def _build_backend_for_variant_impl(
+    variant: str,
+    *,
+    sam3_backend_cls: Any,
+    sam1_backend_cls: Any,
+) -> Any:
+    normalized = (variant or "sam1").lower()
+    if normalized == "sam3":
+        return sam3_backend_cls()
+    return sam1_backend_cls()
+
+
 def _sam3_clear_device_pinned_caches_impl(model: Any) -> None:
     """
     SAM3 upstream precomputes some internal caches on `cuda` (i.e. cuda:0) during module

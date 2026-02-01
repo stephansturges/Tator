@@ -194,6 +194,7 @@ from services.sam3_runtime import (
     _resolve_sam3_device_impl as _resolve_sam3_device_impl,
     _resolve_sam3_mining_devices_impl as _resolve_sam3_mining_devices_impl,
     _reset_sam3_runtime_impl as _reset_sam3_runtime_impl,
+    _build_backend_for_variant_impl as _build_backend_for_variant_impl,
 )
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
@@ -1806,11 +1807,11 @@ class _Sam3Backend:
 
 
 def _build_backend_for_variant(variant: str):
-    normalized = (variant or "sam1").lower()
-    if normalized == "sam3":
-        return _Sam3Backend()
-    # default to classic SAM1 backend
-    return _Sam1Backend()
+    return _build_backend_for_variant_impl(
+        variant,
+        sam3_backend_cls=_Sam3Backend,
+        sam1_backend_cls=_Sam1Backend,
+    )
 
 
 def _sam3_clear_device_pinned_caches(model: Any) -> None:

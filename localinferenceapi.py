@@ -583,6 +583,7 @@ from services.detectors import (
     _yolo_write_head_graft_yaml_impl as _yolo_write_head_graft_yaml_impl,
     _yolo_find_detect_modules_impl as _yolo_find_detect_modules_impl,
     _yolo_detect_layer_index_impl as _yolo_detect_layer_index_impl,
+    _rfdetr_ddp_worker_impl as _rfdetr_ddp_worker_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -14340,19 +14341,8 @@ def _rfdetr_ddp_worker(
     aug_policy: Optional[Dict[str, Any]],
     dist_url: str,
 ) -> None:
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["LOCAL_RANK"] = str(rank)
-    if dist_url.startswith("tcp://"):
-        try:
-            host_port = dist_url.replace("tcp://", "")
-            host, port = host_port.split(":", 1)
-            os.environ["MASTER_ADDR"] = host
-            os.environ["MASTER_PORT"] = port
-        except Exception:
-            pass
-    try:
-        from rfdetr import (
+    def _import_rfdetr() -> Dict[str, Any]:
+        from rfdetr import (  # type: ignore
             RFDETRBase,
             RFDETRLarge,
             RFDETRNano,
@@ -14360,31 +14350,31 @@ def _rfdetr_ddp_worker(
             RFDETRMedium,
             RFDETRSegPreview,
         )
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"rfdetr_import_failed:{exc}") from exc
-    model_cls_map = {
-        "rfdetr-nano": RFDETRNano,
-        "rfdetr-small": RFDETRSmall,
-        "rfdetr-medium": RFDETRMedium,
-        "rfdetr-base": RFDETRBase,
-        "rfdetr-large": RFDETRLarge,
-        "rfdetr-seg-preview": RFDETRSegPreview,
-    }
-    model_cls = model_cls_map.get(variant_id)
-    if not model_cls:
-        raise RuntimeError("rfdetr_variant_unknown")
-    model_kwargs = dict(model_kwargs)
-    model_kwargs["device"] = "cuda" if torch.cuda.is_available() else model_kwargs.get("device", "cpu")
-    train_kwargs = dict(train_kwargs)
-    train_kwargs["device"] = "cuda" if torch.cuda.is_available() else train_kwargs.get("device", "cpu")
-    train_kwargs["world_size"] = world_size
-    train_kwargs["dist_url"] = dist_url
-    rf_detr = model_cls(**model_kwargs)
-    restore = _rfdetr_install_augmentations(_rfdetr_normalize_aug_policy(aug_policy))
-    try:
-        rf_detr.train(**train_kwargs)
-    finally:
-        _rfdetr_restore_augmentations(restore)
+
+        return {
+            "rfdetr-nano": RFDETRNano,
+            "rfdetr-small": RFDETRSmall,
+            "rfdetr-medium": RFDETRMedium,
+            "rfdetr-base": RFDETRBase,
+            "rfdetr-large": RFDETRLarge,
+            "rfdetr-seg-preview": RFDETRSegPreview,
+        }
+
+    _rfdetr_ddp_worker_impl(
+        rank,
+        world_size,
+        variant_id,
+        model_kwargs,
+        train_kwargs,
+        aug_policy,
+        dist_url,
+        os_module=os,
+        torch_module=torch,
+        import_rfdetr_fn=_import_rfdetr,
+        normalize_aug_fn=_rfdetr_normalize_aug_policy,
+        install_aug_fn=_rfdetr_install_augmentations,
+        restore_aug_fn=_rfdetr_restore_augmentations,
+    )
 
 
 def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:

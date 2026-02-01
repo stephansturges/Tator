@@ -1109,6 +1109,54 @@ def _yolo_detect_layer_index_impl(
     return max(0, len(getattr(model, "model", [])) - 1)
 
 
+def _rfdetr_ddp_worker_impl(
+    rank: int,
+    world_size: int,
+    variant_id: str,
+    model_kwargs: Dict[str, Any],
+    train_kwargs: Dict[str, Any],
+    aug_policy: Optional[Dict[str, Any]],
+    dist_url: str,
+    *,
+    os_module: Any,
+    torch_module: Any,
+    import_rfdetr_fn: Callable[[], Dict[str, Any]],
+    normalize_aug_fn: Callable[[Optional[Dict[str, Any]]], Optional[Dict[str, Any]]],
+    install_aug_fn: Callable[[Optional[Dict[str, Any]]], Optional[Tuple[Any, Any]]],
+    restore_aug_fn: Callable[[Optional[Tuple[Any, Any]]], None],
+) -> None:
+    os_module.environ["RANK"] = str(rank)
+    os_module.environ["WORLD_SIZE"] = str(world_size)
+    os_module.environ["LOCAL_RANK"] = str(rank)
+    if dist_url.startswith("tcp://"):
+        try:
+            host_port = dist_url.replace("tcp://", "")
+            host, port = host_port.split(":", 1)
+            os_module.environ["MASTER_ADDR"] = host
+            os_module.environ["MASTER_PORT"] = port
+        except Exception:
+            pass
+    try:
+        model_cls_map = import_rfdetr_fn()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"rfdetr_import_failed:{exc}") from exc
+    model_cls = model_cls_map.get(variant_id)
+    if not model_cls:
+        raise RuntimeError("rfdetr_variant_unknown")
+    model_kwargs = dict(model_kwargs)
+    model_kwargs["device"] = "cuda" if torch_module.cuda.is_available() else model_kwargs.get("device", "cpu")
+    train_kwargs = dict(train_kwargs)
+    train_kwargs["device"] = "cuda" if torch_module.cuda.is_available() else train_kwargs.get("device", "cpu")
+    train_kwargs["world_size"] = world_size
+    train_kwargs["dist_url"] = dist_url
+    rf_detr = model_cls(**model_kwargs)
+    restore = install_aug_fn(normalize_aug_fn(aug_policy))
+    try:
+        rf_detr.train(**train_kwargs)
+    finally:
+        restore_aug_fn(restore)
+
+
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),

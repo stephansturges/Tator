@@ -11165,10 +11165,6 @@ def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
     }
 
 
-def _serialize_calibration_job(job: CalibrationJob) -> Dict[str, Any]:
-    return _serialize_calibration_job_impl(job)
-
-
 def _calibration_update(job: CalibrationJob, **kwargs: Any) -> None:
     _calibration_update_impl(job, **kwargs)
 
@@ -18645,7 +18641,7 @@ def qwen_prepass(payload: QwenPrepassRequest):
 @app.post("/calibration/jobs")
 def start_calibration_job(payload: CalibrationRequest = Body(...)):
     job = _start_calibration_job(payload)
-    return _serialize_calibration_job(job)
+    return _serialize_calibration_job_impl(job)
 
 
 @app.get("/calibration/jobs")
@@ -18654,7 +18650,7 @@ def list_calibration_jobs():
     with CALIBRATION_JOBS_LOCK:
         jobs = list(CALIBRATION_JOBS.values())
     jobs.sort(key=lambda j: j.created_at, reverse=True)
-    return [_serialize_calibration_job(job) for job in jobs]
+    return [_serialize_calibration_job_impl(job) for job in jobs]
 
 
 @app.get("/calibration/jobs/{job_id}")
@@ -18663,13 +18659,13 @@ def get_calibration_job(job_id: str):
         job = CALIBRATION_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
-    return _serialize_calibration_job(job)
+    return _serialize_calibration_job_impl(job)
 
 
 @app.post("/calibration/jobs/{job_id}/cancel")
 def cancel_calibration_job(job_id: str):
     job = _cancel_calibration_job(job_id)
-    return _serialize_calibration_job(job)
+    return _serialize_calibration_job_impl(job)
 
 
 @app.get("/prepass/recipes")

@@ -570,6 +570,7 @@ from services.detectors import (
     _yolo_build_aug_args_impl as _yolo_build_aug_args_impl,
     _yolo_parse_results_csv_impl as _yolo_parse_results_csv_impl,
     _yolo_monitor_training_impl as _yolo_monitor_training_impl,
+    _strip_checkpoint_optimizer_impl as _strip_checkpoint_optimizer_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -11485,26 +11486,7 @@ def _yolo_monitor_training(job: YoloTrainingJob, run_dir: Path, total_epochs: in
 
 
 def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
-    """Remove optimizer/scheduler state from a torch checkpoint to shrink size."""
-    before = ckpt_path.stat().st_size if ckpt_path.exists() else 0
-    if not ckpt_path.exists() or before == 0:
-        return False, before, before
-    try:
-        payload = torch.load(ckpt_path, map_location="cpu")
-        removed = False
-        for key in ["optimizer", "optimizers", "lr_schedulers", "schedulers", "trainer"]:
-            if key in payload:
-                payload.pop(key, None)
-                removed = True
-        if not removed:
-            return False, before, before
-        tmp_path = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
-        torch.save(payload, tmp_path)
-        tmp_size = tmp_path.stat().st_size
-        tmp_path.replace(ckpt_path)
-        return True, before, tmp_size
-    except Exception:
-        return False, before, before
+    return _strip_checkpoint_optimizer_impl(ckpt_path, torch_module=torch)
 
 
 def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:

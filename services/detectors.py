@@ -766,7 +766,34 @@ def _yolo_monitor_training_impl(
                 if epoch_idx is not None and total_epochs > 0:
                     progress = max(0.0, min(0.99, epoch_idx / total_epochs))
                     job_update_fn(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
-        stop_event.wait(wait_seconds)
+    stop_event.wait(wait_seconds)
+
+
+def _strip_checkpoint_optimizer_impl(
+    ckpt_path: Path,
+    *,
+    torch_module: Any,
+) -> Tuple[bool, int, int]:
+    """Remove optimizer/scheduler state from a torch checkpoint to shrink size."""
+    before = ckpt_path.stat().st_size if ckpt_path.exists() else 0
+    if not ckpt_path.exists() or before == 0:
+        return False, before, before
+    try:
+        payload = torch_module.load(ckpt_path, map_location="cpu")
+        removed = False
+        for key in ["optimizer", "optimizers", "lr_schedulers", "schedulers", "trainer"]:
+            if key in payload:
+                payload.pop(key, None)
+                removed = True
+        if not removed:
+            return False, before, before
+        tmp_path = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
+        torch_module.save(payload, tmp_path)
+        tmp_size = tmp_path.stat().st_size
+        tmp_path.replace(ckpt_path)
+        return True, before, tmp_size
+    except Exception:
+        return False, before, before
 
 
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:

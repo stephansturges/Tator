@@ -576,6 +576,7 @@ from services.detectors import (
     _rfdetr_load_labelmap_impl as _rfdetr_load_labelmap_impl,
     _rfdetr_remap_coco_ids_impl as _rfdetr_remap_coco_ids_impl,
     _rfdetr_prepare_dataset_impl as _rfdetr_prepare_dataset_impl,
+    _yolo_write_data_yaml_impl as _yolo_write_data_yaml_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -10948,24 +10949,16 @@ def _rfdetr_monitor_training(job: RfDetrTrainingJob, run_dir: Path, total_epochs
 
 
 def _yolo_write_data_yaml(run_dir: Path, dataset_root: Path, layout: Optional[str], labelmap_path: Optional[str]) -> Path:
-    train_rel, val_rel = _yolo_resolve_split_paths(dataset_root, layout)
-    names = []
-    if labelmap_path:
-        names = _yolo_load_labelmap(Path(labelmap_path))
-    data = {
-        "path": str(dataset_root),
-        "train": train_rel,
-        "val": val_rel,
-        "names": names,
-    }
-    data_path = run_dir / "data.yaml"
-    data_path.write_text(yaml.safe_dump(data, sort_keys=False))
-    if labelmap_path:
-        try:
-            shutil.copy2(labelmap_path, run_dir / "labelmap.txt")
-        except Exception:
-            pass
-    return data_path
+    return _yolo_write_data_yaml_impl(
+        run_dir,
+        dataset_root,
+        layout,
+        labelmap_path,
+        resolve_split_paths_fn=_yolo_resolve_split_paths,
+        yolo_load_labelmap_fn=_yolo_load_labelmap,
+        yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
+        copy_file_fn=shutil.copy2,
+    )
 
 
 def _yolo_device_arg(devices: Optional[List[int]]) -> Optional[str]:

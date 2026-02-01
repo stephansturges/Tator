@@ -933,6 +933,37 @@ def _rfdetr_prepare_dataset_impl(
     return dataset_dir
 
 
+def _yolo_write_data_yaml_impl(
+    run_dir: Path,
+    dataset_root: Path,
+    layout: Optional[str],
+    labelmap_path: Optional[str],
+    *,
+    resolve_split_paths_fn: Callable[[Path, Optional[str]], Tuple[str, str]],
+    yolo_load_labelmap_fn: Callable[[Path], List[str]],
+    yaml_dump_fn: Callable[[Dict[str, Any]], str],
+    copy_file_fn: Callable[[Path, Path], None],
+) -> Path:
+    train_rel, val_rel = resolve_split_paths_fn(dataset_root, layout)
+    names = []
+    if labelmap_path:
+        names = yolo_load_labelmap_fn(Path(labelmap_path))
+    data = {
+        "path": str(dataset_root),
+        "train": train_rel,
+        "val": val_rel,
+        "names": names,
+    }
+    data_path = run_dir / "data.yaml"
+    data_path.write_text(yaml_dump_fn(data))
+    if labelmap_path:
+        try:
+            copy_file_fn(Path(labelmap_path), run_dir / "labelmap.txt")
+        except Exception:
+            pass
+    return data_path
+
+
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),

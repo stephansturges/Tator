@@ -963,6 +963,22 @@ def _resolve_qwen_window_overlap(requested: Optional[float], *, default_overlap:
     return max(0.0, min(overlap, 0.2))
 
 
+def _resolve_qwen_variant_model_id_impl(base_model_id: str, variant: Optional[str]) -> str:
+    if not variant or variant == "auto":
+        return base_model_id
+    if "Thinking" in base_model_id:
+        if variant == "Thinking":
+            return base_model_id
+        if variant == "Instruct":
+            return base_model_id.replace("Thinking", "Instruct")
+    if "Instruct" in base_model_id:
+        if variant == "Instruct":
+            return base_model_id
+        if variant == "Thinking":
+            return base_model_id.replace("Instruct", "Thinking")
+    return base_model_id
+
+
 def _window_positions_impl(
     total: int,
     window: int,

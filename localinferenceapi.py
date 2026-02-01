@@ -516,6 +516,7 @@ from services.qwen import (
     _run_qwen_caption_merge as _run_qwen_caption_merge_impl,
     _resolve_qwen_window_size as _resolve_qwen_window_size_impl,
     _resolve_qwen_window_overlap as _resolve_qwen_window_overlap_impl,
+    _resolve_qwen_variant_model_id_impl as _resolve_qwen_variant_model_id_impl,
     _humanize_class_name_impl as _humanize_class_name_impl,
     _sanitize_prompts_impl as _sanitize_prompts_impl,
     _generate_prompt_variants_for_class_impl as _generate_prompt_variants_for_class_impl,
@@ -3735,19 +3736,7 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
 
 
 def _resolve_qwen_variant_model_id(base_model_id: str, variant: Optional[str]) -> str:
-    if not variant or variant == "auto":
-        return base_model_id
-    if "Thinking" in base_model_id:
-        if variant == "Thinking":
-            return base_model_id
-        if variant == "Instruct":
-            return base_model_id.replace("Thinking", "Instruct")
-    if "Instruct" in base_model_id:
-        if variant == "Instruct":
-            return base_model_id
-        if variant == "Thinking":
-            return base_model_id.replace("Instruct", "Thinking")
-    return base_model_id
+    return _resolve_qwen_variant_model_id_impl(base_model_id, variant)
 
 
 def _strip_qwen_model_suffix(model_id: str) -> Optional[str]:

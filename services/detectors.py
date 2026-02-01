@@ -402,6 +402,83 @@ def _collect_rfdetr_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str
     }
 
 
+def _yolo_extract_detections_impl(
+    results: Any,
+    labelmap: List[str],
+    offset_x: float,
+    offset_y: float,
+    full_w: int,
+    full_h: int,
+) -> List[Dict[str, Any]]:
+    detections: List[Dict[str, Any]] = []
+    if not results:
+        return detections
+    det_boxes = results[0].boxes if results else None
+    if det_boxes is None or det_boxes.xyxy is None:
+        return detections
+    xyxy = det_boxes.xyxy.cpu().numpy()
+    confs = det_boxes.conf.cpu().numpy() if det_boxes.conf is not None else None
+    classes = det_boxes.cls.cpu().numpy() if det_boxes.cls is not None else None
+    for idx, box in enumerate(xyxy):
+        x1, y1, x2, y2 = [float(v) for v in box[:4]]
+        abs_x = max(0.0, min(full_w, x1 + offset_x))
+        abs_y = max(0.0, min(full_h, y1 + offset_y))
+        abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+        abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+        class_id = int(classes[idx]) if classes is not None else -1
+        class_name = labelmap[class_id] if 0 <= class_id < len(labelmap) else None
+        score = float(confs[idx]) if confs is not None else None
+        detections.append(
+            {
+                "bbox": [abs_x, abs_y, abs_w, abs_h],
+                "class_id": class_id,
+                "class_name": class_name,
+                "score": score,
+            }
+        )
+    return detections
+
+
+def _rfdetr_extract_detections_impl(
+    results: Any,
+    labelmap: List[str],
+    offset_x: float,
+    offset_y: float,
+    full_w: int,
+    full_h: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    detections: List[Dict[str, Any]] = []
+    labelmap_shifted = False
+    if results is None:
+        return detections, labelmap_shifted
+    xyxy = getattr(results, "xyxy", None)
+    scores = getattr(results, "confidence", None)
+    class_ids = getattr(results, "class_id", None)
+    if xyxy is None or not len(xyxy):
+        return detections, labelmap_shifted
+    for idx, box in enumerate(xyxy):
+        x1, y1, x2, y2 = [float(v) for v in box[:4]]
+        abs_x = max(0.0, min(full_w, x1 + offset_x))
+        abs_y = max(0.0, min(full_h, y1 + offset_y))
+        abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+        abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+        class_id = int(class_ids[idx]) if class_ids is not None else -1
+        if labelmap and class_id >= len(labelmap) and 0 <= class_id - 1 < len(labelmap):
+            class_id -= 1
+            labelmap_shifted = True
+        class_name = labelmap[class_id] if 0 <= class_id < len(labelmap) else None
+        score = float(scores[idx]) if scores is not None else None
+        detections.append(
+            {
+                "bbox": [abs_x, abs_y, abs_w, abs_h],
+                "class_id": class_id,
+                "class_name": class_name,
+                "score": score,
+            }
+        )
+    return detections, labelmap_shifted
+
+
 def _flatten_metrics_impl(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if out is None:
         out = {}

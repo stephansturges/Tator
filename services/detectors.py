@@ -796,6 +796,60 @@ def _strip_checkpoint_optimizer_impl(
         return False, before, before
 
 
+def _yolo_load_labelmap_impl(labelmap_path: Path) -> List[str]:
+    try:
+        return [line.strip() for line in labelmap_path.read_text().splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def _yolo_load_run_labelmap_impl(
+    run_dir: Path,
+    *,
+    yolo_load_labelmap_fn: Callable[[Path], List[str]],
+    yaml_load_fn: Callable[[str], Any],
+) -> List[str]:
+    labelmap_path = run_dir / "labelmap.txt"
+    labels = yolo_load_labelmap_fn(labelmap_path)
+    if labels:
+        return labels
+    data_yaml = run_dir / "data.yaml"
+    if data_yaml.exists():
+        try:
+            payload = yaml_load_fn(data_yaml.read_text())
+            names = payload.get("names") if isinstance(payload, dict) else None
+            if isinstance(names, dict):
+                return [names[k] for k in sorted(names.keys())]
+            if isinstance(names, list):
+                return [str(x) for x in names]
+        except Exception:
+            pass
+    return []
+
+
+def _rfdetr_load_labelmap_impl(
+    dataset_root: Path,
+    coco_train_json: Optional[str],
+    *,
+    yolo_load_labelmap_fn: Callable[[Path], List[str]],
+    json_load_fn: Callable[[str], Any],
+) -> List[str]:
+    labelmap_path = dataset_root / "labelmap.txt"
+    if labelmap_path.exists():
+        return yolo_load_labelmap_fn(labelmap_path)
+    coco_path = Path(coco_train_json) if coco_train_json else None
+    if coco_path and coco_path.exists():
+        try:
+            data = json_load_fn(coco_path.read_text())
+            categories = data.get("categories", [])
+            categories = [c for c in categories if isinstance(c, dict) and "id" in c and "name" in c]
+            categories.sort(key=lambda c: int(c.get("id", 0)))
+            return [str(c["name"]) for c in categories]
+        except Exception:
+            return []
+    return []
+
+
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),

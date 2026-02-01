@@ -571,6 +571,9 @@ from services.detectors import (
     _yolo_parse_results_csv_impl as _yolo_parse_results_csv_impl,
     _yolo_monitor_training_impl as _yolo_monitor_training_impl,
     _strip_checkpoint_optimizer_impl as _strip_checkpoint_optimizer_impl,
+    _yolo_load_labelmap_impl as _yolo_load_labelmap_impl,
+    _yolo_load_run_labelmap_impl as _yolo_load_run_labelmap_impl,
+    _rfdetr_load_labelmap_impl as _rfdetr_load_labelmap_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -10825,29 +10828,15 @@ def _yolo_resolve_split_paths(dataset_root: Path, layout: Optional[str]) -> Tupl
 
 
 def _yolo_load_labelmap(labelmap_path: Path) -> List[str]:
-    try:
-        return [line.strip() for line in labelmap_path.read_text().splitlines() if line.strip()]
-    except Exception:
-        return []
+    return _yolo_load_labelmap_impl(labelmap_path)
 
 
 def _yolo_load_run_labelmap(run_dir: Path) -> List[str]:
-    labelmap_path = run_dir / "labelmap.txt"
-    labels = _yolo_load_labelmap(labelmap_path)
-    if labels:
-        return labels
-    data_yaml = run_dir / "data.yaml"
-    if data_yaml.exists():
-        try:
-            payload = yaml.safe_load(data_yaml.read_text())
-            names = payload.get("names") if isinstance(payload, dict) else None
-            if isinstance(names, dict):
-                return [names[k] for k in sorted(names.keys())]
-            if isinstance(names, list):
-                return [str(x) for x in names]
-        except Exception:
-            pass
-    return []
+    return _yolo_load_run_labelmap_impl(
+        run_dir,
+        yolo_load_labelmap_fn=_yolo_load_labelmap,
+        yaml_load_fn=yaml.safe_load,
+    )
 
 
 def _validate_yolo_label_ids(labels_dir: Path, label_count: int) -> None:
@@ -10898,20 +10887,12 @@ def _validate_yolo_label_ids(labels_dir: Path, label_count: int) -> None:
 
 
 def _rfdetr_load_labelmap(dataset_root: Path, coco_train_json: Optional[str] = None) -> List[str]:
-    labelmap_path = dataset_root / "labelmap.txt"
-    if labelmap_path.exists():
-        return _yolo_load_labelmap(labelmap_path)
-    coco_path = Path(coco_train_json) if coco_train_json else None
-    if coco_path and coco_path.exists():
-        try:
-            data = json.loads(coco_path.read_text())
-            categories = data.get("categories", [])
-            categories = [c for c in categories if isinstance(c, dict) and "id" in c and "name" in c]
-            categories.sort(key=lambda c: int(c.get("id", 0)))
-            return [str(c["name"]) for c in categories]
-        except Exception:
-            return []
-    return []
+    return _rfdetr_load_labelmap_impl(
+        dataset_root,
+        coco_train_json,
+        yolo_load_labelmap_fn=_yolo_load_labelmap,
+        json_load_fn=json.loads,
+    )
 
 
 def _rfdetr_variant_info(task: str, variant: Optional[str]) -> Dict[str, Any]:

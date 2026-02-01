@@ -178,6 +178,7 @@ from services.qwen_jobs import (
 from services.qwen_runtime import (
     _reset_qwen_runtime_impl as _reset_qwen_runtime_impl,
     _unload_qwen_runtime_impl as _unload_qwen_runtime_impl,
+    _evict_qwen_caption_entry_impl as _evict_qwen_caption_entry_impl,
 )
 from services.sam3_jobs import (
     _sam3_job_append_metric_impl as _sam3_job_append_metric_impl,
@@ -3596,30 +3597,12 @@ def _unload_qwen_runtime() -> None:
 
 
 def _evict_qwen_caption_entry(cache_key: str, cache_entry: Optional[Tuple[Any, Any]]) -> None:
-    if not cache_entry:
-        return
-    try:
-        model, processor = cache_entry
-        try:
-            del model
-        except Exception:
-            pass
-        try:
-            del processor
-        except Exception:
-            pass
-    except Exception:
-        pass
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
-    try:
-        gc.collect()
-    except Exception:
-        pass
+    _evict_qwen_caption_entry_impl(
+        cache_key,
+        cache_entry,
+        torch_module=torch,
+        gc_module=gc,
+    )
 
 
 def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:

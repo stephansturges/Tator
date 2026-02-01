@@ -62,3 +62,36 @@ def _unload_qwen_runtime_impl(
             cuda_alloc,
             cuda_reserved,
         )
+
+
+def _evict_qwen_caption_entry_impl(
+    cache_key: str,
+    cache_entry: Optional[tuple],
+    *,
+    torch_module: Any,
+    gc_module: Any,
+) -> None:
+    if not cache_entry:
+        return
+    try:
+        model, processor = cache_entry
+        try:
+            del model
+        except Exception:
+            pass
+        try:
+            del processor
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if torch_module.cuda.is_available():
+        try:
+            torch_module.cuda.empty_cache()
+            torch_module.cuda.ipc_collect()
+        except Exception:
+            pass
+    try:
+        gc_module.collect()
+    except Exception:
+        pass

@@ -176,6 +176,7 @@ from services.qwen_jobs import (
     _serialize_qwen_job_impl as _serialize_qwen_job_impl,
 )
 from services.qwen_runtime import (
+    _ensure_qwen_ready_for_caption_impl as _ensure_qwen_ready_for_caption_impl,
     _reset_qwen_runtime_impl as _reset_qwen_runtime_impl,
     _unload_qwen_runtime_impl as _unload_qwen_runtime_impl,
     _evict_qwen_caption_entry_impl as _evict_qwen_caption_entry_impl,
@@ -3494,127 +3495,46 @@ def _evict_qwen_caption_entry(cache_key: str, cache_entry: Optional[Tuple[Any, A
 def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     global qwen_device, qwen_last_error
     global qwen_caption_cache, qwen_caption_order
-    if QWEN_IMPORT_ERROR is not None or Qwen3VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
-        detail = f"qwen_dependencies_missing:{QWEN_IMPORT_ERROR}"
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
-    if packaging_version is not None:
-        try:
-            import transformers  # local import to avoid import-time failures
-
-            if packaging_version.parse(transformers.__version__) < packaging_version.parse(QWEN_MIN_TRANSFORMERS):
-                raise HTTPException(
-                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"qwen_transformers_too_old:{transformers.__version__}<{QWEN_MIN_TRANSFORMERS}",
-                )
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-    cache_key = f"caption:{model_id_override}"
-    cache_limit = max(0, int(QWEN_CAPTION_CACHE_LIMIT or 0))
-    if cache_limit == 0 and qwen_caption_cache:
-        for key, entry in list(qwen_caption_cache.items()):
-            _evict_qwen_caption_entry(key, entry)
-        qwen_caption_cache.clear()
-        qwen_caption_order.clear()
-    cached = qwen_caption_cache.get(cache_key)
-    if cached and cache_limit:
-        try:
-            qwen_caption_order.remove(cache_key)
-        except ValueError:
-            pass
-        qwen_caption_order.append(cache_key)
-        return cached
-    with qwen_lock:
-        cached = qwen_caption_cache.get(cache_key)
-        if cached and cache_limit:
-            try:
-                qwen_caption_order.remove(cache_key)
-            except ValueError:
-                pass
-            qwen_caption_order.append(cache_key)
-            return cached
-        try:
-            device = _resolve_qwen_device()
-        except RuntimeError as exc:  # noqa: BLE001
-            qwen_last_error = str(exc)
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}") from exc
-        use_auto_map = QWEN_DEVICE_PREF == "auto" and device.startswith("cuda") and torch.cuda.is_available()
-        if use_auto_map:
-            load_kwargs = {
-                "torch_dtype": "auto",
-                "device_map": "auto",
-            }
-        else:
-            dtype = torch.float16 if device.startswith(("cuda", "mps")) else torch.float32
-            load_kwargs = {
-                "torch_dtype": dtype,
-                "low_cpu_mem_usage": True,
-            }
-        def _load_candidate(candidate_id: str) -> Tuple[Any, Any]:
-            local_only = _hf_offline_enabled()
-            model_local = _load_qwen_vl_model(str(candidate_id), load_kwargs, local_files_only=local_only)
-            if not load_kwargs.get("device_map"):
-                model_local.to(device)
-            model_local.eval()
-            processor_local = AutoProcessor.from_pretrained(
-                str(candidate_id),
-                min_pixels=QWEN_MIN_PIXELS,
-                max_pixels=QWEN_MAX_PIXELS,
-                local_files_only=local_only,
-            )
-            return model_local, processor_local
-
-        def _load_with_online_retry(candidate_id: str) -> Tuple[Any, Any]:
-            try:
-                return _load_candidate(candidate_id)
-            except Exception as exc:  # noqa: BLE001
-                if _hf_offline_enabled():
-                    logger.warning("[qwen] offline load failed; retrying with HF online: %s", exc)
-                    _set_hf_offline(False)
-                    try:
-                        return _load_candidate(candidate_id)
-                    finally:
-                        _enable_hf_offline_defaults()
-                raise
-
-        try:
-            model, processor = _load_with_online_retry(str(model_id_override))
-        except Exception as exc:  # noqa: BLE001
-            fallback_id = _strip_qwen_model_suffix(str(model_id_override))
-            if fallback_id:
-                try:
-                    logger.warning("Qwen model %s not found; falling back to %s", model_id_override, fallback_id)
-                    model, processor = _load_with_online_retry(str(fallback_id))
-                    qwen_caption_cache[cache_key] = (model, processor)
-                    qwen_caption_order.append(cache_key)
-                except Exception as fallback_exc:  # noqa: BLE001
-                    qwen_last_error = str(fallback_exc)
-                    detail = _format_qwen_load_error(fallback_exc)
-                    raise HTTPException(
-                        status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                        detail=f"qwen_load_failed:{detail}",
-                    ) from fallback_exc
-            else:
-                qwen_last_error = str(exc)
-                detail = _format_qwen_load_error(exc)
-                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{detail}") from exc
-        qwen_device = device
-        qwen_last_error = None
-        if cache_limit:
-            qwen_caption_cache[cache_key] = (model, processor)
-            qwen_caption_order.append(cache_key)
-            while len(qwen_caption_order) > cache_limit:
-                evict_key = qwen_caption_order.popleft()
-                evict_model = qwen_caption_cache.pop(evict_key, None)
-                _evict_qwen_caption_entry(evict_key, evict_model)
-        if torch.cuda.is_available():
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
-        _enable_hf_offline_defaults()
-        return model, processor
+    state = {
+        "qwen_caption_cache": qwen_caption_cache,
+        "qwen_caption_order": qwen_caption_order,
+        "qwen_device": qwen_device,
+        "qwen_last_error": qwen_last_error,
+    }
+    try:
+        model, processor = _ensure_qwen_ready_for_caption_impl(
+            model_id_override,
+            state=state,
+            qwen_lock=qwen_lock,
+            import_error=QWEN_IMPORT_ERROR,
+            qwen_model_cls=Qwen3VLForConditionalGeneration,
+            qwen_processor_cls=AutoProcessor,
+            process_vision_info=process_vision_info,
+            packaging_version=packaging_version,
+            min_transformers=QWEN_MIN_TRANSFORMERS,
+            resolve_device_fn=_resolve_qwen_device,
+            device_pref=QWEN_DEVICE_PREF,
+            torch_module=torch,
+            load_qwen_model_fn=_load_qwen_vl_model,
+            hf_offline_enabled_fn=_hf_offline_enabled,
+            set_hf_offline_fn=_set_hf_offline,
+            enable_hf_offline_defaults_fn=_enable_hf_offline_defaults,
+            strip_model_suffix_fn=_strip_qwen_model_suffix,
+            format_load_error_fn=_format_qwen_load_error,
+            min_pixels=QWEN_MIN_PIXELS,
+            max_pixels=QWEN_MAX_PIXELS,
+            caption_cache_limit=QWEN_CAPTION_CACHE_LIMIT,
+            evict_entry_fn=_evict_qwen_caption_entry,
+            logger=logger,
+        )
+    except RuntimeError as exc:  # noqa: BLE001
+        detail = str(exc)
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+    qwen_caption_cache = state["qwen_caption_cache"]
+    qwen_caption_order = state["qwen_caption_order"]
+    qwen_device = state["qwen_device"]
+    qwen_last_error = state["qwen_last_error"]
+    return model, processor
 
 
 def _resolve_qwen_variant_model_id(base_model_id: str, variant: Optional[str]) -> str:

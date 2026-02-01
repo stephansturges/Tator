@@ -215,6 +215,16 @@ def _run_calibration_job(
         image_cache_dir.mkdir(parents=True, exist_ok=True)
 
         prepass_cache_meta = prepass_cache_dir / "prepass.meta.json"
+        glossary_path = prepass_cache_dir / "glossary.json"
+
+        def _normalize_glossary_payload(text: str) -> Any:
+            if not text:
+                return {}
+            try:
+                return json.loads(text)
+            except Exception:
+                return text
+
         if not prepass_cache_meta.exists():
             write_record_fn(
                 prepass_cache_meta,
@@ -229,6 +239,41 @@ def _run_calibration_job(
                     "created_at": time.time(),
                 },
             )
+            write_record_fn(
+                glossary_path,
+                {
+                    "glossary": _normalize_glossary_payload(prepass_glossary_text),
+                    "glossary_hash": glossary_hash,
+                },
+            )
+        else:
+            try:
+                meta = json.loads(prepass_cache_meta.read_text())
+            except Exception:
+                meta = {}
+            updated = False
+            if meta.get("labelmap_hash") != labelmap_hash:
+                meta["labelmap_hash"] = labelmap_hash
+                meta["labelmap"] = labelmap
+                updated = True
+            if meta.get("glossary_hash") != glossary_hash:
+                meta["glossary_hash"] = glossary_hash
+                meta["glossary_text"] = prepass_glossary_text
+                updated = True
+            if "glossary_text" not in meta:
+                meta["glossary_text"] = prepass_glossary_text
+                updated = True
+            if updated:
+                meta["updated_at"] = time.time()
+                write_record_fn(prepass_cache_meta, meta)
+            if not glossary_path.exists():
+                write_record_fn(
+                    glossary_path,
+                    {
+                        "glossary": _normalize_glossary_payload(prepass_glossary_text),
+                        "glossary_hash": glossary_hash,
+                    },
+                )
 
         def _safe_image_cache_name(image_name: str) -> str:
             safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", image_name)

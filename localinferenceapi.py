@@ -175,6 +175,10 @@ from services.qwen_jobs import (
     _summarize_qwen_metric_impl as _summarize_qwen_metric_impl,
     _serialize_qwen_job_impl as _serialize_qwen_job_impl,
 )
+from services.qwen_runtime import (
+    _reset_qwen_runtime_impl as _reset_qwen_runtime_impl,
+    _unload_qwen_runtime_impl as _unload_qwen_runtime_impl,
+)
 from services.sam3_jobs import (
     _sam3_job_append_metric_impl as _sam3_job_append_metric_impl,
     _sam3_job_log_impl as _sam3_job_log_impl,
@@ -1186,16 +1190,19 @@ loaded_qwen_model_id: Optional[str] = None
 
 def _reset_qwen_runtime() -> None:
     global qwen_model, qwen_processor, qwen_last_error, loaded_qwen_model_id, qwen_device
-    qwen_model = None
-    qwen_processor = None
-    qwen_device = None
-    loaded_qwen_model_id = None
-    qwen_last_error = None
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception:  # noqa: BLE001
-            pass
+    state = {
+        "qwen_model": qwen_model,
+        "qwen_processor": qwen_processor,
+        "qwen_device": qwen_device,
+        "loaded_qwen_model_id": loaded_qwen_model_id,
+        "qwen_last_error": qwen_last_error,
+    }
+    _reset_qwen_runtime_impl(state=state, torch_module=torch)
+    qwen_model = state["qwen_model"]
+    qwen_processor = state["qwen_processor"]
+    qwen_device = state["qwen_device"]
+    loaded_qwen_model_id = state["loaded_qwen_model_id"]
+    qwen_last_error = state["qwen_last_error"]
 
 
 def _unload_sam3_text_runtime() -> None:
@@ -3582,40 +3589,27 @@ def _unload_qwen_runtime() -> None:
     """Release Qwen model/processor to free device memory."""
     global qwen_model, qwen_processor, qwen_device, loaded_qwen_model_id
     global qwen_caption_cache, qwen_caption_order
-    try:
-        del qwen_model
-    except Exception:
-        pass
-    try:
-        del qwen_processor
-    except Exception:
-        pass
-    qwen_model = None
-    qwen_processor = None
-    loaded_qwen_model_id = None
-    qwen_caption_cache = {}
-    qwen_caption_order = deque()
-    cuda_alloc = None
-    cuda_reserved = None
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            cuda_alloc = int(torch.cuda.memory_allocated())
-            cuda_reserved = int(torch.cuda.memory_reserved())
-        except Exception:
-            pass
-    qwen_device = None
-    try:
-        gc.collect()
-    except Exception:
-        pass
-    if cuda_alloc is not None or cuda_reserved is not None:
-        logger.info(
-            "[qwen] after unload: cuda_alloc=%s bytes cuda_reserved=%s bytes",
-            cuda_alloc,
-            cuda_reserved,
-        )
+    state = {
+        "qwen_model": qwen_model,
+        "qwen_processor": qwen_processor,
+        "qwen_device": qwen_device,
+        "loaded_qwen_model_id": loaded_qwen_model_id,
+        "qwen_caption_cache": qwen_caption_cache,
+        "qwen_caption_order": qwen_caption_order,
+    }
+    _unload_qwen_runtime_impl(
+        state=state,
+        torch_module=torch,
+        gc_module=gc,
+        logger=logger,
+        deque_factory=deque,
+    )
+    qwen_model = state["qwen_model"]
+    qwen_processor = state["qwen_processor"]
+    qwen_device = state["qwen_device"]
+    loaded_qwen_model_id = state["loaded_qwen_model_id"]
+    qwen_caption_cache = state["qwen_caption_cache"]
+    qwen_caption_order = state["qwen_caption_order"]
 
 
 def _evict_qwen_caption_entry(cache_key: str, cache_entry: Optional[Tuple[Any, Any]]) -> None:

@@ -492,6 +492,7 @@ from services.calibration_metrics import (
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
+    _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
     _generate_qwen_text as _generate_qwen_text_impl,
     _parse_prompt_candidates as _parse_prompt_candidates_impl,
     _generate_prompt_text as _generate_prompt_text_impl,
@@ -524,6 +525,7 @@ from services.qwen import (
     _get_qwen_prompt_config_impl as _get_qwen_prompt_config_impl,
     _set_qwen_prompt_config_impl as _set_qwen_prompt_config_impl,
     _render_qwen_prompt_impl as _render_qwen_prompt_impl,
+    _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _humanize_class_name_impl as _humanize_class_name_impl,
@@ -2557,50 +2559,10 @@ def _render_qwen_prompt(
 
 
 def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
-    def _attempt_parse(raw: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
-        snippet = (raw or "").strip()
-        if not snippet:
-            return None
-        snippet = snippet.strip("`").strip()
-
-        parsed: Any = None
-        try:
-            parsed = json.loads(snippet)
-        except json.JSONDecodeError:
-            parsed = None
-
-        if parsed is None:
-            for start_char, end_char in (("{", "}"), ("[", "]")):
-                start = snippet.find(start_char)
-                end = snippet.rfind(end_char)
-                if start < 0 or end < 0 or end <= start:
-                    continue
-                candidate = snippet[start : end + 1]
-                try:
-                    parsed = json.loads(candidate)
-                    snippet = candidate
-                    break
-                except json.JSONDecodeError:
-                    parsed = None
-
-        if parsed is None:
-            return None
-
-        if isinstance(parsed, dict):
-            if "detections" in parsed and isinstance(parsed["detections"], list):
-                return snippet, [item for item in parsed["detections"] if isinstance(item, dict)]
-            return snippet, [parsed]
-        if isinstance(parsed, list):
-            return snippet, [item for item in parsed if isinstance(item, dict)]
-        return None
-
-    fenced = re.findall(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)```", text, flags=re.DOTALL)
-    for raw in [*fenced, text]:
-        parsed = _attempt_parse(raw)
-        if parsed is not None:
-            return parsed
-
-    raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_parse_error:no_json_block_found")
+    snippet, detections = _extract_qwen_json_block_impl(text)
+    if not detections:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_parse_error:no_json_block_found")
+    return snippet, detections
 
 
 def _extract_numeric_sequence(value: Any, *, length: int) -> Optional[List[float]]:

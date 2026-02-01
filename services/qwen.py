@@ -1050,6 +1050,59 @@ def _render_qwen_prompt_impl(
     return formatted.strip()
 
 
+def _extract_qwen_json_block_impl(text: str) -> tuple[str, list]:
+    def _attempt_parse(raw: str):
+        snippet = (raw or "").strip()
+        if not snippet:
+            return None
+        snippet = snippet.strip("`").strip()
+
+        parsed = None
+        try:
+            parsed = json.loads(snippet)
+        except json.JSONDecodeError:
+            parsed = None
+
+        if parsed is None:
+            for start_char, end_char in (("{", "}"), ("[", "]")):
+                start = snippet.find(start_char)
+                end = snippet.rfind(end_char)
+                if start < 0 or end < 0 or end <= start:
+                    continue
+                candidate = snippet[start : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    snippet = candidate
+                    break
+                except json.JSONDecodeError:
+                    parsed = None
+
+        if parsed is None:
+            return None
+
+        if isinstance(parsed, dict):
+            if "detections" in parsed and isinstance(parsed["detections"], list):
+                return snippet, [item for item in parsed["detections"] if isinstance(item, dict)]
+            return snippet, [parsed]
+        if isinstance(parsed, list):
+            return snippet, [item for item in parsed if isinstance(item, dict)]
+        return None
+
+    fenced = re.findall(r"```(?:[a-zA-Z0-9_-]+)?\\s*(.*?)```", text or "", flags=re.DOTALL)
+    for raw in [*fenced, text]:
+        parsed = _attempt_parse(raw)
+        if parsed is not None:
+            return parsed
+
+    # Strip any <final> style wrapper content
+    cleaned = re.sub(r"<\\s*/?final\\s*>", "", text or "", flags=re.IGNORECASE).strip()
+    parsed = _attempt_parse(cleaned)
+    if parsed is not None:
+        return parsed
+
+    return "", []
+
+
 def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
     base = str(model_id or "")
     if not base:

@@ -208,6 +208,9 @@ from services.runtime_unload import (
     _unload_non_qwen_runtimes_impl as _unload_non_qwen_runtimes_impl,
     _unload_inference_runtimes_impl as _unload_inference_runtimes_impl,
 )
+from services.dinov3_runtime import (
+    _dinov3_resolve_device_impl as _dinov3_resolve_device_impl,
+)
 from services.segmentation import (
     _seg_job_log_impl as _seg_job_log_impl,
     _seg_job_update_impl as _seg_job_update_impl,
@@ -1515,10 +1518,7 @@ _agent_dinov3_backbones_lock = threading.Lock()
 
 
 def _dinov3_resolve_device(requested: str) -> str:
-    normalized = str(requested or "").strip() or "cpu"
-    if dinov3_cuda_disabled and normalized.startswith("cuda"):
-        return "cpu"
-    return normalized
+    return _dinov3_resolve_device_impl(requested, cuda_disabled=dinov3_cuda_disabled)
 
 
 def _suspend_clip_backbone() -> None:

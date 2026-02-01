@@ -436,6 +436,66 @@ def _rfdetr_parse_log_series_impl(log_path: Path) -> List[Dict[str, Any]]:
     return series
 
 
+def _rfdetr_sanitize_metric_impl(metric: Dict[str, Any]) -> Dict[str, Any]:
+    def _coerce(obj: Any) -> Any:
+        if isinstance(obj, __import__("numpy").ndarray):
+            return obj.tolist()
+        if isinstance(obj, __import__("numpy").generic):
+            try:
+                return obj.item()
+            except Exception:
+                return float(obj)
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, set):
+            return list(obj)
+        return obj
+
+    try:
+        return json.loads(json.dumps(metric, default=_coerce))
+    except Exception:
+        return {}
+
+
+def _rfdetr_normalize_aug_policy_impl(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not raw or not isinstance(raw, dict):
+        return None
+
+    def _clamp(value: Any, default: float = 0.0, maximum: float = 1.0) -> float:
+        try:
+            num = float(value)
+        except Exception:
+            num = default
+        return max(0.0, min(maximum, num))
+
+    policy = {
+        "hsv_h": _clamp(raw.get("hsv_h"), 0.0, 0.5),
+        "hsv_s": _clamp(raw.get("hsv_s"), 0.0, 1.0),
+        "hsv_v": _clamp(raw.get("hsv_v"), 0.0, 1.0),
+        "blur_prob": _clamp(raw.get("blur_prob"), 0.0, 1.0),
+        "gray_prob": _clamp(raw.get("gray_prob"), 0.0, 1.0),
+    }
+    kernel = raw.get("blur_kernel")
+    try:
+        kernel = int(kernel)
+    except Exception:
+        kernel = 0
+    if kernel and kernel % 2 == 0:
+        kernel += 1
+    policy["blur_kernel"] = max(0, kernel)
+    if not any(
+        [
+            policy["hsv_h"],
+            policy["hsv_s"],
+            policy["hsv_v"],
+            policy["blur_prob"],
+            policy["gray_prob"],
+        ]
+    ):
+        return None
+    return policy
+
+
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),

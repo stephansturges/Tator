@@ -561,6 +561,8 @@ from services.detectors import (
     _rfdetr_variant_info_impl as _rfdetr_variant_info_impl,
     _rfdetr_best_checkpoint_impl as _rfdetr_best_checkpoint_impl,
     _rfdetr_parse_log_series_impl as _rfdetr_parse_log_series_impl,
+    _rfdetr_sanitize_metric_impl as _rfdetr_sanitize_metric_impl,
+    _rfdetr_normalize_aug_policy_impl as _rfdetr_normalize_aug_policy_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -10922,62 +10924,11 @@ def _rfdetr_parse_log_series(log_path: Path) -> List[Dict[str, Any]]:
 
 
 def _rfdetr_sanitize_metric(metric: Dict[str, Any]) -> Dict[str, Any]:
-    def _coerce(obj: Any) -> Any:
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, np.generic):
-            try:
-                return obj.item()
-            except Exception:
-                return float(obj)
-        if isinstance(obj, Path):
-            return str(obj)
-        if isinstance(obj, set):
-            return list(obj)
-        return obj
-
-    try:
-        return json.loads(json.dumps(metric, default=_coerce))
-    except Exception:
-        return {}
+    return _rfdetr_sanitize_metric_impl(metric)
 
 
 def _rfdetr_normalize_aug_policy(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not raw or not isinstance(raw, dict):
-        return None
-    def _clamp(value: Any, default: float = 0.0, maximum: float = 1.0) -> float:
-        try:
-            num = float(value)
-        except Exception:
-            num = default
-        return max(0.0, min(maximum, num))
-
-    policy = {
-        "hsv_h": _clamp(raw.get("hsv_h"), 0.0, 0.5),
-        "hsv_s": _clamp(raw.get("hsv_s"), 0.0, 1.0),
-        "hsv_v": _clamp(raw.get("hsv_v"), 0.0, 1.0),
-        "blur_prob": _clamp(raw.get("blur_prob"), 0.0, 1.0),
-        "gray_prob": _clamp(raw.get("gray_prob"), 0.0, 1.0),
-    }
-    kernel = raw.get("blur_kernel")
-    try:
-        kernel = int(kernel)
-    except Exception:
-        kernel = 0
-    if kernel and kernel % 2 == 0:
-        kernel += 1
-    policy["blur_kernel"] = max(0, kernel)
-    if not any(
-        [
-            policy["hsv_h"],
-            policy["hsv_s"],
-            policy["hsv_v"],
-            policy["blur_prob"],
-            policy["gray_prob"],
-        ]
-    ):
-        return None
-    return policy
+    return _rfdetr_normalize_aug_policy_impl(raw)
 
 
 def _rfdetr_install_augmentations(policy: Optional[Dict[str, Any]]) -> Optional[Tuple[Any, Any]]:

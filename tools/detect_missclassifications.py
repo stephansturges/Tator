@@ -61,11 +61,6 @@ def parse_args():
 ###############################################################################
 # 2) YOLO I/O
 ###############################################################################
-def load_labelmap(labelmap_path):
-    label_list = joblib.load(labelmap_path)
-    label_to_id = {lbl: i for i, lbl in enumerate(label_list)}
-    return label_list, label_to_id
-
 def load_yolo_file(txt_path):
     if not os.path.isfile(txt_path):
         return []
@@ -82,14 +77,6 @@ def load_yolo_file(txt_path):
         h= float(parts[4])
         records.append((cid,x,y,w,h))
     return records
-
-def save_yolo_file(txt_path, records):
-    if not records:
-        with open(txt_path,"w") as f: pass
-        return
-    with open(txt_path,"w") as f:
-        for (cid,x,y,w,h) in records:
-            f.write(f"{cid} {x:.6f} {y:.6f} {w:.6f} {h:.6f}\n")
 
 ###############################################################################
 # 3) Skip Log

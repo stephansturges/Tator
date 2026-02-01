@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import base64, colorsys, copy, hashlib, io, zipfile, math, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gzip, csv, socket, gc, queue, multiprocessing
-from array import array
+import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue
 from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
 import yaml
 from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable, Set
-from collections import deque, Counter
-import torch, clip, joblib, tiktoken
-from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+from collections import deque
+import torch, clip, joblib
+from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,10 +25,8 @@ except Exception:  # noqa: BLE001
     LogitsProcessor = None
     LogitsProcessorList = None
 _BASE_LOGITS_PROCESSOR = LogitsProcessor if LogitsProcessor is not None else object
-from starlette.background import BackgroundTask
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
-    HTTP_403_FORBIDDEN,
     HTTP_412_PRECONDITION_FAILED,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -44,9 +40,6 @@ from starlette.status import (
 from utils.io import (
     _ensure_directory,
     _load_json_metadata,
-    _write_qwen_metadata,
-    _atomic_write_text,
-    _atomic_write_json,
     _read_csv_last_row,
     _sanitize_yolo_run_id as _sanitize_yolo_run_id_impl,
     _compute_dir_signature as _compute_dir_signature_impl,
@@ -59,29 +52,21 @@ from utils.coco import (
     _write_coco_annotations_impl,
 )
 from utils.image import (
-    _load_image_size,
     _slice_image_sahi,
     _decode_image_base64_impl,
-    _image_path_for_label_impl,
-    _resolve_coco_image_path_impl,
-    _label_relpath_for_image_impl,
 )
 from utils.labels import (
     _read_labelmap_lines,
     _load_labelmap_file,
     _normalize_class_name_for_match,
-    _normalize_labelmap_entries,
     _apply_expected_labelmap_warnings,
-    _labelmaps_match,
     _raise_on_labelmap_mismatch,
-    _agent_label_prefix_candidates,
     _agent_label_color_map,
     _agent_label_prefix_map,
     _agent_overlay_key_text,
     _agent_fuzzy_align_label,
 )
 from utils.classifier_utils import (
-    _is_background_class_name,
     _clip_head_background_indices,
     _agent_background_classes_from_head,
     _find_clip_head_target_index,
@@ -93,7 +78,6 @@ from utils.parsing import (
     _parse_bool,
     _safe_run_name,
     _normalize_device_list,
-    _parse_device_ids_string,
     _agent_extract_json_array,
 )
 from utils.gpu import _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl
@@ -101,16 +85,7 @@ from utils.errors import _agent_error_payload, _agent_error_from_detail
 from utils.hashing import _stable_hash_impl as _stable_hash_impl
 from utils.glossary import (
     _glossary_label_key,
-    _extract_glossary_synonyms,
     _normalize_labelmap_glossary,
-    _normalize_glossary_name,
-    _glossary_key,
-    _parse_glossary_mapping,
-    _parse_glossary_synonyms,
-    _split_synonym_terms,
-    _clean_sam3_synonym,
-    _normalize_synonym_list,
-    _dedupe_synonyms,
     _default_agent_glossary_for_labelmap,
 )
 from utils.datasets import _iter_yolo_images
@@ -133,7 +108,6 @@ from services.prepass_recipes import (
     _load_agent_recipe_json_only_impl as _load_agent_recipe_json_only_impl,
     _ensure_recipe_zip_impl as _ensure_recipe_zip_impl,
     _import_agent_recipe_zip_bytes_impl as _import_agent_recipe_zip_bytes_impl,
-    _copy_tree_filtered_impl as _copy_tree_filtered_impl,
     _list_prepass_recipes_impl as _list_prepass_recipes_impl,
     _collect_recipe_assets_impl as _collect_recipe_assets_impl,
     _import_prepass_recipe_from_zip_impl as _import_prepass_recipe_from_zip_impl,
@@ -248,9 +222,6 @@ from services.datasets import (
     _resolve_dataset_legacy_impl as _resolve_dataset_legacy_impl,
     _resolve_sam3_or_qwen_dataset_impl as _resolve_sam3_or_qwen_dataset_impl,
     _yolo_resolve_split_paths_impl as _yolo_resolve_split_paths_impl,
-    _find_any_file_impl as _find_any_file_impl,
-    _count_dir_files_impl as _count_dir_files_impl,
-    _dataset_integrity_report_impl as _dataset_integrity_report_impl,
     _resolve_yolo_training_dataset_impl as _resolve_yolo_training_dataset_impl,
     _resolve_rfdetr_training_dataset_impl as _resolve_rfdetr_training_dataset_impl,
     _compute_labelmap_hash_impl as _compute_labelmap_hash_impl,
@@ -273,15 +244,11 @@ from services.datasets import (
     _load_coco_index_impl as _load_coco_index_impl,
 )
 from services.prepass import (
-    _agent_merge_prepass_detections,
-    _agent_filter_scoreless_detections,
-    _agent_detection_has_source,
     _agent_det_score,
     _agent_cluster_match,
     _agent_source_counts,
     _agent_format_source_counts,
     _agent_label_counts_summary,
-    _agent_compact_tool_result,
     _agent_select_similarity_exemplars as _agent_select_similarity_exemplars_impl,
     _agent_deep_prepass_cleanup_impl,
     _agent_run_deep_prepass_part_a_impl,
@@ -290,43 +257,26 @@ from services.prepass import (
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import (
-    _context_store,
-    _context_chunk,
     _agent_context_store as _agent_context_store_impl,
     _agent_context_chunk as _agent_context_chunk_impl,
 )
-from services.tile_context import (
-    _cluster_owner_cell,
-    _tile_clusters,
-    _tile_cluster_payload,
-    _tile_caption_hint,
-    _build_tile_context_payloads as _build_tile_context_payloads_impl,
-)
+from services.tile_context import _build_tile_context_payloads as _build_tile_context_payloads_impl
 from services.prepass_grid import (
-    _agent_grid_col_label,
-    _agent_grid_col_index,
-    _agent_grid_spec,
     _agent_grid_spec_for_payload,
     _agent_grid_cell_xyxy,
     _agent_grid_cell_for_window_bbox,
-    _agent_grid_prompt_text,
-    _agent_grid_cells,
     _agent_grid_cell_for_detection,
     _agent_grid_usage_rows,
     _agent_grid_usage_text,
     _agent_grid_label_counts,
-    _agent_quadrant_windows_qwen,
     _agent_tool_grid_cell_from_args as _grid_cell_from_args,
     _agent_record_grid_tool_usage as _record_grid_usage,
 )
 from utils.coords import (
     _xyxy_to_qwen_bbox,
     _qwen_bbox_to_xyxy,
-    _remap_window_xyxy_to_full,
     _normalize_window_xyxy,
-    _window_bbox_2d_to_full_xyxy,
     _window_local_bbox_2d_to_full_xyxy,
-    _window_local_xyxy_to_full_xyxy,
     _resolve_agent_bbox_xyxy,
     _agent_round_bbox_2d,
     _agent_clip_xyxy,
@@ -335,45 +285,24 @@ from utils.coords import (
     _yolo_to_xyxy,
     _xyxy_to_yolo_norm,
     _agent_det_payload,
-    _agent_iou_xyxy,
     _extract_numeric_sequence,
-    _scale_coord,
     _scale_bbox_to_image,
     _scale_point_to_image,
 )
 from utils.overlay import (
-    _agent_detection_center_px,
     _agent_render_detection_overlay,
     _agent_render_grid_overlay,
-    _agent_image_to_data_uri,
     _agent_overlay_labels,
-)
-from utils.text import _agent_clean_plan_text
-from utils.llm import (
-    _qwen_agent_message_text,
-    _agent_content_to_text,
-    _agent_stream_text_from_output,
-    _agent_stream_tag_open,
-    _agent_stream_extract_tool_name,
-    _agent_parse_json_relaxed,
 )
 from utils.trace_utils import (
     _agent_trace_sanitize_payload,
-    _agent_trace_sanitize_messages,
     _agent_trace_full_jsonable,
 )
 from services.readable import (
-    _agent_readable_trim,
     _agent_readable_banner,
     _agent_detection_summary_lines,
-    _agent_readable_detection_line,
     _agent_clean_observation_text,
     _agent_readable_format_bbox,
-    _agent_readable_bbox_from_args,
-    _agent_readable_tool_call_summary,
-    _agent_readable_tool_result_summary,
-    _agent_readable_line,
-    _agent_readable_candidates_summary,
     _agent_readable_write as _agent_readable_write_impl,
 )
 from services.prepass_windows import _agent_sam3_text_windows
@@ -403,24 +332,11 @@ from services.classifier_batch import (
 )
 from services.classifier import (
     _predict_proba_batched_impl as _predict_proba_batched_impl,
-    _agent_classifier_review_impl as _agent_classifier_review_impl,
     _resolve_agent_clip_classifier_path_impl as _resolve_agent_clip_classifier_path_impl,
     _load_clip_head_from_classifier_impl as _load_clip_head_from_classifier_impl,
-    _clip_head_predict_proba_impl as _clip_head_predict_proba_impl,
-    _clip_head_keep_mask_impl as _clip_head_keep_mask_impl,
     _resolve_head_normalize_embeddings_impl as _resolve_head_normalize_embeddings_impl,
     _resolve_active_head_normalize_embeddings_impl as _resolve_active_head_normalize_embeddings_impl,
-    _save_clip_head_artifacts_impl as _save_clip_head_artifacts_impl,
-    _load_clip_head_artifacts_impl as _load_clip_head_artifacts_impl,
-    _resolve_clip_head_background_settings_impl as _resolve_clip_head_background_settings_impl,
     _infer_clip_model_from_embedding_dim_impl as _infer_clip_model_from_embedding_dim_impl,
-    _clip_auto_predict_label_impl as _clip_auto_predict_label_impl,
-    _clip_auto_predict_details_impl as _clip_auto_predict_details_impl,
-    _score_detections_with_clip_head_impl as _score_detections_with_clip_head_impl,
-    _build_clip_head_sweep_grid_impl as _build_clip_head_sweep_grid_impl,
-    _score_head_tuning_candidate_impl as _score_head_tuning_candidate_impl,
-    _update_best_clip_head_sweep_summary_impl as _update_best_clip_head_sweep_summary_impl,
-    _successive_halving_search_impl as _successive_halving_search_impl,
     _load_labelmap_simple_impl as _load_labelmap_simple_impl,
     _validate_clip_dataset_impl as _validate_clip_dataset_impl,
     _resolve_clip_labelmap_path_impl as _resolve_clip_labelmap_path_impl,
@@ -465,32 +381,9 @@ from services.calibration import (
 )
 from services.calibration_metrics import (
     _build_gt_index_for_class_impl as _build_gt_index_for_class_impl,
-    _evaluate_prompt_for_class_impl as _evaluate_prompt_for_class_impl,
     _evaluate_prompt_candidate_impl as _evaluate_prompt_candidate_impl,
     _collect_prompt_detections_impl as _collect_prompt_detections_impl,
     _build_prompt_recipe_impl as _build_prompt_recipe_impl,
-    _score_greedy_eval_summaries_impl as _score_greedy_eval_summaries_impl,
-    _gt_instance_key_impl as _gt_instance_key_impl,
-    _build_seed_threshold_sweep_grid_impl as _build_seed_threshold_sweep_grid_impl,
-    _compute_steps_seed_eval_threshold_impl as _compute_steps_seed_eval_threshold_impl,
-    _compute_steps_seed_eval_max_results_impl as _compute_steps_seed_eval_max_results_impl,
-    _compute_seed_threshold_curve_impl as _compute_seed_threshold_curve_impl,
-    _select_seed_threshold_operating_point_impl as _select_seed_threshold_operating_point_impl,
-    _select_seed_threshold_candidate_points_impl as _select_seed_threshold_candidate_points_impl,
-    _summarize_seed_threshold_curve_for_prompt_impl as _summarize_seed_threshold_curve_for_prompt_impl,
-    _select_steps_from_seed_prompt_stats_impl as _select_steps_from_seed_prompt_stats_impl,
-    _resolve_steps_early_stop_config_impl as _resolve_steps_early_stop_config_impl,
-    _build_seed_stage_candidate_from_prompt_stat_impl as _build_seed_stage_candidate_from_prompt_stat_impl,
-    _refine_steps_prompt_subset_seed_stage_impl as _refine_steps_prompt_subset_seed_stage_impl,
-    _resolve_steps_prompt_prefilter_config_impl as _resolve_steps_prompt_prefilter_config_impl,
-    _resolve_steps_prompt_bg_drop_config_impl as _resolve_steps_prompt_bg_drop_config_impl,
-    _resolve_steps_hard_negative_export_config_impl as _resolve_steps_hard_negative_export_config_impl,
-    _estimate_steps_speed_factor_impl as _estimate_steps_speed_factor_impl,
-    _estimate_agent_global_optimizer_image_evals_impl as _estimate_agent_global_optimizer_image_evals_impl,
-    _build_steps_recipe_step_list_from_selected_stats_impl as _build_steps_recipe_step_list_from_selected_stats_impl,
-    _collect_clip_prefilter_crops_impl as _collect_clip_prefilter_crops_impl,
-    _normalize_steps_for_head_tuning_impl as _normalize_steps_for_head_tuning_impl,
-    _prefilter_prompts_with_clip_impl as _prefilter_prompts_with_clip_impl,
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
@@ -529,10 +422,7 @@ from services.qwen import (
     _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
-    _humanize_class_name_impl as _humanize_class_name_impl,
     _sanitize_prompts_impl as _sanitize_prompts_impl,
-    _generate_prompt_variants_for_class_impl as _generate_prompt_variants_for_class_impl,
-    _expand_prompts_with_prompt_llm_impl as _expand_prompts_with_prompt_llm_impl,
 )
 from services.detectors import (
     _agent_tool_run_detector_impl as _agent_tool_run_detector_impl,

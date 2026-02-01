@@ -566,6 +566,7 @@ from services.detectors import (
     _rfdetr_install_augmentations_impl as _rfdetr_install_augmentations_impl,
     _rfdetr_restore_augmentations_impl as _rfdetr_restore_augmentations_impl,
     _rfdetr_latest_checkpoint_epoch_impl as _rfdetr_latest_checkpoint_epoch_impl,
+    _rfdetr_monitor_training_impl as _rfdetr_monitor_training_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -10947,66 +10948,16 @@ def _rfdetr_latest_checkpoint_epoch(run_dir: Path) -> Optional[int]:
 
 
 def _rfdetr_monitor_training(job: RfDetrTrainingJob, run_dir: Path, total_epochs: int, stop_event: threading.Event) -> None:
-    log_path = run_dir / "log.txt"
-    last_pos = 0
-    pending = ""
-    last_epoch: Optional[int] = None
-    while not stop_event.is_set():
-        if job.cancel_event.is_set() or job.status not in {"running", "queued"}:
-            break
-        new_metrics: List[Dict[str, Any]] = []
-        if log_path.exists():
-            try:
-                with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
-                    handle.seek(last_pos)
-                    chunk = handle.read()
-                    last_pos = handle.tell()
-            except Exception:
-                chunk = ""
-            if chunk:
-                chunk = pending + chunk
-                pending = ""
-                if not chunk.endswith("\n"):
-                    last_newline = chunk.rfind("\n")
-                    if last_newline == -1:
-                        pending = chunk
-                        chunk = ""
-                    else:
-                        pending = chunk[last_newline + 1 :]
-                        chunk = chunk[: last_newline + 1]
-                for line in chunk.splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        metric = json.loads(line)
-                    except Exception:
-                        continue
-                    metric = _rfdetr_sanitize_metric(metric)
-                    if metric:
-                        new_metrics.append(metric)
-        if new_metrics:
-            for metric in new_metrics:
-                _rfdetr_job_append_metric(job, metric)
-            latest = new_metrics[-1]
-            epoch = latest.get("epoch")
-            if isinstance(epoch, (int, float)):
-                try:
-                    epoch_idx = int(epoch)
-                except Exception:
-                    epoch_idx = None
-                if epoch_idx is not None and epoch_idx != last_epoch:
-                    last_epoch = epoch_idx
-                    if total_epochs > 0:
-                        progress = max(0.0, min(0.99, epoch_idx / total_epochs))
-                        _rfdetr_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
-        else:
-            checkpoint_epoch = _rfdetr_latest_checkpoint_epoch(run_dir)
-            if checkpoint_epoch is not None and checkpoint_epoch != last_epoch:
-                last_epoch = checkpoint_epoch
-                if total_epochs > 0:
-                    progress = max(0.0, min(0.99, checkpoint_epoch / total_epochs))
-                    _rfdetr_job_update(job, progress=progress, message=f"Epoch {checkpoint_epoch}/{total_epochs}")
-        stop_event.wait(15.0)
+    _rfdetr_monitor_training_impl(
+        job,
+        run_dir,
+        total_epochs,
+        stop_event,
+        job_append_metric_fn=_rfdetr_job_append_metric,
+        job_update_fn=_rfdetr_job_update,
+        sanitize_metric_fn=_rfdetr_sanitize_metric,
+        latest_checkpoint_fn=_rfdetr_latest_checkpoint_epoch,
+    )
 
 
 def _yolo_write_data_yaml(run_dir: Path, dataset_root: Path, layout: Optional[str], labelmap_path: Optional[str]) -> Path:

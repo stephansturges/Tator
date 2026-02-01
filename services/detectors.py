@@ -595,6 +595,80 @@ def _rfdetr_latest_checkpoint_epoch_impl(run_dir: Path) -> Optional[int]:
         return None
 
 
+def _rfdetr_monitor_training_impl(
+    job: Any,
+    run_dir: Path,
+    total_epochs: int,
+    stop_event: Any,
+    *,
+    job_append_metric_fn: Callable[[Any, Dict[str, Any]], None],
+    job_update_fn: Callable[[Any], None],
+    sanitize_metric_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
+    latest_checkpoint_fn: Callable[[Path], Optional[int]],
+    wait_seconds: float = 15.0,
+) -> None:
+    log_path = run_dir / "log.txt"
+    last_pos = 0
+    pending = ""
+    last_epoch: Optional[int] = None
+    while not stop_event.is_set():
+        if job.cancel_event.is_set() or job.status not in {"running", "queued"}:
+            break
+        new_metrics: List[Dict[str, Any]] = []
+        if log_path.exists():
+            try:
+                with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    handle.seek(last_pos)
+                    chunk = handle.read()
+                    last_pos = handle.tell()
+            except Exception:
+                chunk = ""
+            if chunk:
+                chunk = pending + chunk
+                pending = ""
+                if not chunk.endswith("\n"):
+                    last_newline = chunk.rfind("\n")
+                    if last_newline == -1:
+                        pending = chunk
+                        chunk = ""
+                    else:
+                        pending = chunk[last_newline + 1 :]
+                        chunk = chunk[: last_newline + 1]
+                for line in chunk.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        metric = json.loads(line)
+                    except Exception:
+                        continue
+                    metric = sanitize_metric_fn(metric)
+                    if metric:
+                        new_metrics.append(metric)
+        if new_metrics:
+            for metric in new_metrics:
+                job_append_metric_fn(job, metric)
+            latest = new_metrics[-1]
+            epoch = latest.get("epoch")
+            if isinstance(epoch, (int, float)):
+                try:
+                    epoch_idx = int(epoch)
+                except Exception:
+                    epoch_idx = None
+                if epoch_idx is not None and epoch_idx != last_epoch:
+                    last_epoch = epoch_idx
+                    if total_epochs > 0:
+                        progress = max(0.0, min(0.99, epoch_idx / total_epochs))
+                        job_update_fn(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+        else:
+            checkpoint_epoch = latest_checkpoint_fn(run_dir)
+            if checkpoint_epoch is not None and checkpoint_epoch != last_epoch:
+                last_epoch = checkpoint_epoch
+                if total_epochs > 0:
+                    progress = max(0.0, min(0.99, checkpoint_epoch / total_epochs))
+                    job_update_fn(job, progress=progress, message=f"Epoch {checkpoint_epoch}/{total_epochs}")
+        stop_event.wait(wait_seconds)
+
+
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
         "best_pt": (run_dir / "best.pt").exists(),

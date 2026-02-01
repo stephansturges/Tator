@@ -574,6 +574,8 @@ from services.detectors import (
     _yolo_load_labelmap_impl as _yolo_load_labelmap_impl,
     _yolo_load_run_labelmap_impl as _yolo_load_run_labelmap_impl,
     _rfdetr_load_labelmap_impl as _rfdetr_load_labelmap_impl,
+    _rfdetr_remap_coco_ids_impl as _rfdetr_remap_coco_ids_impl,
+    _rfdetr_prepare_dataset_impl as _rfdetr_prepare_dataset_impl,
     _rfdetr_run_dir_impl as _rfdetr_run_dir_impl,
     _rfdetr_load_run_meta_impl as _rfdetr_load_run_meta_impl,
     _rfdetr_write_run_meta_impl as _rfdetr_write_run_meta_impl,
@@ -14333,79 +14335,17 @@ def _ensure_coco_supercategory(path: Path, default: str = "object") -> bool:
 
 
 def _rfdetr_remap_coco_ids(src_path: Path, dest_path: Path) -> None:
-    """Create a 0-based COCO category id mapping for RF-DETR."""
-    data = json.loads(src_path.read_text())
-    categories = data.get("categories", [])
-    annotations = data.get("annotations", [])
-    if not isinstance(categories, list) or not isinstance(annotations, list):
-        raise RuntimeError("rfdetr_coco_invalid")
-    ordered = [c for c in categories if isinstance(c, dict) and "id" in c and "name" in c]
-    ordered.sort(key=lambda c: int(c.get("id", 0)))
-    mapping = {int(cat["id"]): idx for idx, cat in enumerate(ordered)}
-    new_categories = []
-    for idx, cat in enumerate(ordered):
-        new_categories.append(
-            {
-                "id": idx,
-                "name": str(cat.get("name")),
-                "supercategory": cat.get("supercategory") or "object",
-            }
-        )
-    new_annotations = []
-    for ann in annotations:
-        if not isinstance(ann, dict):
-            continue
-        try:
-            cat_id = int(ann.get("category_id"))
-        except Exception:
-            continue
-        if cat_id not in mapping:
-            continue
-        ann = dict(ann)
-        ann["category_id"] = mapping[cat_id]
-        new_annotations.append(ann)
-    data["categories"] = new_categories
-    data["annotations"] = new_annotations
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    dest_path.write_text(json.dumps(data))
+    _rfdetr_remap_coco_ids_impl(src_path, dest_path)
 
 
 def _rfdetr_prepare_dataset(dataset_root: Path, run_dir: Path, coco_train: str, coco_val: str) -> Path:
-    """Prepare a RF-DETR-compatible dataset layout with 0-based category ids."""
-    dataset_dir = run_dir / "dataset"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
-    train_src = dataset_root / "train"
-    valid_src = dataset_root / "valid"
-    val_src = dataset_root / "val"
-    test_src = dataset_root / "test"
-
-    if not train_src.exists():
-        train_src = dataset_root
-    if not valid_src.exists():
-        valid_src = val_src if val_src.exists() else train_src
-    if not test_src.exists():
-        test_src = valid_src if valid_src.exists() else train_src
-
-    def _link_split(name: str, source: Path) -> None:
-        dest = dataset_dir / name
-        if dest.exists() or dest.is_symlink():
-            return
-        try:
-            dest.symlink_to(source, target_is_directory=True)
-        except Exception:
-            shutil.copytree(source, dest)
-
-    _link_split("train", train_src)
-    _link_split("valid", valid_src)
-    _link_split("test", test_src)
-
-    train_dest = dataset_dir / "train" / "_annotations.coco.json"
-    val_dest = dataset_dir / "valid" / "_annotations.coco.json"
-    test_dest = dataset_dir / "test" / "_annotations.coco.json"
-    _rfdetr_remap_coco_ids(Path(coco_train), train_dest)
-    _rfdetr_remap_coco_ids(Path(coco_val), val_dest)
-    _rfdetr_remap_coco_ids(Path(coco_val), test_dest)
-    return dataset_dir
+    return _rfdetr_prepare_dataset_impl(
+        dataset_root,
+        run_dir,
+        coco_train,
+        coco_val,
+        remap_ids_fn=_rfdetr_remap_coco_ids,
+    )
 
 
 def _validate_cuda_device_ids(device_ids: Sequence[int]) -> None:

@@ -1392,3 +1392,160 @@ def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
     }
     _persist_sam3_dataset_metadata_impl(dataset_root, sam3_meta)
     return sam3_meta
+
+
+def _find_coco_split_impl(dataset_root: Path) -> Tuple[Path, Path]:
+    candidates = list(dataset_root.rglob("_annotations.coco.json"))
+    if not candidates:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_annotations_missing")
+    candidates.sort(key=lambda p: len(p.parts))
+    ann_path = candidates[0]
+    images_dir = ann_path.parent / "images"
+    if not images_dir.exists():
+        images_dir = ann_path.parent
+    return ann_path, images_dir
+
+
+def _convert_coco_dataset_to_yolo_impl(dataset_root: Path) -> Dict[str, Any]:
+    dataset_root = dataset_root.resolve()
+    ann_paths: List[Tuple[str, Path, Path]] = []
+    for split in ("train", "val"):
+        ann_path = dataset_root / split / "_annotations.coco.json"
+        if not ann_path.exists():
+            continue
+        images_dir = ann_path.parent / "images"
+        if not images_dir.exists():
+            images_dir = ann_path.parent
+        ann_paths.append((split, ann_path, images_dir))
+    if not ann_paths:
+        ann_path, images_dir = _find_coco_split_impl(dataset_root)
+        ann_paths = [("train", ann_path, images_dir)]
+
+    category_map: Dict[int, str] = {}
+    has_segmentation = False
+    for _, ann_path, _ in ann_paths:
+        try:
+            data = json.loads(ann_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+        for cat in data.get("categories", []) or []:
+            try:
+                cid = int(cat.get("id"))
+            except Exception:
+                continue
+            name = str(cat.get("name") or f"class_{cid}")
+            category_map.setdefault(cid, name)
+        if not category_map:
+            for ann in data.get("annotations", []) or []:
+                try:
+                    cid = int(ann.get("category_id"))
+                except Exception:
+                    continue
+                category_map.setdefault(cid, f"class_{cid}")
+        if not has_segmentation:
+            for ann in data.get("annotations", []) or []:
+                seg = ann.get("segmentation")
+                if seg:
+                    has_segmentation = True
+                    break
+
+    if not category_map:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_categories_missing")
+
+    sorted_ids = sorted(category_map.keys())
+    labelmap = [category_map[cid] for cid in sorted_ids]
+    labelmap_path = dataset_root / "labelmap.txt"
+    labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+    cat_id_to_idx = {cid: idx for idx, cid in enumerate(sorted_ids)}
+
+    dataset_type = "seg" if has_segmentation else "bbox"
+    for split_name, ann_path, images_dir in ann_paths:
+        labels_dir = dataset_root / split_name / "labels"
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(ann_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+        images = data.get("images", []) or []
+        annotations = data.get("annotations", []) or []
+        ann_by_image: Dict[int, List[Dict[str, Any]]] = {}
+        for ann in annotations:
+            try:
+                img_id = int(ann.get("image_id"))
+            except Exception:
+                continue
+            ann_by_image.setdefault(img_id, []).append(ann)
+        for img in images:
+            try:
+                img_id = int(img.get("id"))
+            except Exception:
+                continue
+            file_name = str(img.get("file_name") or "")
+            img_path = _resolve_coco_image_path_impl(file_name, images_dir, split_name, dataset_root)
+            if img_path is None:
+                logger.warning("COCO->YOLO: missing image for %s in %s", file_name, dataset_root)
+                continue
+            width = img.get("width")
+            height = img.get("height")
+            if not width or not height:
+                try:
+                    with Image.open(img_path) as im:
+                        width, height = im.size
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("COCO->YOLO: failed to read image size for %s: %s", img_path, exc)
+                    continue
+            label_rel = _label_relpath_for_image_impl(file_name)
+            label_path = labels_dir / label_rel
+            label_path.parent.mkdir(parents=True, exist_ok=True)
+            lines: List[str] = []
+            for ann in ann_by_image.get(img_id, []):
+                try:
+                    cat_id = int(ann.get("category_id"))
+                except Exception:
+                    continue
+                if cat_id not in cat_id_to_idx:
+                    continue
+                class_idx = cat_id_to_idx[cat_id]
+                bbox = ann.get("bbox") or []
+                if len(bbox) < 4:
+                    continue
+                x, y, w, h = map(float, bbox[:4])
+                if w <= 0 or h <= 0:
+                    continue
+                cx = (x + w / 2.0) / float(width)
+                cy = (y + h / 2.0) / float(height)
+                bw = w / float(width)
+                bh = h / float(height)
+                if dataset_type == "seg":
+                    seg = ann.get("segmentation")
+                    poly = None
+                    if isinstance(seg, list):
+                        for candidate in seg:
+                            if isinstance(candidate, list) and len(candidate) >= 6:
+                                poly = candidate
+                                break
+                    if poly is not None:
+                        coords: List[str] = []
+                        for idx in range(0, len(poly), 2):
+                            px = float(poly[idx]) / float(width)
+                            py = float(poly[idx + 1]) / float(height)
+                            coords.append(f"{max(0.0, min(1.0, px)):.6f}")
+                            coords.append(f"{max(0.0, min(1.0, py)):.6f}")
+                        if len(coords) >= 6:
+                            lines.append(f"{class_idx} " + " ".join(coords))
+                            continue
+                lines.append(f"{class_idx} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+            if lines:
+                label_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    meta = _load_sam3_dataset_metadata_impl(dataset_root) or {}
+    meta.setdefault("id", dataset_root.name)
+    meta.setdefault("label", dataset_root.name)
+    meta.setdefault("source", meta.get("source") or "coco")
+    meta["classes"] = labelmap
+    meta["type"] = dataset_type
+    meta["dataset_root"] = str(dataset_root)
+    meta["signature"] = _compute_dir_signature(dataset_root)
+    meta["yolo_converted_at"] = time.time()
+    _persist_sam3_dataset_metadata_impl(dataset_root, meta)
+    return meta

@@ -979,6 +979,73 @@ def _resolve_qwen_variant_model_id_impl(base_model_id: str, variant: Optional[st
     return base_model_id
 
 
+def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
+    base = str(model_id or "")
+    if not base:
+        return None
+    if base.endswith("-2507"):
+        return base[: -len("-2507")]
+    for suffix in ("-GPTQ-Int4", "-GPTQ-Int8", "-GGUF", "-AWQ", "-INT4", "-INT8"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    if ":" in base:
+        return base.split(":", 1)[0]
+    if "@" in base:
+        return base.split("@", 1)[0]
+    return None
+
+
+def _format_qwen_load_error_impl(exc: Exception, *, torch_module: Any) -> str:
+    msg = str(exc)
+    if "FP8" in msg and "compute capability" in msg:
+        cc = None
+        if torch_module.cuda.is_available():
+            try:
+                major, minor = torch_module.cuda.get_device_capability(torch_module.cuda.current_device())
+                cc = f"{major}.{minor}"
+            except Exception:
+                cc = None
+        cc_note = f" Current GPU compute capability: {cc}." if cc else ""
+        return (
+            f"{msg} FP8 models require GPU compute capability >= 8.9 (e.g., 4090/H100)."
+            f"{cc_note} Use a non-FP8 model on lower-capability GPUs."
+        )
+    return msg
+
+
+def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
+    base = str(model_id or "")
+    if not base:
+        return None
+    for suffix in ("-GPTQ-Int4", "-GPTQ-Int8", "-GGUF", "-AWQ", "-INT4", "-INT8"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    if ":" in base:
+        return base.split(":", 1)[0]
+    if "@" in base:
+        return base.split("@", 1)[0]
+    return None
+
+
+def _format_qwen_load_error_impl(exc: Exception) -> str:
+    text = str(exc or "")
+    if not text:
+        return "unknown"
+    for needle in (
+        "FileNotFoundError",
+        "No such file",
+        "not found",
+        "RepositoryNotFoundError",
+        "GatedRepoError",
+    ):
+        if needle in text:
+            return "missing_weights"
+    for needle in ("CUDA out of memory", "out of memory"):
+        if needle in text:
+            return "oom"
+    return text[:200]
+
+
 def _window_positions_impl(
     total: int,
     window: int,

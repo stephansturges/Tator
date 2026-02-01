@@ -517,6 +517,10 @@ from services.qwen import (
     _resolve_qwen_window_size as _resolve_qwen_window_size_impl,
     _resolve_qwen_window_overlap as _resolve_qwen_window_overlap_impl,
     _resolve_qwen_variant_model_id_impl as _resolve_qwen_variant_model_id_impl,
+    _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
+    _format_qwen_load_error_impl as _format_qwen_load_error_impl,
+    _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
+    _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _humanize_class_name_impl as _humanize_class_name_impl,
     _sanitize_prompts_impl as _sanitize_prompts_impl,
     _generate_prompt_variants_for_class_impl as _generate_prompt_variants_for_class_impl,
@@ -3740,9 +3744,7 @@ def _resolve_qwen_variant_model_id(base_model_id: str, variant: Optional[str]) -
 
 
 def _strip_qwen_model_suffix(model_id: str) -> Optional[str]:
-    if model_id.endswith("-2507"):
-        return model_id[: -len("-2507")]
-    return None
+    return _strip_qwen_model_suffix_impl(model_id)
 
 
 def _caption_glossary_map(labelmap_glossary: Optional[str], labels: Sequence[str]) -> Dict[str, List[str]]:
@@ -3822,21 +3824,7 @@ def _caption_needs_refine(
     return _caption_needs_refine_impl(caption, counts, detailed_mode, include_counts, glossary_map)
 
 def _format_qwen_load_error(exc: Exception) -> str:
-    msg = str(exc)
-    if "FP8" in msg and "compute capability" in msg:
-        cc = None
-        if torch.cuda.is_available():
-            try:
-                major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
-                cc = f"{major}.{minor}"
-            except Exception:
-                cc = None
-        cc_note = f" Current GPU compute capability: {cc}." if cc else ""
-        return (
-            f"{msg} FP8 models require GPU compute capability >= 8.9 (e.g., 4090/H100)."
-            f"{cc_note} Use a non-FP8 model on lower-capability GPUs."
-        )
-    return msg
+    return _format_qwen_load_error_impl(exc, torch_module=torch)
 
 
 def _sanitize_qwen_caption(text: str) -> str:

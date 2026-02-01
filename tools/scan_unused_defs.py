@@ -20,6 +20,7 @@ EXCLUDE_DIRS = {
     "sam3",
     "sahi",
     "SAM3-UNet",
+    "tests",
 }
 
 
@@ -49,7 +50,12 @@ def _count_occurrences(name: str, corpus: str) -> int:
 
 def main() -> int:
     include_decorated = "--include-decorated" in sys.argv
-    args = [arg for arg in sys.argv[1:] if arg != "--include-decorated"]
+    include_tests = "--include-tests" in sys.argv
+    args = [
+        arg for arg in sys.argv[1:] if arg not in {"--include-decorated", "--include-tests"}
+    ]
+    if include_tests and "tests" in EXCLUDE_DIRS:
+        EXCLUDE_DIRS.remove("tests")
     root = pathlib.Path(args[0]) if args else pathlib.Path(".")
     files = list(_iter_py_files(root))
     corpus = "\n".join(path.read_text() for path in files)

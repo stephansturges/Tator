@@ -376,6 +376,7 @@ from services.calibration_helpers import (
     _calibration_prepass_worker as _calibration_prepass_worker_impl,
 )
 from services.calibration import (
+    CalibrationJob,
     _serialize_calibration_job as _serialize_calibration_job_impl,
     _run_calibration_job as _run_calibration_job_impl,
     _start_calibration_job as _start_calibration_job_impl,
@@ -9495,23 +9496,6 @@ class AgentMiningJob:
     request: Dict[str, Any] = field(default_factory=dict)
     result: Optional[Dict[str, Any]] = None
     logs: List[Dict[str, Any]] = field(default_factory=list)
-    error: Optional[str] = None
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-    cancel_event: threading.Event = field(default_factory=threading.Event)
-
-
-@dataclass
-class CalibrationJob:
-    job_id: str
-    status: str = "queued"
-    message: str = "Queued"
-    phase: str = "queued"
-    progress: float = 0.0
-    processed: int = 0
-    total: int = 0
-    request: Dict[str, Any] = field(default_factory=dict)
-    result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)

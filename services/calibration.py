@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, field
 import json
 import multiprocessing
 import queue
@@ -33,6 +34,23 @@ def _serialize_calibration_job(job: Any) -> Dict[str, Any]:
         "result": job.result,
         "error": job.error,
     }
+
+
+@dataclass
+class CalibrationJob:
+    job_id: str
+    status: str = "queued"
+    message: str = "Queued"
+    phase: str = "queued"
+    progress: float = 0.0
+    processed: int = 0
+    total: int = 0
+    request: Dict[str, Any] = field(default_factory=dict)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: Any = field(default_factory=__import__("threading").Event)
 
 
 def _start_calibration_job(

@@ -1549,3 +1549,18 @@ def _convert_coco_dataset_to_yolo_impl(dataset_root: Path) -> Dict[str, Any]:
     meta["yolo_converted_at"] = time.time()
     _persist_sam3_dataset_metadata_impl(dataset_root, meta)
     return meta
+
+
+def _resolve_sam3_dataset_meta_impl(dataset_id: str) -> Dict[str, Any]:
+    dataset_root = _resolve_sam3_or_qwen_dataset_impl(dataset_id)
+    annotations_path = dataset_root / "train" / "annotations.jsonl"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    if annotations_path.exists():
+        meta = _convert_qwen_dataset_to_coco_impl(dataset_root)
+    elif train_images.exists() and train_labels.exists():
+        meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
+    else:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
+    meta["dataset_root"] = str(dataset_root)
+    return meta

@@ -286,6 +286,7 @@ from services.datasets import (
     _convert_yolo_dataset_to_coco_impl as _convert_yolo_dataset_to_coco_impl,
     _convert_qwen_dataset_to_coco_impl as _convert_qwen_dataset_to_coco_impl,
     _convert_coco_dataset_to_yolo_impl as _convert_coco_dataset_to_yolo_impl,
+    _resolve_sam3_dataset_meta_impl as _resolve_sam3_dataset_meta_impl,
 )
 from services.prepass import (
     _agent_merge_prepass_detections,
@@ -14337,18 +14338,7 @@ def _list_sam3_datasets() -> List[Dict[str, Any]]:
 
 
 def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
-    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
-    annotations_path = dataset_root / "train" / "annotations.jsonl"
-    train_images = dataset_root / "train" / "images"
-    train_labels = dataset_root / "train" / "labels"
-    if annotations_path.exists():
-        meta = _convert_qwen_dataset_to_coco(dataset_root)
-    elif train_images.exists() and train_labels.exists():
-        meta = _convert_yolo_dataset_to_coco(dataset_root)
-    else:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
-    meta["dataset_root"] = str(dataset_root)
-    return meta
+    return _resolve_sam3_dataset_meta_impl(dataset_id)
 
 
 def _prepare_sam3_training_split(

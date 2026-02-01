@@ -2,12 +2,33 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple, List
 
+from fastapi import HTTPException
+from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR
+from PIL import Image
+
 from utils.glossary import _normalize_labelmap_glossary
+from utils.io import _compute_dir_signature
+from utils.labels import _load_labelmap_file
+from utils.coco import (
+    _coco_has_invalid_image_refs_impl,
+    _coco_missing_segmentation_impl,
+    _ensure_coco_info_fields_impl,
+    _write_coco_annotations_impl,
+)
+from utils.image import (
+    _image_path_for_label_impl,
+    _resolve_coco_image_path_impl,
+    _label_relpath_for_image_impl,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _load_qwen_labelmap(dataset_root: Path, *, load_qwen_meta, collect_labels) -> list[str]:
@@ -942,3 +963,432 @@ def _resolve_rfdetr_training_dataset_impl(
         "coco_val_json": coco_val,
         "type": dataset_type,
     }
+
+
+def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
+    dataset_root = dataset_root.resolve()
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    val_images = dataset_root / "val" / "images"
+    val_labels = dataset_root / "val" / "labels"
+    for path in (train_images, train_labels):
+        if not path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_yolo_split_missing")
+    has_val_images = val_images.exists()
+    has_val_labels = val_labels.exists()
+    if has_val_images != has_val_labels:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_yolo_val_split_incomplete")
+    if not has_val_images:
+        val_images.mkdir(parents=True, exist_ok=True)
+        val_labels.mkdir(parents=True, exist_ok=True)
+
+    labelmap = _discover_yolo_labelmap_impl(dataset_root, load_labelmap_file_fn=_load_labelmap_file)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
+    label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
+    categories = [{"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()]
+    signature = _compute_dir_signature(dataset_root)
+    existing_meta = _load_sam3_dataset_metadata_impl(dataset_root)
+    dataset_type = (existing_meta or {}).get("type", "bbox")
+    dataset_label = (existing_meta or {}).get("label", dataset_root.name)
+    dataset_source = (existing_meta or {}).get("source", "yolo")
+    if (
+        existing_meta
+        and existing_meta.get("signature") == signature
+        and existing_meta.get("coco_train_json")
+        and existing_meta.get("coco_val_json")
+    ):
+        coco_train_path = Path(existing_meta["coco_train_json"])
+        coco_val_path = Path(existing_meta["coco_val_json"])
+        rebuild = _coco_has_invalid_image_refs_impl(coco_train_path) or _coco_has_invalid_image_refs_impl(coco_val_path)
+        if dataset_type == "seg":
+            rebuild = rebuild or _coco_missing_segmentation_impl(coco_train_path) or _coco_missing_segmentation_impl(coco_val_path)
+        if not rebuild:
+            _ensure_coco_info_fields_impl(coco_train_path, dataset_root.name, categories)
+            _ensure_coco_info_fields_impl(coco_val_path, dataset_root.name, categories)
+            return existing_meta
+
+    dataset_type = "bbox"
+    image_id_counter = 1
+    annotation_id = 1
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+    def _convert_split(split_images: Path, split_labels: Path, split_name: str) -> str:
+        nonlocal image_id_counter, annotation_id, dataset_type
+        images: List[Dict[str, Any]] = []
+        annotations: List[Dict[str, Any]] = []
+        images_lookup: Dict[str, int] = {}
+        image_sizes: Dict[str, Tuple[int, int]] = {}
+
+        def _clamp01(val: float) -> float:
+            return max(0.0, min(1.0, val))
+
+        def _bbox_xyxy_from_cxcywh(
+            cx: float, cy: float, w: float, h: float
+        ) -> Optional[Tuple[float, float, float, float]]:
+            if w <= 0 or h <= 0:
+                return None
+            x1 = cx - w / 2.0
+            y1 = cy - h / 2.0
+            x2 = cx + w / 2.0
+            y2 = cy + h / 2.0
+            x1 = _clamp01(x1)
+            y1 = _clamp01(y1)
+            x2 = _clamp01(x2)
+            y2 = _clamp01(y2)
+            if x2 <= x1 or y2 <= y1:
+                return None
+            return (x1, y1, x2, y2)
+
+        def _bbox_xyxy_from_polygon(coords: List[float]) -> Optional[Tuple[float, float, float, float]]:
+            if len(coords) < 6 or len(coords) % 2 != 0:
+                return None
+            xs = coords[0::2]
+            ys = coords[1::2]
+            if not xs or not ys:
+                return None
+            min_x = _clamp01(min(xs))
+            max_x = _clamp01(max(xs))
+            min_y = _clamp01(min(ys))
+            max_y = _clamp01(max(ys))
+            if max_x <= min_x or max_y <= min_y:
+                return None
+            return (min_x, min_y, max_x, max_y)
+
+        def _bbox_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+            inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+            inter_area = inter_w * inter_h
+            if inter_area <= 0:
+                return 0.0
+            area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+            area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+            denom = area_a + area_b - inter_area
+            return inter_area / denom if denom > 0 else 0.0
+
+        def _polygon_to_coco_segmentation(
+            coords: List[float], width: int, height: int
+        ) -> Optional[List[List[float]]]:
+            if len(coords) < 6 or len(coords) % 2 != 0:
+                return None
+            out: List[float] = []
+            for idx in range(0, len(coords), 2):
+                x = _clamp01(coords[idx]) * width
+                y = _clamp01(coords[idx + 1]) * height
+                out.extend([x, y])
+            if len(out) < 6:
+                return None
+            return [out]
+
+        for label_file in sorted(split_labels.rglob("*.txt")):
+            image_path = _image_path_for_label_impl(split_labels, split_images, label_file, image_exts)
+            if image_path is None:
+                logger.warning("No matching image for label file %s", label_file)
+                continue
+            image_rel = str(image_path.relative_to(split_images.parent))
+            if image_rel not in images_lookup:
+                try:
+                    with Image.open(image_path) as im:
+                        width, height = im.size
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to read image %s: %s", image_path, exc)
+                    continue
+                images_lookup[image_rel] = image_id_counter
+                image_sizes[image_rel] = (width, height)
+                images.append(
+                    {
+                        "id": image_id_counter,
+                        "file_name": image_rel,
+                        "width": width,
+                        "height": height,
+                    }
+                )
+                image_id_counter += 1
+            image_id = images_lookup[image_rel]
+            width, height = image_sizes.get(image_rel, (None, None))
+            try:
+                with label_file.open("r", encoding="utf-8") as handle:
+                    lines = [ln.strip() for ln in handle if ln.strip()]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to read YOLO labels from %s: %s", label_file, exc)
+                continue
+            for line in lines:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                try:
+                    class_idx = int(float(parts[0]))
+                except (TypeError, ValueError):
+                    continue
+                if class_idx < 0 or class_idx >= len(labelmap):
+                    continue
+                if width is None or height is None:
+                    continue
+                raw_vals: List[float] = []
+                for token in parts[1:]:
+                    try:
+                        raw_vals.append(float(token))
+                    except (TypeError, ValueError):
+                        raw_vals = []
+                        break
+                if not raw_vals:
+                    continue
+                bbox_xyxy: Optional[Tuple[float, float, float, float]] = None
+                segmentation: Optional[List[List[float]]] = None
+                if len(raw_vals) == 4:
+                    cx, cy, w, h = raw_vals
+                    bbox_xyxy = _bbox_xyxy_from_cxcywh(cx, cy, w, h)
+                else:
+                    poly_only = raw_vals if len(raw_vals) >= 6 and len(raw_vals) % 2 == 0 else None
+                    bbox_plus_poly = None
+                    if len(raw_vals) > 4 and (len(raw_vals) - 4) >= 6 and (len(raw_vals) - 4) % 2 == 0:
+                        bbox_plus_poly = (raw_vals[:4], raw_vals[4:])
+                    chosen_poly = None
+                    if poly_only is not None and bbox_plus_poly is not None:
+                        bbox_fields, poly_fields = bbox_plus_poly
+                        bbox_from_fields = _bbox_xyxy_from_cxcywh(*bbox_fields)
+                        bbox_from_poly = _bbox_xyxy_from_polygon(poly_fields)
+                        if bbox_from_fields is not None and bbox_from_poly is not None and _bbox_iou(bbox_from_fields, bbox_from_poly) >= 0.9:
+                            chosen_poly = poly_fields
+                            bbox_xyxy = bbox_from_poly
+                        else:
+                            chosen_poly = poly_only
+                            bbox_xyxy = _bbox_xyxy_from_polygon(poly_only)
+                    elif bbox_plus_poly is not None:
+                        _, poly_fields = bbox_plus_poly
+                        chosen_poly = poly_fields
+                        bbox_xyxy = _bbox_xyxy_from_polygon(poly_fields)
+                    elif poly_only is not None:
+                        chosen_poly = poly_only
+                        bbox_xyxy = _bbox_xyxy_from_polygon(poly_only)
+                    else:
+                        bbox_xyxy = _bbox_xyxy_from_cxcywh(*raw_vals[:4])
+                    if chosen_poly is not None and bbox_xyxy is not None:
+                        segmentation = _polygon_to_coco_segmentation(chosen_poly, int(width), int(height))
+                        dataset_type = "seg"
+
+                if bbox_xyxy is None:
+                    continue
+                x1_n, y1_n, x2_n, y2_n = bbox_xyxy
+                x1 = x1_n * width
+                y1 = y1_n * height
+                abs_w = (x2_n - x1_n) * width
+                abs_h = (y2_n - y1_n) * height
+                if abs_w <= 0 or abs_h <= 0:
+                    continue
+                ann = {
+                    "id": annotation_id,
+                    "image_id": image_id,
+                    "category_id": class_idx + 1,
+                    "bbox": [x1, y1, abs_w, abs_h],
+                    "area": abs_w * abs_h,
+                    "iscrowd": 0,
+                }
+                if segmentation is not None:
+                    ann["segmentation"] = segmentation
+                annotations.append(ann)
+                annotation_id += 1
+        output_path = dataset_root / split_name / "_annotations.coco.json"
+        try:
+            _write_coco_annotations_impl(
+                output_path,
+                dataset_id=dataset_root.name,
+                categories=categories,
+                images=images,
+                annotations=annotations,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}") from exc
+        return str(output_path)
+
+    coco_train = _convert_split(train_images, train_labels, "train")
+    coco_val = _convert_split(val_images, val_labels, "val")
+    sam3_meta = {
+        "id": dataset_root.name,
+        "label": dataset_label,
+        "source": dataset_source,
+        "type": dataset_type,
+        "dataset_root": str(dataset_root),
+        "signature": signature,
+        "classes": labelmap,
+        "context": "",
+        "image_count": None,
+        "train_count": None,
+        "val_count": None,
+        "coco_train_json": coco_train,
+        "coco_val_json": coco_val,
+        "converted_at": time.time(),
+    }
+    _persist_sam3_dataset_metadata_impl(dataset_root, sam3_meta)
+    return sam3_meta
+
+
+def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
+    dataset_root = dataset_root.resolve()
+    metadata = _load_qwen_dataset_metadata_impl(dataset_root) or {}
+    metadata, signature = _ensure_qwen_dataset_signature_impl(
+        dataset_root,
+        metadata,
+        compute_dir_signature_fn=_compute_dir_signature,
+        persist_metadata_fn=_persist_qwen_dataset_metadata_impl,
+    )
+    if "type" not in metadata:
+        metadata["type"] = "bbox"
+        _persist_qwen_dataset_metadata_impl(dataset_root, metadata)
+    dataset_id = metadata.get("id") or dataset_root.name
+    labelmap = _load_qwen_labelmap(
+        dataset_root,
+        load_qwen_meta=_load_qwen_dataset_metadata_impl,
+        collect_labels=_collect_labels_from_qwen_jsonl_impl,
+    )
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
+    label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
+    categories = [{"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()]
+    existing_meta = _load_sam3_dataset_metadata_impl(dataset_root)
+    if (
+        existing_meta
+        and existing_meta.get("signature") == signature
+        and existing_meta.get("coco_train_json")
+        and existing_meta.get("coco_val_json")
+    ):
+        _ensure_coco_info_fields_impl(Path(existing_meta["coco_train_json"]), dataset_id, categories)
+        _ensure_coco_info_fields_impl(Path(existing_meta["coco_val_json"]), dataset_id, categories)
+        return existing_meta
+
+    annotation_id = 1
+    images_lookup: Dict[str, int] = {}
+    image_sizes: Dict[str, Tuple[int, int]] = {}
+
+    def _convert_split(split: str) -> str:
+        nonlocal annotation_id
+        jsonl_path = dataset_root / split / "annotations.jsonl"
+        if not jsonl_path.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"sam3_annotations_missing:{split}")
+        images: List[Dict[str, Any]] = []
+        annotations: List[Dict[str, Any]] = []
+        try:
+            with jsonl_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except Exception:
+                        continue
+                    image_rel = payload.get("image")
+                    if not isinstance(image_rel, str):
+                        continue
+                    if image_rel not in images_lookup:
+                        image_path = dataset_root / split / image_rel
+                        if not image_path.exists():
+                            logger.warning("Missing image referenced in %s: %s", jsonl_path, image_path)
+                            continue
+                        try:
+                            with Image.open(image_path) as im:
+                                width, height = im.size
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("Failed to read image %s: %s", image_path, exc)
+                            continue
+                        images_lookup[image_rel] = len(images_lookup) + 1
+                        image_sizes[image_rel] = (width, height)
+                        images.append(
+                            {
+                                "id": images_lookup[image_rel],
+                                "file_name": image_rel,
+                                "width": width,
+                                "height": height,
+                            }
+                        )
+                    image_id = images_lookup[image_rel]
+                    width, height = image_sizes.get(image_rel, (None, None))
+                    detections = _extract_qwen_detections_from_payload_impl(payload)
+                    for det in detections:
+                        label = str(det.get("label", "")).strip()
+                        if not label or label not in label_to_id:
+                            continue
+                        bbox = det.get("bbox")
+                        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                            try:
+                                x1 = float(bbox[0])
+                                y1 = float(bbox[1])
+                                x2 = float(bbox[2])
+                                y2 = float(bbox[3])
+                            except (TypeError, ValueError):
+                                continue
+                            if width is not None and height is not None:
+                                x1 = max(0.0, min(x1, width))
+                                x2 = max(0.0, min(x2, width))
+                                y1 = max(0.0, min(y1, height))
+                                y2 = max(0.0, min(y2, height))
+                            w = max(0.0, x2 - x1)
+                            h = max(0.0, y2 - y1)
+                            if w <= 0 or h <= 0:
+                                continue
+                            coco_bbox = [x1, y1, w, h]
+                        else:
+                            point = det.get("point")
+                            if not (isinstance(point, (list, tuple)) and len(point) >= 2):
+                                continue
+                            try:
+                                cx = float(point[0])
+                                cy = float(point[1])
+                            except (TypeError, ValueError):
+                                continue
+                            size = 2.0
+                            x1 = cx - size / 2.0
+                            y1 = cy - size / 2.0
+                            coco_bbox = [x1, y1, size, size]
+                        area = coco_bbox[2] * coco_bbox[3]
+                        if area <= 0:
+                            continue
+                        annotations.append(
+                            {
+                                "id": annotation_id,
+                                "image_id": image_id,
+                                "category_id": label_to_id[label],
+                                "bbox": coco_bbox,
+                                "area": area,
+                                "iscrowd": 0,
+                            }
+                        )
+                        annotation_id += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to convert %s to COCO: %s", jsonl_path, exc)
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_conversion_failed:{split}")
+        output_path = dataset_root / split / "_annotations.coco.json"
+        try:
+            _write_coco_annotations_impl(
+                output_path,
+                dataset_id=dataset_id,
+                categories=categories,
+                images=images,
+                annotations=annotations,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}") from exc
+        return str(output_path)
+
+    coco_train = _convert_split("train")
+    coco_val = _convert_split("val")
+    sam3_meta = {
+        "id": metadata.get("id") or dataset_root.name,
+        "label": metadata.get("label") or metadata.get("id") or dataset_root.name,
+        "source": "qwen",
+        "type": metadata.get("type", "bbox"),
+        "dataset_root": str(dataset_root),
+        "signature": signature,
+        "classes": labelmap,
+        "context": metadata.get("context", ""),
+        "image_count": metadata.get("image_count"),
+        "train_count": metadata.get("train_count"),
+        "val_count": metadata.get("val_count"),
+        "coco_train_json": coco_train,
+        "coco_val_json": coco_val,
+        "converted_at": time.time(),
+    }
+    _persist_sam3_dataset_metadata_impl(dataset_root, sam3_meta)
+    return sam3_meta

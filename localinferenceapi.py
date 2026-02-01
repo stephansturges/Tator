@@ -212,6 +212,7 @@ from services.datasets import (
     _persist_sam3_dataset_metadata_impl as _persist_sam3_dataset_metadata_impl,
     _count_dataset_images_impl as _count_dataset_images_impl,
     _count_caption_labels_impl as _count_caption_labels_impl,
+    _list_all_datasets_impl as _list_all_datasets_impl,
     _collect_labels_from_qwen_jsonl_impl as _collect_labels_from_qwen_jsonl_impl,
     _extract_qwen_detections_from_payload_impl as _extract_qwen_detections_from_payload_impl,
     _discover_yolo_labelmap_impl as _discover_yolo_labelmap_impl,
@@ -10857,163 +10858,24 @@ def _coerce_dataset_metadata(dataset_dir: Path, raw_meta: Optional[Dict[str, Any
 
 
 def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
-    """Collect datasets across registry, SAM3, and Qwen roots."""
-    entries: List[Dict[str, Any]] = []
-    seen: Dict[str, Tuple[int, str]] = {}
-    sources = [
-        ("registry", DATASET_REGISTRY_ROOT, _load_registry_dataset_metadata),
-        ("sam3", SAM3_DATASET_ROOT, _load_sam3_dataset_metadata),
-        ("qwen", QWEN_DATASET_ROOT, _load_qwen_dataset_metadata),
-    ]
-    for source, root, loader in sources:
-        if not root.exists():
-            continue
-        for path in root.iterdir():
-            if not path.is_dir():
-                continue
-            raw_meta = loader(path)
-            if not raw_meta and source == "registry":
-                raw_meta = _load_sam3_dataset_metadata(path) or _load_qwen_dataset_metadata(path)
-            if not raw_meta:
-                continue
-            meta = _coerce_dataset_metadata(path, raw_meta, source)
-            sam3_meta = _load_sam3_dataset_metadata(path) if source != "sam3" else meta
-            coco_train = None
-            coco_val = None
-            coco_ready = False
-            if sam3_meta:
-                coco_train = sam3_meta.get("coco_train_json")
-                coco_val = sam3_meta.get("coco_val_json")
-                coco_ready = bool(coco_train and coco_val)
-            labelmap_path = path / "labelmap.txt"
-            train_images = path / "train" / "images"
-            train_labels = path / "train" / "labels"
-            root_images = path / "images"
-            root_labels = path / "labels"
-            yolo_images_dir: Optional[str] = None
-            yolo_labels_dir: Optional[str] = None
-            yolo_layout: Optional[str] = None
-            if labelmap_path.exists():
-                if train_images.exists() and train_labels.exists():
-                    yolo_images_dir = str(train_images)
-                    yolo_labels_dir = str(train_labels)
-                    yolo_layout = "split"
-                elif root_images.exists() and root_labels.exists():
-                    yolo_images_dir = str(root_images)
-                    yolo_labels_dir = str(root_labels)
-                    yolo_layout = "flat"
-            yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
-            qwen_meta = _load_qwen_dataset_metadata(path)
-            qwen_ready = bool(
-                qwen_meta
-                and (path / "train" / "annotations.jsonl").exists()
-                and (path / "val" / "annotations.jsonl").exists()
-            )
-            if not yolo_ready:
-                try:
-                    coco_exists = (path / "train" / "_annotations.coco.json").exists() or (path / "val" / "_annotations.coco.json").exists()
-                    if not coco_exists and qwen_ready:
-                        _convert_qwen_dataset_to_coco(path)
-                        coco_exists = True
-                    if coco_exists:
-                        _convert_coco_dataset_to_yolo(path)
-                        labelmap_path = path / "labelmap.txt"
-                        if labelmap_path.exists():
-                            if train_images.exists() and train_labels.exists():
-                                yolo_images_dir = str(train_images)
-                                yolo_labels_dir = str(train_labels)
-                                yolo_layout = "split"
-                            elif root_images.exists() and root_labels.exists():
-                                yolo_images_dir = str(root_images)
-                                yolo_labels_dir = str(root_labels)
-                                yolo_layout = "flat"
-                            yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
-                            if yolo_ready and not meta.get("classes"):
-                                try:
-                                    with labelmap_path.open("r", encoding="utf-8") as handle:
-                                        meta["classes"] = [line.strip() for line in handle if line.strip()]
-                                except Exception:
-                                    pass
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to auto-convert COCO to YOLO for %s: %s", path, exc)
-            dataset_format = "unknown"
-            dataset_type = meta.get("type", "bbox")
-            if yolo_ready:
-                dataset_format = "yolo"
-            elif qwen_ready:
-                dataset_format = "qwen"
-            yolo_seg_ready = False
-            if yolo_ready and yolo_labels_dir:
-                yolo_seg_ready = _yolo_labels_have_polygons(Path(yolo_labels_dir))
-                if yolo_seg_ready and dataset_type != "seg":
-                    dataset_type = "seg"
-            labelmap = list(meta.get("classes") or [])
-            if not labelmap and labelmap_path.exists():
-                try:
-                    with labelmap_path.open("r", encoding="utf-8") as handle:
-                        labelmap = [line.strip() for line in handle if line.strip()]
-                except Exception:
-                    labelmap = []
-            glossary_text = _load_dataset_glossary(path)
-            glossary_preview = _glossary_preview(glossary_text, labelmap)
-            signature = meta.get("signature") or ""
-            caption_count, caption_dir_present = _count_caption_labels(path)
-            image_total = meta.get("image_count")
-            if not image_total:
-                image_total = _count_dataset_images(path)
-            caption_percent = None
-            if image_total and image_total > 0:
-                caption_percent = (caption_count / image_total) * 100.0
-            key = signature or meta["id"]
-            entry = {
-                "id": meta.get("id") or path.name,
-                "label": meta.get("label") or path.name,
-                "dataset_root": str(path),
-                "created_at": meta.get("created_at") or path.stat().st_mtime,
-                "image_count": meta.get("image_count"),
-                "train_count": meta.get("train_count"),
-                "val_count": meta.get("val_count"),
-                "classes": meta.get("classes", []),
-                "context": meta.get("context", "") or meta.get("dataset_context", ""),
-                "signature": signature,
-                "source": meta.get("source") or source,
-                "type": dataset_type,
-                "coco_ready": coco_ready,
-                "coco_seg_ready": bool(coco_ready and dataset_type == "seg"),
-                "coco_train_json": coco_train,
-                "coco_val_json": coco_val,
-                "format": dataset_format,
-                "yolo_ready": yolo_ready,
-                "yolo_seg_ready": yolo_seg_ready,
-                "yolo_images_dir": yolo_images_dir,
-                "yolo_labels_dir": yolo_labels_dir,
-                "yolo_labelmap_path": str(labelmap_path) if labelmap_path.exists() else None,
-                "yolo_layout": yolo_layout,
-                "qwen_ready": qwen_ready,
-                "qwen_train_count": qwen_meta.get("train_count") if qwen_meta else None,
-                "qwen_val_count": qwen_meta.get("val_count") if qwen_meta else None,
-                "caption_count": caption_count,
-                "caption_dir": caption_dir_present,
-                "caption_percent": caption_percent,
-                "caption_total": image_total,
-                "glossary_present": bool(str(glossary_text or "").strip()),
-                "glossary_preview": glossary_preview,
-            }
-            existing = seen.get(key)
-            if existing is not None:
-                existing_idx, existing_origin = existing
-                if prefer_registry:
-                    if existing_origin == "registry":
-                        continue
-                    if source == "registry":
-                        entries[existing_idx] = entry
-                        seen[key] = (existing_idx, source)
-                        continue
-                continue
-            seen[key] = (len(entries), source)
-            entries.append(entry)
-    entries.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
-    return entries
+    return _list_all_datasets_impl(
+        prefer_registry=prefer_registry,
+        dataset_registry_root=DATASET_REGISTRY_ROOT,
+        sam3_dataset_root=SAM3_DATASET_ROOT,
+        qwen_dataset_root=QWEN_DATASET_ROOT,
+        load_registry_meta_fn=_load_registry_dataset_metadata,
+        load_sam3_meta_fn=_load_sam3_dataset_metadata,
+        load_qwen_meta_fn=_load_qwen_dataset_metadata,
+        coerce_meta_fn=_coerce_dataset_metadata,
+        yolo_labels_have_polygons_fn=_yolo_labels_have_polygons,
+        convert_qwen_dataset_to_coco_fn=_convert_qwen_dataset_to_coco,
+        convert_coco_dataset_to_yolo_fn=_convert_coco_dataset_to_yolo,
+        load_dataset_glossary_fn=_load_dataset_glossary,
+        glossary_preview_fn=_glossary_preview,
+        count_caption_labels_fn=_count_caption_labels,
+        count_dataset_images_fn=_count_dataset_images,
+        logger=logger,
+    )
 
 
 def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:

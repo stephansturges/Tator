@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from utils.coords import _agent_iou_xyxy
 
@@ -855,6 +855,177 @@ def _agent_run_deep_prepass_caption_impl(
                 coords = readable_format_bbox_fn(bbox_2d)
                 trace_readable(f"prepass caption {window_name} {coords}: {caption}")
     return caption_text, caption_entries
+
+
+def _build_deep_prepass_runners_impl(
+    *,
+    run_detector_fn: Any,
+    attach_provenance_fn: Any,
+    generate_sam3_synonyms_fn: Any,
+    generate_text_fn: Any,
+    extract_json_fn: Any,
+    default_synonyms: Any,
+    label_key_fn: Any,
+    sam3_text_windows_fn: Any,
+    ensure_sam3_text_runtime_fn: Any,
+    normalize_window_xyxy_fn: Any,
+    sam3_prompt_variants_fn: Any,
+    sam3_text_payloads_fn: Any,
+    active_sam3_score_thr: float,
+    active_sam3_mask_thr: float,
+    grid_overlap_ratio_default: float,
+    resolve_classifier_path_fn: Any,
+    load_classifier_head_fn: Any,
+    active_classifier_head: Any,
+    background_from_head_fn: Any,
+    sanitize_fn: Any,
+    default_iou: float,
+    select_exemplars_fn: Any,
+    run_similarity_global_fn: Any,
+    run_similarity_windowed_fn: Any,
+    finalize_provenance_fn: Any,
+    caption_request_cls: Any,
+    qwen_caption_fn: Any,
+    sanitize_caption_fn: Any,
+    label_counts_fn: Any,
+    qwen_bbox_to_xyxy_fn: Any,
+    xyxy_to_bbox_fn: Any,
+    grid_cell_for_window_bbox_fn: Any,
+    readable_format_bbox_fn: Any,
+    unload_non_qwen_fn: Any,
+    caption_window_hook: Any,
+    http_exception_cls: Any,
+    http_503_code: int,
+) -> Tuple[
+    Callable[..., Dict[str, Any]],
+    Callable[..., Dict[str, Any]],
+    Callable[..., Dict[str, Any]],
+    Callable[..., Tuple[str, List[Dict[str, Any]]]],
+]:
+    def run_part_a(
+        payload: Any,
+        *,
+        pil_img: Any,
+        image_token: str,
+        labelmap: List[str],
+        glossary: str,
+        trace_writer: Optional[Any] = None,
+        trace_full_writer: Optional[Any] = None,
+        trace_readable: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        return _agent_run_deep_prepass_part_a_impl(
+            payload,
+            pil_img=pil_img,
+            image_token=image_token,
+            labelmap=labelmap,
+            glossary=glossary,
+            run_detector_fn=run_detector_fn,
+            attach_provenance_fn=attach_provenance_fn,
+            generate_sam3_synonyms_fn=generate_sam3_synonyms_fn,
+            generate_text_fn=generate_text_fn,
+            extract_json_fn=extract_json_fn,
+            default_synonyms=default_synonyms,
+            label_key_fn=label_key_fn,
+            sam3_text_windows_fn=sam3_text_windows_fn,
+            ensure_sam3_text_runtime_fn=ensure_sam3_text_runtime_fn,
+            normalize_window_xyxy_fn=normalize_window_xyxy_fn,
+            sam3_prompt_variants_fn=sam3_prompt_variants_fn,
+            sam3_text_payloads_fn=sam3_text_payloads_fn,
+            trace_writer=trace_writer,
+            trace_full_writer=trace_full_writer,
+            trace_readable=trace_readable,
+            active_sam3_score_thr=active_sam3_score_thr,
+            active_sam3_mask_thr=active_sam3_mask_thr,
+            grid_overlap_ratio_default=grid_overlap_ratio_default,
+        )
+
+    def cleanup(
+        payload: Any,
+        *,
+        detections: List[Dict[str, Any]],
+        pil_img: Any,
+        labelmap: List[str],
+    ) -> Dict[str, Any]:
+        return _agent_deep_prepass_cleanup_impl(
+            payload,
+            detections=detections,
+            pil_img=pil_img,
+            labelmap=labelmap,
+            resolve_classifier_path_fn=resolve_classifier_path_fn,
+            load_classifier_head_fn=load_classifier_head_fn,
+            active_classifier_head=active_classifier_head,
+            background_from_head_fn=background_from_head_fn,
+            sanitize_fn=sanitize_fn,
+            default_iou=default_iou,
+        )
+
+    def run(
+        payload: Any,
+        *,
+        pil_img: Any,
+        image_token: str,
+        labelmap: List[str],
+        glossary: str,
+        trace_writer: Optional[Any] = None,
+        trace_full_writer: Optional[Any] = None,
+        trace_readable: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        return _agent_run_deep_prepass_impl(
+            payload,
+            pil_img=pil_img,
+            image_token=image_token,
+            labelmap=labelmap,
+            glossary=glossary,
+            run_part_a_fn=run_part_a,
+            cleanup_fn=cleanup,
+            select_exemplars_fn=select_exemplars_fn,
+            run_similarity_global_fn=run_similarity_global_fn,
+            run_similarity_windowed_fn=run_similarity_windowed_fn,
+            finalize_provenance_fn=finalize_provenance_fn,
+            trace_writer=trace_writer,
+            trace_full_writer=trace_full_writer,
+            trace_readable=trace_readable,
+        )
+
+    def caption(
+        payload: Any,
+        *,
+        pil_img: Any,
+        image_token: str,
+        detections: List[Dict[str, Any]],
+        model_id_override: Optional[str],
+        glossary: Optional[str] = None,
+        grid_for_log: Optional[Dict[str, Any]] = None,
+        trace_writer: Optional[Any] = None,
+        trace_full_writer: Optional[Any] = None,
+        trace_readable: Optional[Any] = None,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        return _agent_run_deep_prepass_caption_impl(
+            payload,
+            pil_img=pil_img,
+            image_token=image_token,
+            detections=detections,
+            model_id_override=model_id_override,
+            glossary=glossary,
+            grid_for_log=grid_for_log,
+            caption_request_cls=caption_request_cls,
+            qwen_caption_fn=qwen_caption_fn,
+            sanitize_caption_fn=sanitize_caption_fn,
+            label_counts_fn=label_counts_fn,
+            qwen_bbox_to_xyxy_fn=qwen_bbox_to_xyxy_fn,
+            xyxy_to_bbox_fn=xyxy_to_bbox_fn,
+            grid_cell_for_window_bbox_fn=grid_cell_for_window_bbox_fn,
+            readable_format_bbox_fn=readable_format_bbox_fn,
+            unload_non_qwen_fn=unload_non_qwen_fn,
+            caption_window_hook=caption_window_hook,
+            http_exception_cls=http_exception_cls,
+            http_503_code=http_503_code,
+            trace_writer=trace_writer,
+            trace_full_writer=trace_full_writer,
+            trace_readable=trace_readable,
+        )
+
+    return run_part_a, cleanup, run, caption
 
 
 def _agent_select_similarity_exemplars(

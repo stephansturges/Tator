@@ -124,13 +124,6 @@ def _normalize_labelmap_glossary(raw_glossary: Any) -> str:
     return str(raw_glossary).strip()
 
 
-def _normalize_glossary_name(name: str) -> str:
-    return re.sub(r"\\s+", " ", str(name or "").strip())
-
-
-def _glossary_key(name: str) -> str:
-    return _normalize_glossary_name(name).lower()
-
 
 def _extract_glossary_synonyms(text: str) -> List[str]:
     cleaned = re.sub(r"[()]", " ", str(text))

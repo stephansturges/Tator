@@ -37,12 +37,37 @@ We previously experimented with agentic annotation loops and removed them. Qwen 
 ```
 Tator/
 ├─ app/                  FastAPI app object (uvicorn imports this)
-├─ localinferenceapi.py  Backend endpoints + orchestration
+├─ api/                  Route handlers (APIRouter modules)
+├─ services/             Core backend logic (prepass, calibration, detectors, sam3, qwen)
+├─ utils/                Shared helpers (coords, labels, image, io, parsing)
+├─ localinferenceapi.py  Router wiring + shared state (thin shim)
 ├─ ybat-master/          Frontend UI (static HTML/JS/CSS)
 ├─ tools/                CLI helpers
 ├─ tests/                Unit tests
 └─ uploads/              Runtime artifacts + caches (git-ignored)
 ```
+
+### Backend module map (where core logic lives)
+- **Prepass + calibration**: `services/prepass*.py`, `services/calibration*.py`
+- **Detectors (YOLO / RF‑DETR)**: `services/detectors.py` + `services/detector_jobs.py`
+- **Classifier heads (CLIP/DINOv3)**: `services/classifier*.py`
+- **SAM3**: `services/sam3_*.py`
+- **Qwen captioning + glossary expansion**: `services/qwen.py`, `services/qwen_generation.py`
+- **Datasets / glossaries**: `services/datasets.py`, `utils/glossary.py`
+- **Shared helpers**: `utils/coords.py`, `utils/image.py`, `utils/labels.py`, `utils/io.py`
+
+### Backend flow (high‑level)
+```
+Frontend (ybat-master)
+   │
+   ▼
+FastAPI app (app/ + localinferenceapi.py)
+   │
+   ▼
+APIRouters (api/*) ──► Services (services/*) ──► Helpers (utils/*)
+```
+Migration note: `localinferenceapi.py` now acts as a thin router shim; core logic
+has moved into `services/` and `utils/`.
 
 ---
 
@@ -271,7 +296,10 @@ bash tools/run_qwen_prepass_benchmark.sh --count 10 --seed 42 --dataset qwen_dat
 ```
 Tator/
 ├─ app/                  FastAPI app object
-├─ localinferenceapi.py  Backend endpoints + orchestration
+├─ api/                  Route handlers (APIRouter modules)
+├─ services/             Core backend logic (prepass, calibration, detectors, sam3, qwen)
+├─ utils/                Shared helpers (coords, labels, image, io, parsing)
+├─ localinferenceapi.py  Router wiring + shared state (thin shim)
 ├─ ybat-master/          Frontend UI (HTML/JS/CSS)
 ├─ tools/                CLI helpers
 ├─ tests/                Unit tests

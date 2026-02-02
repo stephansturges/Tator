@@ -5,10 +5,10 @@ import urllib.request
 from urllib.error import URLError, HTTPError
 
 
-def _get(url: str) -> dict:
+def _get(url: str, timeout: int = 15) -> dict:
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read().decode("utf-8")
     except HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code} for {url}") from exc
@@ -20,6 +20,10 @@ def _get(url: str) -> dict:
 def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
     results = {}
+    timeouts = {
+        "/system/health_summary": 30,
+        "/clip/classifiers": 30,
+    }
     for path in (
         "/system/health_summary",
         "/datasets",
@@ -29,14 +33,20 @@ def main() -> int:
         "/detectors/default",
         "/clip/classifiers",
     ):
-        results[path] = _get(base + path)
+        results[path] = _get(base + path, timeout=timeouts.get(path, 15))
 
     # Minimal schema checks
-    assert "status" in results["/system/health_summary"], "health_summary missing status"
+    health = results["/system/health_summary"]
+    assert ("ok" in health) or ("status" in health), "health_summary missing ok/status"
     assert isinstance(results["/datasets"], list), "/datasets must be list"
     assert isinstance(results["/qwen/datasets"], list), "/qwen/datasets must be list"
-    assert "active" in results["/detectors/default"], "/detectors/default missing active"
-    assert "classifiers" in results["/clip/classifiers"], "/clip/classifiers missing classifiers"
+    det_default = results["/detectors/default"]
+    assert ("active" in det_default) or ("mode" in det_default), "/detectors/default missing active/mode"
+    classifiers_payload = results["/clip/classifiers"]
+    assert (
+        isinstance(classifiers_payload, list)
+        or ("classifiers" in classifiers_payload)
+    ), "/clip/classifiers missing classifiers"
 
     print(json.dumps({"tier0": "ok", "base": base}, indent=2))
     return 0

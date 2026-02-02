@@ -70,18 +70,6 @@ def _classify_agent_recipe_mode(recipe_obj: Dict[str, Any]) -> Literal["sam3_ste
     return "legacy_steps"
 
 
-def _normalize_agent_recipe_execution_plan(recipe_obj: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize an agent recipe into a lightweight execution plan.
-
-    This is intentionally shallow and does not change behavior by itself; it exists so future
-    inference/mining code paths can share a single normalization step.
-    """
-    mode = _classify_agent_recipe_mode(recipe_obj)
-    schema_version = _parse_agent_recipe_schema_version(recipe_obj)
-    return {"mode": mode, "schema_version": schema_version, "recipe": recipe_obj}
-
-
 def _validate_agent_recipe_structure(recipe_obj: Dict[str, Any]) -> None:
     """Lightweight schema guard to avoid accepting malformed recipes."""
     if not isinstance(recipe_obj, dict):

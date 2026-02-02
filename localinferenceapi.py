@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue
+import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools
 from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
@@ -12,21 +12,115 @@ from collections import deque
 import torch, clip, joblib
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
+from api.detectors_default import build_detectors_default_router
+from api.predictor_settings import build_predictor_settings_router
+from api.runtime import build_runtime_router
+from api.system import build_system_router
+from api.qwen_status import build_qwen_status_router
+from api.sam_slots import build_sam_slots_router
+from api.qwen_training import build_qwen_training_router
+from api.qwen_models import build_qwen_models_router
+from api.clip_active_model import build_clip_active_model_router
+from api.sam_preload import build_sam_preload_router
+from api.qwen_infer import build_qwen_infer_router
+from api.qwen_caption import build_qwen_caption_router
+from api.calibration import build_calibration_router
+from api.prepass import build_prepass_router
+from api.qwen_prepass import build_qwen_prepass_router
+from api.clip_registry import build_clip_registry_router
+from api.clip_training import build_clip_training_router
+from api.fs_upload import build_fs_upload_router
+from api.predict_base64 import build_predict_base64_router
+from api.crop_zip import build_crop_zip_router
+from api.agent_mining import build_agent_mining_router
+from api.sam3_prompts import build_sam3_prompts_router
+from api.sam3_prompt_helper import build_sam3_prompt_helper_router
+from api.sam3_training import build_sam3_training_router
+from api.sam3_registry import build_sam3_registry_router
+from api.segmentation_build import build_segmentation_build_router
+from api.yolo_training import build_yolo_training_router
+from api.rfdetr_training import build_rfdetr_training_router
+from api.rfdetr import build_rfdetr_router
+from api.yolo import build_yolo_router
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, root_validator, Field
+from models.schemas import (
+    Base64Payload,
+    PredictResponse,
+    BboxModel,
+    CropImage,
+    CropZipRequest,
+    PointPrompt,
+    BboxPrompt,
+    SamPreloadRequest,
+    SamPreloadResponse,
+    SamSlotStatus,
+    SamActivateRequest,
+    SamActivateResponse,
+    PredictorSettings,
+    Sam3VisualPrompt,
+    SamPointAutoResponse,
+    QwenDetection,
+    QwenInferenceRequest,
+    QwenInferenceResponse,
+    QwenCaptionHint,
+    QwenCaptionRequest,
+    QwenCaptionResponse,
+    QwenPrepassRequest,
+    QwenPrepassResponse,
+    CalibrationRequest,
+    AgentToolCall,
+    AgentToolResult,
+    AgentTraceEvent,
+    QwenPromptSection,
+    QwenPromptConfig,
+    QwenRuntimeSettings,
+    QwenRuntimeSettingsUpdate,
+    Sam3ModelActivateRequest,
+    QwenModelActivateRequest,
+    ActiveModelRequest,
+    ActiveModelResponse,
+    SegmentationBuildRequest,
+    QwenTrainRequest,
+    Sam3TrainRequest,
+    YoloTrainRequest,
+    YoloHeadGraftRequest,
+    YoloHeadGraftDryRunRequest,
+    RfDetrTrainRequest,
+    YoloActiveRequest,
+    RfDetrActiveRequest,
+    DetectorDefaultRequest,
+    YoloRegionRequest,
+    YoloRegionDetection,
+    YoloRegionResponse,
+    YoloFullRequest,
+    YoloWindowedRequest,
+    RfDetrRegionRequest,
+    RfDetrRegionDetection,
+    RfDetrRegionResponse,
+    RfDetrFullRequest,
+    RfDetrWindowedRequest,
+    Sam3TextPromptResponse,
+    Sam3TextPromptAutoResponse,
+    PredictorSettingsUpdate,
+    MultiPointPrompt,
+    YoloBboxOutput,
+    Sam3TextPrompt,
+    PrepassRecipeRequest,
+    PrepassRecipeResponse,
+    AgentApplyImageRequest,
+    AgentApplyChainStep,
+    AgentCascadeDedupeConfig,
+    AgentApplyImageChainRequest,
+    AgentRecipeExportRequest,
+    AgentCascadeSaveRequest,
+)
 from omegaconf import OmegaConf
 import psutil
 try:
     from packaging import version as packaging_version
 except Exception:  # noqa: BLE001
     packaging_version = None
-try:
-    from transformers import LogitsProcessor, LogitsProcessorList
-except Exception:  # noqa: BLE001
-    LogitsProcessor = None
-    LogitsProcessorList = None
-_BASE_LOGITS_PROCESSOR = LogitsProcessor if LogitsProcessor is not None else object
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_412_PRECONDITION_FAILED,
@@ -52,6 +146,9 @@ from utils.network import _find_free_port_impl as _find_free_port_impl
 from utils.coco import (
     _ensure_coco_supercategory_impl,
     _write_coco_annotations_impl,
+    _encode_binary_mask_impl,
+    _decode_binary_mask_impl,
+    _mask_to_polygon_impl,
 )
 from utils.image import (
     _slice_image_sahi,
@@ -100,7 +197,6 @@ from services.prepass_recipes import (
     _load_prepass_recipe_meta,
     _parse_agent_recipe_schema_version as _parse_agent_recipe_schema_version_impl,
     _classify_agent_recipe_mode as _classify_agent_recipe_mode_impl,
-    _normalize_agent_recipe_execution_plan as _normalize_agent_recipe_execution_plan_impl,
     _validate_agent_recipe_structure as _validate_agent_recipe_structure_impl,
     _save_exemplar_crop_impl as _save_exemplar_crop_impl,
     _delete_agent_recipe_impl as _delete_agent_recipe_impl,
@@ -167,6 +263,19 @@ from services.qwen_runtime import (
     _unload_qwen_runtime_impl as _unload_qwen_runtime_impl,
     _evict_qwen_caption_entry_impl as _evict_qwen_caption_entry_impl,
     _resolve_qwen_device_impl as _resolve_qwen_device_impl,
+)
+from services.qwen_generation import (
+    _BASE_LOGITS_PROCESSOR,
+    ThinkingEffortProcessor,
+    ImmediateActionBiasProcessor,
+    _resolve_qwen_max_seq_len,
+    _qwen_estimate_vision_tokens,
+    _qwen_effective_input_len,
+    _qwen_supports_presence_penalty,
+    _qwen_find_end_think_token_id,
+    _qwen_build_thinking_effort_processor,
+    _qwen_build_immediate_action_processor,
+    _qwen_append_logits_processor,
 )
 from services.sam3_jobs import (
     _sam3_job_append_metric_impl as _sam3_job_append_metric_impl,
@@ -252,10 +361,7 @@ from services.prepass import (
     _agent_format_source_counts,
     _agent_label_counts_summary,
     _agent_select_similarity_exemplars as _agent_select_similarity_exemplars_impl,
-    _agent_deep_prepass_cleanup_impl,
-    _agent_run_deep_prepass_part_a_impl,
-    _agent_run_deep_prepass_impl,
-    _agent_run_deep_prepass_caption_impl,
+    _build_deep_prepass_runners_impl,
 )
 from services.cluster_helpers import _cluster_label_counts, _cluster_summaries
 from services.context_store import (
@@ -285,7 +391,10 @@ from utils.coords import (
     _agent_expand_window_xyxy,
     _agent_xyxy_to_xywh,
     _yolo_to_xyxy,
+    _yolo_to_xyxy_int,
     _xyxy_to_yolo_norm,
+    _xyxy_to_yolo_norm_list,
+    _mask_to_bounding_box,
     _agent_det_payload,
     _extract_numeric_sequence,
     _scale_bbox_to_image,
@@ -390,10 +499,7 @@ from services.calibration_metrics import (
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
-    _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
     _generate_qwen_text as _generate_qwen_text_impl,
-    _parse_prompt_candidates as _parse_prompt_candidates_impl,
-    _generate_prompt_text as _generate_prompt_text_impl,
     _caption_glossary_map as _caption_glossary_map_impl,
     _caption_preferred_label as _caption_preferred_label_impl,
     _build_qwen_caption_prompt as _build_qwen_caption_prompt_impl,
@@ -423,8 +529,6 @@ from services.qwen import (
     _get_qwen_prompt_config_impl as _get_qwen_prompt_config_impl,
     _render_qwen_prompt_impl as _render_qwen_prompt_impl,
     _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
-    _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
-    _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _sanitize_prompts_impl as _sanitize_prompts_impl,
 )
 from services.detectors import (
@@ -487,15 +591,8 @@ from services.detectors import (
     _list_rfdetr_runs_impl as _list_rfdetr_runs_impl,
 )
 from collections import OrderedDict
-try:
-    from scipy.spatial import ConvexHull
-except Exception:  # noqa: BLE001
-    ConvexHull = None
 from segment_anything import sam_model_registry, SamPredictor
 
-
-def _extract_balanced_json(text: str, start_char: str, end_char: str) -> Optional[str]:
-    return _extract_balanced_json_impl(text, start_char, end_char)
 
 import threading
 import queue
@@ -692,254 +789,6 @@ QWEN_VRAM_PIXEL_BASE = 451584
 QWEN_VRAM_PIXEL_SCALE_MIN = 0.6
 QWEN_VRAM_PIXEL_SCALE_MAX = 1.6
 
-
-def _resolve_qwen_max_seq_len(model: Any) -> Optional[int]:
-    config = getattr(model, "config", None)
-    if config is None:
-        return None
-
-    def _read_seq_len(cfg: Any) -> Optional[int]:
-        if cfg is None:
-            return None
-        for attr in ("max_position_embeddings", "max_sequence_length", "seq_length"):
-            val = getattr(cfg, attr, None)
-            if isinstance(val, int) and val > 0:
-                return val
-        # Some configs expose max_length as a generation hint (often tiny); treat as fallback only.
-        val = getattr(cfg, "max_length", None)
-        if isinstance(val, int) and val > 0:
-            return val
-        return None
-
-    for cfg in (getattr(config, "text_config", None), getattr(config, "language_config", None), config):
-        val = _read_seq_len(cfg)
-        if isinstance(val, int) and val >= 256:
-            return val
-    return None
-
-
-def _qwen_estimate_vision_tokens(preview_inputs: Any) -> Optional[int]:
-    grid = None
-    if isinstance(preview_inputs, dict):
-        grid = preview_inputs.get("image_grid_thw")
-    else:
-        grid = getattr(preview_inputs, "image_grid_thw", None)
-    if grid is None:
-        return None
-    try:
-        grid_vals = grid if isinstance(grid, torch.Tensor) else torch.as_tensor(grid)
-        if grid_vals.ndim == 3:
-            grid_vals = grid_vals[0]
-        if grid_vals.ndim == 2 and grid_vals.shape[-1] == 3:
-            tokens = (grid_vals[:, 0] * grid_vals[:, 1] * grid_vals[:, 2]).sum()
-            return int(tokens.item())
-        if grid_vals.ndim == 1 and grid_vals.numel() == 3:
-            tokens = grid_vals[0] * grid_vals[1] * grid_vals[2]
-            return int(tokens.item())
-    except Exception:
-        return None
-    return None
-
-
-def _qwen_effective_input_len(preview_inputs: Any, input_len: int, num_images: int) -> Tuple[int, Optional[int]]:
-    vision_tokens = _qwen_estimate_vision_tokens(preview_inputs)
-    if vision_tokens is None or num_images <= 0:
-        return input_len, vision_tokens
-    effective_len = max(1, input_len - num_images + vision_tokens)
-    return effective_len, vision_tokens
-
-
-def _qwen_supports_presence_penalty(model: Any) -> bool:
-    gen_config = getattr(model, "generation_config", None)
-    if gen_config is None:
-        return False
-    if hasattr(gen_config, "to_dict"):
-        try:
-            return "presence_penalty" in gen_config.to_dict()
-        except Exception:
-            pass
-    return hasattr(gen_config, "presence_penalty")
-
-
-class ThinkingEffortProcessor(_BASE_LOGITS_PROCESSOR):
-    """Scale the </think> token logit to reduce or increase chain-of-thought length."""
-
-    def __init__(self, end_thinking_token_id: int, thinking_effort: float = 1.0, scale_factor: float = 2.0):
-        super().__init__()
-        self.end_thinking_token_id = int(end_thinking_token_id)
-        self.thinking_effort = float(thinking_effort)
-        self.scale_factor = float(scale_factor)
-        self.finished_sequences: Set[int] = set()
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        if self.end_thinking_token_id >= scores.size(1):
-            return scores
-        scale = self.scale_factor ** (1.0 - self.thinking_effort)
-        batch_size = input_ids.size(0)
-        for i in range(batch_size):
-            if i in self.finished_sequences:
-                continue
-            if (input_ids[i] == self.end_thinking_token_id).any():
-                self.finished_sequences.add(i)
-                continue
-            scores[i, self.end_thinking_token_id] *= scale
-        return scores
-
-
-class ImmediateActionBiasProcessor(_BASE_LOGITS_PROCESSOR):
-    """Boost </think> when 'wait' appears inside a think block after a minimum threshold."""
-
-    def __init__(
-        self,
-        tokenizer: Any,
-        end_thinking_token_id: int,
-        *,
-        min_think_chars: int = 200,
-        min_think_seconds: float = 2.0,
-        logit_bias: float = 6.0,
-    ):
-        super().__init__()
-        self._tokenizer = tokenizer
-        self.end_thinking_token_id = int(end_thinking_token_id)
-        self.min_think_chars = max(1, int(min_think_chars))
-        self.min_think_seconds = max(0.0, float(min_think_seconds))
-        self.logit_bias = float(logit_bias)
-        self._think_started_at: Dict[int, float] = {}
-        self._wait_seen: Set[int] = set()
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        if self.logit_bias <= 0:
-            return scores
-        if self.end_thinking_token_id >= scores.size(1):
-            return scores
-        now = time.time()
-        batch_size = input_ids.size(0)
-        for i in range(batch_size):
-            if i in self._wait_seen:
-                scores[i, self.end_thinking_token_id] += self.logit_bias
-                continue
-            try:
-                text = self._tokenizer.decode(input_ids[i].tolist(), skip_special_tokens=False)
-            except Exception:
-                continue
-            think_text = self._extract_open_think_text(text)
-            if think_text is None:
-                if i in self._think_started_at:
-                    del self._think_started_at[i]
-                continue
-            if i not in self._think_started_at:
-                self._think_started_at[i] = now
-            if len(think_text) < self.min_think_chars:
-                continue
-            if (now - self._think_started_at.get(i, now)) < self.min_think_seconds:
-                continue
-            if re.search(r"\bwait\b", think_text, flags=re.IGNORECASE):
-                self._wait_seen.add(i)
-                scores[i, self.end_thinking_token_id] += self.logit_bias
-        return scores
-
-
-def _qwen_find_end_think_token_id(tokenizer: Any) -> Optional[int]:
-    if tokenizer is None:
-        return None
-    vocab_size = getattr(tokenizer, "vocab_size", None)
-    vocab_size = int(vocab_size) if isinstance(vocab_size, int) and vocab_size > 0 else None
-    candidates = [
-        "</think>",
-        "<|endofthink|>",
-        "<|end_of_thought|>",
-        "<|end_of_thinking|>",
-    ]
-    unk_id = getattr(tokenizer, "unk_token_id", None)
-    for token in candidates:
-        try:
-            tok_id = tokenizer.convert_tokens_to_ids(token)
-        except Exception:
-            tok_id = None
-        if tok_id is not None and tok_id != unk_id:
-            if vocab_size is not None and int(tok_id) >= vocab_size:
-                tok_id = None
-            else:
-                return int(tok_id)
-        try:
-            ids = tokenizer.encode(token, add_special_tokens=False)
-        except Exception:
-            ids = []
-        if isinstance(ids, list) and len(ids) == 1:
-            tok_id = int(ids[0])
-            if vocab_size is None or tok_id < vocab_size:
-                return tok_id
-    return None
-
-
-def _qwen_build_thinking_effort_processor(
-    tokenizer: Any,
-    thinking_effort: Optional[float],
-    scale_factor: Optional[float],
-) -> Optional[ThinkingEffortProcessor]:
-    if LogitsProcessorList is None or LogitsProcessor is None:
-        return None
-    if thinking_effort is None:
-        return None
-    try:
-        effort_val = float(thinking_effort)
-    except (TypeError, ValueError):
-        return None
-    end_token_id = _qwen_find_end_think_token_id(tokenizer)
-    if end_token_id is None:
-        return None
-    scale_val = 2.0
-    if scale_factor is not None:
-        try:
-            scale_val = float(scale_factor)
-        except (TypeError, ValueError):
-            scale_val = 2.0
-    return ThinkingEffortProcessor(end_token_id, thinking_effort=effort_val, scale_factor=scale_val)
-
-
-def _qwen_build_immediate_action_processor(
-    tokenizer: Any,
-    immediate_action_bias: Optional[bool],
-    min_think_chars: Optional[int],
-    min_think_seconds: Optional[float],
-    logit_bias: Optional[float],
-) -> Optional[ImmediateActionBiasProcessor]:
-    if LogitsProcessorList is None or LogitsProcessor is None:
-        return None
-    if not immediate_action_bias:
-        return None
-    end_token_id = _qwen_find_end_think_token_id(tokenizer)
-    if end_token_id is None:
-        return None
-    chars_val = 200 if min_think_chars is None else int(min_think_chars)
-    secs_val = 2.0 if min_think_seconds is None else float(min_think_seconds)
-    bias_val = 6.0 if logit_bias is None else float(logit_bias)
-    return ImmediateActionBiasProcessor(
-        tokenizer,
-        end_token_id,
-        min_think_chars=chars_val,
-        min_think_seconds=secs_val,
-        logit_bias=bias_val,
-    )
-
-
-def _qwen_append_logits_processor(
-    gen_kwargs: Dict[str, Any],
-    processor: Optional[_BASE_LOGITS_PROCESSOR],
-) -> None:
-    if processor is None:
-        return
-    processors = gen_kwargs.get("logits_processor")
-    if processors is None:
-        gen_kwargs["logits_processor"] = LogitsProcessorList([processor])
-    elif isinstance(processors, LogitsProcessorList):
-        processors.append(processor)
-    else:
-        try:
-            gen_kwargs["logits_processor"] = LogitsProcessorList(list(processors) + [processor])
-        except Exception:
-            gen_kwargs["logits_processor"] = LogitsProcessorList([processor])
-
 def _is_qwen_moe_model_id(model_id: str) -> bool:
     lowered = model_id.lower()
     return "a3b" in lowered or "moe" in lowered
@@ -1099,40 +948,6 @@ def _unload_detector_inference() -> None:
     rfdetr_infer_variant = state["rfdetr_infer_variant"]
 
 
-def _unload_non_qwen_runtimes() -> None:
-    """Free heavy inference runtimes except Qwen (SAM, detectors, classifier backbones)."""
-    _unload_non_qwen_runtimes_impl(
-        predictor_manager=predictor_manager,
-        unload_sam3_text_fn=_unload_sam3_text_runtime,
-        suspend_clip_fn=_suspend_clip_backbone,
-        unload_dinov3_fn=_unload_dinov3_backbone,
-        unload_detector_fn=_unload_detector_inference,
-        torch_module=torch,
-        logger=logger,
-    )
-
-
-def _unload_inference_runtimes() -> None:
-    """Free heavy inference runtimes (SAM, detectors, Qwen, classifier backbones)."""
-    _unload_inference_runtimes_impl(
-        unload_non_qwen_fn=_unload_non_qwen_runtimes,
-        unload_qwen_fn=_unload_qwen_runtime,
-        torch_module=torch,
-    )
-
-
-def _prepare_for_training() -> None:
-    """Free heavy inference runtimes before starting a training job."""
-    _prepare_for_training_impl(unload_inference_runtimes_fn=_unload_inference_runtimes)
-
-
-def _finalize_training_environment() -> None:
-    _finalize_training_environment_impl(
-        resume_classifier_fn=_resume_classifier_backbone,
-        torch_module=torch,
-    )
-
-
 sam3_text_model = None
 sam3_text_processor = None
 sam3_text_device: Optional[torch.device] = None
@@ -1157,11 +972,28 @@ def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict
 
 
 def _prepare_for_qwen_training() -> None:
-    _prepare_for_training()
+    _prepare_for_training_impl(
+        unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+            unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                predictor_manager=predictor_manager,
+                unload_sam3_text_fn=_unload_sam3_text_runtime,
+                suspend_clip_fn=_suspend_clip_backbone,
+                unload_dinov3_fn=_unload_dinov3_backbone,
+                unload_detector_fn=_unload_detector_inference,
+                torch_module=torch,
+                logger=logger,
+            ),
+            unload_qwen_fn=_unload_qwen_runtime,
+            torch_module=torch,
+        )
+    )
 
 
 def _finalize_qwen_training_environment() -> None:
-    _finalize_training_environment()
+    _finalize_training_environment_impl(
+        resume_classifier_fn=_resume_classifier_backbone,
+        torch_module=torch,
+    )
 
 
 def _bytes_to_mb(value: int) -> float:
@@ -1225,7 +1057,12 @@ try:
                 active_classifier_meta = dict(meta_obj)
                 active_encoder_type = meta_obj.get("encoder_type") or "clip"
                 active_encoder_model = meta_obj.get("encoder_model") or meta_obj.get("clip_model")
-                active_head_normalize_embeddings = _resolve_active_head_normalize_embeddings(meta_obj, clf, default=True)
+                active_head_normalize_embeddings = _resolve_active_head_normalize_embeddings_impl(
+                    meta_obj,
+                    clf,
+                    default=True,
+                    resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+                )
 except Exception:
     active_encoder_type = "clip"
     active_encoder_model = None
@@ -1280,9 +1117,6 @@ SUPPORTED_CLIP_MODELS = [
 ]
 DEFAULT_CLIP_MODEL = SUPPORTED_CLIP_MODELS[0]
 
-def _infer_clip_model_from_embedding_dim(embedding_dim: Optional[int], *, active_name: Optional[str] = None) -> Optional[str]:
-    return _infer_clip_model_from_embedding_dim_impl(embedding_dim, active_name=active_name)
-
 clip_model = None
 clip_preprocess = None
 clip_model_name: Optional[str] = None
@@ -1332,10 +1166,6 @@ dinov3_lock = threading.Lock()
 _agent_dinov3_backbones: Dict[Tuple[str, str], Tuple[Any, Any]] = {}
 _agent_dinov3_locks: Dict[Tuple[str, str], threading.Lock] = {}
 _agent_dinov3_backbones_lock = threading.Lock()
-
-
-def _dinov3_resolve_device(requested: str) -> str:
-    return _dinov3_resolve_device_impl(requested, cuda_disabled=dinov3_cuda_disabled)
 
 
 def _suspend_clip_backbone() -> None:
@@ -1404,7 +1234,9 @@ def _resume_classifier_backbone() -> None:
         device=device,
         dinov3_lock=dinov3_lock,
         dinov3_cuda_disabled=dinov3_cuda_disabled,
-        dinov3_resolve_device_fn=_dinov3_resolve_device,
+        dinov3_resolve_device_fn=lambda device: _dinov3_resolve_device_impl(
+            device, cuda_disabled=dinov3_cuda_disabled
+        ),
         load_dinov3_fn=_load_dinov3_backbone,
         resume_clip_fn=_resume_clip_backbone,
     )
@@ -1441,33 +1273,6 @@ def _set_sam3_device_pref(device_index: int) -> None:
     state = {"device_pref": SAM3_DEVICE_PREF}
     _set_sam3_device_pref_impl(device_index, torch_module=torch, state=state)
     SAM3_DEVICE_PREF = state["device_pref"]
-
-
-def _resolve_sam3_device() -> torch.device:
-    return _resolve_sam3_device_impl(
-        SAM3_DEVICE_PREF,
-        torch_module=torch,
-        http_exception_cls=HTTPException,
-        http_400=HTTP_400_BAD_REQUEST,
-    )
-
-
-def _resolve_sam3_mining_devices() -> List[torch.device]:
-    return _resolve_sam3_mining_devices_impl(
-        SAM3_DEVICE_PREF,
-        torch_module=torch,
-        logger=logger,
-    )
-
-
-def _require_sam3_for_prepass(enable_text: bool, enable_similarity: bool) -> None:
-    _require_sam3_for_prepass_impl(
-        enable_text,
-        enable_similarity,
-        sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
-        build_sam3_image_model=build_sam3_image_model,
-        sam3_image_processor=Sam3ImageProcessor,
-    )
 
 
 def _reset_sam3_runtime() -> None:
@@ -1523,7 +1328,12 @@ class _Sam3Backend:
     def __init__(self):
         if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None:
             raise RuntimeError(f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}")
-        self.device = _resolve_sam3_device()
+        self.device = _resolve_sam3_device_impl(
+            SAM3_DEVICE_PREF,
+            torch_module=torch,
+            http_exception_cls=HTTPException,
+            http_400=HTTP_400_BAD_REQUEST,
+        )
         device_str = "cuda" if self.device.type == "cuda" else "cpu"
         source = active_sam3_metadata.get("source") if isinstance(active_sam3_metadata, dict) else None
         try:
@@ -1586,18 +1396,6 @@ class _Sam3Backend:
                 pass
 
 
-def _build_backend_for_variant(variant: str):
-    return _build_backend_for_variant_impl(
-        variant,
-        sam3_backend_cls=_Sam3Backend,
-        sam1_backend_cls=_Sam1Backend,
-    )
-
-
-def _sam3_clear_device_pinned_caches(model: Any) -> None:
-    _sam3_clear_device_pinned_caches_impl(model)
-
-
 def _ensure_sam3_text_runtime():
     global sam3_text_model, sam3_text_processor, sam3_text_device
     state = {
@@ -1608,13 +1406,18 @@ def _ensure_sam3_text_runtime():
     model, processor, device = _ensure_sam3_text_runtime_impl(
         state=state,
         lock=sam3_text_lock,
-        resolve_device_fn=_resolve_sam3_device,
+        resolve_device_fn=lambda: _resolve_sam3_device_impl(
+            SAM3_DEVICE_PREF,
+            torch_module=torch,
+            http_exception_cls=HTTPException,
+            http_400=HTTP_400_BAD_REQUEST,
+        ),
         sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
         build_model_fn=build_sam3_image_model,
         processor_cls=Sam3ImageProcessor,
         sam3_checkpoint=active_sam3_checkpoint,
         sam3_bpe_path=SAM3_BPE_PATH,
-        clear_caches_fn=_sam3_clear_device_pinned_caches,
+        clear_caches_fn=_sam3_clear_device_pinned_caches_impl,
         http_exception_cls=HTTPException,
         http_503=HTTP_503_SERVICE_UNAVAILABLE,
         http_500=HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1688,7 +1491,11 @@ class PredictorSlot:
     def _ensure_backend(self, variant: str):
         backend = self.backends.get(variant)
         if backend is None:
-            backend = _build_backend_for_variant(variant)
+            backend = _build_backend_for_variant_impl(
+                variant,
+                sam3_backend_cls=_Sam3Backend,
+                sam1_backend_cls=_Sam1Backend,
+            )
             self.backends[variant] = backend
         return backend
 
@@ -1902,7 +1709,7 @@ class PredictorManager:
         base64_data = payload.get("image_base64")
         if not base64_data:
             raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_payload_missing")
-        _, np_img = _decode_image_base64(base64_data)
+        _, np_img = _decode_image_base64_impl(base64_data, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
         token = hashlib.md5(np_img.tobytes()).hexdigest()
         _store_preloaded_image(token, np_img, variant)
         return np_img, token, variant, image_name
@@ -2117,7 +1924,7 @@ class SamPreloadManager:
 
     @staticmethod
     def _decode_base64(image_base64: str) -> np.ndarray:
-        _, np_img = _decode_image_base64(image_base64)
+        _, np_img = _decode_image_base64_impl(image_base64, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
         return np_img
 
 
@@ -2297,34 +2104,8 @@ class SamPreloadManager:
 
     @staticmethod
     def _decode_base64(image_base64: str) -> np.ndarray:
-        _, np_img = _decode_image_base64(image_base64)
+        _, np_img = _decode_image_base64_impl(image_base64, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
         return np_img
-
-
-def _resolve_qwen_device() -> str:
-    return _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
-
-
-def _get_qwen_prompt_config() -> QwenPromptConfig:
-    return _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock)
-
-
-def _render_qwen_prompt(
-    prompt_type: str,
-    *,
-    items: Optional[str],
-    image_type: Optional[str],
-    extra_context: Optional[str],
-) -> str:
-    return _render_qwen_prompt_impl(
-        prompt_type,
-        items=items,
-        image_type=image_type,
-        extra_context=extra_context,
-        get_config_fn=_get_qwen_prompt_config,
-        http_exception_cls=HTTPException,
-        http_422=HTTP_422_UNPROCESSABLE_ENTITY,
-    )
 
 
 def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -2360,7 +2141,7 @@ def _qwen_bbox_results(
         if not scaled:
             continue
         left, top, right, bottom = scaled
-        yolo_box = to_yolo(full_w, full_h, left, top, right, bottom)
+        yolo_box = _xyxy_to_yolo_norm_list(full_w, full_h, left, top, right, bottom)
         label = item.get("label") or item.get("class") or item.get("name")
         results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox"))
         if len(results) >= limit:
@@ -2402,10 +2183,10 @@ def _qwen_bbox_sam_results(
             multimask_output=False,
         )
         mask = masks[0]
-        left, top, right, bottom = mask_to_bounding_box(mask)
+        left, top, right, bottom = _mask_to_bounding_box(mask)
         if right <= left or bottom <= top:
             continue
-        yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+        yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
         label = item.get("label") or item.get("class") or item.get("name")
         results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox_sam"))
         if len(results) >= limit:
@@ -2445,10 +2226,10 @@ def _qwen_point_results(
             multimask_output=False,
         )
         mask = masks[0]
-        left, top, right, bottom = mask_to_bounding_box(mask)
+        left, top, right, bottom = _mask_to_bounding_box(mask)
         if right <= left or bottom <= top:
             continue
-        yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+        yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
         label = item.get("label") or item.get("class") or item.get("name")
         results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="point"))
         if len(results) >= limit:
@@ -2519,7 +2300,7 @@ def _sam3_text_detections(
         x_min, y_min, x_max, y_max = coords[:4]
         if x_max <= x_min or y_max <= y_min:
             continue
-        yolo_box = to_yolo(width, height, x_min, y_min, x_max, y_max)
+        yolo_box = _xyxy_to_yolo_norm_list(width, height, x_min, y_min, x_max, y_max)
         score_val = None
         if idx < len(scores_iter):
             try:
@@ -2544,7 +2325,7 @@ def _sam3_text_detections(
         mask_value = None
         if masks_arr is not None and idx < len(masks_arr):
             mask_value = masks_arr[idx]
-            mask_payload = encode_binary_mask(mask_value)
+            mask_payload = _encode_binary_mask_impl(mask_value, max_bytes=MASK_ENCODE_MAX_BYTES)
         if collected_masks is not None:
             collected_masks.append(mask_value)
         detections.append(
@@ -2562,10 +2343,10 @@ def _sam3_text_detections(
     if detections or masks_arr is None:
         return detections
     for idx, mask in enumerate(masks_arr):
-        x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+        x_min, y_min, x_max, y_max = _mask_to_bounding_box(mask)
         if x_max <= x_min or y_max <= y_min:
             continue
-        yolo_box = to_yolo(width, height, x_min, y_min, x_max, y_max)
+        yolo_box = _xyxy_to_yolo_norm_list(width, height, x_min, y_min, x_max, y_max)
         score_val = None
         if idx < len(scores_iter):
             try:
@@ -2591,7 +2372,7 @@ def _sam3_text_detections(
                 qwen_label=text_prompt,
                 source="sam3_text",
                 score=score_val,
-                mask=encode_binary_mask(mask),
+                mask=_encode_binary_mask_impl(mask, max_bytes=MASK_ENCODE_MAX_BYTES),
                 simplify_epsilon=simplify_epsilon,
             )
         )
@@ -2887,7 +2668,7 @@ def _run_sam3_visual_inference(
             bbox = det.bbox or []
             if len(bbox) < 4:
                 continue
-            det_xyxy = yolo_to_corners(bbox, pil_img.width, pil_img.height)
+            det_xyxy = _yolo_to_xyxy_int(bbox, pil_img.width, pil_img.height)
             if _iou(seed_xyxy, det_xyxy) > 0.9:
                 continue
             filtered_dets.append(det)
@@ -3091,7 +2872,7 @@ def _run_sam3_visual_inference_multi(
             bbox = det.bbox or []
             if len(bbox) < 4:
                 continue
-            det_xyxy = yolo_to_corners(bbox, pil_img.width, pil_img.height)
+            det_xyxy = _yolo_to_xyxy_int(bbox, pil_img.width, pil_img.height)
             if any(_iou(seed_xyxy, det_xyxy) > 0.9 for seed_xyxy in seed_boxes_xyxy):
                 continue
             filtered_dets.append(det)
@@ -3136,7 +2917,7 @@ def _ensure_qwen_ready():
         ):
             return qwen_model, qwen_processor
         try:
-            device = _resolve_qwen_device()
+            device = _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
         except RuntimeError as exc:  # noqa: BLE001
             qwen_last_error = str(exc)
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}") from exc
@@ -3194,7 +2975,7 @@ def _ensure_qwen_ready():
             processor_source = str(adapter_path) if adapter_path else str(base_model_id)
             model, processor = _load_with_online_retry(str(base_model_id), processor_source)
         except Exception as exc:  # noqa: BLE001
-            fallback_id = _strip_qwen_model_suffix(str(base_model_id))
+            fallback_id = _strip_qwen_model_suffix_impl(str(base_model_id))
             if fallback_id:
                 try:
                     logger.warning("Qwen model %s not found; falling back to %s", base_model_id, fallback_id)
@@ -3202,14 +2983,14 @@ def _ensure_qwen_ready():
                     model, processor = _load_with_online_retry(str(fallback_id), processor_source)
                 except Exception as fallback_exc:  # noqa: BLE001
                     qwen_last_error = str(fallback_exc)
-                    detail = _format_qwen_load_error(fallback_exc)
+                    detail = _format_qwen_load_error_impl(fallback_exc, torch_module=torch)
                     raise HTTPException(
                         status_code=HTTP_503_SERVICE_UNAVAILABLE,
                         detail=f"qwen_load_failed:{detail}",
                     ) from fallback_exc
             else:
                 qwen_last_error = str(exc)
-                detail = _format_qwen_load_error(exc)
+                detail = _format_qwen_load_error_impl(exc, torch_module=torch)
                 raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{detail}") from exc
         qwen_model = model
         qwen_processor = processor
@@ -3247,15 +3028,6 @@ def _unload_qwen_runtime() -> None:
     qwen_caption_order = state["qwen_caption_order"]
 
 
-def _evict_qwen_caption_entry(cache_key: str, cache_entry: Optional[Tuple[Any, Any]]) -> None:
-    _evict_qwen_caption_entry_impl(
-        cache_key,
-        cache_entry,
-        torch_module=torch,
-        gc_module=gc,
-    )
-
-
 def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     global qwen_device, qwen_last_error
     global qwen_caption_cache, qwen_caption_order
@@ -3276,19 +3048,24 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
             process_vision_info=process_vision_info,
             packaging_version=packaging_version,
             min_transformers=QWEN_MIN_TRANSFORMERS,
-            resolve_device_fn=_resolve_qwen_device,
+            resolve_device_fn=lambda: _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch),
             device_pref=QWEN_DEVICE_PREF,
             torch_module=torch,
             load_qwen_model_fn=_load_qwen_vl_model,
             hf_offline_enabled_fn=_hf_offline_enabled,
             set_hf_offline_fn=_set_hf_offline,
             enable_hf_offline_defaults_fn=_enable_hf_offline_defaults,
-            strip_model_suffix_fn=_strip_qwen_model_suffix,
-            format_load_error_fn=_format_qwen_load_error,
+            strip_model_suffix_fn=_strip_qwen_model_suffix_impl,
+            format_load_error_fn=lambda exc: _format_qwen_load_error_impl(exc, torch_module=torch),
             min_pixels=QWEN_MIN_PIXELS,
             max_pixels=QWEN_MAX_PIXELS,
             caption_cache_limit=QWEN_CAPTION_CACHE_LIMIT,
-            evict_entry_fn=_evict_qwen_caption_entry,
+            evict_entry_fn=lambda cache_key, cache_entry: _evict_qwen_caption_entry_impl(
+                cache_key,
+                cache_entry,
+                torch_module=torch,
+                gc_module=gc,
+            ),
             logger=logger,
         )
     except RuntimeError as exc:  # noqa: BLE001
@@ -3301,58 +3078,8 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     return model, processor
 
 
-def _resolve_qwen_variant_model_id(base_model_id: str, variant: Optional[str]) -> str:
-    return _resolve_qwen_variant_model_id_impl(base_model_id, variant)
+## NOTE: caption prompt helpers call *_impl directly to avoid wrapper drift.
 
-
-def _strip_qwen_model_suffix(model_id: str) -> Optional[str]:
-    return _strip_qwen_model_suffix_impl(model_id)
-
-
-def _caption_glossary_map(labelmap_glossary: Optional[str], labels: Sequence[str]) -> Dict[str, List[str]]:
-    return _caption_glossary_map_impl(labelmap_glossary, labels)
-
-
-def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[str]]] = None) -> str:
-    return _caption_preferred_label_impl(label, glossary_map)
-
-
-def _build_qwen_caption_prompt(
-    user_prompt: str,
-    label_hints: Sequence[QwenCaptionHint],
-    image_width: int,
-    image_height: int,
-    include_counts: bool,
-    include_coords: bool,
-    max_boxes: int,
-    detailed_mode: bool,
-    restrict_to_labels: bool = True,
-    labelmap_glossary: Optional[str] = None,
-) -> Tuple[str, Dict[str, int], int, bool]:
-    return _build_qwen_caption_prompt_impl(
-        user_prompt,
-        label_hints,
-        image_width,
-        image_height,
-        include_counts,
-        include_coords,
-        max_boxes,
-        detailed_mode,
-        restrict_to_labels=restrict_to_labels,
-        labelmap_glossary=labelmap_glossary,
-    )
-
-
-def _collapse_whitespace(text: str) -> str:
-    return _collapse_whitespace_impl(text)
-
-
-def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple[str, bool]:
-    return _extract_caption_from_text_impl(text, marker)
-
-
-def _caption_needs_english_rewrite(text: str) -> bool:
-    return _caption_needs_english_rewrite_impl(text)
 
 _CAPTION_GENERIC_OPENERS = (
     "an aerial view",
@@ -3362,36 +3089,6 @@ _CAPTION_GENERIC_OPENERS = (
     "a bird's-eye view",
     "overhead view",
 )
-
-
-def _caption_starts_generic(text: str) -> bool:
-    return _caption_starts_generic_impl(text)
-
-
-def _caption_missing_labels(
-    text: str,
-    counts: Dict[str, int],
-    glossary_map: Optional[Dict[str, List[str]]] = None,
-) -> List[str]:
-    return _caption_missing_labels_impl(text, counts, glossary_map)
-
-
-def _caption_needs_refine(
-    caption: str,
-    counts: Dict[str, int],
-    detailed_mode: bool,
-    include_counts: bool,
-    glossary_map: Optional[Dict[str, List[str]]] = None,
-) -> Tuple[bool, List[str]]:
-    return _caption_needs_refine_impl(caption, counts, detailed_mode, include_counts, glossary_map)
-
-def _format_qwen_load_error(exc: Exception) -> str:
-    return _format_qwen_load_error_impl(exc, torch_module=torch)
-
-
-def _sanitize_qwen_caption(text: str) -> str:
-    return _sanitize_qwen_caption_impl(text)
-
 
 _QWEN_THINKING_REASONING_RE = re.compile(
     r"(?:\bgot it\b|\blet'?s\b|\bfirst\b|\bsecond\b|\bthird\b|\bstep\b|\bi need\b|\bnow\b|\bthe task\b)",
@@ -3403,122 +3100,7 @@ _QWEN_CAPTION_META_RE = re.compile(
 )
 
 
-def _thinking_caption_needs_cleanup(cleaned: str, raw: Optional[str]) -> bool:
-    return _thinking_caption_needs_cleanup_impl(cleaned, raw)
-
-
-def _caption_needs_completion(caption: str) -> bool:
-    return _caption_needs_completion_impl(caption)
-
-
-def _caption_has_meta(caption: str) -> bool:
-    return _caption_has_meta_impl(caption)
-
-
-def _caption_needs_short_form(caption: str, max_words: int = 80, max_sentences: int = 2) -> bool:
-    return _caption_needs_short_form_impl(caption, max_words=max_words, max_sentences=max_sentences)
-
-
-def _resolve_qwen_caption_decode(payload: QwenCaptionRequest, is_thinking: bool) -> Dict[str, Any]:
-    return _resolve_qwen_caption_decode_impl(payload, is_thinking)
-
-
-def _adjust_prompt_for_thinking(prompt_text: str) -> str:
-    return _adjust_prompt_for_thinking_impl(prompt_text)
-
-
-def _run_qwen_caption_cleanup(
-    prompt: str,
-    pil_img: Image.Image,
-    max_new_tokens: int,
-    base_model_id: str,
-    use_caption_cache: bool,
-    model_id_override: Optional[str] = None,
-    runtime_override: Optional[Tuple[Any, Any]] = None,
-    allowed_labels: Optional[List[str]] = None,
-    strict: bool = False,
-    minimal_edit: bool = False,
-) -> str:
-    return _run_qwen_caption_cleanup_impl(
-        prompt,
-        pil_img,
-        max_new_tokens,
-        base_model_id,
-        use_caption_cache,
-        model_id_override=model_id_override,
-        runtime_override=runtime_override,
-        allowed_labels=allowed_labels,
-        strict=strict,
-        minimal_edit=minimal_edit,
-        run_qwen_inference_fn=_run_qwen_inference,
-        resolve_variant_fn=_resolve_qwen_variant_model_id,
-        extract_caption_fn=_extract_caption_from_text,
-        sanitize_caption_fn=_sanitize_qwen_caption,
-    )
-
-
-def _run_qwen_caption_merge(
-    draft_caption: str,
-    windowed_captions: Sequence[Tuple[int, int, int, str]],
-    *,
-    pil_img: Image.Image,
-    base_model_id: str,
-    runtime_resolver: Callable[[str], Tuple[Any, Any]],
-    max_new_tokens: int,
-    glossary_line: Optional[str] = None,
-) -> str:
-    return _run_qwen_caption_merge_impl(
-        draft_caption,
-        windowed_captions,
-        pil_img=pil_img,
-        base_model_id=base_model_id,
-        runtime_resolver=runtime_resolver,
-        max_new_tokens=max_new_tokens,
-        glossary_line=glossary_line,
-        run_qwen_inference_fn=_run_qwen_inference,
-        resolve_variant_fn=_resolve_qwen_variant_model_id,
-        extract_caption_fn=_extract_caption_from_text,
-        sanitize_caption_fn=_sanitize_qwen_caption,
-    )
-
-
-def _resolve_qwen_window_size(
-    requested: Optional[int],
-    image_width: int,
-    image_height: int,
-    *,
-    overlap: Optional[float] = None,
-) -> int:
-    return _resolve_qwen_window_size_impl(
-        requested,
-        image_width,
-        image_height,
-        overlap=overlap,
-        default_size=QWEN_WINDOW_DEFAULT_SIZE,
-        default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
-    )
-
-
-def _resolve_qwen_window_overlap(requested: Optional[float]) -> float:
-    return _resolve_qwen_window_overlap_impl(requested, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP)
-
-
-def _window_positions(
-    total: int,
-    window: int,
-    overlap: float,
-    *,
-    force_two: bool = False,
-) -> List[int]:
-    return _window_positions_impl(total, window, overlap, force_two=force_two)
-
-
-def _allowed_caption_labels(label_hints: Sequence[QwenCaptionHint]) -> List[str]:
-    return _allowed_caption_labels_impl(label_hints)
-
-
-def _caption_is_degenerate(caption: str) -> bool:
-    return _caption_is_degenerate_impl(caption)
+## NOTE: caption cleanup/merge helpers call *_impl directly to avoid wrapper drift.
 
 
 def _group_hints_by_window(
@@ -3657,7 +3239,7 @@ def _run_qwen_inference(
             max_length=max_input_len,
             return_tensors="pt",
         )
-    device = qwen_device or _resolve_qwen_device()
+    device = qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
     inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
         "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
@@ -3847,7 +3429,7 @@ def _run_qwen_chat(
             max_length=max_input_len,
             return_tensors="pt",
         )
-    device = qwen_device or _resolve_qwen_device()
+    device = qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
     inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
         "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
@@ -4039,7 +3621,7 @@ def _run_qwen_chat_stream(
             max_length=max_input_len,
             return_tensors="pt",
         )
-    device = qwen_device or _resolve_qwen_device()
+    device = qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
     inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
         "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
@@ -4171,42 +3753,7 @@ def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any], local_files_
     )
 
 
-def _generate_qwen_text(
-    prompt: str,
-    *,
-    max_new_tokens: int = 128,
-    use_system_prompt: bool = True,
-) -> str:
-    """Text-only generation with Qwen for small helper tasks (no images)."""
-    return _generate_qwen_text_impl(
-        prompt,
-        max_new_tokens=max_new_tokens,
-        use_system_prompt=use_system_prompt,
-        system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
-        ensure_qwen_ready_fn=_ensure_qwen_ready,
-        resolve_qwen_device_fn=_resolve_qwen_device,
-    )
-
-
-def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
-    """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
-    return _parse_prompt_candidates_impl(raw, seen, limit)
-
-
-def _generate_prompt_text(
-    prompt: str,
-    *,
-    max_new_tokens: int = 128,
-) -> str:
-    """
-    Text-only helper for prompt brainstorming/critique.
-    Uses Qwen (text-only) and returns empty string on failure.
-    """
-    return _generate_prompt_text_impl(
-        prompt,
-        max_new_tokens=max_new_tokens,
-        generate_text_fn=lambda text, tokens: _generate_qwen_text(text, max_new_tokens=tokens, use_system_prompt=False),
-    )
+## NOTE: Qwen text helpers call *_impl directly where needed.
 
 
 def resolve_image_payload(
@@ -4221,699 +3768,13 @@ def resolve_image_payload(
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
         pil_img = Image.fromarray(cached)
         return pil_img, cached, image_token
-    pil_img, np_img = _decode_image_base64(image_base64)
+    pil_img, np_img = _decode_image_base64_impl(image_base64, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
     token = hashlib.md5(np_img.tobytes()).hexdigest()
     _store_preloaded_image(token, np_img, variant)
     return pil_img, np_img, token
 
 
-class Base64Payload(BaseModel):
-    image_base64: str
-    uuid: Optional[str] = None
-    background_guard: Optional[bool] = None
-
-
-class PredictResponse(BaseModel):
-    prediction: str
-    proba: Optional[float] = None
-    second_label: Optional[str] = None
-    second_proba: Optional[float] = None
-    margin: Optional[float] = None
-    error: Optional[str] = None
-    uuid: Optional[str] = None
-
-
-class BboxModel(BaseModel):
-    className: str
-    x: float
-    y: float
-    width: float
-    height: float
-
-
-class CropImage(BaseModel):
-    image_base64: str
-    originalName: str
-    bboxes: List[BboxModel]
-
-
-class CropZipRequest(BaseModel):
-    images: List[CropImage]
-
-
-class PointPrompt(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    point_x: float
-    point_y: float
-    uuid: Optional[str] = None
-    sam_variant: Optional[str] = None
-    image_name: Optional[str] = None
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_point_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        return values
-
-
-class BboxPrompt(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    bbox_left: float
-    bbox_top: float
-    bbox_width: float
-    bbox_height: float
-    uuid: Optional[str] = None
-    sam_variant: Optional[str] = None
-    image_name: Optional[str] = None
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_bbox_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        return values
-
-
-class SamPreloadRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    sam_variant: Optional[str] = None
-    preload_generation: Optional[int] = None
-    image_name: Optional[str] = None
-    slot: Optional[str] = "current"
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_preload_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        if values.get("slot") and values.get("slot") != "current" and not values.get("image_name"):
-            raise ValueError("image_name_required_for_slot")
-        return values
-
-
-class SamPreloadResponse(BaseModel):
-    status: str = "ready"
-    width: int
-    height: int
-    token: str
-
-
 sam_preload_manager = SamPreloadManager()
-
-
-class SamSlotStatus(BaseModel):
-    slot: str
-    image_name: Optional[str]
-    token: Optional[str]
-    variant: Optional[str]
-    width: Optional[int]
-    height: Optional[int]
-    busy: bool
-    last_loaded: float
-    enabled: bool = True
-    memory_bytes: Optional[int] = None
-
-
-class SamActivateRequest(BaseModel):
-    image_name: str
-    sam_variant: Optional[str] = None
-
-
-class SamActivateResponse(BaseModel):
-    status: str
-    slot: Optional[str] = None
-    token: Optional[str] = None
-
-
-class PredictorSettings(BaseModel):
-    max_predictors: int
-    min_predictors: int
-    max_supported_predictors: int
-    active_predictors: int
-    loaded_predictors: int
-    process_ram_mb: float
-    total_ram_mb: float
-    available_ram_mb: float
-    image_ram_mb: float
-    gpu_total_mb: Optional[float] = None
-    gpu_free_mb: Optional[float] = None
-    gpu_compute_capability: Optional[str] = None
-    gpu_device_count: Optional[int] = None
-
-
-class PredictorSettingsUpdate(BaseModel):
-    max_predictors: int
-
-
-class MultiPointPrompt(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    positive_points: List[List[float]] = []
-    negative_points: List[List[float]] = []
-    uuid: Optional[str] = None
-    sam_variant: Optional[str] = None
-    image_name: Optional[str] = None
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_multi_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        return values
-
-
-class YoloBboxOutput(BaseModel):
-    class_id: str
-    bbox: List[float]
-    uuid: Optional[str] = None
-    image_token: Optional[str] = None
-    mask: Optional[Dict[str, Any]] = None
-    simplify_epsilon: Optional[float] = None
-
-
-class Sam3TextPrompt(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    text_prompt: str
-    threshold: float = 0.5
-    mask_threshold: float = 0.5
-    simplify_epsilon: Optional[float] = None
-    sam_variant: Optional[str] = None
-    image_name: Optional[str] = None
-    max_results: Optional[int] = None
-    min_size: Optional[int] = None
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_text_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        if not values.get("text_prompt"):
-            raise ValueError("text_prompt_required")
-        min_size = values.get("min_size")
-        if min_size is not None:
-            try:
-                min_size_int = max(0, int(min_size))
-            except (TypeError, ValueError):
-                min_size_int = 0
-            values["min_size"] = min_size_int
-        eps = values.get("simplify_epsilon")
-        if eps is not None:
-            try:
-                eps_val = float(eps)
-            except (TypeError, ValueError):
-                eps_val = None
-            values["simplify_epsilon"] = eps_val if eps_val is None or eps_val >= 0 else 0.0
-        return values
-
-
-class Sam3VisualPrompt(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    bbox_left: Optional[float] = None
-    bbox_top: Optional[float] = None
-    bbox_width: Optional[float] = None
-    bbox_height: Optional[float] = None
-    bboxes: Optional[List[List[float]]] = None
-    bbox_labels: Optional[List[bool]] = None
-    threshold: float = 0.5
-    mask_threshold: float = 0.5
-    simplify_epsilon: Optional[float] = None
-    sam_variant: Optional[str] = None
-    image_name: Optional[str] = None
-    max_results: Optional[int] = None
-    min_size: Optional[int] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_visual_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        raw_bboxes = values.get("bboxes")
-        cleaned_bboxes: List[Tuple[float, float, float, float]] = []
-        if isinstance(raw_bboxes, list) and raw_bboxes:
-            for entry in raw_bboxes:
-                coords = None
-                if isinstance(entry, Mapping):
-                    coords = [
-                        entry.get("left", entry.get("x")),
-                        entry.get("top", entry.get("y")),
-                        entry.get("width", entry.get("w")),
-                        entry.get("height", entry.get("h")),
-                    ]
-                else:
-                    coords = entry
-                if not isinstance(coords, (list, tuple)) or len(coords) < 4:
-                    continue
-                try:
-                    cleaned = tuple(float(coords[idx]) for idx in range(4))
-                except (TypeError, ValueError):
-                    continue
-                if cleaned[2] <= 0 or cleaned[3] <= 0:
-                    continue
-                cleaned_bboxes.append(cleaned)
-        if cleaned_bboxes:
-            values["bboxes"] = cleaned_bboxes
-        else:
-            values["bboxes"] = None
-            for key in ("bbox_left", "bbox_top", "bbox_width", "bbox_height"):
-                raw = values.get(key)
-                try:
-                    values[key] = float(raw)
-                except (TypeError, ValueError):
-                    raise ValueError(f"invalid_{key}")
-            if values["bbox_width"] <= 0 or values["bbox_height"] <= 0:
-                raise ValueError("invalid_bbox_dims")
-        raw_labels = values.get("bbox_labels")
-        cleaned_labels: Optional[List[bool]] = None
-        if isinstance(raw_labels, (list, tuple)):
-            cleaned_labels = []
-            for entry in raw_labels:
-                if isinstance(entry, bool):
-                    cleaned_labels.append(entry)
-                elif isinstance(entry, (int, float)):
-                    cleaned_labels.append(bool(entry))
-                elif isinstance(entry, str):
-                    cleaned_labels.append(entry.strip().lower() in {"1", "true", "yes", "pos", "positive"})
-                else:
-                    cleaned_labels.append(True)
-        if values.get("bboxes"):
-            if cleaned_labels is None:
-                values["bbox_labels"] = None
-            else:
-                if len(cleaned_labels) < len(values["bboxes"]):
-                    cleaned_labels.extend([True] * (len(values["bboxes"]) - len(cleaned_labels)))
-                values["bbox_labels"] = cleaned_labels[: len(values["bboxes"])]
-        else:
-            values["bbox_labels"] = None
-        min_size = values.get("min_size")
-        if min_size is not None:
-            try:
-                values["min_size"] = max(0, int(min_size))
-            except (TypeError, ValueError):
-                values["min_size"] = 0
-        eps = values.get("simplify_epsilon")
-        if eps is not None:
-            try:
-                eps_val = float(eps)
-            except (TypeError, ValueError):
-                eps_val = None
-            values["simplify_epsilon"] = eps_val if eps_val is None or eps_val >= 0 else 0.0
-        return values
-
-
-class SamPointAutoResponse(BaseModel):
-    prediction: Optional[str] = None
-    proba: Optional[float] = None
-    second_label: Optional[str] = None
-    second_proba: Optional[float] = None
-    margin: Optional[float] = None
-    bbox: List[float]
-    uuid: Optional[str] = None
-    error: Optional[str] = None
-    image_token: Optional[str] = None
-    score: Optional[float] = None
-    mask: Optional[Dict[str, Any]] = None
-    simplify_epsilon: Optional[float] = None
-
-
-class QwenDetection(BaseModel):
-    bbox: List[float]
-    qwen_label: Optional[str] = None
-    source: Literal["bbox", "point", "bbox_sam", "sam3_text"]
-    score: Optional[float] = None
-    mask: Optional[Dict[str, Any]] = None
-    simplify_epsilon: Optional[float] = None
-    class_id: Optional[int] = None
-    class_name: Optional[str] = None
-    clip_head_prob: Optional[float] = None
-    clip_head_margin: Optional[float] = None
-    clip_head_bg_prob: Optional[float] = None
-    clip_head_bg_margin: Optional[float] = None
-
-
-class QwenInferenceRequest(BaseModel):
-    prompt: Optional[str] = None
-    item_list: Optional[str] = None
-    image_type: Optional[str] = None
-    extra_context: Optional[str] = None
-    prompt_type: Literal["bbox", "point", "bbox_sam"] = "bbox"
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    sam_variant: Optional[str] = None
-    image_name: Optional[str] = None
-    max_results: Optional[int] = 8
-
-    @root_validator(skip_on_failure=True)
-    def _validate_qwen_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        prompt = (values.get("prompt") or "").strip()
-        items = (values.get("item_list") or "").strip()
-        if prompt:
-            values["prompt"] = prompt
-        elif items:
-            values["item_list"] = items
-        else:
-            raise ValueError("prompt_or_items_required")
-        max_results = values.get("max_results")
-        if max_results is not None:
-            try:
-                max_int = int(max_results)
-            except (TypeError, ValueError):
-                max_int = 8
-            values["max_results"] = max(1, min(max_int, 50))
-        else:
-            values["max_results"] = 8
-        return values
-
-
-class QwenInferenceResponse(BaseModel):
-    boxes: List[QwenDetection] = Field(default_factory=list)
-    raw_response: str
-    prompt: str
-    prompt_type: Literal["bbox", "point", "bbox_sam"]
-    warnings: List[str] = Field(default_factory=list)
-    image_token: Optional[str] = None
-
-
-class QwenCaptionHint(BaseModel):
-    label: str
-    bbox: Optional[List[float]] = None
-    confidence: Optional[float] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_hint(cls, values):  # noqa: N805
-        label = (values.get("label") or "").strip()
-        if not label:
-            raise ValueError("label_required")
-        values["label"] = label
-        bbox = values.get("bbox")
-        if bbox is not None:
-            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-                raise ValueError("invalid_bbox")
-            cleaned = []
-            for val in bbox:
-                try:
-                    cleaned.append(float(val))
-                except (TypeError, ValueError):
-                    cleaned.append(0.0)
-            values["bbox"] = cleaned
-        return values
-
-
-class QwenCaptionRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    user_prompt: Optional[str] = None
-    label_hints: Optional[List[QwenCaptionHint]] = None
-    image_width: Optional[int] = None
-    image_height: Optional[int] = None
-    include_counts: Optional[bool] = True
-    include_coords: Optional[bool] = True
-    max_boxes: Optional[int] = 0
-    max_new_tokens: Optional[int] = 256
-    model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
-    model_id: Optional[str] = None
-    final_answer_only: Optional[bool] = True
-    two_stage_refine: Optional[bool] = False
-    caption_mode: Optional[Literal["full", "windowed"]] = "full"
-    window_size: Optional[int] = None
-    window_overlap: Optional[float] = None
-    restrict_to_labels: Optional[bool] = True
-    caption_all_windows: Optional[bool] = True
-    unload_others: Optional[bool] = False
-    force_unload: Optional[bool] = None
-    multi_model_cache: Optional[bool] = False
-    fast_mode: Optional[bool] = False
-    use_sampling: Optional[bool] = True
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    top_k: Optional[int] = None
-    presence_penalty: Optional[float] = None
-    labelmap_glossary: Optional[str] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_caption_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        user_prompt = (values.get("user_prompt") or "").strip()
-        values["user_prompt"] = user_prompt
-        max_boxes = values.get("max_boxes")
-        if max_boxes is not None:
-            try:
-                max_boxes_val = int(max_boxes)
-            except (TypeError, ValueError):
-                max_boxes_val = 0
-            values["max_boxes"] = max(0, min(max_boxes_val, 200))
-        else:
-            values["max_boxes"] = 0
-        max_tokens = values.get("max_new_tokens")
-        if max_tokens is not None:
-            try:
-                max_tokens_val = int(max_tokens)
-            except (TypeError, ValueError):
-                max_tokens_val = 256
-            values["max_new_tokens"] = max(32, min(max_tokens_val, 2000))
-        else:
-            values["max_new_tokens"] = 256
-        temp = values.get("temperature")
-        if temp is not None:
-            try:
-                values["temperature"] = float(temp)
-            except (TypeError, ValueError):
-                values["temperature"] = None
-        top_p = values.get("top_p")
-        if top_p is not None:
-            try:
-                values["top_p"] = float(top_p)
-            except (TypeError, ValueError):
-                values["top_p"] = None
-        top_k = values.get("top_k")
-        if top_k is not None:
-            try:
-                values["top_k"] = int(top_k)
-            except (TypeError, ValueError):
-                values["top_k"] = None
-        presence = values.get("presence_penalty")
-        if presence is not None:
-            try:
-                values["presence_penalty"] = float(presence)
-            except (TypeError, ValueError):
-                values["presence_penalty"] = None
-        for key in ("image_width", "image_height"):
-            val = values.get(key)
-            if val is None:
-                continue
-            try:
-                values[key] = max(1, int(val))
-            except (TypeError, ValueError):
-                values[key] = None
-        caption_mode = (values.get("caption_mode") or "full").strip().lower()
-        if caption_mode == "hybrid":
-            caption_mode = "windowed"
-        if caption_mode not in {"full", "windowed"}:
-            caption_mode = "full"
-        values["caption_mode"] = caption_mode
-        window_size = values.get("window_size")
-        if window_size is not None:
-            try:
-                values["window_size"] = max(64, int(window_size))
-            except (TypeError, ValueError):
-                values["window_size"] = None
-        window_overlap = values.get("window_overlap")
-        if window_overlap is not None:
-            try:
-                values["window_overlap"] = float(window_overlap)
-            except (TypeError, ValueError):
-                values["window_overlap"] = None
-        model_id = (values.get("model_id") or "").strip()
-        values["model_id"] = model_id or None
-        glossary = values.get("labelmap_glossary")
-        if glossary is not None:
-            values["labelmap_glossary"] = str(glossary).strip() or None
-        values["final_answer_only"] = bool(values.get("final_answer_only", True))
-        values["two_stage_refine"] = bool(values.get("two_stage_refine", False))
-        return values
-
-
-class QwenCaptionResponse(BaseModel):
-    caption: str
-    used_counts: Dict[str, int] = Field(default_factory=dict)
-    used_boxes: int
-    truncated: bool
-
-
-class QwenPrepassRequest(BaseModel):
-    dataset_id: Optional[str] = None
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    image_name: Optional[str] = None
-    model_id: Optional[str] = None
-    model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
-    labelmap: Optional[List[str]] = None
-    labelmap_glossary: Optional[str] = None
-    detector_mode: Optional[Literal["yolo", "rfdetr"]] = "yolo"
-    detector_id: Optional[str] = None
-    enable_yolo: Optional[bool] = True
-    enable_rfdetr: Optional[bool] = True
-    yolo_id: Optional[str] = None
-    rfdetr_id: Optional[str] = None
-    sahi_window_size: Optional[int] = None
-    sahi_overlap_ratio: Optional[float] = None
-    classifier_id: Optional[str] = None
-    sam_variant: Optional[str] = "sam3"
-    enable_sam3_text: Optional[bool] = True
-    sam3_text_synonym_budget: Optional[int] = 10
-    sam3_text_window_extension: Optional[bool] = True
-    sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
-    sam3_text_window_size: Optional[int] = None
-    sam3_text_window_overlap: Optional[float] = None
-    enable_sam3_similarity: Optional[bool] = True
-    similarity_min_exemplar_score: Optional[float] = 0.6
-    similarity_mid_conf_low: Optional[float] = None
-    similarity_mid_conf_high: Optional[float] = None
-    similarity_mid_conf_class_count: Optional[int] = None
-    similarity_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
-    similarity_window_size: Optional[int] = None
-    similarity_window_overlap: Optional[float] = None
-    similarity_window_extension: Optional[bool] = False
-    prepass_mode: Optional[str] = "ensemble_sahi_sam3_text_similarity"
-    prepass_only: Optional[bool] = True
-    prepass_finalize: Optional[bool] = True
-    prepass_keep_all: Optional[bool] = False
-    prepass_sam3_text_thr: Optional[float] = 0.2
-    prepass_similarity_score: Optional[float] = 0.3
-    prepass_similarity_per_class: Optional[int] = None
-    prepass_inspect_topk: Optional[int] = None
-    prepass_inspect_score: Optional[float] = None
-    prepass_inspect_quadrants: Optional[bool] = None
-    prepass_caption: Optional[bool] = True
-    prepass_caption_profile: Optional[str] = "light"
-    prepass_caption_model_id: Optional[str] = None
-    prepass_caption_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = None
-    prepass_caption_max_tokens: Optional[int] = None
-    use_detection_overlay: Optional[bool] = True
-    grid_cols: Optional[int] = 2
-    grid_rows: Optional[int] = 2
-    grid_overlap_ratio: Optional[float] = None
-    overlay_dot_radius: Optional[int] = None
-    tighten_fp: Optional[bool] = True
-    detector_conf: Optional[float] = 0.45
-    detector_iou: Optional[float] = None
-    detector_merge_iou: Optional[float] = None
-    sam3_score_thr: Optional[float] = 0.2
-    sam3_mask_threshold: Optional[float] = 0.2
-    classifier_min_prob: Optional[float] = 0.35
-    classifier_margin: Optional[float] = 0.05
-    classifier_bg_margin: Optional[float] = 0.05
-    scoreless_iou: Optional[float] = 0.0
-    ensemble_enabled: Optional[bool] = False
-    ensemble_job_id: Optional[str] = None
-    max_detections: Optional[int] = 2000
-    iou: Optional[float] = 0.75
-    cross_iou: Optional[float] = None
-    max_new_tokens: Optional[int] = 4096
-    thinking_effort: Optional[float] = None
-    thinking_scale_factor: Optional[float] = None
-    immediate_action_bias: Optional[bool] = True
-    immediate_action_min_chars: Optional[int] = 200
-    immediate_action_min_seconds: Optional[float] = 2.0
-    immediate_action_logit_bias: Optional[float] = 6.0
-    trace_verbose: Optional[bool] = False
-
-
-class CalibrationRequest(BaseModel):
-    dataset_id: str
-    max_images: Optional[int] = 2000
-    seed: Optional[int] = 42
-    enable_yolo: Optional[bool] = True
-    enable_rfdetr: Optional[bool] = True
-    base_fp_ratio: Optional[float] = 0.2
-    relax_fp_ratio: Optional[float] = 0.2
-    recall_floor: Optional[float] = 0.6
-    per_class_thresholds: Optional[bool] = True
-    threshold_steps: Optional[int] = 200
-    optimize_metric: Optional[str] = "f1"
-    sam3_text_synonym_budget: Optional[int] = 10
-    sam3_text_window_extension: Optional[bool] = True
-    sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
-    sam3_text_window_size: Optional[int] = None
-    sam3_text_window_overlap: Optional[float] = None
-    prepass_sam3_text_thr: Optional[float] = 0.2
-    prepass_similarity_score: Optional[float] = 0.3
-    sam3_score_thr: Optional[float] = 0.2
-    sam3_mask_threshold: Optional[float] = 0.2
-    similarity_min_exemplar_score: Optional[float] = 0.6
-    similarity_window_extension: Optional[bool] = False
-    detector_conf: Optional[float] = 0.45
-    sahi_window_size: Optional[int] = None
-    sahi_overlap_ratio: Optional[float] = None
-    classifier_id: Optional[str] = None
-    support_iou: Optional[float] = 0.5
-    context_radius: Optional[float] = 0.075
-    label_iou: Optional[float] = 0.9
-    eval_iou: Optional[float] = 0.5
-    eval_iou_grid: Optional[str] = None
-    dedupe_iou: Optional[float] = 0.75
-    dedupe_iou_grid: Optional[str] = None
-    scoreless_iou: Optional[float] = 0.0
-    model_hidden: Optional[str] = "256,128"
-    model_dropout: Optional[float] = 0.1
-    model_epochs: Optional[int] = 20
-    model_lr: Optional[float] = 1e-3
-    model_weight_decay: Optional[float] = 1e-4
-    model_seed: Optional[int] = 42
-    calibration_model: Optional[Literal["mlp", "xgb"]] = "xgb"
-    xgb_max_depth: Optional[int] = None
-    xgb_n_estimators: Optional[int] = None
-    xgb_learning_rate: Optional[float] = None
-    xgb_subsample: Optional[float] = None
-    xgb_colsample_bytree: Optional[float] = None
-    xgb_min_child_weight: Optional[float] = None
-    xgb_gamma: Optional[float] = None
-    xgb_reg_lambda: Optional[float] = None
-    xgb_reg_alpha: Optional[float] = None
-    xgb_scale_pos_weight: Optional[float] = None
-    xgb_tree_method: Optional[str] = None
-    xgb_max_bin: Optional[int] = None
-    xgb_early_stopping_rounds: Optional[int] = None
-    xgb_log1p_counts: Optional[bool] = None
-    xgb_standardize: Optional[bool] = None
-
-
-class QwenPrepassResponse(BaseModel):
-    detections: List[Dict[str, Any]]
-    trace: List[AgentTraceEvent]
-    warnings: Optional[List[str]] = None
-    caption: Optional[str] = None
-    trace_path: Optional[str] = None
-    trace_full_path: Optional[str] = None
-
-
-class AgentToolCall(BaseModel):
-    name: str
-    arguments: Dict[str, Any] = Field(default_factory=dict)
-    call_id: Optional[str] = None
-
-
-class AgentToolResult(BaseModel):
-    name: str
-    result: Dict[str, Any] = Field(default_factory=dict)
-    error: Optional[str] = None
-
-
-class AgentTraceEvent(BaseModel):
-    step_id: int
-    phase: Literal["intent", "tool_call", "tool_result", "merge"] = "intent"
-    tool_name: Optional[str] = None
-    summary: Optional[str] = None
-    counts: Optional[Dict[str, int]] = None
-    windows: Optional[List[Dict[str, Any]]] = None
-    timestamp: Optional[float] = None
-    tool_input: Optional[Dict[str, Any]] = None
-    tool_output: Optional[Dict[str, Any]] = None
-    model_output: Optional[str] = None
-
-
 AGENT_TOOL_REGISTRY: Dict[str, Any] = {}
 _AGENT_ACTIVE_IMAGE_TOKEN: Optional[str] = None
 _AGENT_ACTIVE_IMAGE_BASE64: Optional[str] = None
@@ -5063,31 +3924,12 @@ def _agent_classifier_matches_labelmap(path: Path, labelmap: Sequence[str]) -> b
     )
 
 
-def _resolve_agent_clip_classifier_path(path_str: Optional[str]) -> Optional[Path]:
-    return _resolve_agent_clip_classifier_path_impl(
-        path_str,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
-        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
-        path_is_within_root_fn=_path_is_within_root,
-        http_exception_cls=HTTPException,
-    )
+## NOTE: clip classifier path resolution uses *_impl directly to avoid wrapper drift.
 
 
-def _load_clip_head_from_classifier(classifier_path: Path) -> Optional[Dict[str, Any]]:
-    return _load_clip_head_from_classifier_impl(
-        classifier_path,
-        joblib_load_fn=joblib.load,
-        http_exception_cls=HTTPException,
-        clip_head_background_indices_fn=_clip_head_background_indices,
-        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings,
-        infer_clip_model_fn=_infer_clip_model_from_embedding_dim,
-        active_clip_model_name=active_clip_model_name,
-        default_clip_model=DEFAULT_CLIP_MODEL,
-        logger=logger,
-    )
+## NOTE: clip head loader uses *_impl directly to avoid wrapper drift.
 
 
-_AgentToolRunner = None  # legacy tool runner removed
 
 
 def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
@@ -5267,7 +4109,14 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
                     _AGENT_ACTIVE_LABELMAP or [],
                     _AGENT_ACTIVE_GLOSSARY or "",
                     max_synonyms=10,
-                    generate_text_fn=_generate_qwen_text,
+                    generate_text_fn=lambda prompt, max_new_tokens=128, use_system_prompt=True: _generate_qwen_text_impl(
+                        prompt,
+                        max_new_tokens=max_new_tokens,
+                        use_system_prompt=use_system_prompt,
+                        system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
+                        ensure_qwen_ready_fn=_ensure_qwen_ready,
+                        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch),
+                    ),
                     extract_json_fn=_extract_balanced_json,
                     default_synonyms=_DEFAULT_SAM3_SYNONYMS,
                     label_key_fn=_glossary_label_key,
@@ -5520,7 +4369,7 @@ def _agent_tool_look_and_inspect(
                     decode_override={"temperature": 0.3, "top_p": 0.9},
                     model_id_override=model_id,
                 )
-                caption_text = _sanitize_qwen_caption(caption_raw)
+                caption_text = _sanitize_qwen_caption_impl(caption_raw)
             except Exception:
                 caption_text = ""
         register_summary: Optional[Dict[str, Any]] = None
@@ -5606,8 +4455,22 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
         resolve_dataset=_resolve_sam3_or_qwen_dataset,
         discover_yolo_labelmap=_discover_yolo_labelmap_impl,
         load_qwen_labelmap=_load_qwen_labelmap,
-        load_sam3_meta=_load_sam3_dataset_metadata,
-        load_qwen_meta=_load_qwen_dataset_metadata,
+        load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
+            dataset_dir,
+            meta_name=SAM3_DATASET_META_NAME,
+            load_json_metadata_fn=_load_json_metadata,
+            persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                dataset_dir_inner,
+                metadata,
+                meta_name=SAM3_DATASET_META_NAME,
+                logger=logger,
+            ),
+        ),
+        load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
+            dataset_dir,
+            meta_name=QWEN_METADATA_FILENAME,
+            load_json_metadata_fn=_load_json_metadata,
+        ),
         normalize_glossary=_normalize_labelmap_glossary,
         default_glossary_fn=_default_agent_glossary_for_labelmap,
         collect_labels=_collect_labels_from_qwen_jsonl_impl,
@@ -5923,34 +4786,7 @@ def _agent_record_grid_tool_usage(
 
 
 
-def _agent_context_store(
-    payload: Dict[str, Any],
-    *,
-    kind: str,
-    max_bytes: Optional[int] = None,
-) -> Dict[str, Any]:
-    return _agent_context_store_impl(
-        payload,
-        kind=kind,
-        max_bytes=int(max_bytes or PREPASS_CONTEXT_CHUNK_BYTES),
-        tile_store=_AGENT_TILE_CONTEXT_STORE,
-        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
-    )
-
-
-def _agent_context_chunk(
-    handle: str,
-    *,
-    chunk_index: int,
-    kind: str,
-) -> Dict[str, Any]:
-    return _agent_context_chunk_impl(
-        handle,
-        chunk_index=chunk_index,
-        kind=kind,
-        tile_store=_AGENT_TILE_CONTEXT_STORE,
-        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
-    )
+## NOTE: agent context helpers use *_impl directly to avoid wrapper drift.
 
 
 def _agent_overlay_crop_xyxy(
@@ -5990,29 +4826,7 @@ def _agent_merge_detections(
 
 
 
-def _resolve_classifier_batch_size() -> int:
-    return _resolve_classifier_batch()
-
-
-def _predict_proba_batched(
-    crops: Sequence[Image.Image],
-    head: Dict[str, Any],
-    *,
-    batch_size: int,
-) -> Optional[np.ndarray]:
-    empty_cache_fn = None
-    if torch.cuda.is_available():
-        empty_cache_fn = torch.cuda.empty_cache
-    return _predict_proba_batched_impl(
-        crops,
-        head,
-        batch_size=batch_size,
-        encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
-            items, head=head_obj, batch_size_override=bs
-        ),
-        predict_proba_fn=_clip_head_predict_proba,
-        empty_cache_fn=empty_cache_fn,
-    )
+## NOTE: classifier batch helpers use *_impl directly to avoid wrapper drift.
 
 
 def _agent_sanitize_detection_items(
@@ -6119,10 +4933,16 @@ def _agent_sanitize_detection_items(
             cleaned.append(base_entry)
 
     if pending and pil_img is not None and isinstance(classifier_head, dict):
-        proba_arr = _predict_proba_batched(
+        empty_cache_fn = torch.cuda.empty_cache if torch.cuda.is_available() else None
+        proba_arr = _predict_proba_batched_impl(
             pending_crops,
             classifier_head,
-            batch_size=_resolve_classifier_batch_size(),
+            batch_size=_resolve_classifier_batch(),
+            encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
+                items, head=head_obj, batch_size_override=bs
+            ),
+            predict_proba_fn=_clip_head_predict_proba,
+            empty_cache_fn=empty_cache_fn,
         )
         if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] != len(pending):
             rejected += len(pending)
@@ -6357,7 +5177,6 @@ def _agent_tool_zoom_and_detect(
     return result
 
 
-@_register_agent_tool("sam3_text")
 def _sam3_text_payloads_from_state(
     *,
     full_img: Image.Image,
@@ -6417,6 +5236,7 @@ def _sam3_text_payloads_from_state(
     return payloads, assigned_label, class_id
 
 
+@_register_agent_tool("sam3_text")
 def _agent_tool_sam3_text(
     image_base64: Optional[str] = None,
     image_token: Optional[str] = None,
@@ -6682,12 +5502,15 @@ def _agent_tool_qwen_infer(
         item_list = (item_list or "").strip()
         if not item_list:
             raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="agent_qwen_items_required")
-        manual_prompt = _render_qwen_prompt(
-            prompt_type,
-            items=item_list,
-            image_type=(image_type or "").strip() or None,
-            extra_context=(extra_context or "").strip() or None,
-        )
+    manual_prompt = _render_qwen_prompt_impl(
+        prompt_type,
+        items=item_list,
+        image_type=(image_type or "").strip() or None,
+        extra_context=(extra_context or "").strip() or None,
+        get_config_fn=lambda: _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock),
+        http_exception_cls=HTTPException,
+        http_422=HTTP_422_UNPROCESSABLE_ENTITY,
+    )
     try:
         qwen_text, proc_w, proc_h = _run_qwen_inference(manual_prompt, crop_img, max_new_tokens=max_new_tokens)
     except HTTPException:
@@ -6773,7 +5596,7 @@ def _agent_tool_qwen_infer(
         )
     payloads: List[Dict[str, Any]] = []
     for det in boxes:
-        x1, y1, x2, y2 = yolo_to_corners(det.bbox, crop_img.width, crop_img.height)
+        x1, y1, x2, y2 = _yolo_to_xyxy_int(det.bbox, crop_img.width, crop_img.height)
         x1 += offset_x
         y1 += offset_y
         x2 += offset_x
@@ -6879,9 +5702,25 @@ def _agent_tool_classify_crop(
     crop = pil_img.crop((x1, y1, x2, y2))
     head: Optional[Dict[str, Any]] = None
     if classifier_id:
-        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        classifier_path = _resolve_agent_clip_classifier_path_impl(
+            classifier_id,
+            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+            http_exception_cls=HTTPException,
+        )
         if classifier_path is not None:
-            head = _load_clip_head_from_classifier(classifier_path)
+            head = _load_clip_head_from_classifier_impl(
+                classifier_path,
+                joblib_load_fn=joblib.load,
+                http_exception_cls=HTTPException,
+                clip_head_background_indices_fn=_clip_head_background_indices,
+                resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+                infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+                active_clip_model_name=active_clip_model_name,
+                default_clip_model=DEFAULT_CLIP_MODEL,
+                logger=logger,
+            )
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
     if _AGENT_TRACE_FULL_WRITER is not None:
@@ -7166,7 +6005,13 @@ def _agent_tool_get_tile_context(
         grid_usage=_AGENT_GRID_TOOL_USAGE,
         grid_usage_last=_AGENT_GRID_TOOL_LAST,
     )
-    stored = _agent_context_store(public_payload, kind="tile")
+    stored = _agent_context_store_impl(
+        public_payload,
+        kind="tile",
+        max_bytes=int(PREPASS_CONTEXT_CHUNK_BYTES),
+        tile_store=_AGENT_TILE_CONTEXT_STORE,
+        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
+    )
     if stored.get("chunked"):
         preview = {
             "cluster_total": public_payload.get("cluster_total"),
@@ -7210,7 +6055,13 @@ def _agent_tool_get_tile_context_chunk(
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_handle_required")
     if chunk_index is None:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_required")
-    payload = _agent_context_chunk(context_handle, chunk_index=int(chunk_index), kind="tile")
+    payload = _agent_context_chunk_impl(
+        context_handle,
+        chunk_index=int(chunk_index),
+        kind="tile",
+        tile_store=_AGENT_TILE_CONTEXT_STORE,
+        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
+    )
     return payload
 
 
@@ -7237,7 +6088,13 @@ def _agent_tool_get_global_context() -> Dict[str, Any]:
         "windowed_captions": list(_AGENT_ACTIVE_WINDOWED_CAPTIONS or []),
         "overlay_key": _agent_overlay_key_text(label_colors, label_prefixes),
     }
-    stored = _agent_context_store(payload, kind="global")
+    stored = _agent_context_store_impl(
+        payload,
+        kind="global",
+        max_bytes=int(PREPASS_CONTEXT_CHUNK_BYTES),
+        tile_store=_AGENT_TILE_CONTEXT_STORE,
+        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
+    )
     if stored.get("chunked"):
         preview = {
             "tile_summaries_count": len(payload["tile_summaries"]),
@@ -7266,7 +6123,13 @@ def _agent_tool_get_global_context_chunk(
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_handle_required")
     if chunk_index is None:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_required")
-    payload = _agent_context_chunk(context_handle, chunk_index=int(chunk_index), kind="global")
+    payload = _agent_context_chunk_impl(
+        context_handle,
+        chunk_index=int(chunk_index),
+        kind="global",
+        tile_store=_AGENT_TILE_CONTEXT_STORE,
+        global_store=_AGENT_GLOBAL_CONTEXT_STORE,
+    )
     return payload
 
 
@@ -7329,7 +6192,7 @@ def _agent_tool_think_missed_objects(
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"think_missed_failed:{exc}") from exc
-    json_text = _extract_balanced_json(raw, "{", "}") or ""
+    json_text = _extract_balanced_json_impl(raw, "{", "}") or ""
     data: Dict[str, Any] = {}
     if json_text:
         try:
@@ -7393,9 +6256,25 @@ def _agent_tool_get_labelmap(
     classes, glossary = _agent_load_labelmap_meta(dataset_id)
     head: Optional[Dict[str, Any]] = None
     if classifier_id:
-        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        classifier_path = _resolve_agent_clip_classifier_path_impl(
+            classifier_id,
+            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+            http_exception_cls=HTTPException,
+        )
         if classifier_path is not None:
-            head = _load_clip_head_from_classifier(classifier_path)
+            head = _load_clip_head_from_classifier_impl(
+                classifier_path,
+                joblib_load_fn=joblib.load,
+                http_exception_cls=HTTPException,
+                clip_head_background_indices_fn=_clip_head_background_indices,
+                resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+                infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+                active_clip_model_name=active_clip_model_name,
+                default_clip_model=DEFAULT_CLIP_MODEL,
+                logger=logger,
+            )
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
     background = _agent_background_classes_from_head(head)
@@ -7573,9 +6452,25 @@ def _agent_tool_submit_annotations(
     labelmap = _agent_load_labelmap(dataset_id)
     head: Optional[Dict[str, Any]] = None
     if classifier_id:
-        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        classifier_path = _resolve_agent_clip_classifier_path_impl(
+            classifier_id,
+            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+            http_exception_cls=HTTPException,
+        )
         if classifier_path is not None:
-            head = _load_clip_head_from_classifier(classifier_path)
+            head = _load_clip_head_from_classifier_impl(
+                classifier_path,
+                joblib_load_fn=joblib.load,
+                http_exception_cls=HTTPException,
+                clip_head_background_indices_fn=_clip_head_background_indices,
+                resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+                infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+                active_clip_model_name=active_clip_model_name,
+                default_clip_model=DEFAULT_CLIP_MODEL,
+                logger=logger,
+            )
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
     background = _agent_background_classes_from_head(head)
@@ -7692,7 +6587,13 @@ def _agent_apply_ensemble_filter(
         return detections
     classifier_path = None
     if classifier_id:
-        classifier_path = _resolve_agent_clip_classifier_path(classifier_id)
+        classifier_path = _resolve_agent_clip_classifier_path_impl(
+            classifier_id,
+            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+            http_exception_cls=HTTPException,
+        )
     if classifier_path is None:
         if warnings is not None:
             warnings.append("ensemble_filter_classifier_missing")
@@ -8043,37 +6944,6 @@ def _agent_tool_specs_facade(
     return specs
 
 
-def _agent_tool_prompt_qwen(grid_enabled: bool = False) -> str:
-    tools = _agent_tool_specs(grid_enabled=grid_enabled)
-    tool_names: List[str] = []
-    tool_descs: List[str] = []
-    for tool in tools:
-        fn = tool.get("function") or {}
-        name = str(fn.get("name") or "").strip()
-        if not name:
-            continue
-        tool_names.append(name)
-        desc = str(fn.get("description") or "").strip()
-        params = fn.get("parameters") or {}
-        params_text = json.dumps(params, ensure_ascii=False)
-        tool_descs.append(f"### {name}\n{name}: {desc} Input parameters: {params_text}")
-    names_text = ", ".join(tool_names)
-    descs_text = "\n\n".join(tool_descs)
-    return (
-        "# Tools\n\n"
-        "## You have access to the following tools:\n\n"
-        f"{descs_text}\n\n"
-        "## When you need to call a tool, please insert the following command in your reply:\n\n"
-        f"✿FUNCTION✿: The tool to use, should be one of [{names_text}]\n"
-        "✿ARGS✿: The input of the tool\n"
-        "✿RESULT✿: Tool results\n"
-        "✿RETURN✿: Reply based on tool results. Images need to be rendered as ![](url)\n"
-        "Return ONLY the tool call, no other text.\n"
-        "If the response already starts after ✿FUNCTION✿:, continue with the tool name and do not repeat the token.\n"
-        "Keep args minimal; use only grid_cell, handles, labels, and intent as needed.\n"
-    )
-
-
 def _agent_full_trace_write(record: Dict[str, Any]) -> None:
     if _AGENT_TRACE_FULL_WRITER is None:
         return
@@ -8083,148 +6953,97 @@ def _agent_full_trace_write(record: Dict[str, Any]) -> None:
         return
 
 
-def _agent_readable_write(line: str) -> None:
-    _agent_readable_write_impl(
-        line,
-        writer=_AGENT_TRACE_READABLE_WRITER,
-        to_console=PREPASS_READABLE_TO_CONSOLE,
-    )
+_agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
+    line,
+    writer=_AGENT_TRACE_READABLE_WRITER,
+    to_console=PREPASS_READABLE_TO_CONSOLE,
+)
 
 
-def _agent_run_deep_prepass_part_a(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-    image_token: str,
-    labelmap: List[str],
-    glossary: str,
-    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_readable: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
-    return _agent_run_deep_prepass_part_a_impl(
-        payload,
-        pil_img=pil_img,
-        image_token=image_token,
-        labelmap=labelmap,
-        glossary=glossary,
-        run_detector_fn=_agent_tool_run_detector,
-        attach_provenance_fn=_agent_attach_provenance,
-        generate_sam3_synonyms_fn=_agent_generate_sam3_synonyms,
-        generate_text_fn=_generate_qwen_text,
-        extract_json_fn=_extract_balanced_json,
-        default_synonyms=_DEFAULT_SAM3_SYNONYMS,
-        label_key_fn=_glossary_label_key,
-        sam3_text_windows_fn=_agent_sam3_text_windows,
-        ensure_sam3_text_runtime_fn=_ensure_sam3_text_runtime,
-        normalize_window_xyxy_fn=_normalize_window_xyxy,
-        sam3_prompt_variants_fn=_sam3_prompt_variants,
-        sam3_text_payloads_fn=_sam3_text_payloads_from_state,
-        trace_writer=trace_writer,
-        trace_full_writer=trace_full_writer,
-        trace_readable=trace_readable,
-        active_sam3_score_thr=_AGENT_ACTIVE_SAM3_SCORE_THR,
-        active_sam3_mask_thr=_AGENT_ACTIVE_SAM3_MASK_THR,
-        grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
-    )
-
-
-def _agent_run_deep_prepass(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-    image_token: str,
-    labelmap: List[str],
-    glossary: str,
-    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_readable: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
-    return _agent_run_deep_prepass_impl(
-        payload,
-        pil_img=pil_img,
-        image_token=image_token,
-        labelmap=labelmap,
-        glossary=glossary,
-        run_part_a_fn=_agent_run_deep_prepass_part_a,
-        cleanup_fn=_agent_deep_prepass_cleanup,
-        select_exemplars_fn=_agent_select_similarity_exemplars,
-        run_similarity_global_fn=lambda *args, **kwargs: _agent_run_similarity_global(
-            *args,
-            **kwargs,
-            sam3_similarity_fn=_agent_tool_sam3_similarity,
-        ),
-        run_similarity_windowed_fn=lambda *args, **kwargs: _agent_run_similarity_expansion(
-            *args,
-            **kwargs,
-            sam3_similarity_fn=_agent_tool_sam3_similarity,
-            grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
-        ),
-        finalize_provenance_fn=_agent_finalize_provenance,
-        trace_writer=trace_writer,
-        trace_full_writer=trace_full_writer,
-        trace_readable=trace_readable,
-    )
-
-
-def _agent_run_deep_prepass_caption(
-    payload: QwenPrepassRequest,
-    *,
-    pil_img: Image.Image,
-    image_token: str,
-    detections: List[Dict[str, Any]],
-    model_id_override: Optional[str],
-    glossary: Optional[str] = None,
-    grid_for_log: Optional[Dict[str, Any]] = None,
-    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
-    trace_readable: Optional[Callable[[str], None]] = None,
-) -> Tuple[str, List[Dict[str, Any]]]:
-    return _agent_run_deep_prepass_caption_impl(
-        payload,
-        pil_img=pil_img,
-        image_token=image_token,
-        detections=detections,
-        model_id_override=model_id_override,
-        glossary=glossary,
-        grid_for_log=grid_for_log,
-        caption_request_cls=QwenCaptionRequest,
-        qwen_caption_fn=qwen_caption,
-        sanitize_caption_fn=_sanitize_qwen_caption,
-        label_counts_fn=_agent_label_counts_summary,
-        qwen_bbox_to_xyxy_fn=_qwen_bbox_to_xyxy,
-        xyxy_to_bbox_fn=_xyxy_to_qwen_bbox,
-        grid_cell_for_window_bbox_fn=_agent_grid_cell_for_window_bbox,
-        readable_format_bbox_fn=_agent_readable_format_bbox,
-        unload_non_qwen_fn=_unload_non_qwen_runtimes,
-        caption_window_hook=_CAPTION_WINDOW_HOOK,
+(
+    _agent_run_deep_prepass_part_a,
+    _agent_deep_prepass_cleanup,
+    _agent_run_deep_prepass,
+    _agent_run_deep_prepass_caption,
+) = _build_deep_prepass_runners_impl(
+    run_detector_fn=_agent_tool_run_detector,
+    attach_provenance_fn=_agent_attach_provenance,
+    generate_sam3_synonyms_fn=_agent_generate_sam3_synonyms,
+    generate_text_fn=lambda prompt, max_new_tokens=128, use_system_prompt=True: _generate_qwen_text_impl(
+        prompt,
+        max_new_tokens=max_new_tokens,
+        use_system_prompt=use_system_prompt,
+        system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
+        ensure_qwen_ready_fn=_ensure_qwen_ready,
+        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch),
+    ),
+    extract_json_fn=_extract_balanced_json,
+    default_synonyms=_DEFAULT_SAM3_SYNONYMS,
+    label_key_fn=_glossary_label_key,
+    sam3_text_windows_fn=_agent_sam3_text_windows,
+    ensure_sam3_text_runtime_fn=_ensure_sam3_text_runtime,
+    normalize_window_xyxy_fn=_normalize_window_xyxy,
+    sam3_prompt_variants_fn=_sam3_prompt_variants,
+    sam3_text_payloads_fn=_sam3_text_payloads_from_state,
+    active_sam3_score_thr=_AGENT_ACTIVE_SAM3_SCORE_THR,
+    active_sam3_mask_thr=_AGENT_ACTIVE_SAM3_MASK_THR,
+    grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
+    resolve_classifier_path_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
+        path_str,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
-        http_503_code=HTTP_503_SERVICE_UNAVAILABLE,
-        trace_writer=trace_writer,
-        trace_full_writer=trace_full_writer,
-        trace_readable=trace_readable,
-    )
-
-
-def _agent_deep_prepass_cleanup(
-    payload: QwenPrepassRequest,
-    *,
-    detections: List[Dict[str, Any]],
-    pil_img: Image.Image,
-    labelmap: List[str],
-) -> Dict[str, Any]:
-    return _agent_deep_prepass_cleanup_impl(
-        payload,
-        detections=detections,
-        pil_img=pil_img,
-        labelmap=labelmap,
-        resolve_classifier_path_fn=_resolve_agent_clip_classifier_path,
-        load_classifier_head_fn=_load_clip_head_from_classifier,
-        active_classifier_head=active_classifier_head,
-        background_from_head_fn=_agent_background_classes_from_head,
-        sanitize_fn=_agent_sanitize_detection_items,
-        default_iou=PREPASS_CLUSTER_IOU,
-    )
+    ),
+    load_classifier_head_fn=lambda classifier_path: _load_clip_head_from_classifier_impl(
+        classifier_path,
+        joblib_load_fn=joblib.load,
+        http_exception_cls=HTTPException,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+        infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+        active_clip_model_name=active_clip_model_name,
+        default_clip_model=DEFAULT_CLIP_MODEL,
+        logger=logger,
+    ),
+    active_classifier_head=active_classifier_head,
+    background_from_head_fn=_agent_background_classes_from_head,
+    sanitize_fn=_agent_sanitize_detection_items,
+    default_iou=PREPASS_CLUSTER_IOU,
+    select_exemplars_fn=lambda *args, **kwargs: _agent_select_similarity_exemplars(*args, **kwargs),
+    run_similarity_global_fn=lambda *args, **kwargs: _agent_run_similarity_global(
+        *args,
+        **kwargs,
+        sam3_similarity_fn=_agent_tool_sam3_similarity,
+    ),
+    run_similarity_windowed_fn=lambda *args, **kwargs: _agent_run_similarity_expansion(
+        *args,
+        **kwargs,
+        sam3_similarity_fn=_agent_tool_sam3_similarity,
+        grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
+    ),
+    finalize_provenance_fn=_agent_finalize_provenance,
+    caption_request_cls=QwenCaptionRequest,
+    qwen_caption_fn=qwen_caption,
+    sanitize_caption_fn=_sanitize_qwen_caption_impl,
+    label_counts_fn=_agent_label_counts_summary,
+    qwen_bbox_to_xyxy_fn=_qwen_bbox_to_xyxy,
+    xyxy_to_bbox_fn=_xyxy_to_qwen_bbox,
+    grid_cell_for_window_bbox_fn=_agent_grid_cell_for_window_bbox,
+    readable_format_bbox_fn=_agent_readable_format_bbox,
+    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+        predictor_manager,
+        unload_sam3_text_fn=_unload_sam3_text_runtime,
+        suspend_clip_fn=_suspend_clip_backbone,
+        unload_dinov3_fn=_unload_dinov3_backbone,
+        unload_detector_fn=_unload_detector_inference,
+        torch_module=torch,
+        logger=logger,
+    ),
+    caption_window_hook=_CAPTION_WINDOW_HOOK,
+    http_exception_cls=HTTPException,
+    http_503_code=HTTP_503_SERVICE_UNAVAILABLE,
+)
 
 
 def _agent_select_similarity_exemplars(
@@ -8250,7 +7069,13 @@ def _run_prepass_annotation_qwen(
     global QWEN_CAPTION_CACHE_LIMIT
     # Prepass-only mode is enforced; no agentic review loop is executed.
     payload = payload.copy(update={"prepass_only": True})
-    _require_sam3_for_prepass(bool(payload.enable_sam3_text), bool(payload.enable_sam3_similarity))
+    _require_sam3_for_prepass_impl(
+        bool(payload.enable_sam3_text),
+        bool(payload.enable_sam3_similarity),
+        sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
+        build_sam3_image_model=build_sam3_image_model,
+        sam3_image_processor=Sam3ImageProcessor,
+    )
     if int(QWEN_CAPTION_CACHE_LIMIT or 0) < 1:
         QWEN_CAPTION_CACHE_LIMIT = 1
     pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, None)
@@ -8428,9 +7253,25 @@ def _run_prepass_annotation_qwen(
     _AGENT_ACTIVE_CLASSIFIER_ID = classifier_id_for_run
     head: Optional[Dict[str, Any]] = None
     if classifier_id_for_run:
-        classifier_path = _resolve_agent_clip_classifier_path(classifier_id_for_run)
+        classifier_path = _resolve_agent_clip_classifier_path_impl(
+            classifier_id_for_run,
+            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+            http_exception_cls=HTTPException,
+        )
         if classifier_path is not None:
-            head = _load_clip_head_from_classifier(classifier_path)
+            head = _load_clip_head_from_classifier_impl(
+                classifier_path,
+                joblib_load_fn=joblib.load,
+                http_exception_cls=HTTPException,
+                clip_head_background_indices_fn=_clip_head_background_indices,
+                resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+                infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+                active_clip_model_name=active_clip_model_name,
+                default_clip_model=DEFAULT_CLIP_MODEL,
+                logger=logger,
+            )
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
     if isinstance(head, dict):
@@ -8505,7 +7346,7 @@ def _run_prepass_annotation_qwen(
     if payload.model_id:
         model_id_override = payload.model_id
     elif desired_variant in {"Instruct", "Thinking"}:
-        model_id_override = _resolve_qwen_variant_model_id(base_model_id, desired_variant)
+        model_id_override = _resolve_qwen_variant_model_id_impl(base_model_id, desired_variant)
     else:
         model_id_override = base_model_id
     grid_spec: Optional[Dict[str, Any]] = _agent_grid_spec_for_payload(payload, img_w, img_h)
@@ -8731,50 +7572,6 @@ def _run_prepass_annotation(
     return _run_prepass_annotation_qwen(payload, trace_sink=trace_sink, cancel_event=cancel_event)
 
 
-class Sam3TextPromptResponse(BaseModel):
-    detections: List[QwenDetection] = Field(default_factory=list)
-    warnings: List[str] = Field(default_factory=list)
-    image_token: Optional[str] = None
-    # Optional masks aligned to detections (packed and base64-encoded to stay compact)
-    masks: Optional[List[Dict[str, Any]]] = None
-
-
-class Sam3TextPromptAutoResponse(BaseModel):
-    detections: List[SamPointAutoResponse] = Field(default_factory=list)
-    warnings: List[str] = Field(default_factory=list)
-    image_token: Optional[str] = None
-
-
-class QwenPromptSection(BaseModel):
-    base_prompt: str
-    default_image_type: str = "image"
-    default_extra_context: str = ""
-
-    @root_validator(skip_on_failure=True)
-    def _validate_qwen_section(cls, values):  # noqa: N805
-        template = values.get("base_prompt") or ""
-        if "{items}" not in template:
-            raise ValueError("base_prompt_missing_items_placeholder")
-        if "{image_type}" not in template:
-            raise ValueError("base_prompt_missing_image_type_placeholder")
-        if "{extra_context}" not in template:
-            raise ValueError("base_prompt_missing_extra_context_placeholder")
-        return values
-
-
-class QwenPromptConfig(BaseModel):
-    bbox: QwenPromptSection
-    point: QwenPromptSection
-
-
-class QwenRuntimeSettings(BaseModel):
-    trust_remote_code: bool = False
-
-
-class QwenRuntimeSettingsUpdate(BaseModel):
-    trust_remote_code: Optional[bool] = None
-
-
 DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
     bbox=QwenPromptSection(
         base_prompt=(
@@ -8799,377 +7596,6 @@ DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
 qwen_prompt_config = DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True)
 
 
-class QwenTrainRequest(BaseModel):
-    dataset_id: Optional[str] = None
-    run_name: Optional[str] = None
-    model_id: Optional[str] = None
-    training_mode: Optional[Literal["official_lora", "trl_qlora"]] = None
-    system_prompt: Optional[str] = None
-    devices: Optional[str] = None
-    batch_size: Optional[int] = None
-    max_epochs: Optional[int] = None
-    lr: Optional[float] = None
-    accumulate_grad_batches: Optional[int] = None
-    warmup_steps: Optional[int] = None
-    num_workers: Optional[int] = None
-    lora_rank: Optional[int] = None
-    lora_alpha: Optional[int] = None
-    lora_dropout: Optional[float] = None
-    lora_target_modules: Optional[List[str]] = None
-    log_every_n_steps: Optional[int] = None
-    min_pixels: Optional[int] = None
-    max_pixels: Optional[int] = None
-    max_length: Optional[int] = None
-    seed: Optional[int] = None
-    random_split: Optional[bool] = None
-    val_percent: Optional[float] = None
-    split_seed: Optional[int] = None
-    train_limit: Optional[int] = None
-    val_limit: Optional[int] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_dataset_fields(cls, values):  # noqa: N805
-        if not values.get("dataset_id"):
-            raise ValueError("dataset_id_required")
-        return values
-
-
-class Sam3TrainRequest(BaseModel):
-    dataset_id: str
-    run_name: Optional[str] = None
-    experiment_log_dir: Optional[str] = None
-    train_batch_size: Optional[int] = None
-    val_batch_size: Optional[int] = None
-    num_train_workers: Optional[int] = None
-    num_val_workers: Optional[int] = None
-    max_epochs: Optional[int] = None
-    resolution: Optional[int] = None
-    lr_scale: Optional[float] = None
-    gradient_accumulation_steps: Optional[int] = None
-    val_epoch_freq: Optional[int] = None
-    target_epoch_size: Optional[int] = None
-    scheduler_warmup: Optional[int] = None
-    scheduler_timescale: Optional[int] = None
-    num_gpus: Optional[int] = None
-    enable_inst_interactivity: Optional[bool] = None
-    balance_classes: Optional[bool] = None
-    balance_strategy: Optional[str] = None
-    balance_power: Optional[float] = None
-    balance_clip: Optional[float] = None
-    balance_beta: Optional[float] = None
-    balance_gamma: Optional[float] = None
-    train_limit: Optional[int] = None
-    val_limit: Optional[int] = None
-    log_freq: Optional[int] = None
-    log_every_batch: Optional[bool] = None
-    enable_segmentation_head: Optional[bool] = None
-    train_segmentation: Optional[bool] = None
-    freeze_language_backbone: Optional[bool] = None
-    language_backbone_lr: Optional[float] = None
-    prompt_variants: Optional[Dict[str, Any]] = None
-    prompt_randomize: Optional[bool] = None
-    val_score_thresh: Optional[float] = None
-    val_max_dets: Optional[int] = None
-    random_split: Optional[bool] = None
-    val_percent: Optional[float] = None
-    split_seed: Optional[int] = None
-
-
-class YoloTrainRequest(BaseModel):
-    dataset_id: Optional[str] = None
-    dataset_root: Optional[str] = None
-    run_name: Optional[str] = None
-    task: Literal["detect", "segment"] = "detect"
-    variant: Optional[str] = None
-    from_scratch: Optional[bool] = None
-    base_weights: Optional[str] = None
-    epochs: Optional[int] = None
-    img_size: Optional[int] = None
-    batch: Optional[int] = None
-    workers: Optional[int] = None
-    devices: Optional[List[int]] = None
-    seed: Optional[int] = None
-    augmentations: Optional[Dict[str, Any]] = None
-    accept_tos: Optional[bool] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_dataset_fields(cls, values):  # noqa: N805
-        if not (values.get("dataset_id") or values.get("dataset_root")):
-            raise ValueError("dataset_id_or_root_required")
-        return values
-
-
-class YoloHeadGraftRequest(BaseModel):
-    base_run_id: str
-    dataset_id: Optional[str] = None
-    dataset_root: Optional[str] = None
-    run_name: Optional[str] = None
-    epochs: Optional[int] = None
-    img_size: Optional[int] = None
-    batch: Optional[int] = None
-    workers: Optional[int] = None
-    devices: Optional[List[int]] = None
-    seed: Optional[int] = None
-    export_onnx: Optional[bool] = None
-    accept_tos: Optional[bool] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_dataset_fields(cls, values):  # noqa: N805
-        if not (values.get("dataset_id") or values.get("dataset_root")):
-            raise ValueError("dataset_id_or_root_required")
-        return values
-
-
-class YoloHeadGraftDryRunRequest(BaseModel):
-    base_run_id: str
-    dataset_id: Optional[str] = None
-    dataset_root: Optional[str] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_dataset_fields(cls, values):  # noqa: N805
-        if not (values.get("dataset_id") or values.get("dataset_root")):
-            raise ValueError("dataset_id_or_root_required")
-        return values
-
-
-class RfDetrTrainRequest(BaseModel):
-    dataset_id: Optional[str] = None
-    dataset_root: Optional[str] = None
-    run_name: Optional[str] = None
-    task: Literal["detect", "segment"] = "detect"
-    variant: Optional[str] = None
-    epochs: Optional[int] = None
-    batch: Optional[int] = None
-    grad_accum: Optional[int] = None
-    workers: Optional[int] = None
-    devices: Optional[List[int]] = None
-    seed: Optional[int] = None
-    resolution: Optional[int] = None
-    from_scratch: Optional[bool] = None
-    pretrain_weights: Optional[str] = None
-    use_ema: Optional[bool] = None
-    early_stopping: Optional[bool] = None
-    early_stopping_patience: Optional[int] = None
-    multi_scale: Optional[bool] = None
-    expanded_scales: Optional[bool] = None
-    augmentations: Optional[Dict[str, Any]] = None
-    accept_tos: Optional[bool] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_dataset_fields(cls, values):  # noqa: N805
-        if not (values.get("dataset_id") or values.get("dataset_root")):
-            raise ValueError("dataset_id_or_root_required")
-        return values
-
-
-class YoloActiveRequest(BaseModel):
-    run_id: str
-
-
-class RfDetrActiveRequest(BaseModel):
-    run_id: str
-
-
-class YoloRegionRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    region: List[float]
-    conf: Optional[float] = 0.25
-    iou: Optional[float] = 0.45
-    max_det: Optional[int] = 300
-    center_only: Optional[bool] = True
-    image_is_cropped: Optional[bool] = False
-    full_width: Optional[int] = None
-    full_height: Optional[int] = None
-    expected_labelmap: Optional[List[str]] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_region(cls, values):  # noqa: N805
-        region = values.get("region")
-        if not isinstance(region, list) or len(region) < 4:
-            raise ValueError("region_required")
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_required")
-        return values
-
-
-class YoloRegionDetection(BaseModel):
-    bbox: List[float]
-    class_id: int
-    class_name: Optional[str] = None
-    score: Optional[float] = None
-
-
-class YoloRegionResponse(BaseModel):
-    detections: List[YoloRegionDetection]
-    labelmap: Optional[List[str]] = None
-    warnings: Optional[List[str]] = None
-
-
-class YoloFullRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    conf: Optional[float] = 0.25
-    iou: Optional[float] = 0.45
-    max_det: Optional[int] = 300
-    expected_labelmap: Optional[List[str]] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_image(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_required")
-        return values
-
-
-class YoloWindowedRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    conf: Optional[float] = 0.25
-    iou: Optional[float] = 0.45
-    max_det: Optional[int] = 300
-    expected_labelmap: Optional[List[str]] = None
-    slice_size: Optional[int] = 640
-    overlap: Optional[float] = 0.2
-    merge_iou: Optional[float] = 0.5
-
-    @root_validator(skip_on_failure=True)
-    def _validate_image(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_required")
-        return values
-
-
-class RfDetrRegionRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    region: List[float]
-    conf: Optional[float] = 0.25
-    max_det: Optional[int] = 300
-    center_only: Optional[bool] = True
-    image_is_cropped: Optional[bool] = False
-    full_width: Optional[int] = None
-    full_height: Optional[int] = None
-    expected_labelmap: Optional[List[str]] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_region(cls, values):  # noqa: N805
-        region = values.get("region")
-        if not isinstance(region, list) or len(region) < 4:
-            raise ValueError("region_required")
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_required")
-        return values
-
-
-class RfDetrRegionDetection(BaseModel):
-    bbox: List[float]
-    class_id: int
-    class_name: Optional[str] = None
-    score: Optional[float] = None
-
-
-class RfDetrRegionResponse(BaseModel):
-    detections: List[RfDetrRegionDetection]
-    labelmap: Optional[List[str]] = None
-    warnings: Optional[List[str]] = None
-
-
-class RfDetrFullRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    conf: Optional[float] = 0.25
-    max_det: Optional[int] = 300
-    expected_labelmap: Optional[List[str]] = None
-
-    @root_validator(skip_on_failure=True)
-    def _validate_image(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_required")
-        return values
-
-
-class RfDetrWindowedRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    conf: Optional[float] = 0.25
-    max_det: Optional[int] = 300
-    expected_labelmap: Optional[List[str]] = None
-    slice_size: Optional[int] = 640
-    overlap: Optional[float] = 0.2
-    merge_iou: Optional[float] = 0.5
-
-    @root_validator(skip_on_failure=True)
-    def _validate_image(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_required")
-        return values
-
-
-def _clamp_conf_value(conf: float, warnings: List[str]) -> float:
-    return _clamp_conf_value_impl(conf, warnings)
-
-
-def _clamp_iou_value(iou: float, warnings: List[str]) -> float:
-    return _clamp_iou_value_impl(iou, warnings)
-
-
-def _clamp_max_det_value(max_det: int, warnings: List[str]) -> int:
-    return _clamp_max_det_value_impl(max_det, warnings)
-
-
-def _clamp_slice_params(
-    slice_size: int,
-    overlap: float,
-    merge_iou: float,
-    img_w: int,
-    img_h: int,
-    warnings: List[str],
-) -> Tuple[int, float, float]:
-    return _clamp_slice_params_impl(
-        slice_size, overlap, merge_iou, img_w, img_h, warnings
-    )
-
-
-class Sam3ModelActivateRequest(BaseModel):
-    checkpoint_path: Optional[str] = None
-    label: Optional[str] = None
-    enable_segmentation: Optional[bool] = None
-
-
-class QwenModelActivateRequest(BaseModel):
-    model_id: str
-
-
-class ActiveModelRequest(BaseModel):
-    classifier_path: Optional[str] = None
-    labelmap_path: Optional[str] = None
-    clip_model: Optional[str] = None
-    logit_adjustment_inference: Optional[bool] = None
-
-
-class ActiveModelResponse(BaseModel):
-    clip_model: Optional[str]
-    encoder_type: Optional[str] = None
-    encoder_model: Optional[str] = None
-    classifier_path: Optional[str]
-    labelmap_path: Optional[str]
-    clip_ready: bool
-    labelmap_entries: List[str] = []
-    logit_adjustment_inference: Optional[bool] = None
-
-
-class SegmentationBuildRequest(BaseModel):
-    source_dataset_id: str = Field(..., description="Existing bbox dataset id (Qwen or SAM3)")
-    output_name: Optional[str] = Field(None, description="Optional output dataset name")
-    sam_variant: Literal["sam1", "sam3"] = Field("sam3", description="Generator to use for masks")
-    output_format: Literal["yolo-seg"] = Field("yolo-seg", description="Target mask encoding (polygons)")
-    mask_threshold: float = Field(0.5, ge=0.0, le=1.0, description="Mask probability threshold")
-    score_threshold: float = Field(0.0, ge=0.0, le=1.0, description="Box confidence threshold")
-    simplify_epsilon: float = Field(30.0, ge=0.0, description="Polygon simplification epsilon (px)")
-    min_size: float = Field(0.0, ge=0.0, description="Minimum mask area (px^2)")
-    max_results: int = Field(1, ge=1, description="Max detections per box prompt")
-
-
 @dataclass
 class ClipTrainingJob:
     job_id: str
@@ -9188,32 +7614,6 @@ class ClipTrainingJob:
     labelmap_path: Optional[str] = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
-
-@dataclass
-class ClipDatasetUploadJob:
-    job_id: str
-    root_dir: Path
-    images_dir: Path
-    labels_dir: Path
-    created_at: float = field(default_factory=time.time)
-    image_count: int = 0
-    label_count: int = 0
-    completed: bool = False
-
-
-@dataclass
-class QwenDatasetUploadJob:
-    job_id: str
-    root_dir: Path
-    train_dir: Path
-    val_dir: Path
-    train_annotations: Path
-    val_annotations: Path
-    created_at: float = field(default_factory=time.time)
-    run_name: Optional[str] = None
-    train_count: int = 0
-    val_count: int = 0
-    completed: bool = False
 
 
 TRAINING_JOBS: Dict[str, ClipTrainingJob] = {}
@@ -9368,10 +7768,6 @@ SAM3_MAX_METRIC_POINTS = 2000
 SAM3_STORAGE_SCOPES = {"all", "checkpoints", "logs", "tensorboard", "dumps"}
 YOLO_MAX_LOG_LINES = 300
 YOLO_HEAD_GRAFT_PATCHED = False
-
-
-def _list_prepass_recipes() -> List[Dict[str, Any]]:
-    return _list_prepass_recipes_impl(recipes_root=PREPASS_RECIPE_ROOT, meta_filename=PREPASS_RECIPE_META)
 
 
 @dataclass
@@ -9539,25 +7935,6 @@ PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
 PROMPT_HELPER_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-class PrepassRecipeRequest(BaseModel):
-    recipe_id: Optional[str] = None
-    name: str
-    description: Optional[str] = None
-    config: Dict[str, Any]
-    glossary: Optional[str] = None
-
-
-class PrepassRecipeResponse(BaseModel):
-    id: str
-    name: str
-    description: Optional[str] = None
-    created_at: float
-    updated_at: float
-    config: Dict[str, Any]
-    glossary: Optional[str] = None
-    schema_version: int = PREPASS_RECIPE_SCHEMA_VERSION
-    renamed_from: Optional[str] = None
-    notice: Optional[str] = None
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
@@ -9624,663 +8001,153 @@ AGENT_MINING_CASCADES_ROOT = AGENT_MINING_ROOT / "cascades"
 AGENT_MINING_CASCADES_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-CLIP_DATASET_JOBS: Dict[str, ClipDatasetUploadJob] = {}
-CLIP_DATASET_JOBS_LOCK = threading.Lock()
-QWEN_DATASET_JOBS: Dict[str, QwenDatasetUploadJob] = {}
-QWEN_DATASET_JOBS_LOCK = threading.Lock()
-
 MAX_JOB_LOGS = 250
 MAX_QWEN_METRIC_POINTS: Optional[int] = None
 
+_job_log = functools.partial(_clip_job_log_impl, max_logs=MAX_JOB_LOGS, logger=logger)
+_clip_job_append_metric = functools.partial(_clip_job_append_metric_impl, max_points=2000)
+_job_update = functools.partial(_clip_job_update_impl, max_logs=MAX_JOB_LOGS, logger=logger)
 
-def _job_log(job: ClipTrainingJob, message: str) -> None:
-    _clip_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
+_qwen_job_log = functools.partial(_qwen_job_log_impl, max_logs=MAX_JOB_LOGS, logger=logger)
+_qwen_job_update = functools.partial(_qwen_job_update_impl, max_logs=MAX_JOB_LOGS, logger=logger)
+_qwen_job_append_metric = functools.partial(_qwen_job_append_metric_impl, max_points=MAX_QWEN_METRIC_POINTS)
 
+_sam3_job_log = functools.partial(_sam3_job_log_impl, max_logs=SAM3_MAX_LOG_LINES, logger=logger)
+_sam3_job_append_metric = functools.partial(_sam3_job_append_metric_impl, max_points=SAM3_MAX_METRIC_POINTS)
+_sam3_job_update = functools.partial(_sam3_job_update_impl, max_logs=SAM3_MAX_LOG_LINES, logger=logger)
 
-def _clip_job_append_metric(job: ClipTrainingJob, metric: Dict[str, Any]) -> None:
-    _clip_job_append_metric_impl(job, metric, max_points=2000)
+_yolo_job_update = functools.partial(_yolo_job_update_impl)
+_yolo_job_log = functools.partial(_yolo_job_log_impl, max_logs=YOLO_MAX_LOG_LINES, logger=logger)
+_yolo_job_append_metric = functools.partial(_yolo_job_append_metric_impl, max_points=2000)
 
+_yolo_head_graft_audit = functools.partial(_yolo_head_graft_audit_impl, time_fn=time.time)
+_yolo_head_graft_job_update = functools.partial(_yolo_head_graft_job_update_impl, audit_fn=_yolo_head_graft_audit)
+_yolo_head_graft_job_log = functools.partial(
+    _yolo_head_graft_job_log_impl,
+    max_logs=YOLO_MAX_LOG_LINES,
+    audit_fn=_yolo_head_graft_audit,
+    logger=logger,
+)
 
-def _job_update(job: ClipTrainingJob, *, status: Optional[str] = None, message: Optional[str] = None,
-                progress: Optional[float] = None, error: Optional[str] = None,
-                artifacts: Optional[Dict[str, Any]] = None) -> None:
-    _clip_job_update_impl(
-        job,
-        status=status,
-        message=message,
-        progress=progress,
-        error=error,
-        artifacts=artifacts,
-        max_logs=MAX_JOB_LOGS,
-        logger=logger,
-    )
+_rfdetr_job_update = functools.partial(_rfdetr_job_update_impl)
+_rfdetr_job_log = functools.partial(_rfdetr_job_log_impl, max_logs=MAX_JOB_LOGS, logger=logger)
+_rfdetr_job_append_metric = functools.partial(_rfdetr_job_append_metric_impl, max_points=2000)
 
+_seg_job_log = functools.partial(_seg_job_log_impl, max_logs=MAX_JOB_LOGS, logger=logger)
+_seg_job_update = functools.partial(_seg_job_update_impl, max_logs=MAX_JOB_LOGS, logger=logger)
 
-def _qwen_job_log(job: QwenTrainingJob, message: str) -> None:
-    _qwen_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
-
-
-def _qwen_job_update(
-    job: QwenTrainingJob,
-    *,
-    status: Optional[str] = None,
-    message: Optional[str] = None,
-    progress: Optional[float] = None,
-    error: Optional[str] = None,
-    result: Optional[Dict[str, Any]] = None,
-    log_message: bool = True,
-) -> None:
-    _qwen_job_update_impl(
-        job,
-        status=status,
-        message=message,
-        progress=progress,
-        error=error,
-        result=result,
-        log_message=log_message,
-        max_logs=MAX_JOB_LOGS,
-        logger=logger,
-    )
+_log_qwen_get_request = functools.partial(_log_qwen_get_request_impl, logger=logger)
 
 
-def _sam3_job_log(job: Sam3TrainingJob, message: str) -> None:
-    _sam3_job_log_impl(job, message, max_logs=SAM3_MAX_LOG_LINES, logger=logger)
-
-
-def _sam3_job_append_metric(job: Sam3TrainingJob, metric: Dict[str, Any]) -> None:
-    _sam3_job_append_metric_impl(job, metric, max_points=SAM3_MAX_METRIC_POINTS)
-
-
-def _sam3_job_update(
-    job: Sam3TrainingJob,
-    *,
-    status: Optional[str] = None,
-    message: Optional[str] = None,
-    progress: Optional[float] = None,
-    error: Optional[str] = None,
-    result: Optional[Dict[str, Any]] = None,
-    log_message: bool = True,
-) -> None:
-    _sam3_job_update_impl(
-        job,
-        status=status,
-        message=message,
-        progress=progress,
-        error=error,
-        result=result,
-        log_message=log_message,
-        max_logs=SAM3_MAX_LOG_LINES,
-        logger=logger,
-    )
-
-
-def _yolo_job_update(
-    job: YoloTrainingJob,
-    *,
-    status: Optional[str] = None,
-    message: Optional[str] = None,
-    progress: Optional[float] = None,
-    error: Optional[str] = None,
-    result: Optional[Dict[str, Any]] = None,
-) -> None:
-    _yolo_job_update_impl(
-        job,
-        status=status,
-        message=message,
-        progress=progress,
-        error=error,
-        result=result,
-    )
-
-
-def _yolo_job_log(job: YoloTrainingJob, message: str) -> None:
-    _yolo_job_log_impl(job, message, max_logs=YOLO_MAX_LOG_LINES, logger=logger)
-
-
-def _yolo_head_graft_job_update(
-    job: YoloHeadGraftJob,
-    *,
-    status: Optional[str] = None,
-    message: Optional[str] = None,
-    progress: Optional[float] = None,
-    error: Optional[str] = None,
-    result: Optional[Dict[str, Any]] = None,
-) -> None:
-    _yolo_head_graft_job_update_impl(
-        job,
-        status=status,
-        message=message,
-        progress=progress,
-        error=error,
-        result=result,
-        audit_fn=_yolo_head_graft_audit,
-    )
-
-
-def _yolo_head_graft_job_log(job: YoloHeadGraftJob, message: str) -> None:
-    _yolo_head_graft_job_log_impl(
-        job,
-        message,
-        max_logs=YOLO_MAX_LOG_LINES,
-        audit_fn=_yolo_head_graft_audit,
-        logger=logger,
-    )
-
-
-def _yolo_head_graft_audit(
-    job: YoloHeadGraftJob,
-    message: str,
-    *,
-    level: str = "info",
-    event: Optional[str] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> None:
-    _yolo_head_graft_audit_impl(
-        job,
-        message,
-        level=level,
-        event=event,
-        extra=extra,
-        time_fn=time.time,
-    )
-
-
-def _yolo_head_graft_force_stop(job: YoloHeadGraftJob) -> bool:
-    return _yolo_head_graft_force_stop_impl(job)
-
-
-def _yolo_job_append_metric(job: YoloTrainingJob, metric: Dict[str, Any]) -> None:
-    _yolo_job_append_metric_impl(job, metric, max_points=2000)
-
-
-def _rfdetr_job_update(
-    job: RfDetrTrainingJob,
-    *,
-    status: Optional[str] = None,
-    message: Optional[str] = None,
-    progress: Optional[float] = None,
-    error: Optional[str] = None,
-    result: Optional[Dict[str, Any]] = None,
-) -> None:
-    _rfdetr_job_update_impl(
-        job,
-        status=status,
-        message=message,
-        progress=progress,
-        error=error,
-        result=result,
-    )
-
-
-def _rfdetr_job_log(job: RfDetrTrainingJob, message: str) -> None:
-    _rfdetr_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
-
-
-def _rfdetr_job_append_metric(job: RfDetrTrainingJob, metric: Dict[str, Any]) -> None:
-    _rfdetr_job_append_metric_impl(job, metric, max_points=2000)
-
-
-def _seg_job_log(job: SegmentationBuildJob, message: str) -> None:
-    _seg_job_log_impl(job, message, max_logs=MAX_JOB_LOGS, logger=logger)
-
-
-def _seg_job_update(
-    job: SegmentationBuildJob,
-    *,
-    status: Optional[str] = None,
-    message: Optional[str] = None,
-    progress: Optional[float] = None,
-    error: Optional[str] = None,
-    result: Optional[Dict[str, Any]] = None,
-    log_message: bool = True,
-) -> None:
-    _seg_job_update_impl(
-        job,
-        status=status,
-        message=message,
-        progress=progress,
-        error=error,
-        result=result,
-        log_message=log_message,
-        max_logs=MAX_JOB_LOGS,
-        logger=logger,
-    )
-
-
-def _serialize_seg_job(job: SegmentationBuildJob) -> Dict[str, Any]:
-    return _serialize_seg_job_impl(job)
-
-
-def _log_qwen_get_request(endpoint: str, jobs: Sequence[QwenTrainingJob]) -> None:
-    _log_qwen_get_request_impl(endpoint, jobs, logger)
-
-
-def _qwen_job_append_metric(job: QwenTrainingJob, metric: Dict[str, Any]) -> None:
-    _qwen_job_append_metric_impl(job, metric, max_points=MAX_QWEN_METRIC_POINTS)
-
-
-def _summarize_qwen_metric(metric: Dict[str, Any]) -> str:
-    return _summarize_qwen_metric_impl(metric)
-
-
-def _load_registry_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
-    return _load_registry_dataset_metadata_impl(
+_list_all_datasets = functools.partial(
+    _list_all_datasets_impl,
+    dataset_registry_root=DATASET_REGISTRY_ROOT,
+    sam3_dataset_root=SAM3_DATASET_ROOT,
+    qwen_dataset_root=QWEN_DATASET_ROOT,
+    load_registry_meta_fn=lambda dataset_dir: _load_registry_dataset_metadata_impl(
         dataset_dir,
         load_json_metadata_fn=_load_json_metadata,
         meta_name=DATASET_META_NAME,
-    )
-
-
-def _persist_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
-    _persist_dataset_metadata_impl(
+    ),
+    load_sam3_meta_fn=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
         dataset_dir,
-        metadata,
-        meta_name=DATASET_META_NAME,
-        logger=logger,
-    )
-
-
-def _coerce_dataset_metadata(dataset_dir: Path, raw_meta: Optional[Dict[str, Any]], source: str) -> Dict[str, Any]:
-    return _coerce_dataset_metadata_impl(
+        meta_name=SAM3_DATASET_META_NAME,
+        load_json_metadata_fn=_load_json_metadata,
+        persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+            dataset_dir_inner,
+            metadata,
+            meta_name=SAM3_DATASET_META_NAME,
+            logger=logger,
+        ),
+    ),
+    load_qwen_meta_fn=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
+        dataset_dir,
+        meta_name=QWEN_METADATA_FILENAME,
+        load_json_metadata_fn=_load_json_metadata,
+    ),
+    coerce_meta_fn=lambda dataset_dir, raw_meta, source: _coerce_dataset_metadata_impl(
         dataset_dir,
         raw_meta,
         source,
         dataset_context_key="dataset_context",
-        compute_dir_signature_fn=_compute_dir_signature,
-        persist_metadata_fn=_persist_dataset_metadata,
-    )
+        compute_dir_signature_fn=_compute_dir_signature_impl,
+        persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_dataset_metadata_impl(
+            dataset_dir_inner,
+            metadata,
+            meta_name=DATASET_META_NAME,
+            logger=logger,
+        ),
+    ),
+    yolo_labels_have_polygons_fn=_yolo_labels_have_polygons_impl,
+    convert_qwen_dataset_to_coco_fn=_convert_qwen_dataset_to_coco_impl,
+    convert_coco_dataset_to_yolo_fn=_convert_coco_dataset_to_yolo_impl,
+    load_dataset_glossary_fn=_load_dataset_glossary,
+    glossary_preview_fn=_glossary_preview,
+    count_caption_labels_fn=_count_caption_labels_impl,
+    count_dataset_images_fn=lambda path: _count_dataset_images_impl(path, iter_images_fn=_iter_yolo_images),
+    logger=logger,
+)
 
 
-def _list_all_datasets(prefer_registry: bool = True) -> List[Dict[str, Any]]:
-    return _list_all_datasets_impl(
-        prefer_registry=prefer_registry,
-        dataset_registry_root=DATASET_REGISTRY_ROOT,
-        sam3_dataset_root=SAM3_DATASET_ROOT,
-        qwen_dataset_root=QWEN_DATASET_ROOT,
-        load_registry_meta_fn=_load_registry_dataset_metadata,
-        load_sam3_meta_fn=_load_sam3_dataset_metadata,
-        load_qwen_meta_fn=_load_qwen_dataset_metadata,
-        coerce_meta_fn=_coerce_dataset_metadata,
-        yolo_labels_have_polygons_fn=_yolo_labels_have_polygons,
-        convert_qwen_dataset_to_coco_fn=_convert_qwen_dataset_to_coco,
-        convert_coco_dataset_to_yolo_fn=_convert_coco_dataset_to_yolo,
-        load_dataset_glossary_fn=_load_dataset_glossary,
-        glossary_preview_fn=_glossary_preview,
-        count_caption_labels_fn=_count_caption_labels,
-        count_dataset_images_fn=_count_dataset_images,
-        logger=logger,
-    )
+## NOTE: run dir/meta helpers use *_impl directly to avoid wrapper drift.
 
 
-def _load_qwen_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
-    return _load_qwen_dataset_metadata_impl(
+_yolo_labels_have_polygons = _yolo_labels_have_polygons_impl
+
+
+_resolve_yolo_training_dataset = functools.partial(
+    _resolve_yolo_training_dataset_impl,
+    resolve_dataset_entry_fn=lambda dataset_id: _resolve_dataset_entry_impl(
+        dataset_id,
+        list_all_datasets_fn=_list_all_datasets,
+    ),
+    resolve_sam3_or_qwen_dataset_fn=_resolve_sam3_or_qwen_dataset,
+    compute_dir_signature_fn=_compute_dir_signature_impl,
+    sanitize_yolo_run_id_fn=_sanitize_yolo_run_id_impl,
+    detect_yolo_layout_fn=_detect_yolo_layout_impl,
+    yolo_labels_have_polygons_fn=_yolo_labels_have_polygons_impl,
+    stable_hash_fn=_stable_hash_impl,
+    yolo_cache_root=YOLO_DATASET_CACHE_ROOT,
+    http_exception_cls=HTTPException,
+)
+
+
+_resolve_rfdetr_training_dataset = functools.partial(
+    _resolve_rfdetr_training_dataset_impl,
+    resolve_dataset_entry_fn=lambda dataset_id: _resolve_dataset_entry_impl(
+        dataset_id,
+        list_all_datasets_fn=_list_all_datasets,
+    ),
+    resolve_sam3_or_qwen_dataset_fn=_resolve_sam3_or_qwen_dataset,
+    load_sam3_meta_fn=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
+        dataset_dir,
+        meta_name=SAM3_DATASET_META_NAME,
+        load_json_metadata_fn=_load_json_metadata,
+        persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+            dataset_dir_inner,
+            metadata,
+            meta_name=SAM3_DATASET_META_NAME,
+            logger=logger,
+        ),
+    ),
+    detect_yolo_layout_fn=_detect_yolo_layout_impl,
+    yolo_labels_have_polygons_fn=_yolo_labels_have_polygons_impl,
+    convert_yolo_dataset_to_coco_fn=_convert_yolo_dataset_to_coco_impl,
+    convert_qwen_dataset_to_coco_fn=_convert_qwen_dataset_to_coco_impl,
+    load_qwen_dataset_metadata_fn=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
         dataset_dir,
         meta_name=QWEN_METADATA_FILENAME,
         load_json_metadata_fn=_load_json_metadata,
-    )
+    ),
+    ensure_coco_supercategory_fn=_ensure_coco_supercategory_impl,
+    http_exception_cls=HTTPException,
+)
 
 
-def _load_sam3_dataset_metadata(dataset_dir: Path) -> Optional[Dict[str, Any]]:
-    return _load_sam3_dataset_metadata_impl(
-        dataset_dir,
-        meta_name=SAM3_DATASET_META_NAME,
-        load_json_metadata_fn=_load_json_metadata,
-        persist_metadata_fn=_persist_sam3_dataset_metadata,
-    )
+## NOTE: RF‑DETR helpers use *_impl directly to avoid wrapper drift.
 
 
-def _persist_sam3_dataset_metadata(dataset_dir: Path, metadata: Dict[str, Any]) -> None:
-    _persist_sam3_dataset_metadata_impl(
-        dataset_dir,
-        metadata,
-        meta_name=SAM3_DATASET_META_NAME,
-        logger=logger,
-    )
-
-
-def _count_dataset_images(dataset_root: Path) -> int:
-    return _count_dataset_images_impl(dataset_root, iter_images_fn=_iter_yolo_images)
-
-
-def _count_caption_labels(dataset_root: Path) -> Tuple[int, bool]:
-    return _count_caption_labels_impl(dataset_root)
-
-
-def _dir_size_bytes(path: Path) -> int:
-    return _dir_size_bytes_impl(path)
-
-
-def _active_run_paths_for_variant(variant: str) -> set[Path]:
-    return _active_run_paths_for_variant_impl(
-        variant=variant,
-        jobs_lock=SAM3_TRAINING_JOBS_LOCK,
-        jobs=SAM3_TRAINING_JOBS,
-    )
-
-
-def _describe_run_dir(run_dir: Path, variant: str, active_paths: set[Path]) -> Dict[str, Any]:
-    return _describe_run_dir_impl(
-        run_dir=run_dir,
-        variant=variant,
-        active_paths=active_paths,
-        dir_size_fn=_dir_size_bytes,
-    )
-
-
-def _list_sam3_runs(variant: str) -> List[Dict[str, Any]]:
-    return _list_sam3_runs_impl(
-        variant=variant,
-        job_root=SAM3_JOB_ROOT,
-        dataset_root=SAM3_DATASET_ROOT,
-        active_paths_fn=_active_run_paths_for_variant,
-        describe_fn=_describe_run_dir,
-    )
-
-
-def _run_dir_for_request(run_id: str, variant: str) -> Path:
-    return _run_dir_for_request_impl(
-        run_id=run_id,
-        variant=variant,
-        job_root=SAM3_JOB_ROOT,
-        http_exception_cls=HTTPException,
-        http_400=HTTP_400_BAD_REQUEST,
-        http_404=HTTP_404_NOT_FOUND,
-    )
-
-
-def _delete_run_scope(run_dir: Path, scope: str) -> Tuple[List[str], int]:
-    return _delete_run_scope_impl(
-        run_dir=run_dir,
-        scope=scope,
-        dir_size_fn=_dir_size_bytes,
-        rmtree_fn=shutil.rmtree,
-    )
-
-
-def _sanitize_yolo_run_id(raw: str) -> str:
-    return _sanitize_yolo_run_id_impl(raw)
-
-
-def _yolo_run_dir(run_id: str, *, create: bool = False) -> Path:
-    return _yolo_run_dir_impl(
-        run_id,
-        create=create,
-        job_root=YOLO_JOB_ROOT,
-        sanitize_fn=_sanitize_yolo_run_id,
-        http_exception_cls=HTTPException,
-    )
-
-
-def _yolo_load_run_meta(run_dir: Path) -> Dict[str, Any]:
-    return _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
-
-
-def _yolo_write_run_meta(run_dir: Path, meta: Dict[str, Any]) -> None:
-    _yolo_write_run_meta_impl(
-        run_dir,
-        meta,
-        meta_name=YOLO_RUN_META_NAME,
-        time_fn=time.time,
-    )
-
-
-def _yolo_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) -> Dict[str, Any]:
-    return _yolo_prune_run_dir_impl(
-        run_dir,
-        keep_files=keep_files,
-        keep_files_default=YOLO_KEEP_FILES,
-        dir_size_fn=_dir_size_bytes,
-        meta_name=YOLO_RUN_META_NAME,
-    )
-
-
-def _sanitize_rfdetr_run_id(raw: str) -> str:
-    return _sanitize_yolo_run_id(raw)
-
-
-def _rfdetr_run_dir(run_id: str, *, create: bool = False) -> Path:
-    return _rfdetr_run_dir_impl(
-        run_id,
-        create=create,
-        job_root=RFDETR_JOB_ROOT,
-        sanitize_fn=_sanitize_rfdetr_run_id,
-        http_exception_cls=HTTPException,
-    )
-
-
-def _rfdetr_load_run_meta(run_dir: Path) -> Dict[str, Any]:
-    return _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
-
-
-def _rfdetr_write_run_meta(run_dir: Path, meta: Dict[str, Any]) -> None:
-    _rfdetr_write_run_meta_impl(
-        run_dir,
-        meta,
-        meta_name=RFDETR_RUN_META_NAME,
-        time_fn=time.time,
-    )
-
-
-def _rfdetr_prune_run_dir(run_dir: Path, keep_files: Optional[set[str]] = None) -> Dict[str, Any]:
-    return _rfdetr_prune_run_dir_impl(
-        run_dir,
-        keep_files=keep_files,
-        keep_files_default=RFDETR_KEEP_FILES,
-        dir_size_fn=_dir_size_bytes,
-    )
-
-
-def _collect_yolo_artifacts(run_dir: Path) -> Dict[str, bool]:
-    return _collect_yolo_artifacts_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
-
-
-def _collect_rfdetr_artifacts(run_dir: Path) -> Dict[str, bool]:
-    return _collect_rfdetr_artifacts_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
-
-
-def _yolo_metrics_summary(run_dir: Path) -> Dict[str, float]:
-    return _yolo_metrics_summary_impl(run_dir, read_csv_last_row_fn=_read_csv_last_row)
-
-
-def _rfdetr_metrics_summary(run_dir: Path) -> Dict[str, float]:
-    return _rfdetr_metrics_summary_impl(run_dir)
-
-
-def _clean_metric_summary(summary: Dict[str, Optional[float]]) -> Dict[str, float]:
-    return _clean_metric_summary_impl(summary)
-
-
-def _list_yolo_runs() -> List[Dict[str, Any]]:
-    return _list_yolo_runs_impl(
-        job_root=YOLO_JOB_ROOT,
-        dataset_cache_root=YOLO_DATASET_CACHE_ROOT,
-        active_payload=_load_yolo_active(),
-        load_meta_fn=_yolo_load_run_meta,
-        collect_artifacts_fn=_collect_yolo_artifacts,
-        meta_name=YOLO_RUN_META_NAME,
-    )
-
-
-def _list_rfdetr_runs() -> List[Dict[str, Any]]:
-    return _list_rfdetr_runs_impl(
-        job_root=RFDETR_JOB_ROOT,
-        active_payload=_load_rfdetr_active(),
-        load_meta_fn=_rfdetr_load_run_meta,
-        collect_artifacts_fn=_collect_rfdetr_artifacts,
-        meta_name=RFDETR_RUN_META_NAME,
-    )
-
-
-def _load_yolo_active() -> Dict[str, Any]:
-    return _load_yolo_active_impl(YOLO_ACTIVE_PATH)
-
-
-def _save_yolo_active(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return _save_yolo_active_impl(payload, YOLO_ACTIVE_PATH)
-
-
-def _load_rfdetr_active() -> Dict[str, Any]:
-    return _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH, RFDETR_JOB_ROOT, _save_rfdetr_active)
-
-
-def _save_rfdetr_active(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return _save_rfdetr_active_impl(payload, RFDETR_ACTIVE_PATH)
-
-
-def _load_detector_default() -> Dict[str, Any]:
-    return _load_detector_default_impl(DETECTOR_DEFAULT_PATH)
-
-
-def _save_detector_default(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return _save_detector_default_impl(payload, DETECTOR_DEFAULT_PATH, HTTPException)
-
-
-def _detect_yolo_layout(dataset_root: Path) -> Dict[str, Any]:
-    return _detect_yolo_layout_impl(dataset_root)
-
-
-def _yolo_labels_have_polygons(
-    labels_dir: Optional[Path],
-    *,
-    max_files: int = 200,
-    max_lines: int = 2000,
-) -> bool:
-    return _yolo_labels_have_polygons_impl(
-        labels_dir,
-        max_files=max_files,
-        max_lines=max_lines,
-    )
-
-
-def _resolve_dataset_entry(dataset_id: str) -> Optional[Dict[str, Any]]:
-    return _resolve_dataset_entry_impl(dataset_id, list_all_datasets_fn=_list_all_datasets)
-
-
-def _resolve_yolo_training_dataset(payload: YoloTrainRequest) -> Dict[str, Any]:
-    return _resolve_yolo_training_dataset_impl(
-        payload,
-        resolve_dataset_entry_fn=_resolve_dataset_entry,
-        resolve_sam3_or_qwen_dataset_fn=_resolve_sam3_or_qwen_dataset,
-        compute_dir_signature_fn=_compute_dir_signature,
-        sanitize_yolo_run_id_fn=_sanitize_yolo_run_id,
-        detect_yolo_layout_fn=_detect_yolo_layout,
-        yolo_labels_have_polygons_fn=_yolo_labels_have_polygons,
-        stable_hash_fn=_stable_hash,
-        yolo_cache_root=YOLO_DATASET_CACHE_ROOT,
-        http_exception_cls=HTTPException,
-    )
-
-
-def _resolve_rfdetr_training_dataset(payload: RfDetrTrainRequest) -> Dict[str, Any]:
-    return _resolve_rfdetr_training_dataset_impl(
-        payload,
-        resolve_dataset_entry_fn=_resolve_dataset_entry,
-        resolve_sam3_or_qwen_dataset_fn=_resolve_sam3_or_qwen_dataset,
-        load_sam3_meta_fn=_load_sam3_dataset_metadata,
-        detect_yolo_layout_fn=_detect_yolo_layout,
-        yolo_labels_have_polygons_fn=_yolo_labels_have_polygons,
-        convert_yolo_dataset_to_coco_fn=_convert_yolo_dataset_to_coco,
-        convert_qwen_dataset_to_coco_fn=_convert_qwen_dataset_to_coco,
-        load_qwen_dataset_metadata_fn=_load_qwen_dataset_metadata,
-        ensure_coco_supercategory_fn=_ensure_coco_supercategory,
-        http_exception_cls=HTTPException,
-    )
-
-
-def _yolo_resolve_split_paths(dataset_root: Path, layout: Optional[str]) -> Tuple[str, str]:
-    return _yolo_resolve_split_paths_impl(dataset_root, layout)
-
-
-def _yolo_load_labelmap(labelmap_path: Path) -> List[str]:
-    return _yolo_load_labelmap_impl(labelmap_path)
-
-
-def _yolo_load_run_labelmap(run_dir: Path) -> List[str]:
-    return _yolo_load_run_labelmap_impl(
-        run_dir,
-        yolo_load_labelmap_fn=_yolo_load_labelmap,
-        yaml_load_fn=yaml.safe_load,
-    )
-
-
-def _rfdetr_load_labelmap(dataset_root: Path, coco_train_json: Optional[str] = None) -> List[str]:
-    return _rfdetr_load_labelmap_impl(
-        dataset_root,
-        coco_train_json,
-        yolo_load_labelmap_fn=_yolo_load_labelmap,
-        json_load_fn=json.loads,
-    )
-
-
-def _rfdetr_variant_info(task: str, variant: Optional[str]) -> Dict[str, Any]:
-    return _rfdetr_variant_info_impl(
-        task,
-        variant,
-        variants=RFDETR_VARIANTS,
-        http_exception_cls=HTTPException,
-    )
-
-
-def _rfdetr_best_checkpoint(run_dir: Path) -> Optional[str]:
-    return _rfdetr_best_checkpoint_impl(run_dir)
-
-
-def _rfdetr_parse_log_series(log_path: Path) -> List[Dict[str, Any]]:
-    return _rfdetr_parse_log_series_impl(log_path)
-
-
-def _rfdetr_sanitize_metric(metric: Dict[str, Any]) -> Dict[str, Any]:
-    return _rfdetr_sanitize_metric_impl(metric)
-
-
-def _rfdetr_normalize_aug_policy(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    return _rfdetr_normalize_aug_policy_impl(raw)
-
-
-def _rfdetr_install_augmentations(policy: Optional[Dict[str, Any]]) -> Optional[Tuple[Any, Any]]:
-    return _rfdetr_install_augmentations_impl(policy)
-
-
-def _rfdetr_restore_augmentations(restore: Optional[Tuple[Any, Any]]) -> None:
-    _rfdetr_restore_augmentations_impl(restore)
-
-
-def _rfdetr_latest_checkpoint_epoch(run_dir: Path) -> Optional[int]:
-    return _rfdetr_latest_checkpoint_epoch_impl(run_dir)
-
-
-def _rfdetr_monitor_training(job: RfDetrTrainingJob, run_dir: Path, total_epochs: int, stop_event: threading.Event) -> None:
-    _rfdetr_monitor_training_impl(
-        job,
-        run_dir,
-        total_epochs,
-        stop_event,
-        job_append_metric_fn=_rfdetr_job_append_metric,
-        job_update_fn=_rfdetr_job_update,
-        sanitize_metric_fn=_rfdetr_sanitize_metric,
-        latest_checkpoint_fn=_rfdetr_latest_checkpoint_epoch,
-    )
-
-
-def _yolo_write_data_yaml(run_dir: Path, dataset_root: Path, layout: Optional[str], labelmap_path: Optional[str]) -> Path:
-    return _yolo_write_data_yaml_impl(
-        run_dir,
-        dataset_root,
-        layout,
-        labelmap_path,
-        resolve_split_paths_fn=_yolo_resolve_split_paths,
-        yolo_load_labelmap_fn=_yolo_load_labelmap,
-        yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
-        copy_file_fn=shutil.copy2,
-    )
-
-
-def _yolo_device_arg(devices: Optional[List[int]]) -> Optional[str]:
-    return _yolo_device_arg_impl(devices)
-
-
-def _yolo_p2_scale(model_id: str) -> Optional[str]:
-    return _yolo_p2_scale_impl(model_id)
+## NOTE: YOLO dataset helpers use *_impl directly to avoid wrapper drift.
 
 
 class ConcatHead(torch.nn.Module):
@@ -10593,79 +8460,14 @@ def _patch_ultralytics_for_head_grafting() -> None:
 
 
 
-def _yolo_resolve_model_source(
-    variant: Optional[str],
-    task: str,
-    from_scratch: bool,
-    base_weights: Optional[str],
-) -> Tuple[str, str]:
-    return _yolo_resolve_model_source_impl(
-        variant,
-        task,
-        from_scratch,
-        base_weights,
-        p2_scale_fn=_yolo_p2_scale,
-    )
-
-
-def _yolo_variant_base_yaml(variant: str, task: str, *, run_dir: Optional[Path] = None) -> Path:
-    return _yolo_variant_base_yaml_impl(
-        variant,
-        task,
-        run_dir=run_dir,
-        http_exception_cls=HTTPException,
-        import_ultralytics_fn=lambda: __import__("ultralytics"),  # type: ignore
-        yaml_load_fn=yaml.safe_load,
-        yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
-        upload_root=UPLOAD_ROOT,
-        p2_scale_fn=_yolo_p2_scale,
-    )
-
-
-def _yolo_write_variant_yaml(run_dir: Path, variant: str, task: str, nc: int) -> Path:
-    return _yolo_write_variant_yaml_impl(
-        run_dir,
-        variant,
-        task,
-        nc,
-        variant_base_yaml_fn=_yolo_variant_base_yaml,
-        yaml_load_fn=yaml.safe_load,
-        yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
-    )
-
-
-def _yolo_write_head_graft_yaml(run_dir: Path, variant: str, base_nc: int, new_nc: int) -> Path:
-    return _yolo_write_head_graft_yaml_impl(
-        run_dir,
-        variant,
-        base_nc,
-        new_nc,
-        variant_base_yaml_fn=_yolo_variant_base_yaml,
-        yaml_load_fn=yaml.safe_load,
-        yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
-        http_exception_cls=HTTPException,
-    )
-
-
-def _yolo_find_detect_modules(model: Any) -> List[Any]:
-    return _yolo_find_detect_modules_impl(
-        model,
-        import_detect_cls_fn=lambda: __import__("ultralytics.nn.tasks", fromlist=["Detect"]).Detect,  # type: ignore
-    )
-
-
-def _yolo_detect_layer_index(model: Any) -> int:
-    return _yolo_detect_layer_index_impl(
-        model,
-        find_detect_modules_fn=_yolo_find_detect_modules,
-    )
+## NOTE: YOLO YAML/head helpers use *_impl directly to avoid wrapper drift.
 
 
 def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
     return _ensure_yolo_inference_runtime_impl(
-        load_active_fn=_load_yolo_active,
-        load_labelmap_fn=_yolo_load_labelmap,
+        load_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH),
+        load_labelmap_fn=_yolo_load_labelmap_impl,
         patch_ultralytics_fn=_patch_ultralytics_for_head_grafting,
         yolo_lock=YOLO_INFER_LOCK,
         get_state_fn=lambda: (yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task),
@@ -10698,9 +8500,14 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
         }
 
     return _ensure_rfdetr_inference_runtime_impl(
-        load_active_fn=_load_rfdetr_active,
-        load_labelmap_fn=_yolo_load_labelmap,
-        variant_info_fn=_rfdetr_variant_info,
+        load_active_fn=lambda: _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
+        load_labelmap_fn=_yolo_load_labelmap_impl,
+        variant_info_fn=lambda task, variant: _rfdetr_variant_info_impl(
+            task,
+            variant,
+            variants=RFDETR_VARIANTS,
+            http_exception_cls=HTTPException,
+        ),
         rfdetr_lock=RFDETR_INFER_LOCK,
         get_state_fn=lambda: (
             rfdetr_infer_model,
@@ -10719,33 +8526,20 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     )
 
 
-def _yolo_build_aug_args(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    return _yolo_build_aug_args_impl(aug)
-
-
-def _yolo_parse_results_csv(results_path: Path) -> List[Dict[str, Any]]:
-    return _yolo_parse_results_csv_impl(results_path)
-
-
-def _yolo_monitor_training(job: YoloTrainingJob, run_dir: Path, total_epochs: int, stop_event: threading.Event) -> None:
-    _yolo_monitor_training_impl(
-        job,
-        run_dir,
-        total_epochs,
-        stop_event,
-        parse_results_fn=_yolo_parse_results_csv,
-        job_append_metric_fn=_yolo_job_append_metric,
-        job_update_fn=_yolo_job_update,
-    )
-
-
-def _strip_checkpoint_optimizer(ckpt_path: Path) -> Tuple[bool, int, int]:
-    return _strip_checkpoint_optimizer_impl(ckpt_path, torch_module=torch)
-
-
 def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
-    run_dir = _run_dir_for_request(run_id, variant)
-    active_paths = _active_run_paths_for_variant(variant)
+    run_dir = _run_dir_for_request_impl(
+        run_id=run_id,
+        variant=variant,
+        job_root=SAM3_JOB_ROOT,
+        http_exception_cls=HTTPException,
+        http_400=HTTP_400_BAD_REQUEST,
+        http_404=HTTP_404_NOT_FOUND,
+    )
+    active_paths = _active_run_paths_for_variant_impl(
+        variant=variant,
+        jobs_lock=SAM3_TRAINING_JOBS_LOCK,
+        jobs=SAM3_TRAINING_JOBS,
+    )
     if run_dir.resolve() in active_paths:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="sam3_run_active")
     ckpt_dir = run_dir / "checkpoints"
@@ -10777,7 +8571,7 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
             freed += size
         except Exception:
             continue
-    stripped, before, after = _strip_checkpoint_optimizer(keep)
+    stripped, before, after = _strip_checkpoint_optimizer_impl(keep, torch_module=torch)
     freed += max(0, before - after)
     marker = run_dir / ".promoted"
     try:
@@ -10796,318 +8590,120 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
     }
 
 
-def _resolve_dataset_legacy(dataset_id: str) -> Path:
-    return _resolve_dataset_legacy_impl(
-        dataset_id,
-        qwen_root=QWEN_DATASET_ROOT,
-        sam3_root=SAM3_DATASET_ROOT,
-        registry_root=DATASET_REGISTRY_ROOT,
+_persist_agent_recipe = functools.partial(
+    _persist_agent_recipe_impl,
+    recipes_root=AGENT_MINING_RECIPES_ROOT,
+    max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
+    max_crops=AGENT_RECIPE_MAX_CROPS,
+    max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
+    resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
+    load_coco_index_fn=_load_coco_index_impl,
+    compute_dataset_signature_fn=_compute_dataset_signature_impl,
+    compute_labelmap_hash_fn=_compute_labelmap_hash_impl,
+    resolve_clip_classifier_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
+        path_str,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
-    )
-
-
-def _resolve_sam3_or_qwen_dataset(dataset_id: str) -> Path:
-    return _resolve_sam3_or_qwen_dataset_impl(
-        dataset_id,
-        list_all_datasets_fn=_list_all_datasets,
-        resolve_dataset_legacy_fn=_resolve_dataset_legacy,
-    )
-
-
-def _stable_hash(entries: Sequence[str]) -> str:
-    return _stable_hash_impl(entries)
-
-
-def _decode_image_base64(
-    image_base64: str,
-    *,
-    max_bytes: Optional[int] = BASE64_IMAGE_MAX_BYTES,
-    max_dim: Optional[int] = BASE64_IMAGE_MAX_DIM,
-    allow_downscale: bool = True,
-) -> Tuple[Image.Image, np.ndarray]:
-    return _decode_image_base64_impl(
-        image_base64,
-        max_bytes=max_bytes,
-        max_dim=max_dim,
-        allow_downscale=allow_downscale,
-    )
-
-
-def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = None) -> str:
-    return _compute_dir_signature_impl(root, allowed_exts=allowed_exts)
-
-
-def _path_is_within_root(path: Path, root: Path) -> bool:
-    return _path_is_within_root_impl(path, root)
-
-
-def _parse_agent_recipe_schema_version(recipe_obj: Dict[str, Any]) -> Optional[int]:
-    return _parse_agent_recipe_schema_version_impl(recipe_obj)
-
-
-def _classify_agent_recipe_mode(recipe_obj: Dict[str, Any]) -> Literal["sam3_steps", "sam3_greedy", "legacy_steps"]:
-    return _classify_agent_recipe_mode_impl(recipe_obj)
-
-
-def _normalize_agent_recipe_execution_plan(recipe_obj: Dict[str, Any]) -> Dict[str, Any]:
-    return _normalize_agent_recipe_execution_plan_impl(recipe_obj)
-
-
-def _validate_agent_recipe_structure(recipe_obj: Dict[str, Any]) -> None:
-    _validate_agent_recipe_structure_impl(recipe_obj)
-
-
-def _compute_labelmap_hash(categories: List[Dict[str, Any]]) -> Tuple[str, List[str]]:
-    return _compute_labelmap_hash_impl(categories)
-
-
-def _compute_dataset_signature(dataset_id: str, dataset_root: Path, images: Dict[int, Dict[str, Any]], categories: List[Dict[str, Any]]) -> str:
-    return _compute_dataset_signature_impl(dataset_id, dataset_root, images, categories)
-
-
-def _save_exemplar_crop(
-    *,
-    exemplar: Dict[str, Any],
-    images: Dict[int, Dict[str, Any]],
-    crop_dir: Path,
-    step_idx: int,
-    crop_name: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    return _save_exemplar_crop_impl(
-        exemplar=exemplar,
-        images=images,
-        crop_dir=crop_dir,
-        step_idx=step_idx,
-        crop_name=crop_name,
-    )
-
-
-def _persist_agent_recipe(
-    dataset_id: Optional[str],
-    class_id: Optional[int],
-    class_name: Optional[str],
-    label: str,
-    recipe: Dict[str, Any],
-    *,
-    crop_overrides: Optional[Dict[str, bytes]] = None,
-    clip_head_overrides: Optional[Dict[str, bytes]] = None,
-    meta_overrides: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    return _persist_agent_recipe_impl(
-        dataset_id,
-        class_id,
-        class_name,
-        label,
-        recipe,
-        crop_overrides=crop_overrides,
-        clip_head_overrides=clip_head_overrides,
-        meta_overrides=meta_overrides,
-        recipes_root=AGENT_MINING_RECIPES_ROOT,
-        max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
-        max_crops=AGENT_RECIPE_MAX_CROPS,
-        max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
-        resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
-        load_coco_index_fn=_load_coco_index,
-        compute_dataset_signature_fn=_compute_dataset_signature,
-        compute_labelmap_hash_fn=_compute_labelmap_hash,
-        resolve_clip_classifier_fn=_resolve_agent_clip_classifier_path,
-        load_clip_head_fn=_load_clip_head_from_classifier,
-        save_clip_head_artifacts_fn=_save_clip_head_artifacts,
-        load_clip_head_artifacts_fn=_load_clip_head_artifacts,
-        save_exemplar_crop_fn=_save_exemplar_crop,
-        sanitize_prompts_fn=_sanitize_prompts,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _load_agent_recipe(recipe_id: str) -> Dict[str, Any]:
-    return _load_agent_recipe_impl(
-        recipe_id,
-        recipes_root=AGENT_MINING_RECIPES_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _load_agent_recipe_json_only(recipe_id: str) -> Dict[str, Any]:
-    """Load an agent recipe payload without inlining crop_base64 blobs (suitable for inference/export)."""
-    return _load_agent_recipe_json_only_impl(
-        recipe_id,
-        recipes_root=AGENT_MINING_RECIPES_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _delete_agent_recipe(recipe_id: str) -> None:
-    return _delete_agent_recipe_impl(
-        recipe_id,
-        recipes_root=AGENT_MINING_RECIPES_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
+    ),
+    load_clip_head_fn=lambda classifier_path: _load_clip_head_from_classifier_impl(
+        classifier_path,
+        joblib_load_fn=joblib.load,
         http_exception_cls=HTTPException,
-    )
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+        infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+        active_clip_model_name=active_clip_model_name,
+        default_clip_model=DEFAULT_CLIP_MODEL,
+        logger=logger,
+    ),
+    save_clip_head_artifacts_fn=_save_clip_head_artifacts,
+    load_clip_head_artifacts_fn=_load_clip_head_artifacts,
+    save_exemplar_crop_fn=_save_exemplar_crop_impl,
+    sanitize_prompts_fn=_sanitize_prompts_impl,
+    path_is_within_root_fn=_path_is_within_root_impl,
+)
 
 
-def _list_agent_recipes(dataset_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    return _list_agent_recipes_impl(recipes_root=AGENT_MINING_RECIPES_ROOT, dataset_id=dataset_id)
+## NOTE: agent recipe loaders use *_impl directly to avoid wrapper drift.
 
 
-def _ensure_recipe_zip(recipe: Dict[str, Any]) -> Path:
-    return _ensure_recipe_zip_impl(recipe, recipes_root=AGENT_MINING_RECIPES_ROOT)
+_delete_agent_recipe = functools.partial(
+    _delete_agent_recipe_impl,
+    recipes_root=AGENT_MINING_RECIPES_ROOT,
+    path_is_within_root_fn=_path_is_within_root_impl,
+    http_exception_cls=HTTPException,
+)
+
+_list_agent_recipes = functools.partial(_list_agent_recipes_impl, recipes_root=AGENT_MINING_RECIPES_ROOT)
 
 
-def _import_agent_recipe_zip_bytes(zip_bytes: bytes) -> Tuple[Optional[str], Dict[str, Any]]:
-    return _import_agent_recipe_zip_bytes_impl(
-        zip_bytes,
+_ensure_recipe_zip = functools.partial(_ensure_recipe_zip_impl, recipes_root=AGENT_MINING_RECIPES_ROOT)
+
+
+_import_agent_recipe_zip_bytes = functools.partial(
+    _import_agent_recipe_zip_bytes_impl,
+    recipes_root=AGENT_MINING_RECIPES_ROOT,
+    max_json_bytes=AGENT_RECIPE_MAX_JSON_BYTES,
+    max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
+    max_crops=AGENT_RECIPE_MAX_CROPS,
+    max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
+    persist_recipe_fn=_persist_agent_recipe,
+)
+
+
+_persist_agent_cascade = functools.partial(
+    _persist_agent_cascade_impl,
+    cascades_root=AGENT_MINING_CASCADES_ROOT,
+    path_is_within_root_fn=_path_is_within_root_impl,
+)
+
+
+## NOTE: agent cascade loader uses *_impl directly to avoid wrapper drift.
+
+
+_list_agent_cascades = functools.partial(_list_agent_cascades_impl, cascades_root=AGENT_MINING_CASCADES_ROOT)
+
+_delete_agent_cascade = functools.partial(
+    _delete_agent_cascade_impl,
+    cascades_root=AGENT_MINING_CASCADES_ROOT,
+    path_is_within_root_fn=_path_is_within_root_impl,
+)
+
+
+_ensure_cascade_zip = functools.partial(
+    _ensure_cascade_zip_impl,
+    cascades_root=AGENT_MINING_CASCADES_ROOT,
+    recipes_root=AGENT_MINING_RECIPES_ROOT,
+    classifiers_root=(UPLOAD_ROOT / "classifiers"),
+    path_is_within_root_fn=_path_is_within_root_impl,
+    ensure_recipe_zip_fn=_ensure_recipe_zip,
+    load_recipe_fn=lambda recipe_id: _load_agent_recipe_impl(
+        recipe_id,
         recipes_root=AGENT_MINING_RECIPES_ROOT,
-        max_json_bytes=AGENT_RECIPE_MAX_JSON_BYTES,
-        max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
-        max_crops=AGENT_RECIPE_MAX_CROPS,
-        max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
-        persist_recipe_fn=_persist_agent_recipe,
-    )
+        path_is_within_root_fn=_path_is_within_root_impl,
+    ),
+    resolve_classifier_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
+        path_str,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+        http_exception_cls=HTTPException,
+    ),
+)
 
 
-def _persist_agent_cascade(label: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    return _persist_agent_cascade_impl(
-        label,
-        payload,
-        cascades_root=AGENT_MINING_CASCADES_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _load_agent_cascade(cascade_id: str) -> Dict[str, Any]:
-    return _load_agent_cascade_impl(
-        cascade_id,
-        cascades_root=AGENT_MINING_CASCADES_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _list_agent_cascades() -> List[Dict[str, Any]]:
-    return _list_agent_cascades_impl(cascades_root=AGENT_MINING_CASCADES_ROOT)
-
-
-def _delete_agent_cascade(cascade_id: str) -> None:
-    return _delete_agent_cascade_impl(
-        cascade_id,
-        cascades_root=AGENT_MINING_CASCADES_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _ensure_cascade_zip(cascade: Dict[str, Any]) -> Path:
-    return _ensure_cascade_zip_impl(
-        cascade,
-        cascades_root=AGENT_MINING_CASCADES_ROOT,
-        recipes_root=AGENT_MINING_RECIPES_ROOT,
-        classifiers_root=(UPLOAD_ROOT / "classifiers"),
-        path_is_within_root_fn=_path_is_within_root,
-        ensure_recipe_zip_fn=_ensure_recipe_zip,
-        load_recipe_fn=_load_agent_recipe,
-        resolve_classifier_fn=_resolve_agent_clip_classifier_path,
-    )
-
-
-def _import_agent_cascade_zip_bytes(zip_bytes: bytes) -> Dict[str, Any]:
-    return _import_agent_cascade_zip_bytes_impl(
-        zip_bytes,
-        cascades_root=AGENT_MINING_CASCADES_ROOT,
-        classifiers_root=(UPLOAD_ROOT / "classifiers"),
-        max_json_bytes=AGENT_CASCADE_MAX_JSON_BYTES,
-        classifier_allowed_exts=CLASSIFIER_ALLOWED_EXTS,
-        path_is_within_root_fn=_path_is_within_root,
-        import_recipe_fn=_import_agent_recipe_zip_bytes,
-        persist_cascade_fn=_persist_agent_cascade,
-    )
-
-
-def _sanitize_prompts(prompts: List[str]) -> List[str]:
-    return _sanitize_prompts_impl(prompts)
-
-
-def _build_gt_index_for_class(
-    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]], target_class: int
-) -> Tuple[Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]], set[str], Dict[int, int]]:
-    return _build_gt_index_for_class_impl(
-        gt_by_image_cat,
-        target_class,
-        xywh_to_xyxy_fn=_xywh_to_xyxy,
-    )
-
-
-def _evaluate_prompt_candidate(
-    prompt: str,
-    threshold: float,
-    *,
-    cat_id: int,
-    image_ids: List[int],
-    gt_index: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]],
-    other_gt_index: Optional[Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]]] = None,
-    images: Dict[int, Dict[str, Any]],
-    iou_threshold: float,
-    max_dets: int,
-    image_cache: Dict[int, Image.Image],
-    cached_detections: Optional[Dict[int, List[Tuple[float, float, float, float, Optional[float]]]]] = None,
-) -> Dict[str, Any]:
-    return _evaluate_prompt_candidate_impl(
-        prompt,
-        threshold,
-        cat_id=cat_id,
-        image_ids=image_ids,
-        gt_index=gt_index,
-        other_gt_index=other_gt_index,
-        images=images,
-        iou_threshold=iou_threshold,
-        max_dets=max_dets,
-        image_cache=image_cache,
-        cached_detections=cached_detections,
-        run_sam3_text_inference_fn=_run_sam3_text_inference,
-        yolo_to_xyxy_fn=_yolo_to_xyxy,
-        iou_fn=_iou,
-    )
-
-
-def _collect_prompt_detections(
-    prompt: str,
-    min_threshold: float,
-    *,
-    image_ids: List[int],
-    images: Dict[int, Dict[str, Any]],
-    image_cache: Dict[int, Image.Image],
-    max_dets: int,
-) -> Dict[int, List[Tuple[float, float, float, float, Optional[float]]]]:
-    return _collect_prompt_detections_impl(
-        prompt,
-        min_threshold,
-        image_ids=image_ids,
-        images=images,
-        image_cache=image_cache,
-        max_dets=max_dets,
-        run_sam3_text_inference_fn=_run_sam3_text_inference,
-        yolo_to_xyxy_fn=_yolo_to_xyxy,
-    )
-
-
-def _build_prompt_recipe(
-    candidates: List[Dict[str, Any]],
-    all_gt_keys: set[str],
-    per_image_gt: Dict[int, int],
-    images: Dict[int, Dict[str, Any]],
-    image_ids: List[int],
-    gt_index: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]],
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    return _build_prompt_recipe_impl(
-        candidates,
-        all_gt_keys,
-        per_image_gt,
-        images,
-        image_ids,
-        gt_index,
-    )
-
-
-def _serialize_prompt_helper_job(job: PromptHelperJob) -> Dict[str, Any]:
-    return _serialize_prompt_helper_job_impl(job)
+_import_agent_cascade_zip_bytes = functools.partial(
+    _import_agent_cascade_zip_bytes_impl,
+    cascades_root=AGENT_MINING_CASCADES_ROOT,
+    classifiers_root=(UPLOAD_ROOT / "classifiers"),
+    max_json_bytes=AGENT_CASCADE_MAX_JSON_BYTES,
+    classifier_allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+    path_is_within_root_fn=_path_is_within_root_impl,
+    import_recipe_fn=_import_agent_recipe_zip_bytes,
+    persist_cascade_fn=_persist_agent_cascade,
+)
 
 
 def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
@@ -11125,120 +8721,27 @@ def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
     }
 
 
-def _calibration_update(job: CalibrationJob, **kwargs: Any) -> None:
-    _calibration_update_impl(job, **kwargs)
-
-
-def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:
-    _calibration_write_record_atomic_impl(path, record)
-
-
-def _calibration_prepass_worker(
-    device_index: int,
-    tasks: List[Tuple[str, str]],
-    dataset_id: str,
-    labelmap: List[str],
-    glossary: str,
-    prepass_payload_dict: Dict[str, Any],
-    cancel_event: Optional[Any],
-    progress_queue: Optional[Any],
-) -> None:
-    return _calibration_prepass_worker_impl(
-        device_index,
-        tasks,
-        dataset_id,
-        labelmap,
-        glossary,
-        prepass_payload_dict,
-        cancel_event=cancel_event,
-        progress_queue=progress_queue,
-        resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
-        prepass_request_cls=QwenPrepassRequest,
-        cache_image_fn=_calibration_cache_image,
-        run_prepass_fn=_agent_run_deep_prepass,
-        write_record_fn=_calibration_write_record_atomic,
-        set_device_pref_fn=lambda idx: _set_sam3_device_pref(idx),
-    )
-
-
-def _calibration_list_images(dataset_id: str) -> List[str]:
-    return _calibration_list_images_impl(
-        dataset_id, resolve_dataset_fn=_resolve_sam3_or_qwen_dataset
-    )
-
-
-def _calibration_sample_images(images: List[str], *, max_images: int, seed: int) -> List[str]:
-    return _calibration_sample_images_impl(images, max_images=max_images, seed=seed)
-
-
-def _calibration_cache_image(pil_img: Image.Image, sam_variant: Optional[str]) -> str:
-    return _calibration_cache_image_impl(
+_calibration_update = _calibration_update_impl
+_calibration_write_record_atomic = _calibration_write_record_atomic_impl
+_calibration_prepass_worker = functools.partial(
+    _calibration_prepass_worker_impl,
+    resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
+    prepass_request_cls=QwenPrepassRequest,
+    cache_image_fn=lambda pil_img, sam_variant: _calibration_cache_image_impl(
         pil_img,
         sam_variant,
         store_preloaded_fn=_store_preloaded_image,
         default_variant_fn=_default_variant,
-    )
+    ),
+    run_prepass_fn=_agent_run_deep_prepass,
+    write_record_fn=_calibration_write_record_atomic,
+    set_device_pref_fn=lambda idx: _set_sam3_device_pref(idx),
+)
 
 
-def _calibration_hash_payload(payload: Dict[str, Any]) -> str:
-    return _calibration_hash_payload_impl(payload)
+## NOTE: calibration job runner uses *_impl directly to avoid wrapper drift.
 
 
-def _calibration_safe_link(src: Path, dest: Path) -> None:
-    _calibration_safe_link_impl(src, dest)
-
-
-def _run_calibration_job(job: CalibrationJob, payload: CalibrationRequest) -> None:
-    return _run_calibration_job_impl(
-        job,
-        payload,
-        jobs=CALIBRATION_JOBS,
-        jobs_lock=CALIBRATION_JOBS_LOCK,
-        update_fn=_calibration_update,
-        require_sam3_fn=_require_sam3_for_prepass,
-        prepare_for_training_fn=_prepare_for_training,
-        load_yolo_active_fn=_load_yolo_active,
-        load_rfdetr_active_fn=_load_rfdetr_active,
-        load_labelmap_meta_fn=_agent_load_labelmap_meta,
-        list_images_fn=_calibration_list_images,
-        sample_images_fn=_calibration_sample_images,
-        calibration_root=CALIBRATION_ROOT,
-        calibration_cache_root=CALIBRATION_CACHE_ROOT,
-        prepass_request_cls=QwenPrepassRequest,
-        active_classifier_head=active_classifier_head,
-        calibration_features_version=CALIBRATION_FEATURES_VERSION,
-        write_record_fn=_calibration_write_record_atomic,
-        hash_payload_fn=_calibration_hash_payload,
-        safe_link_fn=_calibration_safe_link,
-        prepass_worker_fn=_calibration_prepass_worker,
-        unload_inference_runtimes_fn=_unload_inference_runtimes,
-        resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
-        cache_image_fn=_calibration_cache_image,
-        run_prepass_fn=_agent_run_deep_prepass,
-        logger=logger,
-        http_exception_cls=HTTPException,
-        root_dir=Path(__file__).resolve().parent,
-    )
-
-
-def _start_calibration_job(payload: CalibrationRequest) -> CalibrationJob:
-    return _start_calibration_job_impl(
-        payload,
-        job_cls=CalibrationJob,
-        jobs=CALIBRATION_JOBS,
-        jobs_lock=CALIBRATION_JOBS_LOCK,
-        run_job_fn=_run_calibration_job,
-    )
-
-
-def _cancel_calibration_job(job_id: str) -> CalibrationJob:
-    return _cancel_calibration_job_impl(
-        job_id,
-        jobs=CALIBRATION_JOBS,
-        jobs_lock=CALIBRATION_JOBS_LOCK,
-        http_exception_cls=HTTPException,
-        time_fn=time.time,
-    )
 def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -11247,8 +8750,18 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
     job.request = payload.dict()
     job.updated_at = time.time()
     try:
-        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
-        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+            payload.dataset_id,
+            list_all_datasets_fn=_list_all_datasets,
+            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                dataset_id,
+                qwen_root=QWEN_DATASET_ROOT,
+                sam3_root=SAM3_DATASET_ROOT,
+                registry_root=DATASET_REGISTRY_ROOT,
+                http_exception_cls=HTTPException,
+            ),
+        )
+        coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
         cat_to_images: Dict[int, set[int]] = {}
         for ann in coco.get("annotations", []):
@@ -11370,8 +8883,18 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
     job.request = {"mode": "search", **payload.dict()}
     job.updated_at = time.time()
     try:
-        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
-        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+            payload.dataset_id,
+            list_all_datasets_fn=_list_all_datasets,
+            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                dataset_id,
+                qwen_root=QWEN_DATASET_ROOT,
+                sam3_root=SAM3_DATASET_ROOT,
+                registry_root=DATASET_REGISTRY_ROOT,
+                http_exception_cls=HTTPException,
+            ),
+        )
+        coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
         target_class_id = payload.class_id
         if not payload.prompts_by_class:
@@ -11536,8 +9059,18 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
     try:
         if not payload.prompts:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="recipe_prompts_required")
-        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
-        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+            payload.dataset_id,
+            list_all_datasets_fn=_list_all_datasets,
+            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                dataset_id,
+                qwen_root=QWEN_DATASET_ROOT,
+                sam3_root=SAM3_DATASET_ROOT,
+                registry_root=DATASET_REGISTRY_ROOT,
+                http_exception_cls=HTTPException,
+            ),
+        )
+        coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
         cat_entry = next((c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id), None)
         if not cat_entry:
@@ -11567,7 +9100,11 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         )
         eval_ids = list(dict.fromkeys([*pos_ids, *neg_ids]))
         image_cache: Dict[int, Image.Image] = {}
-        gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class(gt_by_image_cat, payload.class_id)
+        gt_index_all, all_gt_keys_all, per_image_gt_all = _build_gt_index_for_class_impl(
+            gt_by_image_cat,
+            payload.class_id,
+            xywh_to_xyxy_fn=_xywh_to_xyxy,
+        )
         gt_index = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in eval_ids}
         per_image_gt = {img_id: per_image_gt_all.get(img_id, 0) for img_id in eval_ids}
         all_gt_keys = set()
@@ -11593,13 +9130,15 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         for idx, prompt_entry in enumerate(payload.prompts):
             thresholds = thresholds_cache.get(prompt_entry.prompt) or [payload.score_threshold]
             min_threshold = min(thresholds) if thresholds else payload.score_threshold
-            detections = _collect_prompt_detections(
+            detections = _collect_prompt_detections_impl(
                 prompt_entry.prompt,
                 min_threshold,
                 image_ids=eval_ids,
                 images=images,
                 image_cache=image_cache,
                 max_dets=payload.max_dets,
+                run_sam3_text_inference_fn=_run_sam3_text_inference,
+                yolo_to_xyxy_fn=_yolo_to_xyxy,
             )
             for thr in thresholds:
                 try:
@@ -11613,7 +9152,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
                         job.logs[:] = job.logs[-MAX_JOB_LOGS:]
                 except Exception:
                     pass
-                metrics = _evaluate_prompt_candidate(
+                metrics = _evaluate_prompt_candidate_impl(
                     prompt_entry.prompt,
                     thr,
                     cat_id=payload.class_id,
@@ -11624,6 +9163,9 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
                     max_dets=payload.max_dets,
                     image_cache=image_cache,
                     cached_detections=detections,
+                    run_sam3_text_inference_fn=_run_sam3_text_inference,
+                    yolo_to_xyxy_fn=_yolo_to_xyxy,
+                    iou_fn=_iou,
                 )
                 metrics["class_name"] = class_name
                 metrics["class_id"] = payload.class_id
@@ -11634,7 +9176,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
                     job.progress = min(1.0, job.completed_steps / job.total_steps)
                 job.message = f"Evaluated {prompt_entry.prompt} ({job.completed_steps}/{job.total_steps} images)"
                 job.updated_at = time.time()
-        recipe, coverage_by_image = _build_prompt_recipe(
+        recipe, coverage_by_image = _build_prompt_recipe_impl(
             candidates,
             all_gt_keys,
             per_image_gt,
@@ -11709,7 +9251,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
     try:
         _enforce_agent_mining_cache_limits(AGENT_MINING_DET_CACHE_ROOT, allow_when_running=False)
 
-        dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
+        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+            payload.dataset_id,
+            list_all_datasets_fn=_list_all_datasets,
+            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                dataset_id,
+                qwen_root=QWEN_DATASET_ROOT,
+                sam3_root=SAM3_DATASET_ROOT,
+                registry_root=DATASET_REGISTRY_ROOT,
+                http_exception_cls=HTTPException,
+            ),
+        )
         _log(f"Dataset resolved at {dataset_root}")
         _log(
             "Request: "
@@ -11734,7 +9286,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             sample_hash = "unknown"
         job.progress = 0.05
 
-        coco, gt_by_image_cat, images = _load_coco_index(dataset_root)
+        coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
         _log(f"Loaded COCO with {len(categories)} categories")
 
@@ -11773,10 +9325,26 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         )
 
         # Pretrained CLIP head (LogReg) is required for Agent Mining (recipe mining).
-        clip_head_path = _resolve_agent_clip_classifier_path(payload.clip_head_classifier_path)
+        clip_head_path = _resolve_agent_clip_classifier_path_impl(
+            payload.clip_head_classifier_path,
+            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+            http_exception_cls=HTTPException,
+        )
         if clip_head_path is None:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
-        clip_head = _load_clip_head_from_classifier(clip_head_path)
+        clip_head = _load_clip_head_from_classifier_impl(
+            clip_head_path,
+            joblib_load_fn=joblib.load,
+            http_exception_cls=HTTPException,
+            clip_head_background_indices_fn=_clip_head_background_indices,
+            resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+            infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+            active_clip_model_name=active_clip_model_name,
+            default_clip_model=DEFAULT_CLIP_MODEL,
+            logger=logger,
+        )
         if not isinstance(clip_head, dict):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
         head_encoder_type = str(clip_head.get("encoder_type") or "clip").lower().strip()
@@ -11869,7 +9437,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 base_prompts_all = [p for p in raw_base if isinstance(p, str) and p.strip()]
             elif isinstance(raw_base, str) and raw_base.strip():
                 base_prompts_all = [raw_base.strip()]
-        base_prompts_all = _sanitize_prompts(base_prompts_all)
+        base_prompts_all = _sanitize_prompts_impl(base_prompts_all)
         if base_prompts_all:
             _log(f"Base prompts (all classes): {', '.join(base_prompts_all)}")
 
@@ -11918,7 +9486,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     user_extras = [raw_extra.strip()]
             if user_extras:
                 _log(f"User extra prompts for {name}: {', '.join(user_extras)}")
-            base = _sanitize_prompts([*base, *user_extras]) or [name]
+            base = _sanitize_prompts_impl([*base, *user_extras]) or [name]
             extras: List[str] = []
             if payload.prompt_llm_max_prompts > 0:
                 extras = _expand_prompts_with_prompt_llm(
@@ -11936,7 +9504,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     continue
                 seen.add(key)
                 merged.append(str(p))
-            base_keep = _sanitize_prompts([*base, *base_prompts_all])
+            base_keep = _sanitize_prompts_impl([*base, *base_prompts_all])
             prefilter_total = len(merged)
             if prefilter_cfg.get("enabled"):
                 merged = _prefilter_prompts_with_clip(
@@ -12547,11 +10115,27 @@ def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
 
 
 def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
-    clip_head_path = _resolve_agent_clip_classifier_path(payload.clip_head_classifier_path)
+    clip_head_path = _resolve_agent_clip_classifier_path_impl(
+        payload.clip_head_classifier_path,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+        http_exception_cls=HTTPException,
+    )
     if clip_head_path is None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
     # Validate early so we fail fast (no background job created).
-    _load_clip_head_from_classifier(clip_head_path)
+    _load_clip_head_from_classifier_impl(
+        clip_head_path,
+        joblib_load_fn=joblib.load,
+        http_exception_cls=HTTPException,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+        infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+        active_clip_model_name=active_clip_model_name,
+        default_clip_model=DEFAULT_CLIP_MODEL,
+        logger=logger,
+    )
     job_id = f"am_{uuid.uuid4().hex[:8]}"
     job = AgentMiningJob(job_id=job_id)
     with AGENT_MINING_JOBS_LOCK:
@@ -12595,13 +10179,11 @@ def _start_prompt_recipe_job(payload: PromptRecipeRequest) -> PromptHelperJob:
     return job
 
 
-@app.post("/agent_mining/jobs")
 def start_agent_mining_job(payload: AgentMiningRequest):
     job = _start_agent_mining_job(payload)
     return _serialize_agent_mining_job(job)
 
 
-@app.get("/agent_mining/jobs")
 def list_agent_mining_jobs():
     _prune_job_registry(AGENT_MINING_JOBS, AGENT_MINING_JOBS_LOCK)
     with AGENT_MINING_JOBS_LOCK:
@@ -12610,7 +10192,6 @@ def list_agent_mining_jobs():
     return [_serialize_agent_mining_job(j) for j in jobs]
 
 
-@app.get("/agent_mining/jobs/{job_id}")
 def get_agent_mining_job(job_id: str):
     with AGENT_MINING_JOBS_LOCK:
         job = AGENT_MINING_JOBS.get(job_id)
@@ -12619,13 +10200,11 @@ def get_agent_mining_job(job_id: str):
     return _serialize_agent_mining_job(job)
 
 
-@app.post("/agent_mining/jobs/{job_id}/cancel")
 def cancel_agent_mining_job(job_id: str):
     job = _cancel_agent_mining_job(job_id)
     return _serialize_agent_mining_job(job)
 
 
-@app.get("/agent_mining/results/latest")
 def get_latest_agent_mining_result():
     with AGENT_MINING_JOBS_LOCK:
         jobs = [j for j in AGENT_MINING_JOBS.values() if j.status in {"running", "completed", "failed", "cancelled"}]
@@ -12635,7 +10214,6 @@ def get_latest_agent_mining_result():
     return _serialize_agent_mining_job(jobs[0])
 
 
-@app.get("/agent_mining/cache_size")
 def agent_mining_cache_size():
     cache_root = AGENT_MINING_DET_CACHE_ROOT
     # Light touch: enforce TTL/size only when no active job to avoid surprises.
@@ -12660,7 +10238,6 @@ def agent_mining_cache_size():
     }
 
 
-@app.post("/agent_mining/cache/purge")
 def agent_mining_cache_purge():
     cache_root = AGENT_MINING_DET_CACHE_ROOT
     if _agent_cache_running_jobs():
@@ -12683,174 +10260,6 @@ def agent_mining_cache_purge():
     return {"status": "ok", "deleted_bytes": deleted, "deleted_files": deleted_files}
 
 
-class AgentApplyImageRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    image_name: Optional[str] = None
-    sam_variant: Optional[str] = None
-    recipe: Dict[str, Any]
-    mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
-    min_size: int = Field(0, ge=0, le=10_000)
-    simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
-    max_results: int = Field(1000, ge=1, le=5000)
-    override_class_id: Optional[int] = Field(None, ge=0)
-    override_class_name: Optional[str] = None
-    clip_head_min_prob_override: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Optional extra CLIP-head probability threshold applied in addition to the recipe's baked-in head thresholds. "
-            "Effective min_prob is max(recipe_min_prob, clip_head_min_prob_override)."
-        ),
-    )
-    clip_head_margin_override: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Optional extra CLIP-head margin threshold applied in addition to the recipe's baked-in head thresholds. "
-            "Effective margin is max(recipe_margin, clip_head_margin_override)."
-        ),
-    )
-    extra_clip_classifier_path: Optional[str] = Field(
-        None,
-        description=(
-            "Optional extra CLIP classifier head (trained via the CLIP tab) to apply after the recipe runs. "
-            "Useful for adding a classifier-based filter to crop-bank recipes."
-        ),
-    )
-    extra_clip_min_prob: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Minimum probability for the step output class when using extra_clip_classifier_path. "
-            "This filter is applied in addition to any CLIP filtering already baked into the recipe."
-        ),
-    )
-    extra_clip_margin: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Optional margin for the step output class when using extra_clip_classifier_path "
-            "(p(target) - max(p(other)) must be >= margin)."
-        ),
-    )
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_agent_apply_image_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        if not isinstance(values.get("recipe"), dict) or not values.get("recipe"):
-            raise ValueError("recipe_required")
-        return values
-
-
-class AgentApplyChainStep(BaseModel):
-    enabled: bool = True
-    recipe_id: Optional[str] = None
-    recipe: Optional[Dict[str, Any]] = None
-    override_class_id: Optional[int] = Field(None, ge=0)
-    override_class_name: Optional[str] = None
-    dedupe_group: Optional[str] = None
-    participate_cross_class_dedupe: bool = True
-    clip_head_min_prob_override: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Optional extra CLIP-head probability threshold applied in addition to the recipe's baked-in head thresholds. "
-            "Effective min_prob is max(recipe_min_prob, clip_head_min_prob_override)."
-        ),
-    )
-    clip_head_margin_override: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Optional extra CLIP-head margin threshold applied in addition to the recipe's baked-in head thresholds. "
-            "Effective margin is max(recipe_margin, clip_head_margin_override)."
-        ),
-    )
-    extra_clip_classifier_path: Optional[str] = Field(
-        None,
-        description=(
-            "Optional extra CLIP classifier head (trained via the CLIP tab) to apply after the recipe runs. "
-            "Useful for adding a classifier-based filter to crop-bank recipes."
-        ),
-    )
-    extra_clip_min_prob: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Minimum probability for the step output class when using extra_clip_classifier_path. "
-            "This filter is applied in addition to any CLIP filtering already baked into the recipe."
-        ),
-    )
-    extra_clip_margin: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Optional margin for the step output class when using extra_clip_classifier_path "
-            "(p(target) - max(p(other)) must be >= margin)."
-        ),
-    )
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_chain_step(cls, values):  # noqa: N805
-        recipe_id = values.get("recipe_id")
-        recipe_obj = values.get("recipe")
-        if not recipe_id and not (isinstance(recipe_obj, dict) and recipe_obj):
-            raise ValueError("recipe_required")
-        return values
-
-
-class AgentCascadeDedupeConfig(BaseModel):
-    per_class_iou: float = Field(0.5, ge=0.0, le=1.0)
-    cross_class_enabled: bool = False
-    cross_class_iou: float = Field(0.5, ge=0.0, le=1.0)
-    cross_class_scope: Literal["groups", "global"] = "groups"
-    confidence: Literal["sam_score", "clip_head_prob", "clip_head_margin"] = "sam_score"
-    clip_head_recipe_id: Optional[str] = None
-
-
-class AgentApplyImageChainRequest(BaseModel):
-    image_base64: Optional[str] = None
-    image_token: Optional[str] = None
-    image_name: Optional[str] = None
-    sam_variant: Optional[str] = None
-    steps: List[AgentApplyChainStep]
-    dedupe: AgentCascadeDedupeConfig = Field(default_factory=AgentCascadeDedupeConfig)
-    mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
-    min_size: int = Field(0, ge=0, le=10_000)
-    simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
-    max_results: int = Field(1000, ge=1, le=5000)
-
-    @root_validator(skip_on_failure=True)
-    def _ensure_agent_apply_chain_payload(cls, values):  # noqa: N805
-        if not values.get("image_base64") and not values.get("image_token"):
-            raise ValueError("image_payload_missing")
-        steps = values.get("steps") or []
-        if not isinstance(steps, list) or not steps:
-            raise ValueError("steps_required")
-        enabled_steps: List[Any] = []
-        for step in steps:
-            if isinstance(step, dict):
-                if step.get("enabled", True):
-                    enabled_steps.append(step)
-                continue
-            if bool(getattr(step, "enabled", True)):
-                enabled_steps.append(step)
-        if not enabled_steps:
-            raise ValueError("steps_required")
-        return values
-
-
-@app.post("/agent_mining/apply_image", response_model=Sam3TextPromptResponse)
 def agent_mining_apply_image(payload: AgentApplyImageRequest):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
@@ -12905,7 +10314,6 @@ def agent_mining_apply_image(payload: AgentApplyImageRequest):
     return Sam3TextPromptResponse(detections=dets, warnings=warnings, image_token=token)
 
 
-@app.post("/agent_mining/apply_image_chain", response_model=Sam3TextPromptResponse)
 def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
@@ -12933,7 +10341,11 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
             if isinstance(step.recipe, dict) and step.recipe:
                 recipe_obj = step.recipe
             elif step.recipe_id:
-                recipe_obj = _load_agent_recipe_json_only(step.recipe_id)
+                recipe_obj = _load_agent_recipe_json_only_impl(
+                    step.recipe_id,
+                    recipes_root=AGENT_MINING_RECIPES_ROOT,
+                    path_is_within_root_fn=_path_is_within_root_impl,
+                )
             if not isinstance(recipe_obj, dict) or not recipe_obj:
                 continue
 
@@ -12999,14 +10411,18 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
                     if not rid:
                         continue
                     candidate = (AGENT_MINING_RECIPES_ROOT / str(rid) / "clip_head" / "head.npz").resolve()
-                    if _path_is_within_root(candidate, AGENT_MINING_RECIPES_ROOT.resolve()) and candidate.exists():
+                    if _path_is_within_root_impl(candidate, AGENT_MINING_RECIPES_ROOT.resolve()) and candidate.exists():
                         head_recipe_id = str(rid)
                         break
 
             clip_head: Optional[Dict[str, Any]] = None
             if head_recipe_id:
                 try:
-                    head_recipe = _load_agent_recipe_json_only(head_recipe_id)
+                    head_recipe = _load_agent_recipe_json_only_impl(
+                        head_recipe_id,
+                        recipes_root=AGENT_MINING_RECIPES_ROOT,
+                        path_is_within_root_fn=_path_is_within_root_impl,
+                    )
                 except HTTPException:
                     head_recipe = None
                 fallback_meta: Optional[Dict[str, Any]] = None
@@ -13017,7 +10433,7 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
                     elif isinstance(head_recipe.get("clip_head"), dict):
                         fallback_meta = head_recipe.get("clip_head")
                 recipe_root = (AGENT_MINING_RECIPES_ROOT / str(head_recipe_id)).resolve()
-                if _path_is_within_root(recipe_root, AGENT_MINING_RECIPES_ROOT.resolve()):
+                if _path_is_within_root_impl(recipe_root, AGENT_MINING_RECIPES_ROOT.resolve()):
                     clip_head = _load_clip_head_artifacts(recipe_dir=recipe_root, fallback_meta=fallback_meta)
 
             clip_scores = (
@@ -13095,21 +10511,6 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
         shutil.rmtree(staging_dir, ignore_errors=True)
 
 
-class AgentRecipeExportRequest(BaseModel):
-    dataset_id: str
-    class_id: Optional[int] = None
-    class_name: Optional[str] = None
-    label: str = Field(..., min_length=1, max_length=128)
-    recipe: Dict[str, Any]
-
-
-class AgentCascadeSaveRequest(BaseModel):
-    label: str = Field(..., min_length=1, max_length=128)
-    steps: List[AgentApplyChainStep]
-    dedupe: AgentCascadeDedupeConfig = Field(default_factory=AgentCascadeDedupeConfig)
-
-
-@app.post("/agent_mining/recipes", response_model=Dict[str, Any])
 def agent_mining_save_recipe(payload: AgentRecipeExportRequest):
     recipe = _persist_agent_recipe(
         payload.dataset_id,
@@ -13121,19 +10522,16 @@ def agent_mining_save_recipe(payload: AgentRecipeExportRequest):
     return recipe
 
 
-@app.get("/agent_mining/recipes", response_model=List[Dict[str, Any]])
 def agent_mining_list_recipes(dataset_id: Optional[str] = None):
     return _list_agent_recipes(dataset_id)
 
 
-@app.get("/agent_mining/recipes/{recipe_id}", response_model=Dict[str, Any])
-def agent_mining_get_recipe(recipe_id: str):
-    return _load_agent_recipe(recipe_id)
-
-
-@app.get("/agent_mining/recipes/{recipe_id}/export")
 def agent_mining_export_recipe(recipe_id: str):
-    recipe = _load_agent_recipe(recipe_id)
+    recipe = _load_agent_recipe_impl(
+        recipe_id,
+        recipes_root=AGENT_MINING_RECIPES_ROOT,
+        path_is_within_root_fn=_path_is_within_root_impl,
+    )
     zip_path = _ensure_recipe_zip(recipe)
     filename = f"{recipe_id}.zip"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
@@ -13144,7 +10542,6 @@ def agent_mining_export_recipe(recipe_id: str):
     return StreamingResponse(stream, media_type="application/zip", headers=headers)
 
 
-@app.post("/agent_mining/recipes/import", response_model=Dict[str, Any])
 async def agent_mining_import_recipe(file: UploadFile = File(...)):
     staging_dir = Path(tempfile.mkdtemp(prefix="agent_recipe_import_", dir=str(AGENT_MINING_RECIPES_ROOT)))
     zip_path = staging_dir / "payload.zip"
@@ -13168,13 +10565,11 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
         shutil.rmtree(staging_dir, ignore_errors=True)
 
 
-@app.delete("/agent_mining/recipes/{recipe_id}")
 def agent_mining_delete_recipe(recipe_id: str):
     _delete_agent_recipe(recipe_id)
     return {"id": recipe_id, "deleted": True}
 
 
-@app.post("/agent_mining/cascades", response_model=Dict[str, Any])
 def agent_mining_save_cascade(payload: AgentCascadeSaveRequest):
     cascade_payload = {
         "steps": [s.dict() for s in payload.steps],
@@ -13183,25 +10578,21 @@ def agent_mining_save_cascade(payload: AgentCascadeSaveRequest):
     return _persist_agent_cascade(payload.label, cascade_payload)
 
 
-@app.get("/agent_mining/cascades", response_model=List[Dict[str, Any]])
 def agent_mining_list_cascades():
     return _list_agent_cascades()
 
 
-@app.get("/agent_mining/cascades/{cascade_id}", response_model=Dict[str, Any])
-def agent_mining_get_cascade(cascade_id: str):
-    return _load_agent_cascade(cascade_id)
-
-
-@app.delete("/agent_mining/cascades/{cascade_id}")
 def agent_mining_delete_cascade(cascade_id: str):
     _delete_agent_cascade(cascade_id)
     return {"id": cascade_id, "deleted": True}
 
 
-@app.get("/agent_mining/cascades/{cascade_id}/export")
 def agent_mining_export_cascade(cascade_id: str):
-    cascade = _load_agent_cascade(cascade_id)
+    cascade = _load_agent_cascade_impl(
+        cascade_id,
+        cascades_root=AGENT_MINING_CASCADES_ROOT,
+        path_is_within_root_fn=_path_is_within_root_impl,
+    )
     zip_path = _ensure_cascade_zip(cascade)
     filename = f"{cascade_id}.zip"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
@@ -13212,7 +10603,6 @@ def agent_mining_export_cascade(cascade_id: str):
     return StreamingResponse(stream, media_type="application/zip", headers=headers)
 
 
-@app.post("/agent_mining/cascades/import", response_model=Dict[str, Any])
 async def agent_mining_import_cascade(file: UploadFile = File(...)):
     staging_dir = Path(tempfile.mkdtemp(prefix="agent_cascade_import_", dir=str(AGENT_MINING_CASCADES_ROOT)))
     zip_path = staging_dir / "payload.zip"
@@ -13235,15 +10625,64 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
         shutil.rmtree(staging_dir, ignore_errors=True)
 
 
-@app.post("/sam3/prompt_helper/suggest")
+app.include_router(
+    build_agent_mining_router(
+        start_job_fn=start_agent_mining_job,
+        list_jobs_fn=list_agent_mining_jobs,
+        get_job_fn=get_agent_mining_job,
+        cancel_job_fn=cancel_agent_mining_job,
+        latest_result_fn=get_latest_agent_mining_result,
+        cache_size_fn=agent_mining_cache_size,
+        cache_purge_fn=agent_mining_cache_purge,
+        apply_image_fn=agent_mining_apply_image,
+        apply_chain_fn=agent_mining_apply_image_chain,
+        save_recipe_fn=agent_mining_save_recipe,
+        list_recipes_fn=agent_mining_list_recipes,
+        get_recipe_fn=lambda recipe_id: _load_agent_recipe_impl(
+            recipe_id,
+            recipes_root=AGENT_MINING_RECIPES_ROOT,
+            path_is_within_root_fn=_path_is_within_root_impl,
+        ),
+        export_recipe_fn=agent_mining_export_recipe,
+        import_recipe_fn=agent_mining_import_recipe,
+        delete_recipe_fn=agent_mining_delete_recipe,
+        save_cascade_fn=agent_mining_save_cascade,
+        list_cascades_fn=agent_mining_list_cascades,
+        get_cascade_fn=lambda cascade_id: _load_agent_cascade_impl(
+            cascade_id,
+            cascades_root=AGENT_MINING_CASCADES_ROOT,
+            path_is_within_root_fn=_path_is_within_root_impl,
+        ),
+        delete_cascade_fn=agent_mining_delete_cascade,
+        export_cascade_fn=agent_mining_export_cascade,
+        import_cascade_fn=agent_mining_import_cascade,
+        job_request_cls=AgentMiningRequest,
+        apply_image_request_cls=AgentApplyImageRequest,
+        apply_chain_request_cls=AgentApplyImageChainRequest,
+        recipe_request_cls=AgentRecipeExportRequest,
+        cascade_request_cls=AgentCascadeSaveRequest,
+        sam3_response_cls=Sam3TextPromptResponse,
+    )
+)
+
+
 def prompt_helper_suggest(payload: PromptHelperSuggestRequest):
     return _suggest_prompts_for_dataset(payload)
 
 
-@app.post("/sam3/prompt_helper/expand")
 def prompt_helper_expand(payload: PromptRecipeExpandRequest):
-    dataset_root = _resolve_sam3_or_qwen_dataset(payload.dataset_id)
-    coco, _, _ = _load_coco_index(dataset_root)
+    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+        payload.dataset_id,
+        list_all_datasets_fn=_list_all_datasets,
+        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+            dataset_id,
+            qwen_root=QWEN_DATASET_ROOT,
+            sam3_root=SAM3_DATASET_ROOT,
+            registry_root=DATASET_REGISTRY_ROOT,
+            http_exception_cls=HTTPException,
+        ),
+    )
+    coco, _, _ = _load_coco_index_impl(dataset_root)
     categories = coco.get("categories") or []
     cat_entry = next((c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id), None)
     if not cat_entry:
@@ -13273,56 +10712,20 @@ def prompt_helper_expand(payload: PromptRecipeExpandRequest):
     }
 
 
-def _list_prompt_helper_presets() -> List[Dict[str, Any]]:
-    return _list_prompt_helper_presets_impl(presets_root=PROMPT_HELPER_PRESET_ROOT)
-
-
-def _load_prompt_helper_preset(preset_id: str) -> Dict[str, Any]:
-    return _load_prompt_helper_preset_impl(
-        preset_id,
-        presets_root=PROMPT_HELPER_PRESET_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _save_prompt_helper_preset(label: str, dataset_id: str, prompts_by_class: Dict[int, List[str]]) -> Dict[str, Any]:
-    return _save_prompt_helper_preset_impl(
-        label,
-        dataset_id,
-        prompts_by_class,
-        presets_root=PROMPT_HELPER_PRESET_ROOT,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-@app.post("/sam3/prompt_helper/jobs")
 def start_prompt_helper_job(payload: PromptHelperRequest):
     job = _start_prompt_helper_job(payload)
-    return _serialize_prompt_helper_job(job)
+    return _serialize_prompt_helper_job_impl(job)
 
 
-@app.post("/sam3/prompt_helper/search")
 def start_prompt_helper_search(payload: PromptHelperSearchRequest):
     job = _start_prompt_helper_search_job(payload)
-    return _serialize_prompt_helper_job(job)
+    return _serialize_prompt_helper_job_impl(job)
 
 
-@app.post("/sam3/prompt_helper/recipe")
 def start_prompt_helper_recipe(payload: PromptRecipeRequest):
     job = _start_prompt_recipe_job(payload)
-    return _serialize_prompt_helper_job(job)
+    return _serialize_prompt_helper_job_impl(job)
 
-@app.get("/sam3/prompt_helper/presets")
-def list_prompt_helper_presets():
-    return _list_prompt_helper_presets()
-
-
-@app.get("/sam3/prompt_helper/presets/{preset_id}")
-def get_prompt_helper_preset(preset_id: str):
-    return _load_prompt_helper_preset(preset_id)
-
-
-@app.post("/sam3/prompt_helper/presets")
 def create_prompt_helper_preset(
     dataset_id: str = Form(...),
     label: str = Form(""),
@@ -13347,89 +10750,89 @@ def create_prompt_helper_preset(
             normalized[cid] = cleaned
     if not normalized:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="no_prompts_provided")
-    preset = _save_prompt_helper_preset(label, dataset_id, normalized)
+    preset = _save_prompt_helper_preset_impl(
+        label,
+        dataset_id,
+        normalized,
+        presets_root=PROMPT_HELPER_PRESET_ROOT,
+        path_is_within_root_fn=_path_is_within_root_impl,
+    )
     return preset
 
 
-@app.get("/sam3/prompt_helper/jobs")
 def list_prompt_helper_jobs():
     _prune_job_registry(PROMPT_HELPER_JOBS, PROMPT_HELPER_JOBS_LOCK)
     with PROMPT_HELPER_JOBS_LOCK:
         jobs = list(PROMPT_HELPER_JOBS.values())
     jobs.sort(key=lambda j: j.created_at, reverse=True)
-    return [_serialize_prompt_helper_job(j) for j in jobs]
+    return [_serialize_prompt_helper_job_impl(j) for j in jobs]
 
 
-@app.get("/sam3/prompt_helper/jobs/{job_id}")
 def get_prompt_helper_job(job_id: str):
     with PROMPT_HELPER_JOBS_LOCK:
         job = PROMPT_HELPER_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_job_not_found")
-    return _serialize_prompt_helper_job(job)
+    return _serialize_prompt_helper_job_impl(job)
 
 
-@app.post("/segmentation/build/jobs")
+app.include_router(
+    build_sam3_prompt_helper_router(
+        suggest_fn=prompt_helper_suggest,
+        expand_fn=prompt_helper_expand,
+        create_job_fn=start_prompt_helper_job,
+        search_fn=start_prompt_helper_search,
+        recipe_fn=start_prompt_helper_recipe,
+        list_presets_fn=lambda: _list_prompt_helper_presets_impl(presets_root=PROMPT_HELPER_PRESET_ROOT),
+        get_preset_fn=lambda preset_id: _load_prompt_helper_preset_impl(
+            preset_id,
+            presets_root=PROMPT_HELPER_PRESET_ROOT,
+            path_is_within_root_fn=_path_is_within_root_impl,
+        ),
+        save_preset_fn=create_prompt_helper_preset,
+        list_jobs_fn=list_prompt_helper_jobs,
+        get_job_fn=get_prompt_helper_job,
+        request_suggest_cls=PromptHelperSuggestRequest,
+        request_expand_cls=PromptRecipeExpandRequest,
+        request_job_cls=PromptHelperRequest,
+        request_search_cls=PromptHelperSearchRequest,
+        request_recipe_cls=PromptRecipeRequest,
+    )
+)
+
+
 def start_segmentation_build_job(request: SegmentationBuildRequest):
     job = _start_segmentation_build_job(request)
-    return _serialize_seg_job(job)
+    return _serialize_seg_job_impl(job)
 
 
-@app.get("/segmentation/build/jobs")
 def list_segmentation_build_jobs():
     _prune_job_registry(SEGMENTATION_BUILD_JOBS, SEGMENTATION_BUILD_JOBS_LOCK)
     with SEGMENTATION_BUILD_JOBS_LOCK:
         jobs = list(SEGMENTATION_BUILD_JOBS.values())
     jobs.sort(key=lambda j: j.created_at, reverse=True)
-    return [_serialize_seg_job(job) for job in jobs]
+    return [_serialize_seg_job_impl(job) for job in jobs]
 
 
-@app.get("/segmentation/build/jobs/{job_id}")
 def get_segmentation_build_job(job_id: str):
     with SEGMENTATION_BUILD_JOBS_LOCK:
         job = SEGMENTATION_BUILD_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="segmentation_job_not_found")
-    return _serialize_seg_job(job)
+    return _serialize_seg_job_impl(job)
 
 
-def _write_coco_annotations(
-    output_path: Path,
-    *,
-    dataset_id: str,
-    categories: List[Dict[str, Any]],
-    images: List[Dict[str, Any]],
-    annotations: List[Dict[str, Any]],
-) -> None:
-    _write_coco_annotations_impl(
-        output_path,
-        dataset_id=dataset_id,
-        categories=categories,
-        images=images,
-        annotations=annotations,
+app.include_router(
+    build_segmentation_build_router(
+        start_fn=start_segmentation_build_job,
+        list_fn=list_segmentation_build_jobs,
+        get_fn=get_segmentation_build_job,
+        request_cls=SegmentationBuildRequest,
     )
+)
 
 
-def _ensure_coco_supercategory(path: Path, default: str = "object") -> bool:
-    return _ensure_coco_supercategory_impl(path, default)
-
-
-def _rfdetr_remap_coco_ids(src_path: Path, dest_path: Path) -> None:
-    _rfdetr_remap_coco_ids_impl(src_path, dest_path)
-
-
-def _rfdetr_prepare_dataset(dataset_root: Path, run_dir: Path, coco_train: str, coco_val: str) -> Path:
-    return _rfdetr_prepare_dataset_impl(
-        dataset_root,
-        run_dir,
-        coco_train,
-        coco_val,
-        remap_ids_fn=_rfdetr_remap_coco_ids,
-    )
-
-
-def _find_free_port() -> int:
-    return _find_free_port_impl()
+## NOTE: RF‑DETR dataset helpers use *_impl directly to avoid wrapper drift.
 
 
 def _rfdetr_ddp_worker(
@@ -13471,30 +10874,13 @@ def _rfdetr_ddp_worker(
         os_module=os,
         torch_module=torch,
         import_rfdetr_fn=_import_rfdetr,
-        normalize_aug_fn=_rfdetr_normalize_aug_policy,
-        install_aug_fn=_rfdetr_install_augmentations,
-        restore_aug_fn=_rfdetr_restore_augmentations,
+        normalize_aug_fn=_rfdetr_normalize_aug_policy_impl,
+        install_aug_fn=_rfdetr_install_augmentations_impl,
+        restore_aug_fn=_rfdetr_restore_augmentations_impl,
     )
 
 
-def _convert_yolo_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
-    return _convert_yolo_dataset_to_coco_impl(dataset_root)
-
-
-def _convert_qwen_dataset_to_coco(dataset_root: Path) -> Dict[str, Any]:
-    return _convert_qwen_dataset_to_coco_impl(dataset_root)
-
-
-def _convert_coco_dataset_to_yolo(dataset_root: Path) -> Dict[str, Any]:
-    return _convert_coco_dataset_to_yolo_impl(dataset_root)
-
-
-def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
-    return _resolve_sam3_dataset_meta_impl(dataset_id)
-
-
-def _load_coco_index(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
-    return _load_coco_index_impl(dataset_root)
+## NOTE: keep these helpers as direct impl calls at the call sites to avoid wrapper drift.
 
 
 def _prepare_sam3_training_split(
@@ -13606,7 +10992,7 @@ def _prepare_sam3_training_split(
             images_out.append(info_out)
             anns_out.extend(ann_by_image.get(img_id, []))
         ann_path = split_root / split_name / "_annotations.coco.json"
-        _write_coco_annotations(
+        _write_coco_annotations_impl(
             ann_path,
             dataset_id=meta.get("id") or dataset_root.name,
             categories=categories,
@@ -13625,10 +11011,15 @@ def _prepare_sam3_training_split(
         "train_count": train_count,
         "val_count": val_count,
         "image_count": train_count + val_count,
-        "signature": _compute_dir_signature(split_root),
+        "signature": _compute_dir_signature_impl(split_root),
         "source": meta.get("source", "resplit"),
     }
-    _persist_sam3_dataset_metadata(split_root, new_meta)
+    _persist_sam3_dataset_metadata_impl(
+        split_root,
+        new_meta,
+        meta_name=SAM3_DATASET_META_NAME,
+        logger=logger,
+    )
     summary = (
         f"SAM3 split: {train_count} train / {val_count} val "
         f"(seed={split_seed}, val_percent={vp:.2f}, src={dataset_root}) -> {split_root}"
@@ -13640,8 +11031,32 @@ def _prepare_sam3_training_split(
 
 
 def _plan_segmentation_build(request: SegmentationBuildRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    dataset_root = _resolve_sam3_or_qwen_dataset(request.source_dataset_id)
-    source_meta = _load_qwen_dataset_metadata(dataset_root) or _load_sam3_dataset_metadata(dataset_root)
+    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+        request.source_dataset_id,
+        list_all_datasets_fn=_list_all_datasets,
+        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+            dataset_id,
+            qwen_root=QWEN_DATASET_ROOT,
+            sam3_root=SAM3_DATASET_ROOT,
+            registry_root=DATASET_REGISTRY_ROOT,
+            http_exception_cls=HTTPException,
+        ),
+    )
+    source_meta = _load_qwen_dataset_metadata_impl(
+        dataset_root,
+        meta_name=QWEN_METADATA_FILENAME,
+        load_json_metadata_fn=_load_json_metadata,
+    ) or _load_sam3_dataset_metadata_impl(
+        dataset_root,
+        meta_name=SAM3_DATASET_META_NAME,
+        load_json_metadata_fn=_load_json_metadata,
+        persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+            dataset_dir_inner,
+            metadata,
+            meta_name=SAM3_DATASET_META_NAME,
+            logger=logger,
+        ),
+    )
     if not source_meta:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="segmentation_source_metadata_missing")
     dataset_type = source_meta.get("type", "bbox")
@@ -13658,7 +11073,7 @@ def _plan_segmentation_build(request: SegmentationBuildRequest) -> Tuple[Dict[st
 
     classes = source_meta.get("classes") or []
     context = source_meta.get("context") or source_meta.get("dataset_context") or ""
-    source_signature = source_meta.get("signature") or _compute_dir_signature(dataset_root)
+    source_signature = source_meta.get("signature") or _compute_dir_signature_impl(dataset_root)
     planned_meta = {
         "id": output_id,
         "label": source_meta.get("label") or source_id,
@@ -13705,18 +11120,41 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
     def worker() -> None:
         try:
             _seg_job_update(job, status="running", progress=0.02, message="Preparing segmentation build…", error=None)
-            source_meta = _resolve_sam3_dataset_meta(request.source_dataset_id)
+            source_meta = _resolve_sam3_dataset_meta_impl(request.source_dataset_id)
             classes = source_meta.get("classes") or []
             if not classes:
                 # Try to load from labelmap.txt directly.
                 try:
-                    labelmap_file = _resolve_sam3_or_qwen_dataset(request.source_dataset_id) / "labelmap.txt"
+                    labelmap_file = _resolve_sam3_or_qwen_dataset_impl(
+                        request.source_dataset_id,
+                        list_all_datasets_fn=_list_all_datasets,
+                        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                            dataset_id,
+                            qwen_root=QWEN_DATASET_ROOT,
+                            sam3_root=SAM3_DATASET_ROOT,
+                            registry_root=DATASET_REGISTRY_ROOT,
+                            http_exception_cls=HTTPException,
+                        ),
+                    ) / "labelmap.txt"
                     classes = _load_labelmap_file(labelmap_file)
                 except Exception:
                     classes = []
             if not classes:
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_no_classes")
-            dataset_root = Path(source_meta.get("dataset_root") or _resolve_sam3_or_qwen_dataset(request.source_dataset_id))
+            dataset_root = Path(
+                source_meta.get("dataset_root")
+                or _resolve_sam3_or_qwen_dataset_impl(
+                    request.source_dataset_id,
+                    list_all_datasets_fn=_list_all_datasets,
+                    resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                        dataset_id,
+                        qwen_root=QWEN_DATASET_ROOT,
+                        sam3_root=SAM3_DATASET_ROOT,
+                        registry_root=DATASET_REGISTRY_ROOT,
+                        http_exception_cls=HTTPException,
+                    ),
+                )
+            )
             labelmap_file = dataset_root / "labelmap.txt"
             if not labelmap_file.exists() and classes:
                 # Backfill labelmap file if missing.
@@ -13807,7 +11245,11 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
             _seg_job_log(job, f"Queued {total_images} images for conversion using {request.sam_variant.upper()}")
             for split_name, entries in splits:
                 _seg_job_log(job, f"{split_name}: {len(entries)} images")
-            base_devices = _resolve_sam3_mining_devices() if request.sam_variant == "sam3" else _resolve_sam1_devices()
+            base_devices = (
+                _resolve_sam3_mining_devices_impl(SAM3_DEVICE_PREF, torch_module=torch, logger=logger)
+                if request.sam_variant == "sam3"
+                else _resolve_sam1_devices()
+            )
             expanded_devices: List[torch.device] = []
             per_dev = max(1, int(os.environ.get("SEG_BUILDER_WORKERS_PER_DEVICE", "1")))
             max_total_env = os.environ.get("SEG_BUILDER_MAX_WORKERS")
@@ -13904,8 +11346,8 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                                 if best:
                                     mask_arr = best.get("mask_array")
                                     if mask_arr is None and best.get("mask"):
-                                        mask_arr = decode_binary_mask(best.get("mask"))
-                                polygon = mask_to_polygon(mask_arr, simplify_eps) if mask_arr is not None else []
+                                        mask_arr = _decode_binary_mask_impl(best.get("mask"))
+                                polygon = _mask_to_polygon_impl(mask_arr, simplify_eps) if mask_arr is not None else []
                                 if best_score is None or best_score < min_threshold:
                                     polygon = []
                                 if len(polygon) < 3:
@@ -13974,11 +11416,21 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                 return
             _seg_job_log(job, "Converting output to COCO…")
             try:
-                coco_meta = _convert_yolo_dataset_to_coco(output_root)
+                coco_meta = _convert_yolo_dataset_to_coco_impl(output_root)
             except Exception as exc:  # noqa: BLE001
                 _seg_job_update(job, status="failed", message="COCO conversion failed", error=str(exc))
                 return
-            result_meta = _load_sam3_dataset_metadata(output_root) or coco_meta or planned_meta
+            result_meta = _load_sam3_dataset_metadata_impl(
+                output_root,
+                meta_name=SAM3_DATASET_META_NAME,
+                load_json_metadata_fn=_load_json_metadata,
+                persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                    dataset_dir_inner,
+                    metadata,
+                    meta_name=SAM3_DATASET_META_NAME,
+                    logger=logger,
+                ),
+            ) or coco_meta or planned_meta
             _seg_job_update(
                 job,
                 status="completed",
@@ -14042,7 +11494,21 @@ def _start_sam3_training_worker(
         except Exception:
             steps_per_epoch = None
         try:
-            _prepare_for_training()
+            _prepare_for_training_impl(
+                unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+                    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                        predictor_manager=predictor_manager,
+                        unload_sam3_text_fn=_unload_sam3_text_runtime,
+                        suspend_clip_fn=_suspend_clip_backbone,
+                        unload_dinov3_fn=_unload_dinov3_backbone,
+                        unload_detector_fn=_unload_detector_inference,
+                        torch_module=torch,
+                        logger=logger,
+                    ),
+                    unload_qwen_fn=_unload_qwen_runtime,
+                    torch_module=torch,
+                )
+            )
             _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
             script_path = SAM3_PACKAGE_ROOT / "train" / "train.py"
@@ -14233,7 +11699,10 @@ def _start_sam3_training_worker(
                     proc.terminate()
                 except Exception:
                     pass
-            _finalize_training_environment()
+            _finalize_training_environment_impl(
+                resume_classifier_fn=_resume_classifier_backbone,
+                torch_module=torch,
+            )
 
     thread = threading.Thread(target=worker, name=f"sam3-train-{job.job_id}", daemon=True)
     thread.start()
@@ -14241,38 +11710,79 @@ def _start_sam3_training_worker(
 
 def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
     def worker() -> None:
-        run_dir = _yolo_run_dir(job.job_id, create=True)
+        run_dir = _yolo_run_dir_impl(
+            job.job_id,
+            create=True,
+            job_root=YOLO_JOB_ROOT,
+            sanitize_fn=_sanitize_yolo_run_id_impl,
+            http_exception_cls=HTTPException,
+        )
+        write_run_meta = lambda meta: _yolo_write_run_meta_impl(
+            run_dir,
+            meta,
+            meta_name=YOLO_RUN_META_NAME,
+            time_fn=time.time,
+        )
         config = dict(job.config or {})
         dataset_info = config.get("dataset") or {}
         task = str(dataset_info.get("task") or config.get("task") or "detect").lower()
         if job.cancel_event.is_set():
             _yolo_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         if not dataset_info.get("yolo_ready"):
             _yolo_job_update(job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         try:
-            _prepare_for_training()
+            _prepare_for_training_impl(
+                unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+                    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                        predictor_manager=predictor_manager,
+                        unload_sam3_text_fn=_unload_sam3_text_runtime,
+                        suspend_clip_fn=_suspend_clip_backbone,
+                        unload_dinov3_fn=_unload_dinov3_backbone,
+                        unload_detector_fn=_unload_detector_inference,
+                        torch_module=torch,
+                        logger=logger,
+                    ),
+                    unload_qwen_fn=_unload_qwen_runtime,
+                    torch_module=torch,
+                )
+            )
             from ultralytics import YOLO  # type: ignore
         except Exception as exc:  # noqa: BLE001
             _yolo_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         _yolo_job_update(job, status="running", message="Starting YOLOv8 training", progress=0.0)
         _yolo_job_log(job, "Preparing dataset + data.yaml")
         dataset_root = Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or "")
-        data_yaml = _yolo_write_data_yaml(run_dir, dataset_root, dataset_info.get("yolo_layout"), dataset_info.get("yolo_labelmap_path"))
+        data_yaml = _yolo_write_data_yaml_impl(
+            run_dir,
+            dataset_root,
+            dataset_info.get("yolo_layout"),
+            dataset_info.get("yolo_labelmap_path"),
+            resolve_split_paths_fn=_yolo_resolve_split_paths_impl,
+            yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
+            yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
+            copy_file_fn=shutil.copy2,
+        )
         from_scratch = bool(config.get("from_scratch"))
         base_weights = config.get("base_weights")
         variant = config.get("variant") or ""
-        if task == "segment" and _yolo_p2_scale(variant):
+        if task == "segment" and _yolo_p2_scale_impl(variant):
             _yolo_job_update(job, status="failed", message="P2 head is only supported for detection.", error="yolo_p2_segment")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
-        _, model_source = _yolo_resolve_model_source(variant, task, from_scratch, base_weights)
-        device_arg = _yolo_device_arg(config.get("devices"))
+        _, model_source = _yolo_resolve_model_source_impl(
+            variant,
+            task,
+            from_scratch,
+            base_weights,
+            p2_scale_fn=_yolo_p2_scale_impl,
+        )
+        device_arg = _yolo_device_arg_impl(config.get("devices"))
         train_kwargs = {
             "data": str(data_yaml),
             "task": task,
@@ -14286,13 +11796,13 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             "name": "train",
             "exist_ok": True,
         }
-        p2_scale = _yolo_p2_scale(variant)
+        p2_scale = _yolo_p2_scale_impl(variant)
         if p2_scale and model_source.endswith("yolov8-p2.yaml"):
             try:
                 import ultralytics  # type: ignore
             except Exception as exc:  # noqa: BLE001
                 _yolo_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
-                _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+                write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
                 return
             base_cfg = Path(ultralytics.__file__).resolve().parent / "cfg" / "models" / "v8" / "yolov8-p2.yaml"
             cfg_payload = yaml.safe_load(base_cfg.read_text())
@@ -14306,7 +11816,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 train_kwargs["pretrained"] = False
             _yolo_job_log(job, f"P2 variant: scale={p2_scale} (config={p2_cfg.name}, pretrained={train_kwargs.get('pretrained')})")
         _yolo_job_log(job, f"Model source: {model_source}")
-        train_kwargs.update(_yolo_build_aug_args(config.get("augmentations")))
+        train_kwargs.update(_yolo_build_aug_args_impl(config.get("augmentations")))
         train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
         monitor_stop = threading.Event()
         monitor_thread = None
@@ -14314,8 +11824,13 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             model = YOLO(model_source)
             _yolo_job_log(job, "Training started")
             monitor_thread = threading.Thread(
-                target=_yolo_monitor_training,
+                target=_yolo_monitor_training_impl,
                 args=(job, run_dir, int(config.get("epochs") or 0), monitor_stop),
+                kwargs={
+                    "parse_results_fn": _yolo_parse_results_csv_impl,
+                    "job_append_metric_fn": _yolo_job_append_metric,
+                    "job_update_fn": _yolo_job_update,
+                },
                 name=f"yolo-monitor-{job.job_id[:8]}",
                 daemon=True,
             )
@@ -14334,7 +11849,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             metrics_series: List[Dict[str, Any]] = []
             series_path = run_dir / "metrics_series.json"
             if (run_dir / "results.csv").exists():
-                metrics_series = _yolo_parse_results_csv(run_dir / "results.csv")
+                metrics_series = _yolo_parse_results_csv_impl(run_dir / "results.csv")
                 if metrics_series:
                     try:
                         series_path.write_text(json.dumps(metrics_series, indent=2, sort_keys=True))
@@ -14348,7 +11863,12 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 metrics_payload = {}
             if metrics_payload:
                 (run_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2, sort_keys=True))
-            _yolo_prune_run_dir(run_dir)
+            _yolo_prune_run_dir_impl(
+                run_dir,
+                keep_files_default=YOLO_KEEP_FILES,
+                dir_size_fn=_dir_size_bytes,
+                meta_name=YOLO_RUN_META_NAME,
+            )
             result_payload = {
                 "run_dir": str(run_dir),
                 "best_path": str(run_dir / "best.pt") if (run_dir / "best.pt").exists() else None,
@@ -14362,10 +11882,12 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             monitor_stop.set()
             if monitor_thread:
                 monitor_thread.join(timeout=2.0)
-            _finalize_training_environment()
-            _yolo_write_run_meta(
-                run_dir,
-                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config, "result": job.result},
+            _finalize_training_environment_impl(
+                resume_classifier_fn=_resume_classifier_backbone,
+                torch_module=torch,
+            )
+            write_run_meta(
+                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config, "result": job.result}
             )
 
     thread = threading.Thread(target=worker, name=f"yolo-train-{job.job_id}", daemon=True)
@@ -14375,7 +11897,19 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
 def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
     def worker() -> None:
         job.thread_ident = threading.get_ident()
-        run_dir = _yolo_run_dir(job.job_id, create=True)
+        run_dir = _yolo_run_dir_impl(
+            job.job_id,
+            create=True,
+            job_root=YOLO_JOB_ROOT,
+            sanitize_fn=_sanitize_yolo_run_id_impl,
+            http_exception_cls=HTTPException,
+        )
+        write_run_meta = lambda meta: _yolo_write_run_meta_impl(
+            run_dir,
+            meta,
+            meta_name=YOLO_RUN_META_NAME,
+            time_fn=time.time,
+        )
         config = dict(job.config or {})
         if run_dir:
             config.setdefault("paths", {})["run_dir"] = str(run_dir)
@@ -14383,24 +11917,30 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
         base_run_id = str(config.get("base_run_id") or "").strip()
         if not base_run_id:
             _yolo_head_graft_job_update(job, status="failed", message="Base YOLO run missing", error="yolo_base_missing")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         if job.cancel_event.is_set():
             _yolo_head_graft_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
-        base_run_dir = _yolo_run_dir(base_run_id, create=False)
+        base_run_dir = _yolo_run_dir_impl(
+            base_run_id,
+            create=False,
+            job_root=YOLO_JOB_ROOT,
+            sanitize_fn=_sanitize_yolo_run_id_impl,
+            http_exception_cls=HTTPException,
+        )
         base_best = base_run_dir / "best.pt"
         if not base_best.exists():
             _yolo_head_graft_job_update(job, status="failed", message="Base run is missing best.pt", error="yolo_base_missing_best")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
-        base_meta = _yolo_load_run_meta(base_run_dir)
+        base_meta = _yolo_load_run_meta_impl(base_run_dir, meta_name=YOLO_RUN_META_NAME)
         base_cfg = base_meta.get("config") or {}
         base_task = str(base_cfg.get("task") or "detect").lower()
         if base_task != "detect":
             _yolo_head_graft_job_update(job, status="failed", message="Base run is not detect", error="yolo_base_not_detect")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         base_variant = config.get("variant") or base_cfg.get("variant")
         if not base_variant:
@@ -14410,33 +11950,37 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 message="Base run missing variant (cannot infer architecture)",
                 error="yolo_base_variant_missing",
             )
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
-        base_labelmap = _yolo_load_run_labelmap(base_run_dir)
+        base_labelmap = _yolo_load_run_labelmap_impl(
+            base_run_dir,
+            yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
+            yaml_load_fn=yaml.safe_load,
+        )
         if not base_labelmap:
             _yolo_head_graft_job_update(job, status="failed", message="Base labelmap missing", error="yolo_base_labelmap_missing")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         try:
             dataset_payload = YoloTrainRequest(dataset_id=config.get("dataset_id"), dataset_root=config.get("dataset_root"))
             dataset_info = _resolve_yolo_training_dataset(dataset_payload)
         except Exception as exc:  # noqa: BLE001
             _yolo_head_graft_job_update(job, status="failed", message="Dataset not ready", error=str(exc))
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         if not dataset_info.get("yolo_ready"):
             _yolo_head_graft_job_update(job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         dataset_task = str(dataset_info.get("task") or "detect").lower()
         if dataset_task != "detect":
             _yolo_head_graft_job_update(job, status="failed", message="Head grafting only supports detect datasets", error="yolo_graft_detect_only")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
-        new_labelmap = _yolo_load_labelmap(Path(dataset_info.get("yolo_labelmap_path") or ""))
+        new_labelmap = _yolo_load_labelmap_impl(Path(dataset_info.get("yolo_labelmap_path") or ""))
         if not new_labelmap:
             _yolo_head_graft_job_update(job, status="failed", message="New labelmap missing", error="yolo_new_labelmap_missing")
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         base_norm = {_normalize_class_name_for_match(n) for n in base_labelmap if n}
         new_norm = {_normalize_class_name_for_match(n) for n in new_labelmap if n}
@@ -14448,16 +11992,30 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 message="Base and new class lists overlap",
                 error="yolo_labelmap_overlap",
             )
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         try:
-            _prepare_for_training()
+            _prepare_for_training_impl(
+                unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+                    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                        predictor_manager=predictor_manager,
+                        unload_sam3_text_fn=_unload_sam3_text_runtime,
+                        suspend_clip_fn=_suspend_clip_backbone,
+                        unload_dinov3_fn=_unload_dinov3_backbone,
+                        unload_detector_fn=_unload_detector_inference,
+                        torch_module=torch,
+                        logger=logger,
+                    ),
+                    unload_qwen_fn=_unload_qwen_runtime,
+                    torch_module=torch,
+                )
+            )
             _patch_ultralytics_for_head_grafting()
             import ultralytics  # type: ignore
             from ultralytics import YOLO  # type: ignore
         except Exception as exc:  # noqa: BLE001
             _yolo_head_graft_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         version = getattr(ultralytics, "__version__", "")
         if version and not version.startswith("8."):
@@ -14467,7 +12025,7 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 message=f"Ultralytics {version} unsupported for head grafting",
                 error="yolo_graft_ultralytics_version",
             )
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
             return
         _yolo_head_graft_job_update(job, status="running", message="Preparing head graft", progress=0.0)
         _yolo_head_graft_job_log(job, f"Base run: {base_run_id}")
@@ -14478,11 +12036,43 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             event="start",
             extra={"base_run_id": base_run_id, "variant": base_variant, "dataset_id": config.get("dataset_id")},
         )
-        data_yaml = _yolo_write_data_yaml(run_dir, Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or ""), dataset_info.get("yolo_layout"), dataset_info.get("yolo_labelmap_path"))
+        data_yaml = _yolo_write_data_yaml_impl(
+            run_dir,
+            Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or ""),
+            dataset_info.get("yolo_layout"),
+            dataset_info.get("yolo_labelmap_path"),
+            resolve_split_paths_fn=_yolo_resolve_split_paths_impl,
+            yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
+            yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
+            copy_file_fn=shutil.copy2,
+        )
+        variant_base_yaml_fn = lambda variant, task, run_dir=None: _yolo_variant_base_yaml_impl(
+            variant,
+            task,
+            run_dir=run_dir,
+            http_exception_cls=HTTPException,
+            import_ultralytics_fn=lambda: __import__("ultralytics"),  # type: ignore
+            yaml_load_fn=yaml.safe_load,
+            yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
+            upload_root=UPLOAD_ROOT,
+            p2_scale_fn=_yolo_p2_scale_impl,
+        )
+        find_detect_modules_fn = lambda model: _yolo_find_detect_modules_impl(
+            model,
+            import_detect_cls_fn=lambda: __import__("ultralytics.nn.tasks", fromlist=["Detect"]).Detect,  # type: ignore
+        )
         nc_new = len(new_labelmap)
         nc_base = len(base_labelmap)
-        head_yaml = _yolo_write_variant_yaml(run_dir, base_variant, "detect", nc_new)
-        device_arg = _yolo_device_arg(config.get("devices"))
+        head_yaml = _yolo_write_variant_yaml_impl(
+            run_dir,
+            base_variant,
+            "detect",
+            nc_new,
+            variant_base_yaml_fn=variant_base_yaml_fn,
+            yaml_load_fn=yaml.safe_load,
+            yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
+        )
+        device_arg = _yolo_device_arg_impl(config.get("devices"))
         train_kwargs = {
             "data": str(data_yaml),
             "task": "detect",
@@ -14499,7 +12089,10 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
         train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
         try:
             model = YOLO(str(head_yaml)).load(str(base_best))
-            detect_idx = _yolo_detect_layer_index(model.model)
+            detect_idx = _yolo_detect_layer_index_impl(
+                model.model,
+                find_detect_modules_fn=find_detect_modules_fn,
+            )
 
             def _freeze_bn(trainer):
                 for idx, layer in enumerate(trainer.model.model):
@@ -14528,21 +12121,36 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 raise RuntimeError("new_head_best_missing")
             if job.cancel_event.is_set():
                 _yolo_head_graft_job_update(job, status="cancelled", message="Head training cancelled", progress=job.progress)
-                _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
-                _finalize_training_environment()
+                write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+                _finalize_training_environment_impl(
+                    resume_classifier_fn=_resume_classifier_backbone,
+                    torch_module=torch,
+                )
                 return
         except Exception as exc:  # noqa: BLE001
             _yolo_head_graft_job_update(job, status="failed", message="Head training failed", error=str(exc))
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
-            _finalize_training_environment()
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _finalize_training_environment_impl(
+                resume_classifier_fn=_resume_classifier_backbone,
+                torch_module=torch,
+            )
             return
         _yolo_head_graft_job_update(job, message="Merging heads", progress=0.7)
-        merged_yaml = _yolo_write_head_graft_yaml(run_dir, base_variant, nc_base, nc_new)
+        merged_yaml = _yolo_write_head_graft_yaml_impl(
+            run_dir,
+            base_variant,
+            nc_base,
+            nc_new,
+            variant_base_yaml_fn=variant_base_yaml_fn,
+            yaml_load_fn=yaml.safe_load,
+            yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
+            http_exception_cls=HTTPException,
+        )
         try:
             merged = YOLO(str(merged_yaml)).load(str(base_best))
             new_model = YOLO(str(new_best))
-            new_detects = _yolo_find_detect_modules(new_model.model)
-            merged_detects = _yolo_find_detect_modules(merged.model)
+            new_detects = find_detect_modules_fn(new_model.model)
+            merged_detects = find_detect_modules_fn(merged.model)
             if len(new_detects) < 1 or len(merged_detects) < 2:
                 raise RuntimeError("detect_module_missing")
             merged_detects[1].load_state_dict(new_detects[0].state_dict(), strict=False)
@@ -14614,10 +12222,14 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 "export_path": str(export_path) if export_path else None,
                 "merged_yaml": str(merged_yaml),
             }
-            _yolo_prune_run_dir(run_dir)
-            _yolo_head_graft_job_update(job, status="succeeded", message="Head graft complete", progress=1.0, result=result_payload)
-            _yolo_write_run_meta(
+            _yolo_prune_run_dir_impl(
                 run_dir,
+                keep_files_default=YOLO_KEEP_FILES,
+                dir_size_fn=_dir_size_bytes,
+                meta_name=YOLO_RUN_META_NAME,
+            )
+            _yolo_head_graft_job_update(job, status="succeeded", message="Head graft complete", progress=1.0, result=result_payload)
+            write_run_meta(
                 {
                     "job_id": job.job_id,
                     "status": job.status,
@@ -14630,14 +12242,17 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                         "new_labelmap": new_labelmap,
                         "variant": base_variant,
                     },
-                },
+                }
             )
             _yolo_head_graft_audit(job, "head_graft_complete", event="complete", extra={"result": result_payload})
         except Exception as exc:  # noqa: BLE001
             _yolo_head_graft_job_update(job, status="failed", message="Head merge failed", error=str(exc))
-            _yolo_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
         finally:
-            _finalize_training_environment()
+            _finalize_training_environment_impl(
+                resume_classifier_fn=_resume_classifier_backbone,
+                torch_module=torch,
+            )
 
     thread = threading.Thread(target=worker, name=f"yolo-graft-{job.job_id}", daemon=True)
     thread.start()
@@ -14645,15 +12260,39 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
 
 def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
     def worker() -> None:
-        run_dir = _rfdetr_run_dir(job.job_id, create=True)
+        run_dir = _rfdetr_run_dir_impl(
+            job.job_id,
+            create=True,
+            job_root=RFDETR_JOB_ROOT,
+            sanitize_fn=_sanitize_rfdetr_run_id_impl,
+            http_exception_cls=HTTPException,
+        )
         config = dict(job.config or {})
         dataset_info = config.get("dataset") or {}
         if job.cancel_event.is_set():
             _rfdetr_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
-            _rfdetr_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _rfdetr_write_run_meta_impl(
+                run_dir,
+                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config},
+                meta_name=RFDETR_RUN_META_NAME,
+                time_fn=time.time,
+            )
             return
         try:
-            _prepare_for_training()
+            _prepare_for_training_impl(
+                _unload_inference_runtimes_impl,
+                unload_runtime_fn=_unload_runtime,
+                unload_detector_fn=_unload_detector_inference,
+                unload_sam3_text_fn=_unload_sam3_text_runtime,
+                unload_sam3_similarity_fn=_unload_sam3_similarity_runtime,
+                unload_qwen_caption_fn=_unload_qwen_caption_runtime,
+                unload_qwen_term_fn=_unload_qwen_term_runtime,
+                unload_clip_fn=_unload_clip_backbone,
+                unload_classifier_fn=_unload_classifier_backbone,
+                unload_dinov3_fn=_unload_dinov3_backbone,
+                unload_segmentation_fn=_unload_segmentation_inference,
+                torch_module=torch,
+            )
             from rfdetr import (
                 RFDETRBase,
                 RFDETRLarge,
@@ -14664,11 +12303,21 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             )
         except Exception as exc:  # noqa: BLE001
             _rfdetr_job_update(job, status="failed", message="RF-DETR not installed", error=str(exc))
-            _rfdetr_write_run_meta(run_dir, {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _rfdetr_write_run_meta_impl(
+                run_dir,
+                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config},
+                meta_name=RFDETR_RUN_META_NAME,
+                time_fn=time.time,
+            )
             return
         try:
             task = str(dataset_info.get("task") or config.get("task") or "detect").lower()
-            variant_info = _rfdetr_variant_info(task, config.get("variant"))
+            variant_info = _rfdetr_variant_info_impl(
+                task,
+                config.get("variant"),
+                variants=RFDETR_VARIANTS,
+                http_exception_cls=HTTPException,
+            )
             variant_id = variant_info.get("id")
             variant_label = variant_info.get("label")
             model_cls_map = {
@@ -14687,7 +12336,12 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             coco_val = dataset_info.get("coco_val_json") or coco_train
             if not coco_train or not coco_val:
                 raise RuntimeError("rfdetr_coco_missing")
-            labelmap = _rfdetr_load_labelmap(dataset_root, coco_train)
+            labelmap = _rfdetr_load_labelmap_impl(
+                dataset_root,
+                coco_train,
+                yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
+                json_load_fn=json.loads,
+            )
             if labelmap:
                 (run_dir / "labelmap.txt").write_text("\n".join(labelmap) + "\n")
             model_kwargs: Dict[str, Any] = {}
@@ -14705,7 +12359,13 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 model_kwargs["segmentation_head"] = True
             _rfdetr_job_update(job, status="running", message=f"Starting RF-DETR training ({variant_label})", progress=0.0)
             _rfdetr_job_log(job, "Preparing dataset + COCO annotations")
-            prepared_root = _rfdetr_prepare_dataset(dataset_root, run_dir, coco_train, coco_val)
+            prepared_root = _rfdetr_prepare_dataset_impl(
+                dataset_root,
+                run_dir,
+                coco_train,
+                coco_val,
+                remap_ids_fn=_rfdetr_remap_coco_ids_impl,
+            )
             _rfdetr_job_log(job, f"RF-DETR dataset prepared at {prepared_root}")
             total_epochs = max(1, int(config.get("epochs") or 100))
             train_kwargs: Dict[str, Any] = {
@@ -14723,7 +12383,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 "run": config.get("run_name") or job.job_id[:8],
                 "project": "rfdetr",
             }
-            aug_policy = _rfdetr_normalize_aug_policy(config.get("augmentations"))
+            aug_policy = _rfdetr_normalize_aug_policy_impl(config.get("augmentations"))
             multi_scale = config.get("multi_scale")
             if multi_scale is not None:
                 train_kwargs["multi_scale"] = bool(multi_scale)
@@ -14748,14 +12408,20 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             use_distributed = torch.cuda.is_available() and len(device_ids) > 1
             _rfdetr_job_log(job, f"Model variant: {variant_id}")
             if use_distributed:
-                dist_url = f"tcp://127.0.0.1:{_find_free_port()}"
+                dist_url = f"tcp://127.0.0.1:{_find_free_port_impl()}"
                 world_size = len(device_ids)
                 _rfdetr_job_log(job, f"Multi-GPU enabled: devices={cuda_visible} world_size={world_size}")
                 _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
                 monitor_stop = threading.Event()
                 monitor_thread = threading.Thread(
-                    target=_rfdetr_monitor_training,
+                    target=_rfdetr_monitor_training_impl,
                     args=(job, run_dir, total_epochs, monitor_stop),
+                    kwargs={
+                        "job_append_metric_fn": _rfdetr_job_append_metric,
+                        "job_update_fn": _rfdetr_job_update,
+                        "sanitize_metric_fn": _rfdetr_sanitize_metric_impl,
+                        "latest_checkpoint_fn": _rfdetr_latest_checkpoint_epoch_impl,
+                    },
                     name=f"rfdetr-monitor-{job.job_id[:8]}",
                     daemon=True,
                 )
@@ -14779,10 +12445,10 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                         os.environ["TATOR_SKIP_CLIP_LOAD"] = prev_skip_clip
             else:
                 rf_detr = model_cls(**model_kwargs)
-                restore = _rfdetr_install_augmentations(aug_policy)
+                restore = _rfdetr_install_augmentations_impl(aug_policy)
 
                 def on_fit_epoch_end(stats: Dict[str, Any]) -> None:
-                    metric = _rfdetr_sanitize_metric(stats)
+                    metric = _rfdetr_sanitize_metric_impl(stats)
                     if metric:
                         _rfdetr_job_append_metric(job, metric)
                     epoch = metric.get("epoch") if metric else None
@@ -14804,14 +12470,14 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 try:
                     rf_detr.train(**train_kwargs)
                 finally:
-                    _rfdetr_restore_augmentations(restore)
+                    _rfdetr_restore_augmentations_impl(restore)
             if job.cancel_event.is_set():
                 _rfdetr_job_update(job, status="cancelled", message="Training cancelled", progress=job.progress)
             else:
                 _rfdetr_job_update(job, status="succeeded", message="Training complete", progress=1.0)
             metrics_series = job.metrics or []
             if not metrics_series:
-                metrics_series = _rfdetr_parse_log_series(run_dir / "log.txt")
+                metrics_series = _rfdetr_parse_log_series_impl(run_dir / "log.txt")
                 if metrics_series:
                     job.metrics = metrics_series
             if metrics_series:
@@ -14819,7 +12485,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                     (run_dir / "metrics_series.json").write_text(json.dumps(metrics_series, indent=2, sort_keys=True))
                 except Exception:
                     pass
-            best_path = _rfdetr_best_checkpoint(run_dir)
+            best_path = _rfdetr_best_checkpoint_impl(run_dir)
             optimized_path = None
             if best_path:
                 try:
@@ -14841,7 +12507,11 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 "metrics_series_path": str(run_dir / "metrics_series.json") if (run_dir / "metrics_series.json").exists() else None,
                 "log_path": str(run_dir / "log.txt") if (run_dir / "log.txt").exists() else None,
             }
-            _rfdetr_prune_run_dir(run_dir)
+            _rfdetr_prune_run_dir_impl(
+                run_dir,
+                keep_files_default=RFDETR_KEEP_FILES,
+                dir_size_fn=_dir_size_bytes,
+            )
             job.result = result_payload
         except Exception as exc:  # noqa: BLE001
             _rfdetr_job_update(job, status="failed", message="Training failed", error=str(exc))
@@ -14851,8 +12521,11 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                 else:
                     os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda_visible
-            _finalize_training_environment()
-            _rfdetr_write_run_meta(
+            _finalize_training_environment_impl(
+                resume_classifier_fn=_resume_classifier_backbone,
+                torch_module=torch,
+            )
+            _rfdetr_write_run_meta_impl(
                 run_dir,
                 {
                     "job_id": job.job_id,
@@ -14863,6 +12536,8 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                     "created_at": job.created_at,
                     "updated_at": job.updated_at,
                 },
+                meta_name=RFDETR_RUN_META_NAME,
+                time_fn=time.time,
             )
 
     thread = threading.Thread(target=worker, name=f"rfdetr-train-{job.job_id}", daemon=True)
@@ -14974,7 +12649,7 @@ async def _write_upload_file(
     if dest.exists() and not allow_overwrite:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
     written = 0
-    existing = _dir_size_bytes(quota_root) if quota_root and quota_limit else 0
+    existing = _dir_size_bytes_impl(quota_root) if quota_root and quota_limit else 0
     with dest.open("wb") as handle:
         while True:
             chunk = await upload.read(1024 * 1024)
@@ -15075,168 +12750,24 @@ def _active_encoder_ready() -> bool:
     return bool(clip_initialized and clip_model is not None and clip_preprocess is not None)
 
 
-def _resolve_head_normalize_embeddings(head: Optional[Dict[str, Any]], *, default: bool = True) -> bool:
-    return _resolve_head_normalize_embeddings_impl(head, default=default)
-
-
-def _resolve_active_head_normalize_embeddings(
-    meta_obj: Optional[Dict[str, Any]],
-    clf_obj: Optional[object],
-    *,
-    default: bool = True,
-) -> bool:
-    return _resolve_active_head_normalize_embeddings_impl(
-        meta_obj,
-        clf_obj,
-        default=default,
-        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings,
-    )
-
-def mask_to_bounding_box(mask: np.ndarray) -> tuple[int,int,int,int]:
-    rows = np.any(mask, axis=1)
-    cols = np.any(mask, axis=0)
-    if not np.any(rows) or not np.any(cols):
-        return (0,0,0,0)
-    y_min,y_max = np.where(rows)[0][[0,-1]]
-    x_min,x_max = np.where(cols)[0][[0,-1]]
-    return (int(x_min), int(y_min), int(x_max), int(y_max))
-
-
-def encode_binary_mask(mask: np.ndarray) -> Optional[Dict[str, Any]]:
-    try:
-        mask_arr = np.asarray(mask)
-    except Exception:
-        return None
-    if mask_arr.ndim == 3 and mask_arr.shape[0] == 1:
-        mask_arr = mask_arr[0]
-    if mask_arr.ndim == 3 and mask_arr.shape[-1] == 1:
-        mask_arr = mask_arr[..., 0]
-    if mask_arr.ndim != 2:
-        return None
-    mask_bool = mask_arr.astype(bool)
-    height, width = mask_bool.shape
-    packed = np.packbits(mask_bool.astype(np.uint8), axis=None)
-    try:
-        packed_bytes = packed.tobytes()
-    except Exception:
-        return None
-    if MASK_ENCODE_MAX_BYTES > 0 and len(packed_bytes) > MASK_ENCODE_MAX_BYTES:
-        return None
-    try:
-        encoded = base64.b64encode(packed_bytes).decode("ascii")
-    except Exception:
-        return None
-    return {"size": [int(height), int(width)], "counts": encoded}
-
-
-def decode_binary_mask(payload: Dict[str, Any]) -> Optional[np.ndarray]:
-    if not payload:
-        return None
-    counts = payload.get("counts")
-    size = payload.get("size") or []
-    if not counts or len(size) != 2:
-        return None
-    try:
-        packed = np.frombuffer(base64.b64decode(counts), dtype=np.uint8)
-        bits = np.unpackbits(packed)[: int(size[0]) * int(size[1])]
-        return bits.reshape(int(size[0]), int(size[1]))
-    except Exception:
-        return None
-
-
-def _rdp(points: np.ndarray, epsilon: float) -> np.ndarray:
-    """Ramer–Douglas–Peucker simplification for 2D points."""
-    if points.shape[0] < 3 or epsilon <= 0:
-        return points
-
-    def _perp_dist(pt, start, end):
-        if np.allclose(start, end):
-            return np.linalg.norm(pt - start)
-        return np.abs(np.cross(end - start, start - pt)) / np.linalg.norm(end - start)
-
-    start_pt = points[0]
-    end_pt = points[-1]
-    dmax = 0.0
-    idx = 0
-    for i in range(1, len(points) - 1):
-        d = _perp_dist(points[i], start_pt, end_pt)
-        if d > dmax:
-            idx = i
-            dmax = d
-    if dmax > epsilon:
-        rec1 = _rdp(points[: idx + 1], epsilon)
-        rec2 = _rdp(points[idx:], epsilon)
-        return np.concatenate((rec1[:-1], rec2), axis=0)
-    return np.array([start_pt, end_pt])
-
-
-def mask_to_polygon(mask: np.ndarray, simplify_epsilon: float) -> List[Tuple[float, float]]:
-    """Extract a coarse polygon outline from a binary mask."""
-    try:
-        mask_arr = np.asarray(mask).astype(bool)
-    except Exception:
-        return []
-    if mask_arr.ndim != 2 or not mask_arr.any():
-        return []
-    coords = np.argwhere(mask_arr)  # y, x
-    if coords.shape[0] < 3:
-        return []
-    points = np.stack([coords[:, 1], coords[:, 0]], axis=1)  # x, y
-    hull_pts = points
-    if ConvexHull is not None:
-        try:
-            hull = ConvexHull(points)
-            hull_pts = points[hull.vertices]
-        except Exception:
-            hull_pts = points
-    if simplify_epsilon and simplify_epsilon > 0:
-        hull_pts = _rdp(hull_pts, simplify_epsilon)
-    # Ensure at least 3 points.
-    if hull_pts.shape[0] < 3:
-        # Fallback to simple bounding box.
-        xs, ys = points[:, 0], points[:, 1]
-        x1, x2 = xs.min(), xs.max()
-        y1, y2 = ys.min(), ys.max()
-        hull_pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
-    return [(float(x), float(y)) for x, y in hull_pts]
-
-def to_yolo(w: int, h: int, left: int, top: int, right: int, bottom: int) -> List[float]:
-    w_abs = float(right - left)
-    h_abs = float(bottom - top)
-    cx_abs = left + w_abs/2
-    cy_abs = top + h_abs/2
-    cx = cx_abs / w
-    cy = cy_abs / h
-    ww = w_abs / w
-    hh = h_abs / h
-    return [cx, cy, ww, hh]
-
-
-def yolo_to_corners(box: List[float], w: int, h: int) -> Tuple[int, int, int, int]:
-    if len(box) < 4:
-        return (0, 0, 0, 0)
-    cx, cy, ww, hh = box[:4]
-    w_abs = max(0.0, float(ww) * w)
-    h_abs = max(0.0, float(hh) * h)
-    cx_abs = float(cx) * w
-    cy_abs = float(cy) * h
-    left = int(round(cx_abs - w_abs / 2))
-    top = int(round(cy_abs - h_abs / 2))
-    right = int(round(cx_abs + w_abs / 2))
-    bottom = int(round(cy_abs + h_abs / 2))
-    left = max(0, min(w, left))
-    top = max(0, min(h, top))
-    right = max(left, min(w, right))
-    bottom = max(top, min(h, bottom))
-    return left, top, right, bottom
-
-@app.post("/predict_base64", response_model=PredictResponse)
 def predict_base64(payload: Base64Payload):
     # If CLIP/logreg not loaded, return error message in "prediction"
     if not _active_encoder_ready():
         return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable") # messy ... returning the error message int as str. Crap logic needs cleanup
 
-    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
+    pil_img, _np_img, _token = _resolve_detector_image_impl(
+        payload.image_base64,
+        payload.image_token,
+        fetch_preloaded_fn=_fetch_preloaded_image,
+        decode_image_fn=lambda b64: _decode_image_base64_impl(
+            b64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        ),
+        store_preloaded_fn=_store_preloaded_image,
+        hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+    )
     feats_np = _encode_pil_batch_for_active([pil_img])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
         return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable")
@@ -15253,7 +12784,15 @@ def predict_base64(payload: Base64Payload):
     )
 
 
-@app.get("/clip/backbones")
+app.include_router(
+    build_predict_base64_router(
+        predict_fn=predict_base64,
+        request_cls=Base64Payload,
+        response_cls=PredictResponse,
+    )
+)
+
+
 def list_clip_backbones():
     return {
         "available": SUPPORTED_CLIP_MODELS,
@@ -15261,59 +12800,14 @@ def list_clip_backbones():
     }
 
 
-def _list_clip_classifiers() -> List[Dict[str, Any]]:
-    return _list_clip_classifiers_impl(
-        upload_root=UPLOAD_ROOT,
-        classifier_exts=CLASSIFIER_ALLOWED_EXTS,
-        labelmap_exts=LABELMAP_ALLOWED_EXTS,
-        path_is_within_root_fn=_path_is_within_root,
-        joblib_load_fn=joblib.load,
-        resolve_clip_labelmap_path_fn=_resolve_clip_labelmap_path,
-    )
-
-
-@app.get("/clip/classifiers")
-def list_clip_classifiers():
-    return _list_clip_classifiers()
-
-
-def _resolve_clip_labelmap_path(path_str: Optional[str], *, root_hint: Optional[str] = None) -> Optional[Path]:
-    return _resolve_clip_labelmap_path_impl(
-        path_str,
-        root_hint=root_hint,
-        upload_root=UPLOAD_ROOT,
-        labelmap_exts=LABELMAP_ALLOWED_EXTS,
-        path_is_within_root_fn=_path_is_within_root,
-    )
-
-
-def _find_labelmap_for_classifier(classifier_path: Path) -> Optional[Path]:
-    return _find_labelmap_for_classifier_impl(
-        classifier_path,
-        upload_root=UPLOAD_ROOT,
-        labelmap_exts=LABELMAP_ALLOWED_EXTS,
-        path_is_within_root_fn=_path_is_within_root,
-        joblib_load_fn=joblib.load,
-        resolve_clip_labelmap_path_fn=_resolve_clip_labelmap_path,
-    )
-
-
-def _list_clip_labelmaps() -> List[Dict[str, Any]]:
-    return _list_clip_labelmaps_impl(
-        upload_root=UPLOAD_ROOT,
-        labelmap_exts=LABELMAP_ALLOWED_EXTS,
-        load_labelmap_file_fn=_load_labelmap_file,
-    )
-
-
-@app.get("/clip/labelmaps")
-def list_clip_labelmaps():
-    return _list_clip_labelmaps()
-
-
-@app.get("/clip/classifiers/download")
 def download_clip_classifier(rel_path: str = Query(...)):
-    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    classifier_path = _resolve_agent_clip_classifier_path_impl(
+        rel_path,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+        http_exception_cls=HTTPException,
+    )
     if classifier_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
     stream = classifier_path.open("rb")
@@ -15321,14 +12815,32 @@ def download_clip_classifier(rel_path: str = Query(...)):
     return StreamingResponse(stream, media_type="application/octet-stream", headers=headers)
 
 
-@app.get("/clip/classifiers/download_zip")
 def download_clip_classifier_zip(rel_path: str = Query(...)):
-    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    classifier_path = _resolve_agent_clip_classifier_path_impl(
+        rel_path,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+        http_exception_cls=HTTPException,
+    )
     if classifier_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
     buffer = io.BytesIO()
     meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
-    labelmap_path = _find_labelmap_for_classifier(classifier_path)
+    labelmap_path = _find_labelmap_for_classifier_impl(
+        classifier_path,
+        upload_root=UPLOAD_ROOT,
+        labelmap_exts=LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+        joblib_load_fn=joblib.load,
+        resolve_clip_labelmap_path_fn=lambda path_str, root_hint=None: _resolve_clip_labelmap_path_impl(
+            path_str,
+            root_hint=root_hint,
+            upload_root=UPLOAD_ROOT,
+            labelmap_exts=LABELMAP_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+        ),
+    )
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.write(classifier_path, arcname=classifier_path.name)
         if meta_path.exists():
@@ -15341,9 +12853,14 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
-@app.delete("/clip/classifiers")
 def delete_clip_classifier(rel_path: str = Query(...)):
-    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    classifier_path = _resolve_agent_clip_classifier_path_impl(
+        rel_path,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+        http_exception_cls=HTTPException,
+    )
     if classifier_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
     try:
@@ -15361,12 +12878,17 @@ def delete_clip_classifier(rel_path: str = Query(...)):
     return {"status": "deleted", "rel_path": rel_path}
 
 
-@app.post("/clip/classifiers/rename")
 def rename_clip_classifier(
     rel_path: str = Form(...),
     new_name: str = Form(...),
 ):
-    classifier_path = _resolve_agent_clip_classifier_path(rel_path)
+    classifier_path = _resolve_agent_clip_classifier_path_impl(
+        rel_path,
+        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+        http_exception_cls=HTTPException,
+    )
     if classifier_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
     raw = str(new_name or "").strip()
@@ -15386,10 +12908,10 @@ def rename_clip_classifier(
 
     classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
     parent = classifier_path.parent.resolve()
-    if not _path_is_within_root(parent, classifiers_root):
+    if not _path_is_within_root_impl(parent, classifiers_root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
     target_path = (parent / target_name).resolve()
-    if not _path_is_within_root(target_path, classifiers_root):
+    if not _path_is_within_root_impl(target_path, classifiers_root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
 
     if target_path == classifier_path:
@@ -15443,9 +12965,14 @@ def rename_clip_classifier(
     }
 
 
-@app.get("/clip/labelmaps/download")
 def download_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query(None)):
-    labelmap_path = _resolve_clip_labelmap_path(rel_path, root_hint=root)
+    labelmap_path = _resolve_clip_labelmap_path_impl(
+        rel_path,
+        root_hint=root,
+        upload_root=UPLOAD_ROOT,
+        labelmap_exts=LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+    )
     if labelmap_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
     stream = labelmap_path.open("rb")
@@ -15453,9 +12980,14 @@ def download_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Que
     return StreamingResponse(stream, media_type="application/octet-stream", headers=headers)
 
 
-@app.delete("/clip/labelmaps")
 def delete_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query(None)):
-    labelmap_path = _resolve_clip_labelmap_path(rel_path, root_hint=root)
+    labelmap_path = _resolve_clip_labelmap_path_impl(
+        rel_path,
+        root_hint=root,
+        upload_root=UPLOAD_ROOT,
+        labelmap_exts=LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=_path_is_within_root_impl,
+    )
     if labelmap_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
     try:
@@ -15467,7 +12999,38 @@ def delete_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query
     return {"status": "deleted", "rel_path": rel_path}
 
 
-@app.post("/fs/upload_classifier")
+app.include_router(
+    build_clip_registry_router(
+        list_backbones_fn=list_clip_backbones,
+        list_classifiers_fn=lambda: _list_clip_classifiers_impl(
+            upload_root=UPLOAD_ROOT,
+            classifier_exts=CLASSIFIER_ALLOWED_EXTS,
+            labelmap_exts=LABELMAP_ALLOWED_EXTS,
+            path_is_within_root_fn=_path_is_within_root_impl,
+            joblib_load_fn=joblib.load,
+            resolve_clip_labelmap_path_fn=lambda path_str, root_hint=None: _resolve_clip_labelmap_path_impl(
+                path_str,
+                root_hint=root_hint,
+                upload_root=UPLOAD_ROOT,
+                labelmap_exts=LABELMAP_ALLOWED_EXTS,
+                path_is_within_root_fn=_path_is_within_root_impl,
+            ),
+        ),
+        list_labelmaps_fn=lambda: _list_clip_labelmaps_impl(
+            upload_root=UPLOAD_ROOT,
+            labelmap_exts=LABELMAP_ALLOWED_EXTS,
+            load_labelmap_file_fn=_load_labelmap_file,
+        ),
+        download_classifier_fn=download_clip_classifier,
+        download_classifier_zip_fn=download_clip_classifier_zip,
+        delete_classifier_fn=delete_clip_classifier,
+        rename_classifier_fn=rename_clip_classifier,
+        download_labelmap_fn=download_clip_labelmap,
+        delete_labelmap_fn=delete_clip_labelmap,
+    )
+)
+
+
 async def upload_classifier(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="filename_required")
@@ -15481,7 +13044,6 @@ async def upload_classifier(file: UploadFile = File(...)):
     return {"path": saved_path}
 
 
-@app.post("/fs/upload_labelmap")
 async def upload_labelmap(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="filename_required")
@@ -15493,6 +13055,14 @@ async def upload_labelmap(file: UploadFile = File(...)):
         quota_bytes=ASSET_UPLOAD_QUOTA_BYTES,
     )
     return {"path": saved_path}
+
+
+app.include_router(
+    build_fs_upload_router(
+        upload_classifier_fn=upload_classifier,
+        upload_labelmap_fn=upload_labelmap,
+    )
+)
 
 
 def _validate_job_exists(job_id: str) -> ClipTrainingJob:
@@ -15542,7 +13112,20 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
 
     def worker() -> None:
         try:
-            _prepare_for_training()
+            _prepare_for_training_impl(
+                _unload_inference_runtimes_impl,
+                unload_runtime_fn=_unload_runtime,
+                unload_detector_fn=_unload_detector_inference,
+                unload_sam3_text_fn=_unload_sam3_text_runtime,
+                unload_sam3_similarity_fn=_unload_sam3_similarity_runtime,
+                unload_qwen_caption_fn=_unload_qwen_caption_runtime,
+                unload_qwen_term_fn=_unload_qwen_term_runtime,
+                unload_clip_fn=_unload_clip_backbone,
+                unload_classifier_fn=_unload_classifier_backbone,
+                unload_dinov3_fn=_unload_dinov3_backbone,
+                unload_segmentation_fn=_unload_segmentation_inference,
+                torch_module=torch,
+            )
             with TRAINING_JOBS_LOCK:
                 if cancel_event.is_set():
                     _job_update(job, status="cancelled", progress=job.progress, message="Training cancelled before start.")
@@ -15628,25 +13211,15 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
                 _job_update(job, status="failed", message="Training crashed.", error=str(exc))
             logger.exception("[clip-train %s] Training crashed", job.job_id[:8])
         finally:
-            _finalize_training_environment()
+            _finalize_training_environment_impl(
+                resume_classifier_fn=_resume_classifier_backbone,
+                torch_module=torch,
+            )
             _cleanup_job(job)
 
     threading.Thread(target=worker, name=f"clip-train-{job.job_id[:8]}", daemon=True).start()
 
 
-def _load_labelmap_simple(path: Optional[str]) -> List[str]:
-    return _load_labelmap_simple_impl(path, load_labelmap_file_fn=_load_labelmap_file)
-
-
-def _validate_clip_dataset(inputs: Dict[str, str]) -> Dict[str, Any]:
-    return _validate_clip_dataset_impl(
-        inputs,
-        http_exception_cls=HTTPException,
-        load_labelmap_simple_fn=_load_labelmap_simple,
-    )
-
-
-@app.post("/clip/train")
 async def start_clip_training(
     images: Optional[List[UploadFile]] = File(None),
     labels: Optional[List[UploadFile]] = File(None),
@@ -15810,7 +13383,14 @@ async def start_clip_training(
     if images_dir is None or labels_dir is None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_paths_unresolved")
     # Fail fast on obviously invalid staged datasets.
-    _validate_clip_dataset({"images_dir": images_dir, "labels_dir": labels_dir, "labelmap_path": labelmap_path})
+    _validate_clip_dataset_impl(
+        {"images_dir": images_dir, "labels_dir": labels_dir, "labelmap_path": labelmap_path},
+        http_exception_cls=HTTPException,
+        load_labelmap_simple_fn=lambda path: _load_labelmap_simple_impl(
+            path,
+            load_labelmap_file_fn=_load_labelmap_file,
+        ),
+    )
     logger.info(
         "Starting training job %s (encoder=%s, model=%s, native_paths=%s)",
         job_id[:8],
@@ -15989,7 +13569,7 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
             progress = None
             if isinstance(progress_val, (int, float)):
                 progress = max(0.0, min(float(progress_val), 0.999))
-            message = _summarize_qwen_metric(payload)
+            message = _summarize_qwen_metric_impl(payload)
             _qwen_job_update(job, status="running", message=message, progress=progress, log_message=False)
 
     def cancel_cb() -> bool:
@@ -16028,7 +13608,6 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
 
 
 
-@app.get("/clip/train")
 def list_training_jobs():
     _prune_job_registry(TRAINING_JOBS, TRAINING_JOBS_LOCK)
     with TRAINING_JOBS_LOCK:
@@ -16036,13 +13615,11 @@ def list_training_jobs():
         return [{"job_id": job.job_id, "status": job.status, "created_at": job.created_at} for job in jobs]
 
 
-@app.get("/clip/train/{job_id}")
 def get_training_job(job_id: str):
     job = _validate_job_exists(job_id)
     return _serialize_clip_job_impl(job)
 
 
-@app.post("/clip/train/{job_id}/cancel")
 def cancel_training_job(job_id: str):
     job = _validate_job_exists(job_id)
     next_status = job.status
@@ -16055,6 +13632,16 @@ def cancel_training_job(job_id: str):
         next_status = job.status if job.status not in {"running", "queued"} else "cancelling"
         _job_update(job, status=next_status, message="Cancellation requested ...")
     return {"status": next_status}
+
+
+app.include_router(
+    build_clip_training_router(
+        start_fn=start_clip_training,
+        list_fn=list_training_jobs,
+        get_fn=get_training_job,
+        cancel_fn=cancel_training_job,
+    )
+)
 
 
 def _build_sam3_config(
@@ -16274,9 +13861,8 @@ def _build_sam3_config(
     return cfg, int(cfg.launcher.gpus_per_node)
 
 
-@app.post("/sam3/train/jobs")
 def create_sam3_training_job(payload: Sam3TrainRequest):
-    meta = _resolve_sam3_dataset_meta(payload.dataset_id)
+    meta = _resolve_sam3_dataset_meta_impl(payload.dataset_id)
     job_id = uuid.uuid4().hex
     prep_logs: List[str] = []
     cfg, num_gpus = _build_sam3_config(payload, meta, job_id, prep_logs)
@@ -16298,7 +13884,6 @@ def create_sam3_training_job(payload: Sam3TrainRequest):
     return {"job_id": job_id}
 
 
-@app.get("/sam3/train/jobs")
 def list_sam3_training_jobs():
     _prune_job_registry(SAM3_TRAINING_JOBS, SAM3_TRAINING_JOBS_LOCK)
     with SAM3_TRAINING_JOBS_LOCK:
@@ -16306,13 +13891,11 @@ def list_sam3_training_jobs():
         return [_serialize_sam3_job_impl(job) for job in jobs]
 
 
-@app.get("/sam3/train/jobs/{job_id}")
 def get_sam3_training_job(job_id: str):
     job = _get_sam3_job(job_id)
     return _serialize_sam3_job_impl(job)
 
 
-@app.post("/sam3/train/jobs/{job_id}/cancel")
 def cancel_sam3_training_job(job_id: str):
     job = _get_sam3_job(job_id)
     with SAM3_TRAINING_JOBS_LOCK:
@@ -16331,12 +13914,41 @@ def cancel_sam3_training_job(job_id: str):
     return {"status": job.status}
 
 
-@app.post("/yolo/train/jobs")
+def sam3_train_cache_size():
+    cache_root = SAM3_JOB_ROOT / "splits"
+    return {"bytes": _dir_size_bytes_impl(cache_root)}
+
+
+def sam3_train_cache_purge():
+    cache_root = SAM3_JOB_ROOT / "splits"
+    deleted = _purge_directory(cache_root)
+    return {"status": "ok", "deleted_bytes": deleted}
+
+
+app.include_router(
+    build_sam3_training_router(
+        create_job_fn=create_sam3_training_job,
+        list_jobs_fn=list_sam3_training_jobs,
+        get_job_fn=get_sam3_training_job,
+        cancel_job_fn=cancel_sam3_training_job,
+        cache_size_fn=sam3_train_cache_size,
+        cache_purge_fn=sam3_train_cache_purge,
+        request_cls=Sam3TrainRequest,
+    )
+)
+
+
 def create_yolo_training_job(payload: YoloTrainRequest):
     if not payload.accept_tos:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_tos_required")
     job_id = uuid.uuid4().hex
-    run_dir = _yolo_run_dir(job_id, create=True)
+    run_dir = _yolo_run_dir_impl(
+        job_id,
+        create=True,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     dataset_info = _resolve_yolo_training_dataset(payload)
     if payload.task == "segment" and dataset_info.get("yolo_ready") and not dataset_info.get("yolo_seg_ready"):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_seg_requires_polygons")
@@ -16352,7 +13964,7 @@ def create_yolo_training_job(payload: YoloTrainRequest):
     with YOLO_TRAINING_JOBS_LOCK:
         YOLO_TRAINING_JOBS[job_id] = job
         _yolo_job_log(job, job.message)
-    _yolo_write_run_meta(
+    _yolo_write_run_meta_impl(
         run_dir,
         {
             "job_id": job_id,
@@ -16360,13 +13972,14 @@ def create_yolo_training_job(payload: YoloTrainRequest):
             "message": job.message,
             "config": job.config,
         },
+        meta_name=YOLO_RUN_META_NAME,
+        time_fn=time.time,
     )
     if job.status != "blocked":
         _start_yolo_training_worker(job)
     return {"job_id": job_id}
 
 
-@app.get("/yolo/train/jobs")
 def list_yolo_training_jobs():
     _prune_job_registry(YOLO_TRAINING_JOBS, YOLO_TRAINING_JOBS_LOCK)
     with YOLO_TRAINING_JOBS_LOCK:
@@ -16374,13 +13987,11 @@ def list_yolo_training_jobs():
         return [_serialize_yolo_job_impl(job) for job in jobs]
 
 
-@app.get("/yolo/train/jobs/{job_id}")
 def get_yolo_training_job(job_id: str):
     job = _get_yolo_job(job_id)
     return _serialize_yolo_job_impl(job)
 
 
-@app.post("/yolo/train/jobs/{job_id}/cancel")
 def cancel_yolo_training_job(job_id: str):
     job = _get_yolo_job(job_id)
     with YOLO_TRAINING_JOBS_LOCK:
@@ -16391,8 +14002,14 @@ def cancel_yolo_training_job(job_id: str):
         job.cancel_event.set()
         next_status = job.status if job.status not in {"running", "queued"} else "cancelled"
         _yolo_job_update(job, status=next_status, message="Cancellation requested ...")
-        run_dir = _yolo_run_dir(job.job_id, create=False)
-        _yolo_write_run_meta(
+        run_dir = _yolo_run_dir_impl(
+            job.job_id,
+            create=False,
+            job_root=YOLO_JOB_ROOT,
+            sanitize_fn=_sanitize_yolo_run_id_impl,
+            http_exception_cls=HTTPException,
+        )
+        _yolo_write_run_meta_impl(
             run_dir,
             {
                 "job_id": job.job_id,
@@ -16400,20 +14017,27 @@ def cancel_yolo_training_job(job_id: str):
                 "message": job.message,
                 "config": job.config,
             },
+            meta_name=YOLO_RUN_META_NAME,
+            time_fn=time.time,
         )
     return {"status": job.status}
 
 
-@app.post("/yolo/head_graft/jobs")
 def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
     if not payload.accept_tos:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_tos_required")
     job_id = uuid.uuid4().hex
     if payload.run_name:
-        safe_id = _sanitize_yolo_run_id(payload.run_name)
+        safe_id = _sanitize_yolo_run_id_impl(payload.run_name)
         if safe_id:
             job_id = safe_id
-    run_dir = _yolo_run_dir(job_id, create=False)
+    run_dir = _yolo_run_dir_impl(
+        job_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if run_dir.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="yolo_run_exists")
     config = payload.dict(exclude_none=True)
@@ -16421,28 +14045,45 @@ def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
         YOLO_HEAD_GRAFT_JOBS[job_id] = job
         _yolo_head_graft_job_log(job, job.message)
-    run_dir = _yolo_run_dir(job_id, create=True)
-    _yolo_write_run_meta(
+    run_dir = _yolo_run_dir_impl(
+        job_id,
+        create=True,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
+    _yolo_write_run_meta_impl(
         run_dir,
         {"job_id": job_id, "status": job.status, "message": job.message, "config": job.config},
+        meta_name=YOLO_RUN_META_NAME,
+        time_fn=time.time,
     )
     _start_yolo_head_graft_worker(job)
     return _serialize_yolo_head_graft_job_impl(job)
 
 
-@app.post("/yolo/head_graft/dry_run")
 def yolo_head_graft_dry_run(payload: YoloHeadGraftDryRunRequest):
     base_run_id = str(payload.base_run_id or "").strip()
     if not base_run_id:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_base_missing")
-    base_run_dir = _yolo_run_dir(base_run_id, create=False)
+    base_run_dir = _yolo_run_dir_impl(
+        base_run_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not base_run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_base_missing")
-    base_meta = _yolo_load_run_meta(base_run_dir)
+    base_meta = _yolo_load_run_meta_impl(base_run_dir, meta_name=YOLO_RUN_META_NAME)
     base_cfg = base_meta.get("config") or {}
     base_task = str(base_cfg.get("task") or "detect").lower()
     base_variant = base_cfg.get("variant")
-    base_labelmap = _yolo_load_run_labelmap(base_run_dir)
+    base_labelmap = _yolo_load_run_labelmap_impl(
+        base_run_dir,
+        yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
+        yaml_load_fn=yaml.safe_load,
+    )
     dataset_payload = YoloTrainRequest(dataset_id=payload.dataset_id, dataset_root=payload.dataset_root)
     dataset_info = _resolve_yolo_training_dataset(dataset_payload)
     if not dataset_info.get("yolo_ready"):
@@ -16454,7 +14095,7 @@ def yolo_head_graft_dry_run(payload: YoloHeadGraftDryRunRequest):
             "base_variant": base_variant,
         }
     dataset_task = str(dataset_info.get("task") or "detect").lower()
-    new_labelmap = _yolo_load_labelmap(Path(dataset_info.get("yolo_labelmap_path") or ""))
+    new_labelmap = _yolo_load_labelmap_impl(Path(dataset_info.get("yolo_labelmap_path") or ""))
     base_norm = {_normalize_class_name_for_match(n) for n in base_labelmap if n}
     new_norm = {_normalize_class_name_for_match(n) for n in new_labelmap if n}
     overlap = sorted(base_norm.intersection(new_norm))
@@ -16473,7 +14114,6 @@ def yolo_head_graft_dry_run(payload: YoloHeadGraftDryRunRequest):
     }
 
 
-@app.get("/yolo/head_graft/jobs")
 def list_yolo_head_graft_jobs():
     _prune_job_registry(YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK)
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
@@ -16481,7 +14121,6 @@ def list_yolo_head_graft_jobs():
     return [_serialize_yolo_head_graft_job_impl(job) for job in jobs]
 
 
-@app.get("/yolo/head_graft/jobs/{job_id}")
 def get_yolo_head_graft_job(job_id: str):
     _prune_job_registry(YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK)
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
@@ -16491,7 +14130,6 @@ def get_yolo_head_graft_job(job_id: str):
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
 
 
-@app.post("/yolo/head_graft/jobs/{job_id}/cancel")
 def cancel_yolo_head_graft_job(job_id: str):
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
         job = YOLO_HEAD_GRAFT_JOBS.get(job_id)
@@ -16504,19 +14142,42 @@ def cancel_yolo_head_graft_job(job_id: str):
         job.cancel_event.set()
         stopped = False
         if job.status in {"running", "queued"}:
-            stopped = _yolo_head_graft_force_stop(job)
+            stopped = _yolo_head_graft_force_stop_impl(job)
         next_status = "cancelled" if stopped else (job.status if job.status not in {"running", "queued"} else "cancelling")
         _yolo_head_graft_job_update(job, status=next_status, message="Cancellation requested ...")
         _yolo_head_graft_audit(job, "cancel_requested", event="cancel", extra={"forced": stopped})
     return {"status": job.status}
 
 
-@app.post("/rfdetr/train/jobs")
+app.include_router(
+    build_yolo_training_router(
+        create_job_fn=create_yolo_training_job,
+        list_jobs_fn=list_yolo_training_jobs,
+        get_job_fn=get_yolo_training_job,
+        cancel_job_fn=cancel_yolo_training_job,
+        head_graft_create_fn=create_yolo_head_graft_job,
+        head_graft_dry_run_fn=yolo_head_graft_dry_run,
+        head_graft_list_fn=list_yolo_head_graft_jobs,
+        head_graft_get_fn=get_yolo_head_graft_job,
+        head_graft_cancel_fn=cancel_yolo_head_graft_job,
+        train_request_cls=YoloTrainRequest,
+        head_graft_request_cls=YoloHeadGraftRequest,
+        head_graft_dry_run_request_cls=YoloHeadGraftDryRunRequest,
+    )
+)
+
+
 def create_rfdetr_training_job(payload: RfDetrTrainRequest):
     if not payload.accept_tos:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_tos_required")
     job_id = uuid.uuid4().hex
-    run_dir = _rfdetr_run_dir(job_id, create=True)
+    run_dir = _rfdetr_run_dir_impl(
+        job_id,
+        create=True,
+        job_root=RFDETR_JOB_ROOT,
+        sanitize_fn=_sanitize_rfdetr_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     dataset_info = _resolve_rfdetr_training_dataset(payload)
     config = payload.dict(exclude_none=True)
     config["paths"] = {"run_dir": str(run_dir)}
@@ -16527,7 +14188,7 @@ def create_rfdetr_training_job(payload: RfDetrTrainRequest):
     with RFDETR_TRAINING_JOBS_LOCK:
         RFDETR_TRAINING_JOBS[job_id] = job
         _rfdetr_job_log(job, job.message)
-    _rfdetr_write_run_meta(
+    _rfdetr_write_run_meta_impl(
         run_dir,
         {
             "job_id": job_id,
@@ -16537,12 +14198,13 @@ def create_rfdetr_training_job(payload: RfDetrTrainRequest):
             "created_at": job.created_at,
             "updated_at": job.updated_at,
         },
+        meta_name=RFDETR_RUN_META_NAME,
+        time_fn=time.time,
     )
     _start_rfdetr_training_worker(job)
     return {"job_id": job_id}
 
 
-@app.get("/rfdetr/train/jobs")
 def list_rfdetr_training_jobs():
     _prune_job_registry(RFDETR_TRAINING_JOBS, RFDETR_TRAINING_JOBS_LOCK)
     with RFDETR_TRAINING_JOBS_LOCK:
@@ -16550,13 +14212,11 @@ def list_rfdetr_training_jobs():
         return [_serialize_rfdetr_job_impl(job) for job in jobs]
 
 
-@app.get("/rfdetr/train/jobs/{job_id}")
 def get_rfdetr_training_job(job_id: str):
     job = _get_rfdetr_job(job_id)
     return _serialize_rfdetr_job_impl(job)
 
 
-@app.post("/rfdetr/train/jobs/{job_id}/cancel")
 def cancel_rfdetr_training_job(job_id: str):
     job = _get_rfdetr_job(job_id)
     with RFDETR_TRAINING_JOBS_LOCK:
@@ -16567,8 +14227,14 @@ def cancel_rfdetr_training_job(job_id: str):
         job.cancel_event.set()
         next_status = job.status if job.status not in {"running", "queued"} else "cancelled"
         _rfdetr_job_update(job, status=next_status, message="Cancellation requested ...")
-        run_dir = _rfdetr_run_dir(job.job_id, create=False)
-        _rfdetr_write_run_meta(
+        run_dir = _rfdetr_run_dir_impl(
+            job.job_id,
+            create=False,
+            job_root=RFDETR_JOB_ROOT,
+            sanitize_fn=_sanitize_rfdetr_run_id_impl,
+            http_exception_cls=HTTPException,
+        )
+        _rfdetr_write_run_meta_impl(
             run_dir,
             {
                 "job_id": job.job_id,
@@ -16578,11 +14244,23 @@ def cancel_rfdetr_training_job(job_id: str):
                 "created_at": job.created_at,
                 "updated_at": job.updated_at,
             },
+            meta_name=RFDETR_RUN_META_NAME,
+            time_fn=time.time,
         )
     return {"status": job.status}
 
 
-@app.get("/rfdetr/variants")
+app.include_router(
+    build_rfdetr_training_router(
+        create_job_fn=create_rfdetr_training_job,
+        list_jobs_fn=list_rfdetr_training_jobs,
+        get_job_fn=get_rfdetr_training_job,
+        cancel_job_fn=cancel_rfdetr_training_job,
+        request_cls=RfDetrTrainRequest,
+    )
+)
+
+
 def list_rfdetr_variants(task: Optional[str] = Query(None)):
     if task:
         task_norm = task.strip().lower()
@@ -16590,25 +14268,20 @@ def list_rfdetr_variants(task: Optional[str] = Query(None)):
     return RFDETR_VARIANTS
 
 
-@app.get("/rfdetr/runs")
-def list_rfdetr_runs():
-    return _list_rfdetr_runs()
-
-
-@app.get("/rfdetr/active")
-def get_rfdetr_active():
-    return _load_rfdetr_active()
-
-
-@app.post("/rfdetr/active")
 def set_rfdetr_active(payload: RfDetrActiveRequest):
-    run_dir = _rfdetr_run_dir(payload.run_id, create=False)
+    run_dir = _rfdetr_run_dir_impl(
+        payload.run_id,
+        create=False,
+        job_root=RFDETR_JOB_ROOT,
+        sanitize_fn=_sanitize_rfdetr_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
-    best_path = _rfdetr_best_checkpoint(run_dir)
+    best_path = _rfdetr_best_checkpoint_impl(run_dir)
     if not best_path:
         raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_best_missing")
-    meta = _rfdetr_load_run_meta(run_dir)
+    meta = _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
     config = meta.get("config") or {}
     dataset = config.get("dataset") or {}
     active_payload = {
@@ -16619,32 +14292,35 @@ def set_rfdetr_active(payload: RfDetrActiveRequest):
         "task": config.get("task") or dataset.get("task"),
         "variant": config.get("variant"),
     }
-    return _save_rfdetr_active(active_payload)
+    return _save_rfdetr_active_impl(active_payload, RFDETR_ACTIVE_PATH)
 
 
-@app.get("/detectors/default")
-def get_default_detector():
-    return _load_detector_default()
+app.include_router(
+    build_detectors_default_router(
+        load_default_fn=lambda: _load_detector_default_impl(DETECTOR_DEFAULT_PATH),
+        save_default_fn=lambda settings: _save_detector_default_impl(
+            settings,
+            DETECTOR_DEFAULT_PATH,
+            HTTPException,
+        ),
+        request_cls=DetectorDefaultRequest,
+    )
+)
 
 
-class DetectorDefaultRequest(BaseModel):
-    mode: str
-
-
-@app.post("/detectors/default")
-def set_default_detector(payload: DetectorDefaultRequest):
-    data = {"mode": payload.mode}
-    return _save_detector_default(data)
-
-
-@app.get("/rfdetr/runs/{run_id}/download")
 def download_rfdetr_run(run_id: str):
-    run_dir = _rfdetr_run_dir(run_id, create=False)
+    run_dir = _rfdetr_run_dir_impl(
+        run_id,
+        create=False,
+        job_root=RFDETR_JOB_ROOT,
+        sanitize_fn=_sanitize_rfdetr_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
-    meta = _rfdetr_load_run_meta(run_dir)
+    meta = _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
     run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or run_id
-    safe_name = _sanitize_yolo_run_id(run_name)
+    safe_name = _sanitize_yolo_run_id_impl(run_name)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filename in sorted(RFDETR_KEEP_FILES):
@@ -16656,17 +14332,24 @@ def download_rfdetr_run(run_id: str):
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
-@app.get("/yolo/runs/{run_id}/summary")
 def yolo_run_summary(run_id: str):
-    run_dir = _yolo_run_dir(run_id, create=False)
+    run_dir = _yolo_run_dir_impl(
+        run_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
-    meta = _yolo_load_run_meta(run_dir)
+    meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     config = meta.get("config") or {}
     dataset = config.get("dataset") or {}
     run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
     labelmap = _read_labelmap_lines(run_dir / "labelmap.txt")
-    metrics = _clean_metric_summary(_yolo_metrics_summary(run_dir))
+    metrics = _clean_metric_summary_impl(
+        _yolo_metrics_summary_impl(run_dir, read_csv_last_row_fn=_read_csv_last_row)
+    )
     return {
         "run_id": run_id,
         "run_name": run_name,
@@ -16679,17 +14362,22 @@ def yolo_run_summary(run_id: str):
     }
 
 
-@app.get("/rfdetr/runs/{run_id}/summary")
 def rfdetr_run_summary(run_id: str):
-    run_dir = _rfdetr_run_dir(run_id, create=False)
+    run_dir = _rfdetr_run_dir_impl(
+        run_id,
+        create=False,
+        job_root=RFDETR_JOB_ROOT,
+        sanitize_fn=_sanitize_rfdetr_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
-    meta = _rfdetr_load_run_meta(run_dir)
+    meta = _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
     config = meta.get("config") or {}
     dataset = config.get("dataset") or {}
     run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
     labelmap = _read_labelmap_lines(run_dir / "labelmap.txt")
-    metrics = _clean_metric_summary(_rfdetr_metrics_summary(run_dir))
+    metrics = _clean_metric_summary_impl(_rfdetr_metrics_summary_impl(run_dir))
     return {
         "run_id": run_id,
         "run_name": run_name,
@@ -16701,9 +14389,14 @@ def rfdetr_run_summary(run_id: str):
         "metrics": metrics,
     }
 
-@app.delete("/rfdetr/runs/{run_id}")
 def delete_rfdetr_run(run_id: str):
-    run_dir = _rfdetr_run_dir(run_id, create=False)
+    run_dir = _rfdetr_run_dir_impl(
+        run_id,
+        create=False,
+        job_root=RFDETR_JOB_ROOT,
+        sanitize_fn=_sanitize_rfdetr_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
     try:
@@ -16713,7 +14406,6 @@ def delete_rfdetr_run(run_id: str):
     return {"status": "deleted", "run_id": run_id}
 
 
-@app.get("/yolo/variants")
 def list_yolo_variants(task: Optional[str] = Query(None)):
     if task:
         task_norm = task.strip().lower()
@@ -16721,25 +14413,20 @@ def list_yolo_variants(task: Optional[str] = Query(None)):
     return YOLO_VARIANTS
 
 
-@app.get("/yolo/runs")
-def list_yolo_runs():
-    return _list_yolo_runs()
-
-
-@app.get("/yolo/active")
-def get_yolo_active():
-    return _load_yolo_active()
-
-
-@app.post("/yolo/active")
 def set_yolo_active(payload: YoloActiveRequest):
-    run_dir = _yolo_run_dir(payload.run_id, create=False)
+    run_dir = _yolo_run_dir_impl(
+        payload.run_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     best_path = run_dir / "best.pt"
     if not best_path.exists():
         raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_best_missing")
-    meta = _yolo_load_run_meta(run_dir)
+    meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     config = meta.get("config") or {}
     dataset = config.get("dataset") or {}
     active_payload = {
@@ -16752,10 +14439,9 @@ def set_yolo_active(payload: YoloActiveRequest):
     }
     if meta.get("head_graft"):
         active_payload["head_graft"] = meta.get("head_graft")
-    return _save_yolo_active(active_payload)
+    return _save_yolo_active_impl(active_payload, YOLO_ACTIVE_PATH)
 
 
-@app.post("/yolo/predict_region", response_model=YoloRegionResponse)
 def yolo_predict_region(payload: YoloRegionRequest):
     model, labelmap, task = _ensure_yolo_inference_runtime()
     task_name = str(task).lower() if task else None
@@ -16763,7 +14449,19 @@ def yolo_predict_region(payload: YoloRegionRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_region_detect_requires_bbox")
-    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
+    pil_img, _np_img, _token = _resolve_detector_image_impl(
+        payload.image_base64,
+        payload.image_token,
+        fetch_preloaded_fn=_fetch_preloaded_image,
+        decode_image_fn=lambda b64: _decode_image_base64_impl(
+            b64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        ),
+        store_preloaded_fn=_store_preloaded_image,
+        hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+    )
     img_w, img_h = pil_img.size
     full_w = int(payload.full_width) if payload.full_width else img_w
     full_h = int(payload.full_height) if payload.full_height else img_h
@@ -16839,7 +14537,6 @@ def yolo_predict_region(payload: YoloRegionRequest):
     return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
-@app.post("/rfdetr/predict_region", response_model=RfDetrRegionResponse)
 def rfdetr_predict_region(payload: RfDetrRegionRequest):
     model, labelmap, task = _ensure_rfdetr_inference_runtime()
     task_name = str(task).lower() if task else None
@@ -16847,7 +14544,19 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_region_detect_requires_bbox")
-    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
+    pil_img, _np_img, _token = _resolve_detector_image_impl(
+        payload.image_base64,
+        payload.image_token,
+        fetch_preloaded_fn=_fetch_preloaded_image,
+        decode_image_fn=lambda b64: _decode_image_base64_impl(
+            b64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        ),
+        store_preloaded_fn=_store_preloaded_image,
+        hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+    )
     img_w, img_h = pil_img.size
     full_w = int(payload.full_width) if payload.full_width else img_w
     full_h = int(payload.full_height) if payload.full_height else img_h
@@ -16934,63 +14643,10 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
     return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
-def _yolo_extract_detections(
-    results: Any,
-    labelmap: List[str],
-    offset_x: float,
-    offset_y: float,
-    full_w: int,
-    full_h: int,
-) -> List[Dict[str, Any]]:
-    return _yolo_extract_detections_impl(
-        results,
-        labelmap,
-        offset_x,
-        offset_y,
-        full_w,
-        full_h,
-    )
+_yolo_extract_detections = _yolo_extract_detections_impl
+_rfdetr_extract_detections = _rfdetr_extract_detections_impl
 
 
-def _rfdetr_extract_detections(
-    results: Any,
-    labelmap: List[str],
-    offset_x: float,
-    offset_y: float,
-    full_w: int,
-    full_h: int,
-) -> Tuple[List[Dict[str, Any]], bool]:
-    return _rfdetr_extract_detections_impl(
-        results,
-        labelmap,
-        offset_x,
-        offset_y,
-        full_w,
-        full_h,
-    )
-
-
-def _resolve_detector_image(
-    image_base64: Optional[str],
-    image_token: Optional[str],
-) -> Tuple[Image.Image, np.ndarray, str]:
-    try:
-        return _resolve_detector_image_impl(
-            image_base64,
-            image_token,
-            fetch_preloaded_fn=_fetch_preloaded_image,
-            decode_image_fn=_decode_image_base64,
-            store_preloaded_fn=_store_preloaded_image,
-            hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
-        )
-    except RuntimeError as exc:  # noqa: BLE001
-        detail = str(exc)
-        if "image_token_not_found" in detail:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found") from exc
-        raise
-
-
-@app.post("/yolo/predict_full", response_model=YoloRegionResponse)
 def yolo_predict_full(payload: YoloFullRequest):
     model, labelmap, task = _ensure_yolo_inference_runtime()
     task_name = str(task).lower() if task else None
@@ -16998,12 +14654,24 @@ def yolo_predict_full(payload: YoloFullRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_full_detect_requires_bbox")
-    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
+    pil_img, _np_img, _token = _resolve_detector_image_impl(
+        payload.image_base64,
+        payload.image_token,
+        fetch_preloaded_fn=_fetch_preloaded_image,
+        decode_image_fn=lambda b64: _decode_image_base64_impl(
+            b64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        ),
+        store_preloaded_fn=_store_preloaded_image,
+        hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+    )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
-    iou = _clamp_iou_value(float(payload.iou) if payload.iou is not None else 0.45, warnings)
-    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    iou = _clamp_iou_value_impl(float(payload.iou) if payload.iou is not None else 0.45, warnings)
+    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
     with YOLO_INFER_LOCK:
         results = model.predict(pil_img, conf=conf, iou=iou, max_det=max_det, verbose=False)
@@ -17012,7 +14680,6 @@ def yolo_predict_full(payload: YoloFullRequest):
     return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
-@app.post("/yolo/predict_windowed", response_model=YoloRegionResponse)
 def yolo_predict_windowed(payload: YoloWindowedRequest):
     model, labelmap, task = _ensure_yolo_inference_runtime()
     task_name = str(task).lower() if task else None
@@ -17020,18 +14687,30 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_windowed_detect_requires_bbox")
-    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
+    pil_img, _np_img, _token = _resolve_detector_image_impl(
+        payload.image_base64,
+        payload.image_token,
+        fetch_preloaded_fn=_fetch_preloaded_image,
+        decode_image_fn=lambda b64: _decode_image_base64_impl(
+            b64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        ),
+        store_preloaded_fn=_store_preloaded_image,
+        hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+    )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
-    iou = _clamp_iou_value(float(payload.iou) if payload.iou is not None else 0.45, warnings)
-    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    iou = _clamp_iou_value_impl(float(payload.iou) if payload.iou is not None else 0.45, warnings)
+    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
     slice_size = int(payload.slice_size) if payload.slice_size is not None else 640
     overlap = float(payload.overlap) if payload.overlap is not None else 0.2
     merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
-    slice_size, overlap, merge_iou = _clamp_slice_params(slice_size, overlap, merge_iou, img_w, img_h, warnings)
+    slice_size, overlap, merge_iou = _clamp_slice_params_impl(slice_size, overlap, merge_iou, img_w, img_h, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
-    slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
+    slices, starts = _slice_image_sahi_impl(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
     for tile, start in zip(slices, starts):
         offset_x, offset_y = float(start[0]), float(start[1])
@@ -17043,7 +14722,6 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
     return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
-@app.post("/rfdetr/predict_full", response_model=RfDetrRegionResponse)
 def rfdetr_predict_full(payload: RfDetrFullRequest):
     model, labelmap, task = _ensure_rfdetr_inference_runtime()
     task_name = str(task).lower() if task else None
@@ -17051,11 +14729,23 @@ def rfdetr_predict_full(payload: RfDetrFullRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_full_detect_requires_bbox")
-    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
+    pil_img, _np_img, _token = _resolve_detector_image_impl(
+        payload.image_base64,
+        payload.image_token,
+        fetch_preloaded_fn=_fetch_preloaded_image,
+        decode_image_fn=lambda b64: _decode_image_base64_impl(
+            b64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        ),
+        store_preloaded_fn=_store_preloaded_image,
+        hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+    )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
-    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
     try:
         with RFDETR_INFER_LOCK:
@@ -17070,7 +14760,6 @@ def rfdetr_predict_full(payload: RfDetrFullRequest):
     return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
-@app.post("/rfdetr/predict_windowed", response_model=RfDetrRegionResponse)
 def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
     model, labelmap, task = _ensure_rfdetr_inference_runtime()
     task_name = str(task).lower() if task else None
@@ -17078,17 +14767,29 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_windowed_detect_requires_bbox")
-    pil_img, _np_img, _token = _resolve_detector_image(payload.image_base64, payload.image_token)
+    pil_img, _np_img, _token = _resolve_detector_image_impl(
+        payload.image_base64,
+        payload.image_token,
+        fetch_preloaded_fn=_fetch_preloaded_image,
+        decode_image_fn=lambda b64: _decode_image_base64_impl(
+            b64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        ),
+        store_preloaded_fn=_store_preloaded_image,
+        hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
+    )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value(float(payload.conf) if payload.conf is not None else 0.25, warnings)
-    max_det = _clamp_max_det_value(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
     slice_size = int(payload.slice_size) if payload.slice_size is not None else 640
     overlap = float(payload.overlap) if payload.overlap is not None else 0.2
     merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
-    slice_size, overlap, merge_iou = _clamp_slice_params(slice_size, overlap, merge_iou, img_w, img_h, warnings)
+    slice_size, overlap, merge_iou = _clamp_slice_params_impl(slice_size, overlap, merge_iou, img_w, img_h, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
-    slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
+    slices, starts = _slice_image_sahi_impl(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
     labelmap_shifted = False
     for tile, start in zip(slices, starts):
@@ -17109,14 +14810,49 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
     return RfDetrRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
 
 
-@app.get("/yolo/runs/{run_id}/download")
+app.include_router(
+    build_rfdetr_router(
+        list_variants_fn=list_rfdetr_variants,
+        list_runs_fn=lambda: _list_rfdetr_runs_impl(
+            job_root=RFDETR_JOB_ROOT,
+            active_payload=_load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
+            load_meta_fn=lambda run_dir: _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME),
+            collect_artifacts_fn=lambda run_dir: _collect_rfdetr_artifacts_impl(
+                run_dir,
+                meta_name=RFDETR_RUN_META_NAME,
+            ),
+            meta_name=RFDETR_RUN_META_NAME,
+        ),
+        get_active_fn=lambda: _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
+        set_active_fn=set_rfdetr_active,
+        download_run_fn=download_rfdetr_run,
+        summary_fn=rfdetr_run_summary,
+        delete_run_fn=delete_rfdetr_run,
+        predict_region_fn=rfdetr_predict_region,
+        predict_full_fn=rfdetr_predict_full,
+        predict_windowed_fn=rfdetr_predict_windowed,
+        active_request_cls=RfDetrActiveRequest,
+        region_request_cls=RfDetrRegionRequest,
+        full_request_cls=RfDetrFullRequest,
+        windowed_request_cls=RfDetrWindowedRequest,
+        region_response_cls=RfDetrRegionResponse,
+    )
+)
+
+
 def download_yolo_run(run_id: str):
-    run_dir = _yolo_run_dir(run_id, create=False)
+    run_dir = _yolo_run_dir_impl(
+        run_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
-    meta = _yolo_load_run_meta(run_dir)
+    meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or run_id
-    safe_name = _sanitize_yolo_run_id(run_name)
+    safe_name = _sanitize_yolo_run_id_impl(run_name)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         keep_files = set(YOLO_KEEP_FILES)
@@ -17132,16 +14868,21 @@ def download_yolo_run(run_id: str):
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
-@app.get("/yolo/head_graft/jobs/{job_id}/bundle")
 def download_yolo_head_graft_bundle(job_id: str):
-    run_dir = _yolo_run_dir(job_id, create=False)
+    run_dir = _yolo_run_dir_impl(
+        job_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
-    meta = _yolo_load_run_meta(run_dir)
+    meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     if not meta.get("head_graft"):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_head_graft_not_found")
     run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or job_id
-    safe_name = _sanitize_yolo_run_id(run_name)
+    safe_name = _sanitize_yolo_run_id_impl(run_name)
     required = {"best.pt", "labelmap.txt", "head_graft_audit.jsonl", YOLO_RUN_META_NAME}
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -17156,9 +14897,14 @@ def download_yolo_head_graft_bundle(job_id: str):
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
-@app.delete("/yolo/runs/{run_id}")
 def delete_yolo_run(run_id: str):
-    run_dir = _yolo_run_dir(run_id, create=False)
+    run_dir = _yolo_run_dir_impl(
+        run_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     try:
@@ -17168,50 +14914,91 @@ def delete_yolo_run(run_id: str):
     return {"status": "deleted", "run_id": run_id}
 
 
-@app.get("/sam3/train/cache_size")
-def sam3_train_cache_size():
-    cache_root = SAM3_JOB_ROOT / "splits"
-    return {"bytes": _dir_size_bytes(cache_root)}
+app.include_router(
+    build_yolo_router(
+        list_variants_fn=list_yolo_variants,
+        list_runs_fn=lambda: _list_yolo_runs_impl(
+            job_root=YOLO_JOB_ROOT,
+            dataset_cache_root=YOLO_DATASET_CACHE_ROOT,
+            active_payload=_load_yolo_active_impl(YOLO_ACTIVE_PATH),
+            load_meta_fn=lambda run_dir: _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME),
+            collect_artifacts_fn=lambda run_dir: _collect_yolo_artifacts_impl(
+                run_dir,
+                meta_name=YOLO_RUN_META_NAME,
+            ),
+            meta_name=YOLO_RUN_META_NAME,
+        ),
+        get_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH),
+        set_active_fn=set_yolo_active,
+        predict_region_fn=yolo_predict_region,
+        predict_full_fn=yolo_predict_full,
+        predict_windowed_fn=yolo_predict_windowed,
+        download_run_fn=download_yolo_run,
+        summary_fn=yolo_run_summary,
+        head_graft_bundle_fn=download_yolo_head_graft_bundle,
+        delete_run_fn=delete_yolo_run,
+        active_request_cls=YoloActiveRequest,
+        region_request_cls=YoloRegionRequest,
+        full_request_cls=YoloFullRequest,
+        windowed_request_cls=YoloWindowedRequest,
+        region_response_cls=YoloRegionResponse,
+    )
+)
 
 
-@app.post("/sam3/train/cache/purge")
-def sam3_train_cache_purge():
-    cache_root = SAM3_JOB_ROOT / "splits"
-    deleted = _purge_directory(cache_root)
-    return {"status": "ok", "deleted_bytes": deleted}
-
-
-@app.get("/sam3/storage/runs")
-def list_sam3_runs(variant: str = Query("sam3")):
-    # SAM3-lite removed; always use sam3
-    return _list_sam3_runs("sam3")
-
-
-@app.delete("/sam3/storage/runs/{run_id}")
 def delete_sam3_run(run_id: str, variant: str = Query("sam3"), scope: str = Query("all")):
     normalized = "sam3"
     if scope not in SAM3_STORAGE_SCOPES:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_scope")
-    run_dir = _run_dir_for_request(run_id, normalized)
-    active_paths = _active_run_paths_for_variant(normalized)
+    run_dir = _run_dir_for_request_impl(
+        run_id=run_id,
+        variant=normalized,
+        job_root=SAM3_JOB_ROOT,
+        http_exception_cls=HTTPException,
+        http_400=HTTP_400_BAD_REQUEST,
+        http_404=HTTP_404_NOT_FOUND,
+    )
+    active_paths = _active_run_paths_for_variant_impl(
+        variant=normalized,
+        jobs_lock=SAM3_TRAINING_JOBS_LOCK,
+        jobs=SAM3_TRAINING_JOBS,
+    )
     if run_dir.resolve() in active_paths:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="sam3_run_active")
-    deleted, freed = _delete_run_scope(run_dir, scope)
+    deleted, freed = _delete_run_scope_impl(
+        run_dir=run_dir,
+        scope=scope,
+        dir_size_fn=_dir_size_bytes,
+        rmtree_fn=shutil.rmtree,
+    )
     return {"deleted": deleted, "freed_bytes": freed}
 
 
-@app.post("/sam3/storage/runs/{run_id}/promote")
 def promote_sam3_run(run_id: str, variant: str = Query("sam3")):
     return _promote_run(run_id, "sam3")
 
 
-@app.get("/sam3/models/available")
 def list_sam3_available_models(
     variant: str = Query("sam3"),
     promoted_only: bool = Query(False),
 ):
     """List run checkpoints for prompt model selection."""
-    runs = _list_sam3_runs("sam3")
+    runs = _list_sam3_runs_impl(
+        variant="sam3",
+        job_root=SAM3_JOB_ROOT,
+        dataset_root=SAM3_DATASET_ROOT,
+        active_paths_fn=lambda variant: _active_run_paths_for_variant_impl(
+            variant=variant,
+            jobs_lock=SAM3_TRAINING_JOBS_LOCK,
+            jobs=SAM3_TRAINING_JOBS,
+        ),
+        describe_fn=lambda run_dir, variant, active_paths: _describe_run_dir_impl(
+            run_dir=run_dir,
+            variant=variant,
+            active_paths=active_paths,
+            dir_size_fn=_dir_size_bytes,
+        ),
+    )
     models: List[Dict[str, Any]] = []
     # Always expose the base/active env model if available
     # Env/base model entry (always listed)
@@ -17275,7 +15062,6 @@ def list_sam3_available_models(
         )
     return models
 
-@app.post("/sam3/models/activate")
 def activate_sam3_model(payload: Sam3ModelActivateRequest):
     global active_sam3_checkpoint, active_sam3_model_id, active_sam3_metadata, active_sam3_enable_segmentation
     checkpoint_path = payload.checkpoint_path
@@ -17304,7 +15090,33 @@ def activate_sam3_model(payload: Sam3ModelActivateRequest):
     return {"active": active_sam3_metadata}
 
 
-@app.post("/qwen/train/jobs")
+app.include_router(
+    build_sam3_registry_router(
+        list_runs_fn=lambda variant="sam3": _list_sam3_runs_impl(
+            variant="sam3",
+            job_root=SAM3_JOB_ROOT,
+            dataset_root=SAM3_DATASET_ROOT,
+            active_paths_fn=lambda variant: _active_run_paths_for_variant_impl(
+                variant=variant,
+                jobs_lock=SAM3_TRAINING_JOBS_LOCK,
+                jobs=SAM3_TRAINING_JOBS,
+            ),
+            describe_fn=lambda run_dir, variant, active_paths: _describe_run_dir_impl(
+                run_dir=run_dir,
+                variant=variant,
+                active_paths=active_paths,
+                dir_size_fn=_dir_size_bytes,
+            ),
+        ),
+        delete_run_fn=delete_sam3_run,
+        promote_run_fn=promote_sam3_run,
+        list_models_fn=list_sam3_available_models,
+        activate_model_fn=activate_sam3_model,
+        activate_cls=Sam3ModelActivateRequest,
+    )
+)
+
+
 def create_qwen_training_job(payload: QwenTrainRequest):
     if QWEN_TRAINING_IMPORT_ERROR is not None or train_qwen_model is None:
         raise HTTPException(
@@ -17334,7 +15146,6 @@ def create_qwen_training_job(payload: QwenTrainRequest):
     return {"job_id": job_id}
 
 
-@app.get("/qwen/train/jobs")
 def list_qwen_training_jobs(request: Request):
     _prune_job_registry(QWEN_TRAINING_JOBS, QWEN_TRAINING_JOBS_LOCK)
     with QWEN_TRAINING_JOBS_LOCK:
@@ -17343,14 +15154,12 @@ def list_qwen_training_jobs(request: Request):
         return [_serialize_qwen_job_impl(job) for job in jobs]
 
 
-@app.get("/qwen/train/jobs/{job_id}")
 def get_qwen_training_job(job_id: str, request: Request):
     job = _get_qwen_job(job_id)
     _log_qwen_get_request(str(request.url.path), [job])
     return _serialize_qwen_job_impl(job)
 
 
-@app.post("/qwen/train/jobs/{job_id}/cancel")
 def cancel_qwen_training_job(job_id: str):
     job = _get_qwen_job(job_id)
     with QWEN_TRAINING_JOBS_LOCK:
@@ -17364,20 +15173,17 @@ def cancel_qwen_training_job(job_id: str):
         return {"status": next_status}
 
 
-@app.get("/qwen/train/cache_size")
 def qwen_train_cache_size():
     cache_root = QWEN_JOB_ROOT / "splits"
-    return {"bytes": _dir_size_bytes(cache_root)}
+    return {"bytes": _dir_size_bytes_impl(cache_root)}
 
 
-@app.post("/qwen/train/cache/purge")
 def qwen_train_cache_purge():
     cache_root = QWEN_JOB_ROOT / "splits"
     deleted = _purge_directory(cache_root)
     return {"status": "ok", "deleted_bytes": deleted}
 
 
-@app.get("/qwen/models")
 def list_qwen_models():
     default_entry = {
         "id": "default",
@@ -17399,7 +15205,6 @@ def list_qwen_models():
     }
 
 
-@app.post("/qwen/models/activate")
 def activate_qwen_model(payload: QwenModelActivateRequest):
     model_id = (payload.model_id or "").strip()
     if not model_id:
@@ -17420,12 +15225,32 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
     }
 
 
-@app.get("/clip/active_model", response_model=ActiveModelResponse)
+app.include_router(
+    build_qwen_models_router(
+        list_models_fn=list_qwen_models,
+        activate_fn=activate_qwen_model,
+        activate_cls=QwenModelActivateRequest,
+    )
+)
+
+
+app.include_router(
+    build_qwen_training_router(
+        create_job_fn=create_qwen_training_job,
+        list_jobs_fn=list_qwen_training_jobs,
+        get_job_fn=get_qwen_training_job,
+        cancel_job_fn=cancel_qwen_training_job,
+        cache_size_fn=qwen_train_cache_size,
+        cache_purge_fn=qwen_train_cache_purge,
+        request_cls=QwenTrainRequest,
+    )
+)
+
+
 def get_active_model():
     return _current_active_payload()
 
 
-@app.post("/clip/active_model", response_model=ActiveModelResponse)
 def set_active_model(payload: ActiveModelRequest):
     global clf, clip_model, clip_preprocess, clip_model_name, clip_initialized
     global active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
@@ -17509,7 +15334,7 @@ def set_active_model(payload: ActiveModelRequest):
 
     if encoder_type_norm == "clip":
         clip_name = requested_clip_model or str(meta_clip_model or "").strip() or clip_model_name or DEFAULT_CLIP_MODEL
-        inferred = _infer_clip_model_from_embedding_dim(embed_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
+        inferred = _infer_clip_model_from_embedding_dim_impl(embed_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
         if inferred and inferred != clip_name and not requested_clip_model:
             clip_name = inferred
         if clip_name not in SUPPORTED_CLIP_MODELS:
@@ -17525,7 +15350,7 @@ def set_active_model(payload: ActiveModelRequest):
             new_preprocess = clip_preprocess
         clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
         if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
-            inferred = _infer_clip_model_from_embedding_dim(embed_dim, active_name=clip_name)
+            inferred = _infer_clip_model_from_embedding_dim_impl(embed_dim, active_name=clip_name)
             if inferred and inferred != clip_name:
                 try:
                     new_clip_model, new_preprocess = clip.load(inferred, device=device)
@@ -17545,7 +15370,7 @@ def set_active_model(payload: ActiveModelRequest):
         if not encoder_model_norm:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="encoder_model_required")
         try:
-            target_device = _dinov3_resolve_device(device)
+            target_device = _dinov3_resolve_device_impl(device, cuda_disabled=dinov3_cuda_disabled)
             new_dinov3_model, new_dinov3_processor = _load_dinov3_backbone(
                 encoder_model_norm,
                 target_device,
@@ -17611,9 +15436,24 @@ def set_active_model(payload: ActiveModelRequest):
         active_encoder_type = encoder_type_norm
         active_encoder_model = encoder_model_for_active
         active_classifier_meta = dict(meta_obj) if isinstance(meta_obj, dict) else {}
-        active_head_normalize_embeddings = _resolve_active_head_normalize_embeddings(meta_obj, new_clf, default=True)
+        active_head_normalize_embeddings = _resolve_active_head_normalize_embeddings_impl(
+            meta_obj,
+            new_clf,
+            default=True,
+            resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+        )
         try:
-            active_classifier_head = _load_clip_head_from_classifier(Path(classifier_path_abs))
+            active_classifier_head = _load_clip_head_from_classifier_impl(
+                Path(classifier_path_abs),
+                joblib_load_fn=joblib.load,
+                http_exception_cls=HTTPException,
+                clip_head_background_indices_fn=_clip_head_background_indices,
+                resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+                infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+                active_clip_model_name=active_clip_model_name,
+                default_clip_model=DEFAULT_CLIP_MODEL,
+                logger=logger,
+            )
         except Exception:
             active_classifier_head = None
         if payload.logit_adjustment_inference is not None and isinstance(active_classifier_head, dict):
@@ -17630,13 +15470,22 @@ def set_active_model(payload: ActiveModelRequest):
     return _current_active_payload()
 
 
+app.include_router(
+    build_clip_active_model_router(
+        get_fn=get_active_model,
+        set_fn=set_active_model,
+        request_cls=ActiveModelRequest,
+        response_cls=ActiveModelResponse,
+    )
+)
+
+
 # note this one is actually not used. For a while I thought it would be cool to send a smaller crop to SAM but I'm not sure it makes sense since
 # now I'm caching / checking the file that is currently loaded in the predictor and not updating on every call so it's actually waaaay faster and we have the whole image
 # ---------------------------------------------------------------------------
 # SAM preload endpoint
 # ---------------------------------------------------------------------------
 
-@app.post("/sam_preload", response_model=SamPreloadResponse)
 def sam_preload(payload: SamPreloadRequest):
     variant = _default_variant(payload.sam_variant)
     try:
@@ -17657,13 +15506,20 @@ def sam_preload(payload: SamPreloadRequest):
         raise HTTPException(status_code=500, detail=f"sam_preload_failed:{exc}") from exc
 
 
-@app.get("/sam_slots", response_model=List[SamSlotStatus])
-def sam_slots():
+app.include_router(
+    build_sam_preload_router(
+        preload_fn=sam_preload,
+        request_cls=SamPreloadRequest,
+        response_cls=SamPreloadResponse,
+    )
+)
+
+
+def _sam_slots_status() -> List[SamSlotStatus]:
     return predictor_manager.status()
 
 
-@app.post("/sam_activate_slot", response_model=SamActivateResponse)
-def sam_activate_slot(payload: SamActivateRequest):
+def _sam_activate_slot(payload: SamActivateRequest) -> SamActivateResponse:
     variant = _default_variant(payload.sam_variant)
     slot = predictor_manager.get_slot_for_image(payload.image_name, variant)
     if slot is None:
@@ -17672,6 +15528,17 @@ def sam_activate_slot(payload: SamActivateRequest):
     if not promoted and slot.name != "current":
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="slot_busy")
     return SamActivateResponse(status="promoted", slot="current", token=slot.token)
+
+
+app.include_router(
+    build_sam_slots_router(
+        status_fn=_sam_slots_status,
+        activate_fn=_sam_activate_slot,
+        status_cls=List[SamSlotStatus],
+        activate_req_cls=SamActivateRequest,
+        activate_resp_cls=SamActivateResponse,
+    )
+)
 
 
 def _predictor_settings_payload() -> PredictorSettings:
@@ -17719,13 +15586,7 @@ def _predictor_settings_payload() -> PredictorSettings:
     )
 
 
-@app.get("/predictor_settings", response_model=PredictorSettings)
-def get_predictor_settings():
-    return _predictor_settings_payload()
-
-
-@app.post("/predictor_settings", response_model=PredictorSettings)
-def update_predictor_settings(payload: PredictorSettingsUpdate):
+def _update_predictor_settings(payload: PredictorSettingsUpdate) -> PredictorSettings:
     min_cap, max_cap = predictor_manager.capacity_limits()
     try:
         requested = int(payload.max_predictors)
@@ -17734,6 +15595,16 @@ def update_predictor_settings(payload: PredictorSettingsUpdate):
     normalized = max(min_cap, min(max_cap, requested))
     predictor_manager.set_capacity(normalized)
     return _predictor_settings_payload()
+
+
+app.include_router(
+    build_predictor_settings_router(
+        get_payload_fn=_predictor_settings_payload,
+        update_fn=_update_predictor_settings,
+        settings_cls=PredictorSettings,
+        update_cls=PredictorSettingsUpdate,
+    )
+)
 
 
 def _gpu_status_payload() -> Dict[str, Any]:
@@ -17764,11 +15635,6 @@ def _gpu_status_payload() -> Dict[str, Any]:
         payload["error"] = str(exc)
     payload["devices"] = devices
     return payload
-
-
-@app.get("/system/gpu")
-def get_system_gpu():
-    return _gpu_status_payload()
 
 
 def _storage_check_payload() -> Dict[str, Any]:
@@ -17804,11 +15670,6 @@ def _storage_check_payload() -> Dict[str, Any]:
     return {"ok": ok, "roots": results}
 
 
-@app.get("/system/storage_check")
-def system_storage_check():
-    return _storage_check_payload()
-
-
 def _system_health_summary() -> Dict[str, Any]:
     storage = _storage_check_payload()
     gpu = _gpu_status_payload()
@@ -17833,7 +15694,24 @@ def _system_health_summary() -> Dict[str, Any]:
         summary["errors"].append(f"qwen_status_failed:{exc}")
         summary["ok"] = False
     try:
-        summary["models"]["sam3_runs"] = len(_list_sam3_runs("sam3"))
+        summary["models"]["sam3_runs"] = len(
+            _list_sam3_runs_impl(
+                variant="sam3",
+                job_root=SAM3_JOB_ROOT,
+                dataset_root=SAM3_DATASET_ROOT,
+                active_paths_fn=lambda variant: _active_run_paths_for_variant_impl(
+                    variant=variant,
+                    jobs_lock=SAM3_TRAINING_JOBS_LOCK,
+                    jobs=SAM3_TRAINING_JOBS,
+                ),
+                describe_fn=lambda run_dir, variant, active_paths: _describe_run_dir_impl(
+                    run_dir=run_dir,
+                    variant=variant,
+                    active_paths=active_paths,
+                    dir_size_fn=_dir_size_bytes,
+                ),
+            )
+        )
     except Exception as exc:  # noqa: BLE001
         summary["errors"].append(f"sam3_runs_failed:{exc}")
         summary["ok"] = False
@@ -17843,7 +15721,22 @@ def _system_health_summary() -> Dict[str, Any]:
         summary["errors"].append(f"qwen_models_failed:{exc}")
         summary["ok"] = False
     try:
-        summary["models"]["clip_classifiers"] = len(_list_clip_classifiers())
+        summary["models"]["clip_classifiers"] = len(
+            _list_clip_classifiers_impl(
+                upload_root=UPLOAD_ROOT,
+                classifier_exts=CLASSIFIER_ALLOWED_EXTS,
+                labelmap_exts=LABELMAP_ALLOWED_EXTS,
+                path_is_within_root_fn=_path_is_within_root_impl,
+                joblib_load_fn=joblib.load,
+                resolve_clip_labelmap_path_fn=lambda path_str, root_hint=None: _resolve_clip_labelmap_path_impl(
+                    path_str,
+                    root_hint=root_hint,
+                    upload_root=UPLOAD_ROOT,
+                    labelmap_exts=LABELMAP_ALLOWED_EXTS,
+                    path_is_within_root_fn=_path_is_within_root_impl,
+                ),
+            )
+        )
     except Exception as exc:  # noqa: BLE001
         summary["errors"].append(f"clip_classifiers_failed:{exc}")
         summary["ok"] = False
@@ -17852,19 +15745,22 @@ def _system_health_summary() -> Dict[str, Any]:
     return summary
 
 
-@app.get("/system/health_summary")
-def system_health_summary():
-    return _system_health_summary()
+app.include_router(
+    build_system_router(
+        gpu_payload_fn=_gpu_status_payload,
+        storage_payload_fn=_storage_check_payload,
+        health_summary_fn=_system_health_summary,
+    )
+)
 
 
-@app.get("/qwen/status")
 def qwen_status():
     dependency_error = str(QWEN_IMPORT_ERROR) if QWEN_IMPORT_ERROR else None
     device_guess = qwen_device
     pending_error = qwen_last_error
     if not device_guess and not dependency_error:
         try:
-            device_guess = _resolve_qwen_device()
+            device_guess = _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
         except RuntimeError as exc:  # noqa: BLE001
             pending_error = str(exc)
             device_guess = None
@@ -17884,12 +15780,10 @@ def qwen_status():
     }
 
 
-@app.get("/qwen/settings", response_model=QwenRuntimeSettings)
 def qwen_settings():
     return QwenRuntimeSettings(trust_remote_code=QWEN_TRUST_REMOTE_CODE)
 
 
-@app.post("/qwen/settings", response_model=QwenRuntimeSettings)
 def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
     global QWEN_TRUST_REMOTE_CODE
     if payload.trust_remote_code is not None:
@@ -17900,19 +15794,36 @@ def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
     return QwenRuntimeSettings(trust_remote_code=QWEN_TRUST_REMOTE_CODE)
 
 
-@app.post("/runtime/unload")
-def unload_all_runtimes():
-    _unload_inference_runtimes()
-    return {"status": "unloaded"}
+app.include_router(
+    build_runtime_router(
+        unload_all_fn=lambda: _unload_inference_runtimes_impl(
+            unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                predictor_manager,
+                unload_sam3_text_fn=_unload_sam3_text_runtime,
+                suspend_clip_fn=_suspend_clip_backbone,
+                unload_dinov3_fn=_unload_dinov3_backbone,
+                unload_detector_fn=_unload_detector_inference,
+                torch_module=torch,
+                logger=logger,
+            ),
+            unload_qwen_fn=_unload_qwen_runtime,
+            torch_module=torch,
+        ),
+    )
+)
+
+app.include_router(
+    build_qwen_status_router(
+        status_fn=qwen_status,
+        get_settings_fn=qwen_settings,
+        update_settings_fn=update_qwen_settings,
+        unload_fn=lambda: (_unload_qwen_runtime() or {"status": "unloaded"}),
+        settings_cls=QwenRuntimeSettings,
+        update_cls=QwenRuntimeSettingsUpdate,
+    )
+)
 
 
-@app.post("/qwen/unload")
-def qwen_unload():
-    _unload_qwen_runtime()
-    return {"status": "unloaded"}
-
-
-@app.post("/qwen/infer", response_model=QwenInferenceResponse)
 def qwen_infer(payload: QwenInferenceRequest):
     prompt_type = payload.prompt_type.lower()
     if prompt_type not in {"bbox", "point", "bbox_sam"}:
@@ -17927,11 +15838,14 @@ def qwen_infer(payload: QwenInferenceRequest):
         final_prompt = manual_prompt
     else:
         item_list = (payload.item_list or "").strip()
-        final_prompt = _render_qwen_prompt(
+        final_prompt = _render_qwen_prompt_impl(
             prompt_type,
             items=item_list,
             image_type=(payload.image_type or "").strip() or None,
             extra_context=(payload.extra_context or "").strip() or None,
+            get_config_fn=lambda: _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock),
+            http_exception_cls=HTTPException,
+            http_422=HTTP_422_UNPROCESSABLE_ENTITY,
         )
     try:
         qwen_text, proc_w, proc_h = _run_qwen_inference(final_prompt, pil_img)
@@ -18009,7 +15923,6 @@ def qwen_infer(payload: QwenInferenceRequest):
     )
 
 
-@app.post("/qwen/caption", response_model=QwenCaptionResponse)
 def qwen_caption(payload: QwenCaptionRequest):
     fast_mode = bool(payload.fast_mode)
     force_unload = payload.force_unload
@@ -18055,7 +15968,15 @@ def qwen_caption(payload: QwenCaptionRequest):
 
     try:
         if payload.unload_others and not fast_mode:
-            _unload_non_qwen_runtimes()
+            _unload_non_qwen_runtimes_impl(
+                predictor_manager,
+                unload_sam3_text_fn=_unload_sam3_text_runtime,
+                suspend_clip_fn=_suspend_clip_backbone,
+                unload_dinov3_fn=_unload_dinov3_backbone,
+                unload_detector_fn=_unload_detector_inference,
+                torch_module=torch,
+                logger=logger,
+            )
         pil_img, _, _ = resolve_image_payload(payload.image_base64, payload.image_token, None)
         user_prompt = (payload.user_prompt or "").strip()
         include_counts = bool(payload.include_counts)
@@ -18063,23 +15984,23 @@ def qwen_caption(payload: QwenCaptionRequest):
         max_boxes = payload.max_boxes if payload.max_boxes is not None else 0
         max_new_tokens = payload.max_new_tokens if payload.max_new_tokens is not None else 128
         label_hints = payload.label_hints or []
-        allowed_labels = _allowed_caption_labels(label_hints)
+        allowed_labels = _allowed_caption_labels_impl(label_hints)
         image_width = payload.image_width or pil_img.width
         image_height = payload.image_height or pil_img.height
         caption_mode = payload.caption_mode or "full"
         restrict_to_labels = payload.restrict_to_labels if payload.restrict_to_labels is not None else True
         caption_all_windows = True if caption_mode == "windowed" else bool(payload.caption_all_windows)
         detailed_mode = caption_mode == "windowed"
-        glossary_map = _caption_glossary_map(
+        glossary_map = _caption_glossary_map_impl(
             payload.labelmap_glossary,
             [hint.label for hint in label_hints if hint.label],
         )
         allowed_labels_prompt = (
-            [_caption_preferred_label(label, glossary_map) for label in allowed_labels]
+            [_caption_preferred_label_impl(label, glossary_map) for label in allowed_labels]
             if allowed_labels
             else []
         )
-        prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt(
+        prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt_impl(
             user_prompt,
             label_hints,
             image_width,
@@ -18106,7 +16027,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         if model_id_override:
             desired_model_id = model_id_override
         else:
-            desired_model_id = _resolve_qwen_variant_model_id(base_model_id, variant)
+            desired_model_id = _resolve_qwen_variant_model_id_impl(base_model_id, variant)
         if active_qwen_model_path and desired_model_id != base_model_id:
             logger.info(
                 "[qwen-caption] using base model override (%s) while adapter %s is active",
@@ -18117,10 +16038,10 @@ def qwen_caption(payload: QwenCaptionRequest):
         final_only = bool(payload.final_answer_only)
         two_stage = bool(payload.two_stage_refine)
         is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
-        decode_params = _resolve_qwen_caption_decode(payload, is_thinking)
+        decode_params = _resolve_qwen_caption_decode_impl(payload, is_thinking)
         deterministic_decode = {"do_sample": False}
         if is_thinking:
-            prompt_text = _adjust_prompt_for_thinking(prompt_text)
+            prompt_text = _adjust_prompt_for_thinking_impl(prompt_text)
         # Keep caption max_new_tokens consistent across full/windowed/refine paths; cap at 2000.
         # Avoid per-path caps here (we previously caused repeated CUDA asserts by diverging).
         if is_thinking:
@@ -18144,6 +16065,60 @@ def qwen_caption(payload: QwenCaptionRequest):
         if active_qwen_model_path and not model_id_override and desired_model_id == base_model_id and variant == "auto":
             use_caption_cache = False
 
+        def _caption_cleanup(
+            prompt: str,
+            img: Image.Image,
+            tokens: int,
+            base_id: str,
+            cache_ok: bool,
+            *,
+            model_id_override: Optional[str] = None,
+            runtime_override: Optional[Tuple[Any, Any]] = None,
+            allowed_labels: Optional[List[str]] = None,
+            strict: bool = False,
+            minimal_edit: bool = False,
+        ) -> str:
+            return _run_qwen_caption_cleanup_impl(
+                prompt,
+                img,
+                tokens,
+                base_id,
+                cache_ok,
+                model_id_override=model_id_override,
+                runtime_override=runtime_override,
+                allowed_labels=allowed_labels,
+                strict=strict,
+                minimal_edit=minimal_edit,
+                run_qwen_inference_fn=_run_qwen_inference,
+                resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
+                extract_caption_fn=_extract_caption_from_text_impl,
+                sanitize_caption_fn=_sanitize_qwen_caption_impl,
+            )
+
+        def _caption_merge(
+            draft: str,
+            windows: Sequence[Tuple[int, int, int, str]],
+            *,
+            img: Image.Image,
+            base_id: str,
+            runtime_resolver: Callable[[str], Tuple[Any, Any]],
+            tokens: int,
+            glossary_line: Optional[str] = None,
+        ) -> str:
+            return _run_qwen_caption_merge_impl(
+                draft,
+                windows,
+                pil_img=img,
+                base_model_id=base_id,
+                runtime_resolver=runtime_resolver,
+                max_new_tokens=tokens,
+                glossary_line=glossary_line,
+                run_qwen_inference_fn=_run_qwen_inference,
+                resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
+                extract_caption_fn=_extract_caption_from_text_impl,
+                sanitize_caption_fn=_sanitize_qwen_caption_impl,
+            )
+
         def resolve_main_runtime() -> Tuple[Any, Any]:
             if model_id_override:
                 return get_runtime(desired_model_id)
@@ -18156,11 +16131,18 @@ def qwen_caption(payload: QwenCaptionRequest):
         refine_count = 0
         merge_count = 0
         if caption_mode == "windowed":
-            overlap = _resolve_qwen_window_overlap(payload.window_overlap)
-            window_size = _resolve_qwen_window_size(None, image_width, image_height, overlap=overlap)
+            overlap = _resolve_qwen_window_overlap_impl(payload.window_overlap, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP)
+            window_size = _resolve_qwen_window_size_impl(
+                None,
+                image_width,
+                image_height,
+                overlap=overlap,
+                default_size=QWEN_WINDOW_DEFAULT_SIZE,
+                default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
+            )
             force_two = True
-            x_positions = _window_positions(image_width, window_size, overlap, force_two=force_two)
-            y_positions = _window_positions(image_height, window_size, overlap, force_two=force_two)
+            x_positions = _window_positions_impl(image_width, window_size, overlap, force_two=force_two)
+            y_positions = _window_positions_impl(image_height, window_size, overlap, force_two=force_two)
             grouped_hints = _group_hints_by_window(label_hints, x_positions, y_positions, window_size)
             window_model_id = desired_model_id
             window_base_model_id = window_model_id
@@ -18170,17 +16152,17 @@ def qwen_caption(payload: QwenCaptionRequest):
                     window_hints = grouped_hints.get((x0, y0), [])
                     if not window_hints and not caption_all_windows:
                         continue
-                    window_allowed = _allowed_caption_labels(window_hints)
-                    window_glossary_map = _caption_glossary_map(
+                    window_allowed = _allowed_caption_labels_impl(window_hints)
+                    window_glossary_map = _caption_glossary_map_impl(
                         payload.labelmap_glossary,
                         [hint.label for hint in window_hints if hint.label],
                     )
                     window_allowed_prompt = (
-                        [_caption_preferred_label(label, window_glossary_map) for label in window_allowed]
+                        [_caption_preferred_label_impl(label, window_glossary_map) for label in window_allowed]
                         if window_allowed
                         else []
                     )
-                    window_prompt, window_counts, _, _ = _build_qwen_caption_prompt(
+                    window_prompt, window_counts, _, _ = _build_qwen_caption_prompt_impl(
                         user_prompt,
                         window_hints,
                         window_size,
@@ -18209,7 +16191,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             "Do not introduce any other entity types."
                         )
                     if window_is_thinking:
-                        window_prompt = _adjust_prompt_for_thinking(window_prompt)
+                        window_prompt = _adjust_prompt_for_thinking_impl(window_prompt)
                     window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
                     window_max_tokens = max_new_tokens
                     qwen_text, _, _ = _run_qwen_inference(
@@ -18220,11 +16202,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                         runtime_override=get_runtime(window_model_id),
                         decode_override=decode_params,
                     )
-                    window_caption, _ = _extract_caption_from_text(qwen_text, marker=None)
-                    window_caption = _sanitize_qwen_caption(window_caption)
-                    if window_is_thinking and _thinking_caption_needs_cleanup(window_caption, qwen_text):
-                        cleanup_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
-                        window_caption = _run_qwen_caption_cleanup(
+                    window_caption, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
+                    window_caption = _sanitize_qwen_caption_impl(window_caption)
+                    if window_is_thinking and _thinking_caption_needs_cleanup_impl(window_caption, qwen_text):
+                        cleanup_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
+                        window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
                             window_max_tokens,
@@ -18237,9 +16219,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                             minimal_edit=True,
                         )
                         cleanup_count += 1
-                    if _caption_is_degenerate(window_caption):
-                        cleanup_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
-                        window_caption = _run_qwen_caption_cleanup(
+                    if _caption_is_degenerate_impl(window_caption):
+                        cleanup_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
+                        window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
                             window_max_tokens,
@@ -18252,9 +16234,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                             minimal_edit=True,
                         )
                         cleanup_count += 1
-                    if _caption_needs_completion(window_caption) or _caption_has_meta(window_caption):
-                        cleanup_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
-                        window_caption = _run_qwen_caption_cleanup(
+                    if _caption_needs_completion_impl(window_caption) or _caption_has_meta_impl(window_caption):
+                        cleanup_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
+                        window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
                             window_max_tokens,
@@ -18267,7 +16249,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             minimal_edit=True,
                         )
                         cleanup_count += 1
-                    needs_refine, missing = _caption_needs_refine(
+                    needs_refine, missing = _caption_needs_refine_impl(
                         window_caption,
                         window_counts,
                         detailed_mode=True,
@@ -18275,7 +16257,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         glossary_map=window_glossary_map,
                     )
                     if needs_refine:
-                        refine_model = _resolve_qwen_variant_model_id(window_base_model_id, "Instruct")
+                        refine_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
                         allowed_note = ""
                         if restrict_to_labels and window_allowed_prompt:
                             allowed_note = (
@@ -18308,8 +16290,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                             runtime_override=get_runtime(refine_model),
                             decode_override=deterministic_decode,
                         )
-                        window_caption, _ = _extract_caption_from_text(refine_text, marker=None)
-                        window_caption = _sanitize_qwen_caption(window_caption)
+                        window_caption, _ = _extract_caption_from_text_impl(refine_text, marker=None)
+                        window_caption = _sanitize_qwen_caption_impl(window_caption)
                         refine_count += 1
                     if window_caption:
                         windowed_captions.append((x0, y0, window_size, window_caption))
@@ -18364,8 +16346,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 runtime_override=resolve_main_runtime(),
                 decode_override=decode_params,
             )
-            draft_caption, _ = _extract_caption_from_text(draft_text, marker="DRAFT")
-            draft_caption = _sanitize_qwen_caption(draft_caption)
+            draft_caption, _ = _extract_caption_from_text_impl(draft_text, marker="DRAFT")
+            draft_caption = _sanitize_qwen_caption_impl(draft_caption)
             allowed_note = ""
             if restrict_to_labels and allowed_labels_prompt:
                 allowed_note = (
@@ -18385,7 +16367,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 "You are a captioning assistant. Use the image as truth. "
                 "Return only the final caption. Respond in English only."
             )
-            refine_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
+            refine_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
             qwen_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
@@ -18394,9 +16376,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 runtime_override=get_runtime(refine_model),
                 decode_override=deterministic_decode,
             )
-            caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
+            caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
             if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption(caption_text)
+                caption_text = _sanitize_qwen_caption_impl(caption_text)
         else:
             qwen_text, _, _ = _run_qwen_inference(
                 prompt_text,
@@ -18406,12 +16388,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                 runtime_override=resolve_main_runtime(),
                 decode_override=decode_params,
             )
-            caption_text, _ = _extract_caption_from_text(qwen_text, marker=None)
+            caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
             if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption(caption_text)
-            if is_thinking and _thinking_caption_needs_cleanup(caption_text, qwen_text):
-                cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
-                caption_text = _run_qwen_caption_cleanup(
+                caption_text = _sanitize_qwen_caption_impl(caption_text)
+            if is_thinking and _thinking_caption_needs_cleanup_impl(caption_text, qwen_text):
+                cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+                caption_text = _caption_cleanup(
                     caption_text,
                     pil_img,
                     refine_max_tokens,
@@ -18426,7 +16408,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 cleanup_count += 1
         if caption_mode == "windowed" and windowed_captions and caption_text:
             merge_tokens = min(refine_max_tokens, 256)
-            caption_text = _run_qwen_caption_merge(
+            caption_text = _caption_merge(
                 caption_text,
                 windowed_captions,
                 pil_img=pil_img,
@@ -18437,10 +16419,10 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             merge_count += 1
             if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption(caption_text)
-        if _caption_is_degenerate(caption_text):
-            cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
-            caption_text = _run_qwen_caption_cleanup(
+                caption_text = _sanitize_qwen_caption_impl(caption_text)
+        if _caption_is_degenerate_impl(caption_text):
+            cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
                 refine_max_tokens,
@@ -18453,9 +16435,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 minimal_edit=True,
             )
             cleanup_count += 1
-        if _caption_needs_completion(caption_text) or _caption_has_meta(caption_text):
-            cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
-            caption_text = _run_qwen_caption_cleanup(
+        if _caption_needs_completion_impl(caption_text) or _caption_has_meta_impl(caption_text):
+            cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
                 refine_max_tokens,
@@ -18468,9 +16450,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 minimal_edit=True,
             )
             cleanup_count += 1
-        if caption_mode == "windowed" and "4B" in desired_model_id and _caption_needs_short_form(caption_text):
-            cleanup_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
-            caption_text = _run_qwen_caption_cleanup(
+        if caption_mode == "windowed" and "4B" in desired_model_id and _caption_needs_short_form_impl(caption_text):
+            cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
                 refine_max_tokens,
@@ -18483,7 +16465,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 minimal_edit=True,
             )
             cleanup_count += 1
-        needs_refine, missing = _caption_needs_refine(
+        needs_refine, missing = _caption_needs_refine_impl(
             caption_text,
             counts,
             detailed_mode=detailed_mode,
@@ -18491,7 +16473,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             glossary_map=glossary_map,
         )
         if needs_refine:
-            refine_model = _resolve_qwen_variant_model_id(caption_base_model_id, "Instruct")
+            refine_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
             allowed_note = ""
             if restrict_to_labels and allowed_labels_prompt:
                 allowed_note = (
@@ -18521,11 +16503,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                 runtime_override=get_runtime(refine_model),
                 decode_override=deterministic_decode,
             )
-            caption_text, _ = _extract_caption_from_text(refine_text, marker=None)
-            caption_text = _sanitize_qwen_caption(caption_text)
+            caption_text, _ = _extract_caption_from_text_impl(refine_text, marker=None)
+            caption_text = _sanitize_qwen_caption_impl(caption_text)
             refine_count += 1
-        if caption_text and _caption_needs_english_rewrite(caption_text):
-            rewrite_model = _resolve_qwen_variant_model_id(base_model_id, "Instruct")
+        if caption_text and _caption_needs_english_rewrite_impl(caption_text):
+            rewrite_model = _resolve_qwen_variant_model_id_impl(base_model_id, "Instruct")
             rewrite_prompt = (
                 "Rewrite the caption in English only, preserving meaning and brevity.\n"
                 f"Caption: {caption_text}"
@@ -18539,9 +16521,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 runtime_override=get_runtime(rewrite_model),
                 decode_override=deterministic_decode,
             )
-            caption_text, _ = _extract_caption_from_text(rewrite_text, marker=None)
+            caption_text, _ = _extract_caption_from_text_impl(rewrite_text, marker=None)
             if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption(caption_text)
+                caption_text = _sanitize_qwen_caption_impl(caption_text)
         response = QwenCaptionResponse(
             caption=caption_text,
             used_counts=counts,
@@ -18587,7 +16569,23 @@ def qwen_caption(payload: QwenCaptionRequest):
     return response
 
 
-@app.post("/qwen/prepass", response_model=QwenPrepassResponse)
+app.include_router(
+    build_qwen_infer_router(
+        infer_fn=qwen_infer,
+        request_cls=QwenInferenceRequest,
+        response_cls=QwenInferenceResponse,
+    )
+)
+
+app.include_router(
+    build_qwen_caption_router(
+        caption_fn=qwen_caption,
+        request_cls=QwenCaptionRequest,
+        response_cls=QwenCaptionResponse,
+    )
+)
+
+
 def qwen_prepass(payload: QwenPrepassRequest):
     try:
         payload = payload.copy(update={"prepass_only": True})
@@ -18598,13 +16596,94 @@ def qwen_prepass(payload: QwenPrepassRequest):
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_prepass_failed:{exc}") from exc
 
 
-@app.post("/calibration/jobs")
+app.include_router(
+    build_qwen_prepass_router(
+        prepass_fn=qwen_prepass,
+        request_cls=QwenPrepassRequest,
+        response_cls=QwenPrepassResponse,
+    )
+)
+
+
 def start_calibration_job(payload: CalibrationRequest = Body(...)):
-    job = _start_calibration_job(payload)
+    job = _start_calibration_job_impl(
+        payload,
+        job_cls=CalibrationJob,
+        jobs=CALIBRATION_JOBS,
+        jobs_lock=CALIBRATION_JOBS_LOCK,
+        run_job_fn=lambda job, request: _run_calibration_job_impl(
+            job,
+            request,
+            jobs=CALIBRATION_JOBS,
+            jobs_lock=CALIBRATION_JOBS_LOCK,
+            update_fn=_calibration_update,
+            require_sam3_fn=lambda enable_text, enable_similarity: _require_sam3_for_prepass_impl(
+                enable_text,
+                enable_similarity,
+                sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
+                build_sam3_image_model=build_sam3_image_model,
+                sam3_image_processor=Sam3ImageProcessor,
+            ),
+            prepare_for_training_fn=lambda: _prepare_for_training_impl(
+                unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+                    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                        predictor_manager,
+                        unload_sam3_text_fn=_unload_sam3_text_runtime,
+                        suspend_clip_fn=_suspend_clip_backbone,
+                        unload_dinov3_fn=_unload_dinov3_backbone,
+                        unload_detector_fn=_unload_detector_inference,
+                        torch_module=torch,
+                        logger=logger,
+                    ),
+                    unload_qwen_fn=_unload_qwen_runtime,
+                    torch_module=torch,
+                )
+            ),
+            load_yolo_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH),
+            load_rfdetr_active_fn=lambda: _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
+            load_labelmap_meta_fn=_agent_load_labelmap_meta,
+            list_images_fn=lambda dataset_id: _calibration_list_images_impl(
+                dataset_id, resolve_dataset_fn=_resolve_sam3_or_qwen_dataset
+            ),
+            sample_images_fn=_calibration_sample_images_impl,
+            calibration_root=CALIBRATION_ROOT,
+            calibration_cache_root=CALIBRATION_CACHE_ROOT,
+            prepass_request_cls=QwenPrepassRequest,
+            active_classifier_head=active_classifier_head,
+            calibration_features_version=CALIBRATION_FEATURES_VERSION,
+            write_record_fn=_calibration_write_record_atomic,
+            hash_payload_fn=_calibration_hash_payload_impl,
+            safe_link_fn=_calibration_safe_link_impl,
+            prepass_worker_fn=_calibration_prepass_worker,
+            unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+                unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                    predictor_manager,
+                    unload_sam3_text_fn=_unload_sam3_text_runtime,
+                    suspend_clip_fn=_suspend_clip_backbone,
+                    unload_dinov3_fn=_unload_dinov3_backbone,
+                    unload_detector_fn=_unload_detector_inference,
+                    torch_module=torch,
+                    logger=logger,
+                ),
+                unload_qwen_fn=_unload_qwen_runtime,
+                torch_module=torch,
+            ),
+            resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
+            cache_image_fn=lambda pil_img, sam_variant: _calibration_cache_image_impl(
+                pil_img,
+                sam_variant,
+                store_preloaded_fn=_store_preloaded_image,
+                default_variant_fn=_default_variant,
+            ),
+            run_prepass_fn=_agent_run_deep_prepass,
+            logger=logger,
+            http_exception_cls=HTTPException,
+            root_dir=Path(__file__).resolve().parent,
+        ),
+    )
     return _serialize_calibration_job_impl(job)
 
 
-@app.get("/calibration/jobs")
 def list_calibration_jobs():
     _prune_job_registry(CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK)
     with CALIBRATION_JOBS_LOCK:
@@ -18613,7 +16692,6 @@ def list_calibration_jobs():
     return [_serialize_calibration_job_impl(job) for job in jobs]
 
 
-@app.get("/calibration/jobs/{job_id}")
 def get_calibration_job(job_id: str):
     with CALIBRATION_JOBS_LOCK:
         job = CALIBRATION_JOBS.get(job_id)
@@ -18622,30 +16700,39 @@ def get_calibration_job(job_id: str):
     return _serialize_calibration_job_impl(job)
 
 
-@app.post("/calibration/jobs/{job_id}/cancel")
 def cancel_calibration_job(job_id: str):
-    job = _cancel_calibration_job(job_id)
+    job = _cancel_calibration_job_impl(
+        job_id,
+        jobs=CALIBRATION_JOBS,
+        jobs_lock=CALIBRATION_JOBS_LOCK,
+        http_exception_cls=HTTPException,
+        time_fn=time.time,
+    )
     return _serialize_calibration_job_impl(job)
 
 
-@app.get("/prepass/recipes")
-def list_prepass_recipes():
-    return _list_prepass_recipes()
+app.include_router(
+    build_calibration_router(
+        start_fn=start_calibration_job,
+        list_fn=list_calibration_jobs,
+        get_fn=get_calibration_job,
+        cancel_fn=cancel_calibration_job,
+        request_cls=CalibrationRequest,
+    )
+)
 
 
-@app.get("/prepass/recipes/{recipe_id}", response_model=PrepassRecipeResponse)
 def get_prepass_recipe(recipe_id: str):
     data = _get_prepass_recipe_impl(
         recipe_id,
         recipes_root=PREPASS_RECIPE_ROOT,
-        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
         load_meta_fn=_load_prepass_recipe_meta,
         prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
     )
     return PrepassRecipeResponse(**data)
 
 
-@app.post("/prepass/recipes", response_model=PrepassRecipeResponse)
 def save_prepass_recipe(payload: PrepassRecipeRequest):
     recipe_id = payload.recipe_id or uuid.uuid4().hex
     data = _save_prepass_recipe_impl(
@@ -18653,46 +16740,22 @@ def save_prepass_recipe(payload: PrepassRecipeRequest):
         recipe_id=recipe_id,
         prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
         recipes_root=PREPASS_RECIPE_ROOT,
-        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
         normalize_glossary_fn=_normalize_labelmap_glossary,
         write_meta_fn=_write_prepass_recipe_meta,
     )
     return PrepassRecipeResponse(**data)
 
 
-@app.delete("/prepass/recipes/{recipe_id}")
 def delete_prepass_recipe(recipe_id: str):
     _delete_prepass_recipe_impl(
         recipe_id,
         recipes_root=PREPASS_RECIPE_ROOT,
-        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
     )
     return {"status": "deleted", "id": recipe_id}
 
 
-def _collect_recipe_assets(recipe_meta: Dict[str, Any], temp_dir: Path) -> Dict[str, Any]:
-    return _collect_recipe_assets_impl(
-        recipe_meta,
-        temp_dir,
-        read_labelmap_lines_fn=_read_labelmap_lines,
-        load_labelmap_meta_fn=_agent_load_labelmap_meta,
-        active_labelmap_path=active_labelmap_path,
-        sanitize_run_id_fn=_sanitize_yolo_run_id,
-        copy_tree_filtered_fn=_copy_tree_filtered,
-        sha256_fn=_sha256_path,
-        get_qwen_model_entry_fn=_get_qwen_model_entry,
-        resolve_classifier_path_fn=_resolve_agent_clip_classifier_path,
-        yolo_job_root=YOLO_JOB_ROOT,
-        rfdetr_job_root=RFDETR_JOB_ROOT,
-        rfdetr_keep_files=RFDETR_KEEP_FILES,
-        qwen_metadata_filename=QWEN_METADATA_FILENAME,
-        qwen_job_root=QWEN_JOB_ROOT,
-        upload_root=UPLOAD_ROOT,
-        calibration_root=CALIBRATION_ROOT,
-    )
-
-
-@app.post("/prepass/recipes/{recipe_id}/export")
 def export_prepass_recipe(recipe_id: str):
     zip_path = _export_prepass_recipe_impl(
         recipe_id,
@@ -18700,9 +16763,33 @@ def export_prepass_recipe(recipe_id: str):
         prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
         prepass_recipe_export_root=PREPASS_RECIPE_EXPORT_ROOT,
         prepass_recipe_root=PREPASS_RECIPE_ROOT,
-        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
         load_meta_fn=_load_prepass_recipe_meta,
-        collect_assets_fn=_collect_recipe_assets,
+        collect_assets_fn=lambda recipe_meta, temp_dir: _collect_recipe_assets_impl(
+            recipe_meta,
+            temp_dir,
+            read_labelmap_lines_fn=_read_labelmap_lines,
+            load_labelmap_meta_fn=_agent_load_labelmap_meta,
+            active_labelmap_path=active_labelmap_path,
+            sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
+            copy_tree_filtered_fn=_copy_tree_filtered,
+            sha256_fn=_sha256_path,
+            get_qwen_model_entry_fn=_get_qwen_model_entry,
+            resolve_classifier_path_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
+                path_str,
+                allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+                allowed_exts=CLASSIFIER_ALLOWED_EXTS,
+                path_is_within_root_fn=_path_is_within_root_impl,
+                http_exception_cls=HTTPException,
+            ),
+            yolo_job_root=YOLO_JOB_ROOT,
+            rfdetr_job_root=RFDETR_JOB_ROOT,
+            rfdetr_keep_files=RFDETR_KEEP_FILES,
+            qwen_metadata_filename=QWEN_METADATA_FILENAME,
+            qwen_job_root=QWEN_JOB_ROOT,
+            upload_root=UPLOAD_ROOT,
+            calibration_root=CALIBRATION_ROOT,
+        ),
     )
     return FileResponse(
         path=str(zip_path),
@@ -18730,12 +16817,11 @@ def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
         unique_name_fn=_unique_prepass_recipe_name,
         normalize_glossary_fn=_normalize_labelmap_glossary,
         write_meta_fn=_write_prepass_recipe_meta,
-        sanitize_run_id_fn=_sanitize_yolo_run_id,
+        sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
     )
     return PrepassRecipeResponse(**data)
 
 
-@app.post("/prepass/recipes/import", response_model=PrepassRecipeResponse)
 def import_prepass_recipe(file: UploadFile = File(...)):  # noqa: B008
     temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_"))
     try:
@@ -18747,7 +16833,6 @@ def import_prepass_recipe(file: UploadFile = File(...)):  # noqa: B008
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-@app.post("/prepass/recipes/import-raw", response_model=PrepassRecipeResponse)
 async def import_prepass_recipe_raw(request: Request):
     if "application/zip" not in (request.headers.get("content-type") or ""):
         raise HTTPException(status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="prepass_recipe_invalid_media")
@@ -18761,7 +16846,25 @@ async def import_prepass_recipe_raw(request: Request):
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-@app.post("/sam3/text_prompt", response_model=Sam3TextPromptResponse)
+
+app.include_router(
+    build_prepass_router(
+        list_fn=lambda: _list_prepass_recipes_impl(
+            recipes_root=PREPASS_RECIPE_ROOT,
+            meta_filename=PREPASS_RECIPE_META,
+        ),
+        get_fn=get_prepass_recipe,
+        save_fn=save_prepass_recipe,
+        delete_fn=delete_prepass_recipe,
+        export_fn=export_prepass_recipe,
+        import_fn=import_prepass_recipe,
+        import_raw_fn=import_prepass_recipe_raw,
+        response_cls=PrepassRecipeResponse,
+        request_cls=PrepassRecipeRequest,
+    )
+)
+
+
 def sam3_text_prompt(payload: Sam3TextPrompt):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
@@ -18788,7 +16891,7 @@ def sam3_text_prompt(payload: Sam3TextPrompt):
             payload = det.mask if isinstance(det, QwenDetection) else None
             if payload is None and masks_arr is not None and idx < len(masks_arr) and masks_arr[idx] is not None:
                 try:
-                    payload = encode_binary_mask(masks_arr[idx])
+                    payload = _encode_binary_mask_impl(masks_arr[idx], max_bytes=MASK_ENCODE_MAX_BYTES)
                 except Exception:
                     payload = None
             encoded_masks.append(payload)
@@ -18802,7 +16905,6 @@ def sam3_text_prompt(payload: Sam3TextPrompt):
     )
 
 
-@app.post("/sam3/text_prompt_auto", response_model=Sam3TextPromptAutoResponse)
 def sam3_text_prompt_auto(payload: Sam3TextPrompt):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
@@ -18834,14 +16936,14 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
         mask = masks_arr[idx] if masks_arr is not None and idx < len(masks_arr) else None
         mask_payload = det.mask if hasattr(det, "mask") else None
         if mask_payload is None and mask is not None:
-            mask_payload = encode_binary_mask(mask)
+            mask_payload = _encode_binary_mask_impl(mask, max_bytes=MASK_ENCODE_MAX_BYTES)
         if mask is not None:
             try:
-                x_min, y_min, x_max, y_max = mask_to_bounding_box(mask)
+                x_min, y_min, x_max, y_max = _mask_to_bounding_box(mask)
             except Exception:
-                x_min, y_min, x_max, y_max = yolo_to_corners(det.bbox, pil_img.width, pil_img.height)
+                x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(det.bbox, pil_img.width, pil_img.height)
         else:
-            x_min, y_min, x_max, y_max = yolo_to_corners(det.bbox, pil_img.width, pil_img.height)
+            x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(det.bbox, pil_img.width, pil_img.height)
         li = max(0, int(x_min))
         ti = max(0, int(y_min))
         ri = min(pil_img.width, int(x_max))
@@ -18900,7 +17002,6 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
     return Sam3TextPromptAutoResponse(detections=responses, warnings=warnings, image_token=token)
 
 
-@app.post("/sam3/visual_prompt", response_model=Sam3TextPromptResponse)
 def sam3_visual_prompt(payload: Sam3VisualPrompt):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
@@ -18950,7 +17051,7 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
             payload_mask = det.mask if isinstance(det, QwenDetection) else None
             if payload_mask is None and masks_arr is not None and idx < len(masks_arr) and masks_arr[idx] is not None:
                 try:
-                    payload_mask = encode_binary_mask(masks_arr[idx])
+                    payload_mask = _encode_binary_mask_impl(masks_arr[idx], max_bytes=MASK_ENCODE_MAX_BYTES)
                 except Exception:
                     payload_mask = None
             encoded_masks.append(payload_mask)
@@ -18964,7 +17065,6 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
     )
 
 
-@app.post("/sam_point", response_model=YoloBboxOutput)
 def sam_point(prompt: PointPrompt):
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -18986,19 +17086,18 @@ def sam_point(prompt: PointPrompt):
     mask_arr = np.asarray(masks[0])
     if mask_arr.dtype != np.uint8:
         mask_arr = (mask_arr > 0).astype(np.uint8)
-    left, top, right, bottom = mask_to_bounding_box(mask_arr)
-    yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+    left, top, right, bottom = _mask_to_bounding_box(mask_arr)
+    yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
     return YoloBboxOutput(
         class_id="0",
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
-        mask=encode_binary_mask(mask_arr),
+        mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
         simplify_epsilon=None,
     )
 
 
-@app.post("/sam_bbox_auto", response_model=SamPointAutoResponse)
 def sam_bbox_auto(prompt: BboxPrompt):
     if not _active_encoder_ready():
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
@@ -19034,8 +17133,8 @@ def sam_bbox_auto(prompt: BboxPrompt):
     mask_arr = np.asarray(masks[0])
     if mask_arr.dtype != np.uint8:
         mask_arr = (mask_arr > 0).astype(np.uint8)
-    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask_arr)
-    yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
+    x_min, y_min, x_max, y_max = _mask_to_bounding_box(mask_arr)
+    yolo_box = _xyxy_to_yolo_norm_list(full_w, full_h, x_min, y_min, x_max, y_max)
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
     gx_max_i = min(full_w, int(x_max))
@@ -19063,13 +17162,12 @@ def sam_bbox_auto(prompt: BboxPrompt):
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
-        mask=encode_binary_mask(mask_arr),
+        mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
         simplify_epsilon=None,
         error=details.get("error"),
     )
 
 
-@app.post("/sam_point_auto", response_model=SamPointAutoResponse)
 def sam_point_auto(prompt: PointPrompt):
     if not _active_encoder_ready():
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
@@ -19094,8 +17192,8 @@ def sam_point_auto(prompt: PointPrompt):
     mask_arr = np.asarray(masks[0])
     if mask_arr.dtype != np.uint8:
         mask_arr = (mask_arr > 0).astype(np.uint8)
-    left, top, right, bottom = mask_to_bounding_box(mask_arr)
-    yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+    left, top, right, bottom = _mask_to_bounding_box(mask_arr)
+    yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
     li = max(0, int(left))
     ti = max(0, int(top))
     ri = min(pil_img.width, int(right))
@@ -19107,7 +17205,7 @@ def sam_point_auto(prompt: PointPrompt):
             uuid=prompt.uuid,
             error="empty_mask",
             image_token=token,
-            mask=encode_binary_mask(mask_arr),
+            mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
             simplify_epsilon=None,
         )
     subarr = np_img[ti:bi, li:ri, :]
@@ -19120,7 +17218,7 @@ def sam_point_auto(prompt: PointPrompt):
             uuid=prompt.uuid,
             error="clip_unavailable",
             image_token=token,
-            mask=encode_binary_mask(mask_arr),
+            mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
             simplify_epsilon=None,
         )
     details = _clip_auto_predict_details(feats_np)
@@ -19133,13 +17231,12 @@ def sam_point_auto(prompt: PointPrompt):
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
-        mask=encode_binary_mask(mask_arr),
+        mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
         simplify_epsilon=None,
         error=details.get("error"),
     )
 
 
-@app.post("/sam_point_multi", response_model=YoloBboxOutput)
 def sam_point_multi(prompt: MultiPointPrompt):
     positive = prompt.positive_points or []
     negative = prompt.negative_points or []
@@ -19166,19 +17263,18 @@ def sam_point_multi(prompt: MultiPointPrompt):
     mask_arr = np.asarray(masks[0])
     if mask_arr.dtype != np.uint8:
         mask_arr = (mask_arr > 0).astype(np.uint8)
-    left, top, right, bottom = mask_to_bounding_box(mask_arr)
-    yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+    left, top, right, bottom = _mask_to_bounding_box(mask_arr)
+    yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
     return YoloBboxOutput(
         class_id="0",
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
-        mask=encode_binary_mask(mask_arr),
+        mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
         simplify_epsilon=None,
     )
 
 
-@app.post("/sam_point_multi_auto", response_model=SamPointAutoResponse)
 def sam_point_multi_auto(prompt: MultiPointPrompt):
     if not _active_encoder_ready():
         return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
@@ -19208,8 +17304,8 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
     mask_arr = np.asarray(masks[0])
     if mask_arr.dtype != np.uint8:
         mask_arr = (mask_arr > 0).astype(np.uint8)
-    left, top, right, bottom = mask_to_bounding_box(mask_arr)
-    yolo_box = to_yolo(pil_img.width, pil_img.height, left, top, right, bottom)
+    left, top, right, bottom = _mask_to_bounding_box(mask_arr)
+    yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
     li = max(0, int(left))
     ti = max(0, int(top))
     ri = min(pil_img.width, int(right))
@@ -19231,13 +17327,12 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
-        mask=encode_binary_mask(mask_arr),
+        mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
         simplify_epsilon=None,
         error=details.get("error"),
     )
 
 
-@app.post("/sam_bbox", response_model=YoloBboxOutput)
 def sam_bbox(prompt: BboxPrompt):
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -19268,8 +17363,8 @@ def sam_bbox(prompt: BboxPrompt):
     mask_arr = np.asarray(masks[0])
     if mask_arr.dtype != np.uint8:
         mask_arr = (mask_arr > 0).astype(np.uint8)
-    x_min, y_min, x_max, y_max = mask_to_bounding_box(mask_arr)
-    yolo_box = to_yolo(full_w, full_h, x_min, y_min, x_max, y_max)
+    x_min, y_min, x_max, y_max = _mask_to_bounding_box(mask_arr)
+    yolo_box = _xyxy_to_yolo_norm_list(full_w, full_h, x_min, y_min, x_max, y_max)
     gx_min_i = max(0, int(x_min))
     gy_min_i = max(0, int(y_min))
     gx_max_i = min(full_w, int(x_max))
@@ -19286,24 +17381,46 @@ def sam_bbox(prompt: BboxPrompt):
         bbox=yolo_box,
         uuid=prompt.uuid,
         image_token=token,
-        mask=encode_binary_mask(mask_arr),
+        mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
         simplify_epsilon=None,
     )
 
-@app.post("/crop_zip_init")
+
+app.include_router(
+    build_sam3_prompts_router(
+        sam3_text_fn=sam3_text_prompt,
+        sam3_text_auto_fn=sam3_text_prompt_auto,
+        sam3_visual_fn=sam3_visual_prompt,
+        sam_point_fn=sam_point,
+        sam_bbox_auto_fn=sam_bbox_auto,
+        sam_point_auto_fn=sam_point_auto,
+        sam_point_multi_fn=sam_point_multi,
+        sam_point_multi_auto_fn=sam_point_multi_auto,
+        sam_bbox_fn=sam_bbox,
+        sam3_text_req=Sam3TextPrompt,
+        sam3_text_auto_req=Sam3TextPrompt,
+        sam3_visual_req=Sam3VisualPrompt,
+        sam_point_req=PointPrompt,
+        sam_bbox_req=BboxPrompt,
+        sam_point_multi_req=MultiPointPrompt,
+        sam3_text_resp=Sam3TextPromptResponse,
+        sam3_text_auto_resp=Sam3TextPromptAutoResponse,
+        sam_point_auto_resp=SamPointAutoResponse,
+        yolo_bbox_resp=YoloBboxOutput,
+    )
+)
+
 def crop_zip_init():
     jobId = str(uuid.uuid4())
     job_store[jobId] = []
     return {"jobId": jobId}
 
-@app.post("/crop_zip_chunk")
 def crop_zip_chunk(request: CropZipRequest, jobId: str = Query(...)):
     if jobId not in job_store:
         raise HTTPException(status_code=400, detail="Invalid jobId")
     job_store[jobId].extend(request.images)
     return {"status": "ok", "count": len(request.images)}
 
-@app.get("/crop_zip_finalize")
 def crop_zip_finalize(jobId: str):
     if jobId not in job_store:
         raise HTTPException(status_code=400, detail="Invalid jobId")
@@ -19349,6 +17466,16 @@ def crop_zip_finalize(jobId: str):
         media_type="application/x-zip-compressed",
         headers={"Content-Disposition": "attachment; filename=crops.zip"}
     )
+
+
+app.include_router(
+    build_crop_zip_router(
+        init_fn=crop_zip_init,
+        chunk_fn=crop_zip_chunk,
+        finalize_fn=crop_zip_finalize,
+        request_cls=CropZipRequest,
+    )
+)
 
 
 if os.environ.get("COORD_ROUNDTRIP_TEST") == "1":

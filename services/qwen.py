@@ -60,62 +60,6 @@ def _generate_qwen_text(
     return decoded.strip()
 
 
-def _parse_prompt_candidates(raw: str, seen: set[str], limit: int) -> List[str]:
-    """Parse and validate a comma/list output into cleaned candidates; returns [] if invalid."""
-    if not raw:
-        return []
-    parts = re.split(r"[,;\n]+", raw)
-    parsed: List[str] = []
-    for part in parts:
-        cand = part.strip().strip('"').strip("'")
-        cand = re.sub(r"(?i)^assistant\\s+final[:\\s]+", "", cand)
-        if not cand:
-            continue
-        if cand.upper() == "STOP":
-            break
-        # Must be letters/spaces/hyphens only.
-        if re.search(r"[^A-Za-z\\s\\-]", cand):
-            continue
-        words = cand.split()
-        if not (1 <= len(words) <= 4):
-            continue
-        if any(len(w) < 2 for w in words):
-            continue
-        key = cand.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        parsed.append(cand)
-        if limit and len(parsed) >= limit:
-            break
-    return parsed
-
-
-def _generate_prompt_text(
-    prompt: str,
-    *,
-    max_new_tokens: int,
-    generate_text_fn: Callable[[str, int], str],
-) -> str:
-    """
-    Text-only helper for prompt brainstorming/critique.
-    Uses Qwen (text-only) and returns empty string on failure.
-    """
-    try:
-        helper_prompt = (
-            "You generate short noun-phrase candidates for open-vocabulary detection. "
-            "Respond with a comma-separated list only (no prose). "
-            "Each candidate: 1-3 words, letters/spaces/hyphens only, no numbers, no quotes, no JSON. "
-            "If no valid candidates, return an empty list.\n\n"
-            f"Task: {prompt}"
-        )
-        text = generate_text_fn(helper_prompt, max_new_tokens)
-        return text.strip()
-    except Exception:
-        pass
-    return ""
-
-
 def _caption_glossary_map(labelmap_glossary: Optional[str], labels: Sequence[str]) -> Dict[str, List[str]]:
     if not labelmap_glossary:
         return {}

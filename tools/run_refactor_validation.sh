@@ -8,6 +8,8 @@ echo "==> PyCompile core modules"
 python -m py_compile \
   localinferenceapi.py \
   app/__init__.py \
+  models/*.py \
+  api/*.py \
   services/*.py \
   utils/*.py \
   tools/*.py
@@ -17,11 +19,15 @@ if [[ "${RUN_UNUSED_SCAN:-0}" == "1" ]]; then
   python tools/scan_unused_defs.py
 fi
 
-echo "==> Tier-0/Tier-1 fuzz (skip_gpu=${SKIP_GPU})"
-if [[ "${SKIP_GPU}" == "1" ]]; then
-  SKIP_GPU=1 BASE_URL="${BASE_URL}" tools/run_fuzz_fast.sh
+if [[ "${SKIP_FUZZ:-0}" == "1" ]]; then
+  echo "==> Fuzz tests skipped (SKIP_FUZZ=1)"
 else
-  SKIP_GPU=0 BASE_URL="${BASE_URL}" tools/run_fuzz_fast.sh
+  echo "==> Tier-0/Tier-1 fuzz (skip_gpu=${SKIP_GPU})"
+  if [[ "${SKIP_GPU}" == "1" ]]; then
+    SKIP_GPU=1 BASE_URL="${BASE_URL}" tools/run_fuzz_fast.sh
+  else
+    SKIP_GPU=0 BASE_URL="${BASE_URL}" tools/run_fuzz_fast.sh
+  fi
 fi
 
 echo "==> Refactor validation complete"

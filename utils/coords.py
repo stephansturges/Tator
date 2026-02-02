@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional, Sequence, Tuple, List
 
+import numpy as np
+
 
 def _xyxy_to_qwen_bbox(width: int, height: int, x1: float, y1: float, x2: float, y2: float) -> Tuple[float, float, float, float]:
     if width <= 0 or height <= 0:
@@ -307,6 +309,17 @@ def _xyxy_to_yolo_norm(
     )
 
 
+def _xyxy_to_yolo_norm_list(
+    width: int,
+    height: int,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> List[float]:
+    return list(_xyxy_to_yolo_norm(width, height, x1, y1, x2, y2))
+
+
 def _agent_det_payload(
     img_w: int,
     img_h: int,
@@ -348,3 +361,26 @@ def _yolo_to_xyxy(width: int, height: int, bbox: Sequence[float]) -> Tuple[float
     x2 = (cx + bw / 2.0) * float(width)
     y2 = (cy + bh / 2.0) * float(height)
     return x1, y1, x2, y2
+
+
+def _yolo_to_xyxy_int(width: int, height: int, bbox: Sequence[float]) -> Tuple[int, int, int, int]:
+    x1, y1, x2, y2 = _yolo_to_xyxy(width, height, bbox)
+    left = int(round(x1))
+    top = int(round(y1))
+    right = int(round(x2))
+    bottom = int(round(y2))
+    left = max(0, min(width, left))
+    top = max(0, min(height, top))
+    right = max(left, min(width, right))
+    bottom = max(top, min(height, bottom))
+    return left, top, right, bottom
+
+
+def _mask_to_bounding_box(mask: np.ndarray) -> Tuple[int, int, int, int]:
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    if not np.any(rows) or not np.any(cols):
+        return (0, 0, 0, 0)
+    y_min, y_max = np.where(rows)[0][[0, -1]]
+    x_min, x_max = np.where(cols)[0][[0, -1]]
+    return (int(x_min), int(y_min), int(x_max), int(y_max))

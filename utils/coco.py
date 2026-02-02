@@ -6,7 +6,14 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
+
+import base64
+import numpy as np
+try:  # optional dependency
+    from scipy.spatial import ConvexHull
+except Exception:  # pragma: no cover - optional
+    ConvexHull = None
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +155,99 @@ def _ensure_coco_supercategory_impl(path: Path, default: str = "object") -> bool
         except Exception:
             return False
     return modified
+
+
+def _encode_binary_mask_impl(mask: np.ndarray, *, max_bytes: int = 0) -> Optional[Dict[str, Any]]:
+    try:
+        mask_arr = np.asarray(mask)
+    except Exception:
+        return None
+    if mask_arr.ndim == 3 and mask_arr.shape[-1] == 1:
+        mask_arr = mask_arr[..., 0]
+    if mask_arr.ndim != 2:
+        return None
+    mask_bool = mask_arr.astype(bool)
+    height, width = mask_bool.shape
+    packed = np.packbits(mask_bool.astype(np.uint8), axis=None)
+    try:
+        packed_bytes = packed.tobytes()
+    except Exception:
+        return None
+    if max_bytes > 0 and len(packed_bytes) > max_bytes:
+        return None
+    try:
+        encoded = base64.b64encode(packed_bytes).decode("ascii")
+    except Exception:
+        return None
+    return {"size": [int(height), int(width)], "counts": encoded}
+
+
+def _decode_binary_mask_impl(payload: Dict[str, Any]) -> Optional[np.ndarray]:
+    if not payload:
+        return None
+    counts = payload.get("counts")
+    size = payload.get("size") or []
+    if not counts or len(size) != 2:
+        return None
+    try:
+        packed = np.frombuffer(base64.b64decode(counts), dtype=np.uint8)
+        bits = np.unpackbits(packed)[: int(size[0]) * int(size[1])]
+        return bits.reshape(int(size[0]), int(size[1]))
+    except Exception:
+        return None
+
+
+def _rdp(points: np.ndarray, epsilon: float) -> np.ndarray:
+    """Ramer–Douglas–Peucker simplification for 2D points."""
+    if points.shape[0] < 3 or epsilon <= 0:
+        return points
+
+    def _perp_dist(pt, start, end):
+        if np.allclose(start, end):
+            return np.linalg.norm(pt - start)
+        return np.abs(np.cross(end - start, start - pt)) / np.linalg.norm(end - start)
+
+    start_pt = points[0]
+    end_pt = points[-1]
+    dmax = 0.0
+    idx = 0
+    for i in range(1, len(points) - 1):
+        d = _perp_dist(points[i], start_pt, end_pt)
+        if d > dmax:
+            idx = i
+            dmax = d
+    if dmax > epsilon:
+        rec1 = _rdp(points[: idx + 1], epsilon)
+        rec2 = _rdp(points[idx:], epsilon)
+        return np.concatenate((rec1[:-1], rec2), axis=0)
+    return np.array([start_pt, end_pt])
+
+
+def _mask_to_polygon_impl(mask: np.ndarray, simplify_epsilon: float) -> List[Tuple[float, float]]:
+    """Extract a coarse polygon outline from a binary mask."""
+    try:
+        mask_arr = np.asarray(mask).astype(bool)
+    except Exception:
+        return []
+    if mask_arr.ndim != 2 or not mask_arr.any():
+        return []
+    coords = np.argwhere(mask_arr)  # y, x
+    if coords.shape[0] < 3:
+        return []
+    points = np.stack([coords[:, 1], coords[:, 0]], axis=1)  # x, y
+    hull_pts = points
+    if ConvexHull is not None:
+        try:
+            hull = ConvexHull(points)
+            hull_pts = points[hull.vertices]
+        except Exception:
+            hull_pts = points
+    if simplify_epsilon and simplify_epsilon > 0:
+        hull_pts = _rdp(hull_pts, simplify_epsilon)
+    # Ensure at least 3 points.
+    if hull_pts.shape[0] < 3:
+        xs, ys = points[:, 0], points[:, 1]
+        x1, x2 = xs.min(), xs.max()
+        y1, y2 = ys.min(), ys.max()
+        hull_pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+    return [(float(x), float(y)) for x, y in hull_pts]

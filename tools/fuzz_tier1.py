@@ -121,7 +121,10 @@ def main() -> int:
     classifier_id = None
     try:
         classifiers = _get(args.base_url + "/clip/classifiers")
-        entries = classifiers.get("classifiers", [])
+        if isinstance(classifiers, list):
+            entries = classifiers
+        else:
+            entries = classifiers.get("classifiers", [])
         if isinstance(entries, list) and entries:
             first = entries[0]
             if isinstance(first, dict):

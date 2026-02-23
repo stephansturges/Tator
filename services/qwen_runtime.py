@@ -126,7 +126,7 @@ def _ensure_qwen_ready_for_caption_impl(
             raise
         except Exception:
             pass
-    cache_key = f"caption:{model_id_override}"
+    cache_key = f"caption:{model_id_override}:{device_pref}"
     cache_limit = max(0, int(caption_cache_limit or 0))
     if cache_limit == 0 and state.get("qwen_caption_cache"):
         for key, entry in list(state["qwen_caption_cache"].items()):

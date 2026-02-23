@@ -113,13 +113,13 @@ def _agent_grid_cell_xyxy(
     if not grid or not cell_label:
         return None
     text = str(cell_label).strip()
-    match = re.search(r"([A-Za-z]+)\\s*(\\d+)", text)
+    match = re.search(r"([A-Za-z]+)\s*(\d+)", text)
     col_label = None
     row_text = None
     if match:
         col_label, row_text = match.groups()
     else:
-        match = re.search(r"(\\d+)\\s*([A-Za-z]+)", text)
+        match = re.search(r"(\d+)\s*([A-Za-z]+)", text)
         if match:
             row_text, col_label = match.groups()
     if not col_label or not row_text:

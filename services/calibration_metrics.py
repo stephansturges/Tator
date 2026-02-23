@@ -115,7 +115,6 @@ def _evaluate_prompt_candidate_impl(
                         break
                 if conflict_found:
                     continue
-            total_preds += 1
             best_iou = 0.0
             best_idx = -1
             for idx, (_, gt_box) in enumerate(gts):
@@ -408,7 +407,6 @@ def _build_prompt_recipe_impl(
                 }
             )
     return recipe, coverage_by_image
-
 
 
 

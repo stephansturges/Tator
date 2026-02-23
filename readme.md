@@ -105,21 +105,83 @@ Key notes:
 - Intermediate prepass/features/labels cached under `uploads/calibration_cache/` keyed by payload hash.
 - Poll status via `GET /calibration/jobs/{job_id}`.
 
-### Calibration benchmark (IoU=0.50, qwen_dataset, validation split)
-| Dataset size | Windowed SAM3 text | Windowed SAM3 similarity | Pipeline | Precision | Recall | F1 |
-| --- | --- | --- | --- | --- | --- | --- |
-| 4000 | no | no | YOLO‑supported clusters (source_list contains yolo) | 0.769 | 0.532 | 0.629 |
-| 4000 | no | no | RF‑DETR‑supported clusters (source_list contains rfdetr) | 0.712 | 0.562 | 0.628 |
-| 4000 | no | no | YOLO + RF‑DETR (dedupe on source_list union) | 0.663 | 0.635 | 0.649 |
-| 4000 | no | no | **Prepass + XGBoost (context)** | **0.850** | **0.799** | **0.824** |
-| 2000 | no | no | **Prepass + XGBoost (context)** | **0.844** | **0.688** | **0.758** |
+### Metric taxonomy (strict tiers, IoU=0.50 default)
+Calibration/evaluation now reports metrics in explicit tiers to avoid attribution ambiguity:
+
+1. `raw_detector`: true replay baselines from raw detector atoms (YOLO-only, RF-DETR-only, YOLO+RF-DETR union).
+2. `post_prepass`: candidates after detector + SAM3 text/similarity generation, before cluster dedupe.
+3. `post_cluster`: candidates after dedupe/fusion.
+4. `post_xgb`: final accepted candidates after XGBoost calibration thresholding.
 
 Notes:
-- Detector baselines above are derived from **prepass clusters** using `source_list` membership (more faithful than `score_source` alone).
-- IoU=0.50 is used for calibration selection (recall‑friendly for prelabeling). For stricter downstream evaluation, use IoU=0.75 or higher.
-- **Windowed cost**: enabling 2×2 windowed SAM3 text+similarity increased throughput from ~20 s/img to ~31 s/img (≈+55%) on dual A6000s in our qwen_dataset runs. Expect variation by GPU/model.
+- Metric outputs are written under each calibration job in `uploads/calibration_jobs/<job_id>/ensemble_xgb.eval.json`.
+- Prepass cache artifacts under `uploads/calibration_cache/prepass/.../images/*.json` persist atom provenance so raw baselines do not require detector replay.
+- Ground truth targets are YOLO labels (for example `uploads/clip_dataset_uploads/qwen_dataset_yolo`).
+
+### Comparison policy and acceptance gate
+- Primary comparison IoU is `0.50`.
+- Report at least these baselines for every run:
+  - raw YOLO-only
+  - raw RF-DETR-only
+  - raw YOLO+RF-DETR union
+  - post-XGB ensemble
+- Acceptance gate: the post-XGB ensemble must beat raw detector union on the agreed target metric (typically F1, plus precision/recall breakdown).
+
+### Apples-to-apples benchmark snapshot (2026-02-20)
+The metrics below replace earlier apples-to-oranges summaries. These runs use:
+
+- fixed validation slice,
+- IoU `0.50` for evaluation,
+- identical detector targets (YOLO labels),
+- strict tiered reporting (`raw_detector`, `post_prepass`, `post_cluster`, `post_xgb`).
+
+Artifacts:
+
+- Base evals: `tmp/emb1024_calibration_20260219_161507/nonwindow_20c8.eval.json`, `tmp/emb1024_calibration_20260219_161507/window_ceab.eval.json`
+- Projection sweep: `tmp/emb1024_calibration_20260219_161507/projection_sweep/projection_sweep_report.json`
+- Hybrid follow-up: `tmp/emb1024_calibration_20260219_161507/hybrid_after_sweep_jl_d512/selected_projection_hybrid_summary.json`
+
+Raw detector baselines (`metric_tiers.raw_detector.*.post_cluster`) are identical between windowed/non-windowed variants because detector atoms are shared:
+
+| Baseline | Precision | Recall | F1 |
+|---|---:|---:|---:|
+| YOLO-only | 0.8037 | 0.8302 | 0.8167 |
+| RF-DETR-only | 0.7482 | 0.8994 | 0.8169 |
+| YOLO+RF-DETR union | 0.6701 | 0.9165 | 0.7742 |
+
+Calibrator comparison (same split, IoU=0.50):
+
+| Variant | Method | Precision | Recall | F1 |
+|---|---|---:|---:|---:|
+| nonwindow_20c8 | XGB (1024-d embedding block) | 0.9278 | 0.7048 | **0.8011** |
+| nonwindow_20c8 | XGB (JL 512 projection) | 0.9335 | 0.6984 | 0.7990 |
+| nonwindow_20c8 | LR_dense + XGB_struct + blender | 0.7864 | 0.7791 | 0.7827 |
+| nonwindow_20c8 | MLP_dense + XGB_struct + blender | 0.7823 | 0.7830 | 0.7827 |
+| window_ceab | XGB (1024-d embedding block) | 0.9094 | 0.6908 | 0.7852 |
+| window_ceab | XGB (JL 512 projection) | 0.9149 | 0.6877 | 0.7852 |
+| window_ceab | LR_dense + XGB_struct + blender | 0.8824 | 0.6734 | 0.7639 |
+| window_ceab | MLP_dense + XGB_struct + blender | 0.8835 | 0.6768 | 0.7665 |
+
+Projection sweep note:
+
+- Best projected setup by mean F1 across both variants was `jl.d512` (mean F1 `0.7921`), but it did not beat the 1024-d XGB baseline overall.
+- On the windowed variant only, `pca.d512` was marginally highest (`F1=0.7855` vs `0.7852` baseline), not a meaningful gain.
+
+Takeaway:
+
+- The current best overall calibrator remains single-stage XGB with the full 1024-d embedding block.
+- Windowed SAM3 candidate expansion is still not translating into better post-XGB F1 under current feature/policy settings.
 
 ---
+
+### 2000 vs 4000 extension snapshot
+Using the same XGB-1024 pipeline and IoU=0.50 policy, we extended each prepass variant by +2000 images (from 2000 to 4000).
+
+| Variant | F1@2000 | F1@4000 | Delta F1 | CovPres@2000 | CovPres@4000 | Delta CovPres |
+|---|---:|---:|---:|---:|---:|---:|
+| nonwindow | 0.8011 | 0.7849 | -0.0162 | 0.7503 | 0.7345 | -0.0158 |
+| windowed | 0.7852 | 0.7690 | -0.0162 | 0.7267 | 0.7014 | -0.0253 |
+
 
 ## Feature highlights (current status)
 - **Labeling assists**: auto‑class, SAM refinement, multi‑point prompts.

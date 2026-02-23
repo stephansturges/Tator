@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, root_validator
 
 class Base64Payload(BaseModel):
     image_base64: str
+    image_token: Optional[str] = None
     uuid: Optional[str] = None
     background_guard: Optional[bool] = None
 
@@ -1066,9 +1067,13 @@ class QwenPrepassRequest(BaseModel):
     sam3_text_window_overlap: Optional[float] = None
     enable_sam3_similarity: Optional[bool] = True
     similarity_min_exemplar_score: Optional[float] = 0.6
-    similarity_mid_conf_low: Optional[float] = None
-    similarity_mid_conf_high: Optional[float] = None
-    similarity_mid_conf_class_count: Optional[int] = None
+    similarity_exemplar_count: Optional[int] = 3
+    similarity_exemplar_strategy: Optional[Literal["top", "random", "diverse"]] = "top"
+    similarity_exemplar_seed: Optional[int] = None
+    similarity_exemplar_fraction: Optional[float] = 0.2
+    similarity_exemplar_min: Optional[int] = 3
+    similarity_exemplar_max: Optional[int] = 12
+    similarity_exemplar_source_quota: Optional[int] = 1
     similarity_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     similarity_window_size: Optional[int] = None
     similarity_window_overlap: Optional[float] = None
@@ -1079,10 +1084,6 @@ class QwenPrepassRequest(BaseModel):
     prepass_keep_all: Optional[bool] = False
     prepass_sam3_text_thr: Optional[float] = 0.2
     prepass_similarity_score: Optional[float] = 0.3
-    prepass_similarity_per_class: Optional[int] = None
-    prepass_inspect_topk: Optional[int] = None
-    prepass_inspect_score: Optional[float] = None
-    prepass_inspect_quadrants: Optional[bool] = None
     prepass_caption: Optional[bool] = True
     prepass_caption_profile: Optional[str] = "light"
     prepass_caption_model_id: Optional[str] = None
@@ -1105,9 +1106,10 @@ class QwenPrepassRequest(BaseModel):
     scoreless_iou: Optional[float] = 0.0
     ensemble_enabled: Optional[bool] = False
     ensemble_job_id: Optional[str] = None
-    max_detections: Optional[int] = 2000
     iou: Optional[float] = 0.75
-    cross_iou: Optional[float] = None
+    fusion_mode: Optional[Literal["primary", "wbf"]] = "primary"
+    cross_class_dedupe_enabled: Optional[bool] = False
+    cross_class_dedupe_iou: Optional[float] = 0.8
     max_new_tokens: Optional[int] = 4096
     thinking_effort: Optional[float] = None
     thinking_scale_factor: Optional[float] = None
@@ -1130,6 +1132,8 @@ class CalibrationRequest(BaseModel):
     per_class_thresholds: Optional[bool] = True
     threshold_steps: Optional[int] = 200
     optimize_metric: Optional[str] = "f1"
+    target_fp_ratio_by_label_json: Optional[str] = None
+    min_recall_by_label_json: Optional[str] = None
     sam3_text_synonym_budget: Optional[int] = 10
     sam3_text_window_extension: Optional[bool] = True
     sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
@@ -1140,17 +1144,30 @@ class CalibrationRequest(BaseModel):
     sam3_score_thr: Optional[float] = 0.2
     sam3_mask_threshold: Optional[float] = 0.2
     similarity_min_exemplar_score: Optional[float] = 0.6
+    similarity_exemplar_count: Optional[int] = 3
+    similarity_exemplar_strategy: Optional[Literal["top", "random", "diverse"]] = "top"
+    similarity_exemplar_seed: Optional[int] = None
+    similarity_exemplar_fraction: Optional[float] = 0.2
+    similarity_exemplar_min: Optional[int] = 3
+    similarity_exemplar_max: Optional[int] = 12
+    similarity_exemplar_source_quota: Optional[int] = 1
     similarity_window_extension: Optional[bool] = False
+    similarity_window_mode: Optional[Literal["grid", "sahi"]] = None
+    similarity_window_size: Optional[int] = None
+    similarity_window_overlap: Optional[float] = None
     detector_conf: Optional[float] = 0.45
     sahi_window_size: Optional[int] = None
     sahi_overlap_ratio: Optional[float] = None
     classifier_id: Optional[str] = None
     support_iou: Optional[float] = 0.5
     context_radius: Optional[float] = 0.075
-    label_iou: Optional[float] = 0.9
+    label_iou: Optional[float] = 0.5
     eval_iou: Optional[float] = 0.5
     eval_iou_grid: Optional[str] = None
     dedupe_iou: Optional[float] = 0.75
+    fusion_mode: Optional[Literal["primary", "wbf"]] = "primary"
+    cross_class_dedupe_enabled: Optional[bool] = False
+    cross_class_dedupe_iou: Optional[float] = 0.8
     dedupe_iou_grid: Optional[str] = None
     scoreless_iou: Optional[float] = 0.0
     model_hidden: Optional[str] = "256,128"
@@ -1175,6 +1192,9 @@ class CalibrationRequest(BaseModel):
     xgb_early_stopping_rounds: Optional[int] = None
     xgb_log1p_counts: Optional[bool] = None
     xgb_standardize: Optional[bool] = None
+    split_head_by_support: Optional[bool] = True
+    train_sam3_text_quality: Optional[bool] = True
+    sam3_text_quality_alpha: Optional[float] = 0.35
 
 
 class AgentToolCall(BaseModel):
@@ -1209,3 +1229,144 @@ class QwenPrepassResponse(BaseModel):
     caption: Optional[str] = None
     trace_path: Optional[str] = None
     trace_full_path: Optional[str] = None
+
+
+class PromptHelperSuggestRequest(BaseModel):
+    dataset_id: str
+    max_synonyms: int = Field(3, ge=0, le=10)
+    use_qwen: bool = True
+
+
+class PromptHelperPreset(BaseModel):
+    id: str
+    label: str
+    dataset_id: str
+    created_at: float
+    prompts_by_class: Dict[int, List[str]]
+
+
+class PromptHelperRequest(BaseModel):
+    dataset_id: str
+    sample_per_class: int = Field(10, ge=1, le=1000)
+    max_synonyms: int = Field(3, ge=0, le=10)
+    score_threshold: float = Field(0.2, ge=0.0, le=1.0)
+    max_dets: int = Field(100, ge=1, le=2000)
+    iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    seed: int = 42
+    use_qwen: bool = True
+    prompts_by_class: Optional[Dict[int, List[str]]] = None
+
+
+class PromptHelperSearchRequest(BaseModel):
+    dataset_id: str
+    sample_per_class: int = Field(20, ge=1, le=2000)
+    negatives_per_class: int = Field(20, ge=0, le=2000)
+    score_threshold: float = Field(0.2, ge=0.0, le=1.0)
+    max_dets: int = Field(100, ge=1, le=2000)
+    iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    seed: int = 42
+    precision_floor: float = Field(0.9, ge=0.0, le=1.0)
+    prompts_by_class: Dict[int, List[str]]
+    class_id: Optional[int] = None
+
+
+class PromptRecipePrompt(BaseModel):
+    prompt: str
+    thresholds: Optional[List[float]] = None
+
+
+class PromptRecipeRequest(BaseModel):
+    dataset_id: str
+    class_id: int
+    prompts: List[PromptRecipePrompt]
+    sample_size: int = Field(30, ge=1, le=5000)
+    negatives: int = Field(0, ge=0, le=5000)
+    max_dets: int = Field(100, ge=1, le=2000)
+    iou_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    seed: int = 42
+    score_threshold: float = Field(0.2, ge=0.0, le=1.0)
+    threshold_candidates: Optional[List[float]] = None
+
+
+class PromptRecipeExpandRequest(BaseModel):
+    dataset_id: str
+    class_id: int
+    base_prompts: List[str]
+    max_new: int = Field(10, ge=0, le=50)
+
+
+class AgentMiningRequest(BaseModel):
+    dataset_id: str
+    classes: Optional[List[int]] = None
+    eval_image_count: int = Field(100, ge=1, le=50_000)
+    split_seed: int = 42
+
+    search_mode: Literal["steps"] = "steps"
+    reuse_cache: bool = True
+
+    steps_max_steps_per_recipe: int = Field(6, ge=1, le=50)
+    steps_max_visual_seeds_per_step: int = Field(10, ge=0, le=500)
+    steps_optimize_tier1: bool = False
+    steps_optimize_tier1_eval_cap: int = Field(200, ge=10, le=50_000)
+    steps_optimize_tier1_max_trials: int = Field(9, ge=1, le=256)
+    steps_seed_eval_floor: Optional[float] = Field(None, ge=0.0, le=1.0)
+    steps_seed_eval_max_results: Optional[int] = Field(None, ge=1, le=5000)
+    steps_early_stop: bool = True
+    steps_early_stop_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
+    steps_prompt_prefilter: bool = True
+    steps_prompt_prefilter_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
+    steps_prompt_bg_drop: bool = True
+    steps_prompt_bg_drop_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
+    steps_optimize_tier2: bool = False
+    steps_optimize_tier2_eval_cap: int = Field(200, ge=10, le=50_000)
+    steps_optimize_tier2_max_trials: int = Field(12, ge=1, le=256)
+    steps_refine_prompt_subset: bool = False
+    steps_refine_prompt_subset_max_iters: int = Field(6, ge=0, le=100)
+    steps_refine_prompt_subset_top_k: int = Field(6, ge=1, le=50)
+    steps_optimize_global: bool = False
+    steps_optimize_global_eval_caps: List[int] = Field(default_factory=lambda: [50, 200, 1000])
+    steps_optimize_global_max_trials: int = Field(36, ge=1, le=4096)
+    steps_optimize_global_keep_ratio: float = Field(0.5, ge=0.1, le=0.9)
+    steps_optimize_global_rounds: int = Field(2, ge=1, le=20)
+    steps_optimize_global_mutations_per_round: int = Field(24, ge=1, le=10_000)
+    steps_optimize_global_max_steps_mutated: int = Field(2, ge=1, le=10)
+    steps_optimize_global_enable_max_results: bool = False
+    steps_optimize_global_enable_ordering: bool = False
+
+    max_workers_per_device: int = Field(1, ge=1, le=8)
+    max_workers: Optional[int] = Field(None, ge=1, le=256)
+
+    text_prompts_by_class: Optional[Dict[int, List[str]]] = None
+    prompt_llm_max_prompts: int = Field(10, ge=0, le=50)
+    prompt_max_new_tokens: int = Field(160, ge=16, le=800)
+    class_hints: Optional[Dict[str, str]] = None
+    extra_prompts_by_class: Optional[Dict[str, List[str]]] = None
+
+    clip_head_classifier_path: Optional[str] = None
+    clip_head_min_prob: float = Field(0.5, ge=0.0, le=1.0)
+    clip_head_margin: float = Field(0.0, ge=0.0, le=1.0)
+    clip_head_auto_tune: bool = True
+    clip_head_tune_margin: bool = True
+    clip_head_target_precision: float = Field(0.75, ge=0.0, le=1.0)
+    clip_head_background_guard: bool = True
+    clip_head_background_margin: float = Field(0.0, ge=0.0, le=1.0)
+    clip_head_background_auto_tune: bool = True
+    clip_head_background_apply: Literal["seed", "final", "both"] = "final"
+    clip_head_background_penalty: float = Field(0.0, ge=0.0, le=2.0)
+
+    steps_hard_negative_export: bool = True
+    steps_hard_negative_max_crops: int = Field(200, ge=0, le=5000)
+    steps_hard_negative_min_prob: float = Field(0.1, ge=0.0, le=1.0)
+
+    seed_threshold: float = Field(0.02, ge=0.0, le=1.0)
+    expand_threshold: float = Field(0.15, ge=0.0, le=1.0)
+    max_visual_seeds: int = Field(25, ge=0, le=500)
+    seed_dedupe_iou: float = Field(0.9, ge=0.0, le=1.0)
+    dedupe_iou: float = Field(0.5, ge=0.0, le=1.0)
+    mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    similarity_score: float = Field(0.25, ge=0.0, le=1.0)
+    max_results: int = Field(1000, ge=1, le=5000)
+    min_size: int = Field(0, ge=0, le=10_000)
+    simplify_epsilon: float = Field(0.0, ge=0.0, le=1000.0)
+
+    iou_threshold: float = Field(0.5, ge=0.0, le=1.0)

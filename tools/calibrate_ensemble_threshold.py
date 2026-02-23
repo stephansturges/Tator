@@ -35,6 +35,16 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def _resolve_temperature(meta: Dict[str, object], override: Optional[float]) -> float:
+    if override is not None:
+        temp = float(override)
+    else:
+        temp = float(meta.get("calibrated_temperature") or 1.0)
+    if not np.isfinite(temp) or temp <= 0.0:
+        return 1.0
+    return float(temp)
+
+
 def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     tp = int(((y_true == 1) & (y_pred == 1)).sum())
     fp = int(((y_true == 0) & (y_pred == 1)).sum())
@@ -92,6 +102,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=200, help="Threshold steps.")
     parser.add_argument("--per-class", action="store_true", help="Calibrate per-label thresholds.")
     parser.add_argument("--optimize", default="f1", choices=["f1", "tp", "recall"], help="Optimization metric.")
+    parser.add_argument("--temperature", type=float, default=None, help="Override logit temperature.")
     args = parser.parse_args()
 
     model_blob = _load_model(Path(args.model))
@@ -119,12 +130,13 @@ def main() -> None:
     data = np.load(args.data, allow_pickle=True)
     X = data["X"].astype(np.float32)
     y = data["y"].astype(np.int64)
-    with torch.no_grad():
-        logits = model(torch.tensor(X)).numpy().reshape(-1)
-    probs = _sigmoid(logits)
-
     meta_path = Path(args.meta)
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    with torch.no_grad():
+        logits = model(torch.tensor(X)).numpy().reshape(-1)
+    temperature = _resolve_temperature(meta, args.temperature)
+    probs = _sigmoid(logits / max(temperature, 1e-6))
+    meta["calibrated_temperature"] = float(temperature)
     val_images = set(meta.get("split_val_images") or [])
     if val_images:
         meta_rows = data["meta"] if "meta" in data else None

@@ -13,6 +13,7 @@ import uuid
 import zipfile
 import hashlib
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal, List, Tuple
 
@@ -34,10 +35,16 @@ def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> Non
 
 
 def _load_prepass_recipe_meta(recipe_dir: Path) -> Dict[str, Any]:
-    meta_path = recipe_dir / "prepass.meta.json"
-    if not meta_path.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
-    return json.loads(meta_path.read_text())
+    primary_meta_path = recipe_dir / "prepass.meta.json"
+    legacy_meta_path = recipe_dir / "recipe.json"
+    for meta_path in (primary_meta_path, legacy_meta_path):
+        if not meta_path.exists():
+            continue
+        try:
+            return json.loads(meta_path.read_text())
+        except Exception:
+            continue
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
 
 
 def _parse_agent_recipe_schema_version(recipe_obj: Dict[str, Any]) -> Optional[int]:
@@ -272,6 +279,22 @@ def _save_exemplar_crop_impl(
         "crop_size": [crop.width, crop.height],
     }
     return enriched
+
+
+def _validate_prepass_recipe_config_impl(config: Any) -> Dict[str, Any]:
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="prepass_recipe_invalid_config",
+        )
+    if "cross_iou" in config:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="prepass_recipe_legacy_cross_iou_unsupported",
+        )
+    return dict(config)
 
 
 def _delete_agent_recipe_impl(
@@ -1175,16 +1198,54 @@ def _list_prepass_recipes_impl(
     recipes_root: Path,
     meta_filename: str,
 ) -> List[Dict[str, Any]]:
+    def _parse_timestamp(raw: Any) -> Optional[float]:
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, (int, float)):
+            value = float(raw)
+            return value if math.isfinite(value) else None
+        if isinstance(raw, str):
+            value = raw.strip()
+            if not value:
+                return None
+            try:
+                numeric = float(value)
+                if math.isfinite(numeric):
+                    return numeric
+            except (TypeError, ValueError):
+                pass
+            try:
+                iso_value = value[:-1] + "+00:00" if value.endswith("Z") else value
+                return datetime.fromisoformat(iso_value).timestamp()
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _recipe_sort_timestamp(recipe: Dict[str, Any]) -> float:
+        updated = _parse_timestamp(recipe.get("updated_at"))
+        if updated is not None:
+            return updated
+        created = _parse_timestamp(recipe.get("created_at"))
+        if created is not None:
+            return created
+        return 0.0
+
     recipes: List[Dict[str, Any]] = []
     for entry in recipes_root.iterdir():
         if not entry.is_dir():
             continue
-        meta_path = entry / meta_filename
-        if not meta_path.exists():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text())
-        except Exception:
+        meta = None
+        primary_meta_path = entry / meta_filename
+        fallback_meta_path = entry / "recipe.json"
+        for meta_path in (primary_meta_path, fallback_meta_path):
+            if not meta_path.exists():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+                break
+            except Exception:
+                continue
+        if not isinstance(meta, dict):
             continue
         recipes.append(
             {
@@ -1195,7 +1256,12 @@ def _list_prepass_recipes_impl(
                 "updated_at": meta.get("updated_at"),
             }
         )
-    recipes.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or 0, reverse=True)
+    recipes.sort(
+        key=lambda recipe: (
+            -_recipe_sort_timestamp(recipe),
+            str(recipe.get("name") or recipe.get("id") or ""),
+        )
+    )
     return recipes
 
 
@@ -1363,13 +1429,19 @@ def _import_prepass_recipe_from_zip_impl(
         manifest = json.loads(manifest_path.read_text())
         meta_path = extract_dir / prepass_recipe_meta
         if not meta_path.exists():
+            legacy_meta_path = extract_dir / "recipe.json"
+            if legacy_meta_path.exists():
+                meta_path = legacy_meta_path
+            else:
+                legacy_meta_path = extract_dir / "prepass.meta.json"
+                if legacy_meta_path.exists():
+                    meta_path = legacy_meta_path
+        if not meta_path.exists():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_missing_meta")
         meta = json.loads(meta_path.read_text())
         validate_manifest_fn(manifest, extract_dir)
-        config = meta.get("config") or {}
-        if isinstance(config, dict):
-            config = dict(config)
-            config.pop("dataset_id", None)
+        config = _validate_prepass_recipe_config_impl(meta.get("config"))
+        config.pop("dataset_id", None)
         glossary = meta.get("glossary") or ""
         labelmap_file = None
         for candidate in (extract_dir / "labelmap.txt", extract_dir / "labelmaps" / "labelmap.txt"):
@@ -1520,6 +1592,7 @@ def _import_prepass_recipe_from_zip_impl(
         write_meta_fn(recipe_dir, recipe_meta)
         return {
             "id": recipe_id,
+            "schema_version": prepass_schema_version,
             "name": recipe_meta["name"],
             "description": recipe_meta.get("description"),
             "created_at": now,
@@ -1594,10 +1667,16 @@ def _save_prepass_recipe_impl(
     )
     now = time.time()
     existing = {}
-    meta_path = recipe_dir / "recipe.json"
+    meta_path = recipe_dir / "prepass.meta.json"
+    legacy_meta_path = recipe_dir / "recipe.json"
     if meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
+        except Exception:
+            existing = {}
+    elif legacy_meta_path.exists():
+        try:
+            existing = json.loads(legacy_meta_path.read_text())
         except Exception:
             existing = {}
     created_at = float(existing.get("created_at") or now)
@@ -1606,7 +1685,7 @@ def _save_prepass_recipe_impl(
         "schema_version": prepass_schema_version,
         "name": str(payload.get("name") or "").strip(),
         "description": (payload.get("description") or "").strip(),
-        "config": payload.get("config") or {},
+        "config": _validate_prepass_recipe_config_impl(payload.get("config")),
         "glossary": normalize_glossary_fn(payload.get("glossary")),
         "created_at": created_at,
         "updated_at": now,
@@ -1614,6 +1693,7 @@ def _save_prepass_recipe_impl(
     write_meta_fn(recipe_dir, recipe_meta)
     return {
         "id": recipe_id,
+        "schema_version": prepass_schema_version,
         "name": recipe_meta["name"],
         "description": recipe_meta.get("description"),
         "created_at": created_at,

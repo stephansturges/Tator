@@ -1,6 +1,5 @@
 """APIRouter for SAM3 storage/model registry endpoints."""
 
-from __future__ import annotations
 
 from typing import Any, Callable, Type
 
@@ -32,6 +31,10 @@ def build_sam3_registry_router(
 
     @router.get("/sam3/models/available")
     def list_sam3_available_models(variant: str = Query("sam3"), promoted_only: bool = Query(False)):
+        return list_models_fn(variant, promoted_only)
+
+    @router.get("/sam3/models")
+    def list_sam3_models_alias(variant: str = Query("sam3"), promoted_only: bool = Query(False)):
         return list_models_fn(variant, promoted_only)
 
     @router.post("/sam3/models/activate")

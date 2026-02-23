@@ -58,7 +58,6 @@ for idx, info in enumerate(selected, 1):
         "image_base64": image_base64,
         "model_id": args.model_id,
         "model_variant": args.variant,
-        "max_detections": 600,
         "max_new_tokens": 1200,
     }
     print(f"[{idx}/{args.count}] {img_name}")

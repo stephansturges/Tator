@@ -59,6 +59,17 @@ def _ensure_yolo_inference_runtime_impl(
     best_path = active.get("best_path")
     if not best_path:
         raise http_exception_cls(status_code=412, detail="yolo_active_missing")
+    run_id = active.get("run_id")
+    try:
+        run_dir = Path(best_path).parent
+        run_meta = run_dir / "run.json"
+        if run_id and run_meta.exists():
+            meta = json.loads(run_meta.read_text())
+            dataset_root = str((meta.get("config") or {}).get("dataset_root") or "")
+            if "tator_yolo_smoke" in dataset_root:
+                raise http_exception_cls(status_code=412, detail="yolo_active_smoke_run")
+    except Exception:
+        pass
     labelmap_path = active.get("labelmap_path")
     task = active.get("task")
     with yolo_lock:
@@ -101,10 +112,43 @@ def _ensure_rfdetr_inference_runtime_impl(
     labelmap_path = active.get("labelmap_path")
     task = active.get("task") or "detect"
     variant = active.get("variant")
+    def _rfdetr_get_model_device(obj: Any) -> Optional[str]:
+        for attr in ("model", "module"):
+            try:
+                inner = getattr(obj, attr, None)
+            except Exception:
+                inner = None
+            if inner is None:
+                continue
+            try:
+                params = inner.parameters()
+            except Exception:
+                params = None
+            if params is not None:
+                try:
+                    return str(next(params).device)
+                except Exception:
+                    pass
+        try:
+            params = obj.parameters()
+        except Exception:
+            params = None
+        if params is not None:
+            try:
+                return str(next(params).device)
+            except Exception:
+                pass
+        return None
+
+    device_str = resolve_device_fn() if torch_available() else "cpu"
     with rfdetr_lock:
         model, path, labelmap, cached_task, cached_variant = get_state_fn()
         if model is not None and path == best_path:
-            return model, labelmap, cached_task
+            current_device = _rfdetr_get_model_device(model)
+            if current_device and current_device != device_str:
+                model = None
+            else:
+                return model, labelmap, cached_task
         try:
             import_map = import_rfdetr_fn()
         except Exception as exc:  # noqa: BLE001
@@ -114,9 +158,16 @@ def _ensure_rfdetr_inference_runtime_impl(
         model_cls = import_map.get(variant_id)
         if not model_cls:
             raise http_exception_cls(status_code=400, detail="rfdetr_variant_unknown")
+        if torch_available() and isinstance(device_str, str) and device_str.startswith("cuda"):
+            try:
+                import torch
+
+                torch.cuda.set_device(device_str)
+            except Exception:
+                pass
         model_kwargs: Dict[str, Any] = {
             "pretrain_weights": best_path,
-            "device": resolve_device_fn() if torch_available() else "cpu",
+            "device": device_str,
         }
         if variant_id == "rfdetr-seg-preview" or task == "segment":
             model_kwargs["segmentation_head"] = True
@@ -268,7 +319,7 @@ def _yolo_write_run_meta_impl(
 def _yolo_prune_run_dir_impl(
     run_dir: Path,
     *,
-    keep_files: Optional[set[str]],
+    keep_files: Optional[set[str]] = None,
     keep_files_default: Sequence[str],
     dir_size_fn: Callable[[Path], int],
     meta_name: str,
@@ -798,9 +849,12 @@ def _strip_checkpoint_optimizer_impl(
         return False, before, before
 
 
-def _yolo_load_labelmap_impl(labelmap_path: Path) -> List[str]:
+def _yolo_load_labelmap_impl(labelmap_path: Path | str | None) -> List[str]:
+    if not labelmap_path:
+        return []
+    path = Path(labelmap_path)
     try:
-        return [line.strip() for line in labelmap_path.read_text().splitlines() if line.strip()]
+        return [line.strip() for line in path.read_text().splitlines() if line.strip()]
     except Exception:
         return []
 
@@ -1411,17 +1465,24 @@ def _list_yolo_runs_impl(
                 created_at = entry.stat().st_mtime
             except Exception:
                 created_at = None
+        artifacts = collect_artifacts_fn(entry)
+        status = meta.get("status")
+        message = meta.get("message")
+        if status not in {"succeeded", "failed", "cancelled"} and artifacts.get("best_pt"):
+            status = "succeeded"
+            if not message:
+                message = "Artifacts present"
         runs.append(
             {
                 "run_id": run_id,
                 "run_name": run_name,
-                "status": meta.get("status"),
-                "message": meta.get("message"),
+                "status": status,
+                "message": message,
                 "created_at": created_at,
                 "updated_at": meta.get("updated_at"),
                 "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
                 "dataset_label": dataset.get("label"),
-                "artifacts": collect_artifacts_fn(entry),
+                "artifacts": artifacts,
                 "is_active": bool(active_id and run_id == active_id),
             }
         )
@@ -1456,17 +1517,26 @@ def _list_rfdetr_runs_impl(
                 created_at = entry.stat().st_mtime
             except Exception:
                 created_at = None
+        artifacts = collect_artifacts_fn(entry)
+        status = meta.get("status")
+        message = meta.get("message")
+        if status not in {"succeeded", "failed", "cancelled"} and (
+            artifacts.get("best_total") or artifacts.get("best_regular") or artifacts.get("best_ema")
+        ):
+            status = "succeeded"
+            if not message:
+                message = "Artifacts present"
         runs.append(
             {
                 "run_id": run_id,
                 "run_name": run_name,
-                "status": meta.get("status"),
-                "message": meta.get("message"),
+                "status": status,
+                "message": message,
                 "created_at": created_at,
                 "updated_at": meta.get("updated_at"),
                 "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
                 "dataset_label": dataset.get("label"),
-                "artifacts": collect_artifacts_fn(entry),
+                "artifacts": artifacts,
                 "is_active": bool(active_id and run_id == active_id),
             }
         )
@@ -1494,6 +1564,8 @@ def _agent_tool_run_detector_impl(
     normalize_window_fn: Callable[[Optional[Any], int, int], Optional[Tuple[float, float, float, float]]],
     ensure_yolo_runtime_fn: Callable[[], Tuple[Any, List[str], str]],
     ensure_rfdetr_runtime_fn: Callable[[], Tuple[Any, List[str], str]],
+    ensure_yolo_runtime_by_id_fn: Optional[Callable[[Optional[str]], Tuple[Any, List[str], str]]],
+    ensure_rfdetr_runtime_by_id_fn: Optional[Callable[[Optional[str]], Tuple[Any, List[str], str]]],
     raise_labelmap_mismatch_fn: Callable[[Optional[Sequence[str]], Optional[Sequence[str]], str], None],
     clamp_conf_fn: Callable[[float, List[str]], float],
     clamp_iou_fn: Callable[[float, List[str]], float],
@@ -1533,7 +1605,10 @@ def _agent_tool_run_detector_impl(
     detections: List[Dict[str, Any]] = []
     warnings: List[str] = []
     if mode_norm == "yolo":
-        model, labelmap, _task = ensure_yolo_runtime_fn()
+        if detector_id and ensure_yolo_runtime_by_id_fn is not None:
+            model, labelmap, _task = ensure_yolo_runtime_by_id_fn(detector_id)
+        else:
+            model, labelmap, _task = ensure_yolo_runtime_fn()
         expected = list(expected_labelmap or (agent_labelmap or []))
         raise_labelmap_mismatch_fn(expected=expected or None, actual=labelmap, context="yolo")
         conf_val = clamp_conf_fn(float(conf) if conf is not None else 0.25, warnings)
@@ -1593,12 +1668,58 @@ def _agent_tool_run_detector_impl(
                 )
             )
     else:
-        model, labelmap, _task = ensure_rfdetr_runtime_fn()
+        if detector_id and ensure_rfdetr_runtime_by_id_fn is not None:
+            model, labelmap, _task = ensure_rfdetr_runtime_by_id_fn(detector_id)
+        else:
+            model, labelmap, _task = ensure_rfdetr_runtime_fn()
         expected = list(expected_labelmap or (agent_labelmap or []))
         raise_labelmap_mismatch_fn(expected=expected or None, actual=labelmap, context="rfdetr")
         conf_val = clamp_conf_fn(float(conf) if conf is not None else 0.25, warnings)
         max_det_val = clamp_max_det_fn(int(max_det) if max_det is not None else 300, warnings)
         raw: List[Dict[str, Any]] = []
+
+        def _sync_rfdetr_device() -> Optional[str]:
+            try:
+                import torch
+            except Exception:
+                return None
+            device = None
+            try:
+                inner = getattr(model, "model", None)
+                if inner is not None and hasattr(inner, "parameters"):
+                    device = str(next(inner.parameters()).device)
+            except Exception:
+                device = None
+            if device is None:
+                try:
+                    if hasattr(model, "parameters"):
+                        device = str(next(model.parameters()).device)
+                except Exception:
+                    device = None
+            if device and device.startswith("cuda"):
+                try:
+                    torch.cuda.set_device(device)
+                except Exception:
+                    return device
+            return device
+
+        def _rfdetr_predict_safe(image: Any) -> Any:
+            try:
+                _sync_rfdetr_device()
+                return model.predict(image, threshold=conf_val)
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if "Expected all tensors to be on the same device" in msg:
+                    try:
+                        if hasattr(model, "model") and hasattr(model.model, "to"):
+                            model.model.to("cpu")
+                        if hasattr(model, "to"):
+                            model.to("cpu")
+                        return model.predict(image, threshold=conf_val)
+                    except Exception:
+                        pass
+                raise
+
         if sahi and sahi.get("enabled"):
             try:
                 slice_size = int(sahi.get("slice_size") or 640)
@@ -1613,7 +1734,7 @@ def _agent_tool_run_detector_impl(
                     tile_offset_y = float(start[1]) + offset_y
                     try:
                         with rfdetr_lock:
-                            results = model.predict(__import__("PIL").Image.fromarray(tile), threshold=conf_val)
+                            results = _rfdetr_predict_safe(__import__("PIL").Image.fromarray(tile))
                     except Exception as exc:  # noqa: BLE001
                         raise http_exception_cls(status_code=500, detail=f"rfdetr_predict_failed:{exc}") from exc
                     extracted, shifted = rfdetr_extract_fn(
@@ -1637,7 +1758,7 @@ def _agent_tool_run_detector_impl(
         if not raw:
             try:
                 with rfdetr_lock:
-                    results = model.predict(crop_img, threshold=conf_val)
+                    results = _rfdetr_predict_safe(crop_img)
             except Exception as exc:  # noqa: BLE001
                 raise http_exception_cls(status_code=500, detail=f"rfdetr_predict_failed:{exc}") from exc
             raw, shifted = rfdetr_extract_fn(results, labelmap, offset_x, offset_y, img_w, img_h)

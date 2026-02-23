@@ -35,6 +35,16 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def _resolve_temperature(meta: Dict[str, object], override: Optional[float]) -> float:
+    if override is not None:
+        temp = float(override)
+    else:
+        temp = float(meta.get("calibrated_temperature") or 1.0)
+    if not np.isfinite(temp) or temp <= 0.0:
+        return 1.0
+    return float(temp)
+
+
 def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     tp = int(((y_true == 1) & (y_pred == 1)).sum())
     fp = int(((y_true == 0) & (y_pred == 1)).sum())
@@ -111,6 +121,7 @@ def main() -> None:
     parser.add_argument("--global-fp-cap", type=float, default=0.2, help="Max FP/TP ratio globally.")
     parser.add_argument("--smooth-alpha", type=float, default=0.2, help="Blend per-class threshold toward global.")
     parser.add_argument("--smooth-step", type=float, default=0.05, help="Step size when increasing alpha.")
+    parser.add_argument("--temperature", type=float, default=None, help="Override logit temperature.")
     args = parser.parse_args()
 
     model_blob = _load_model(Path(args.model))
@@ -169,7 +180,9 @@ def main() -> None:
 
     with torch.no_grad():
         logits = model(torch.tensor(X)).numpy().reshape(-1)
-    probs = _sigmoid(logits)
+    temperature = _resolve_temperature(meta, args.temperature)
+    probs = _sigmoid(logits / max(temperature, 1e-6))
+    meta["calibrated_temperature"] = float(temperature)
 
     thresholds_by_label = meta.get("calibrated_thresholds") if isinstance(meta.get("calibrated_thresholds"), dict) else {}
     default_threshold = float(meta.get("calibrated_threshold") or 0.5)

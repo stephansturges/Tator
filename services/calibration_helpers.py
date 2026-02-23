@@ -139,13 +139,37 @@ def _calibration_prepass_worker(
                 img_path = candidate
                 break
         if img_path is None:
+            try:
+                write_record_fn(
+                    Path(cache_path),
+                    {
+                        "image": image_name,
+                        "dataset_id": dataset_id,
+                        "detections": [],
+                        "warnings": ["deep_prepass_image_missing"],
+                    },
+                )
+            except Exception:
+                pass
             if progress_queue is not None:
                 progress_queue.put(1)
             continue
         try:
             with Image.open(img_path) as img:
                 pil_img = img.convert("RGB")
-        except Exception:
+        except Exception as exc:
+            try:
+                write_record_fn(
+                    Path(cache_path),
+                    {
+                        "image": image_name,
+                        "dataset_id": dataset_id,
+                        "detections": [],
+                        "warnings": [f"deep_prepass_image_open_failed:{exc}"],
+                    },
+                )
+            except Exception:
+                pass
             if progress_queue is not None:
                 progress_queue.put(1)
             continue
@@ -163,14 +187,28 @@ def _calibration_prepass_worker(
             )
             detections = list(result.get("detections") or [])
             warnings = list(result.get("warnings") or [])
+            provenance = result.get("provenance")
             record = {
                 "image": image_name,
                 "dataset_id": dataset_id,
                 "detections": detections,
                 "warnings": warnings,
             }
+            if isinstance(provenance, dict):
+                record["provenance"] = provenance
             write_record_fn(Path(cache_path), record)
-        except Exception:
-            pass
+        except Exception as exc:
+            try:
+                write_record_fn(
+                    Path(cache_path),
+                    {
+                        "image": image_name,
+                        "dataset_id": dataset_id,
+                        "detections": [],
+                        "warnings": [f"deep_prepass_worker_failed:{exc}"],
+                    },
+                )
+            except Exception:
+                pass
         if progress_queue is not None:
             progress_queue.put(1)

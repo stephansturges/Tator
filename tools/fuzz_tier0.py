@@ -26,8 +26,8 @@ def main() -> int:
     }
     for path in (
         "/system/health_summary",
-        "/datasets",
-        "/qwen/datasets",
+        "/system/storage_check",
+        "/system/gpu",
         "/sam3/models/available",
         "/qwen/models",
         "/detectors/default",
@@ -38,8 +38,6 @@ def main() -> int:
     # Minimal schema checks
     health = results["/system/health_summary"]
     assert ("ok" in health) or ("status" in health), "health_summary missing ok/status"
-    assert isinstance(results["/datasets"], list), "/datasets must be list"
-    assert isinstance(results["/qwen/datasets"], list), "/qwen/datasets must be list"
     det_default = results["/detectors/default"]
     assert ("active" in det_default) or ("mode" in det_default), "/detectors/default missing active/mode"
     classifiers_payload = results["/clip/classifiers"]

@@ -183,6 +183,16 @@ def _load_model(model_path: Path) -> torch.nn.Module:
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
+
+def _resolve_temperature(meta: Dict[str, Any], override: Optional[float]) -> float:
+    if override is not None:
+        temp = float(override)
+    else:
+        temp = float(meta.get("calibrated_temperature") or 1.0)
+    if not np.isfinite(temp) or temp <= 0.0:
+        return 1.0
+    return float(temp)
+
 def _normalize_features(X: np.ndarray, meta: dict, feature_names: List[str]) -> np.ndarray:
     mean = meta.get("feature_mean")
     std = meta.get("feature_std")
@@ -214,6 +224,7 @@ def main() -> None:
     parser.add_argument("--dedupe-iou-grid", default=None, help="Comma-separated IoU thresholds for dedupe sweep.")
     parser.add_argument("--scoreless-iou", type=float, default=0.0, help="IoU threshold for scoreless filter.")
     parser.add_argument("--threshold", type=float, default=None, help="Override global threshold.")
+    parser.add_argument("--temperature", type=float, default=None, help="Override logit temperature.")
     parser.add_argument("--output-jsonl", default=None, help="Optional JSONL output of deduped detections.")
     parser.add_argument("--use-val-split", action="store_true", help="Restrict evaluation to validation split.")
     args = parser.parse_args()
@@ -237,7 +248,8 @@ def main() -> None:
     X = _normalize_features(X, meta, feature_names)
     with torch.no_grad():
         logits = model(torch.tensor(X)).numpy().reshape(-1)
-    probs = _sigmoid(logits)
+    temperature = _resolve_temperature(meta, args.temperature)
+    probs = _sigmoid(logits / max(temperature, 1e-6))
 
     parsed_meta: List[Dict[str, Any]] = []
     for row in meta_rows:
@@ -360,6 +372,7 @@ def main() -> None:
 
     metrics = _eval(float(args.dedupe_iou), float(args.eval_iou))
     output = dict(metrics)
+    output["calibrated_temperature"] = float(temperature)
 
     if args.output_jsonl:
         output_records: List[Dict[str, Any]] = []

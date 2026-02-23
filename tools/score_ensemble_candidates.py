@@ -11,6 +11,16 @@ import torch
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
+
+def _resolve_temperature(meta: dict, override: float | None = None) -> float:
+    if override is not None:
+        temp = float(override)
+    else:
+        temp = float(meta.get("calibrated_temperature") or 1.0)
+    if not np.isfinite(temp) or temp <= 0.0:
+        return 1.0
+    return float(temp)
+
 def _normalize_features(X: np.ndarray, meta: dict, feature_names: List[str]) -> np.ndarray:
     mean = meta.get("feature_mean")
     std = meta.get("feature_std")
@@ -64,6 +74,7 @@ def main() -> None:
     parser.add_argument("--data", required=True, help="Input .npz data.")
     parser.add_argument("--output", required=True, help="Output JSONL path.")
     parser.add_argument("--threshold", type=float, default=None, help="Override threshold.")
+    parser.add_argument("--temperature", type=float, default=None, help="Override logit temperature.")
     args = parser.parse_args()
 
     model_blob = torch.load(Path(args.model), map_location="cpu")
@@ -105,7 +116,8 @@ def main() -> None:
     X = _normalize_features(X, meta, feature_names)
     with torch.no_grad():
         logits = model(torch.tensor(X)).numpy().reshape(-1)
-    probs = _sigmoid(logits)
+    temperature = _resolve_temperature(meta, args.temperature)
+    probs = _sigmoid(logits / max(temperature, 1e-6))
     parsed_meta = []
     for row in meta_rows:
         try:
@@ -132,6 +144,7 @@ def main() -> None:
             entry["ensemble_prob"] = float(probs[idx])
             entry["ensemble_accept"] = bool(preds[idx])
             entry["ensemble_threshold"] = float(thresholds_used[idx])
+            entry["ensemble_temperature"] = float(temperature)
             f.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
     if y is not None:

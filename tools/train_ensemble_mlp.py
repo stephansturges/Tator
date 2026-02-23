@@ -279,7 +279,7 @@ def main() -> None:
     labelmap = list(data.get("labelmap", []))
     classifier_classes = list(data.get("classifier_classes", []))
     sam3_iou = float(data.get("sam3_iou", 0.5))
-    label_iou = float(data.get("label_iou", 0.9))
+    label_iou = float(data.get("label_iou", 0.5))
 
     split = _split_by_image(meta, seed=args.seed, val_ratio=args.val_ratio)
     train_idx = np.asarray(split["train"], dtype=np.int64)

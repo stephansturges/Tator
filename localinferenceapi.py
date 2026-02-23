@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools
+import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math
 from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
@@ -13,6 +13,8 @@ import torch, clip, joblib
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
 from api.detectors_default import build_detectors_default_router
+from api.datasets import build_datasets_router
+from api.glossaries import build_glossaries_router
 from api.predictor_settings import build_predictor_settings_router
 from api.runtime import build_runtime_router
 from api.system import build_system_router
@@ -20,6 +22,7 @@ from api.qwen_status import build_qwen_status_router
 from api.sam_slots import build_sam_slots_router
 from api.qwen_training import build_qwen_training_router
 from api.qwen_models import build_qwen_models_router
+from api.qwen_datasets import build_qwen_datasets_router
 from api.clip_active_model import build_clip_active_model_router
 from api.sam_preload import build_sam_preload_router
 from api.qwen_infer import build_qwen_infer_router
@@ -37,6 +40,7 @@ from api.sam3_prompts import build_sam3_prompts_router
 from api.sam3_prompt_helper import build_sam3_prompt_helper_router
 from api.sam3_training import build_sam3_training_router
 from api.sam3_registry import build_sam3_registry_router
+from api.sam3_datasets import build_sam3_datasets_router
 from api.segmentation_build import build_segmentation_build_router
 from api.yolo_training import build_yolo_training_router
 from api.rfdetr_training import build_rfdetr_training_router
@@ -106,6 +110,13 @@ from models.schemas import (
     MultiPointPrompt,
     YoloBboxOutput,
     Sam3TextPrompt,
+    PromptHelperSuggestRequest,
+    PromptHelperPreset,
+    PromptHelperRequest,
+    PromptHelperSearchRequest,
+    PromptRecipePrompt,
+    PromptRecipeRequest,
+    PromptRecipeExpandRequest,
     PrepassRecipeRequest,
     PrepassRecipeResponse,
     AgentApplyImageRequest,
@@ -114,6 +125,7 @@ from models.schemas import (
     AgentApplyImageChainRequest,
     AgentRecipeExportRequest,
     AgentCascadeSaveRequest,
+    AgentMiningRequest,
 )
 from omegaconf import OmegaConf
 import psutil
@@ -142,6 +154,7 @@ from utils.io import (
     _dir_size_bytes as _dir_size_bytes_impl,
     _path_is_within_root_impl as _path_is_within_root_impl,
 )
+_sanitize_rfdetr_run_id_impl = _sanitize_yolo_run_id_impl
 from utils.network import _find_free_port_impl as _find_free_port_impl
 from utils.coco import (
     _ensure_coco_supercategory_impl,
@@ -153,6 +166,7 @@ from utils.coco import (
 from utils.image import (
     _slice_image_sahi,
     _decode_image_base64_impl,
+    _image_path_for_label_impl,
 )
 from utils.labels import (
     _read_labelmap_lines,
@@ -186,6 +200,7 @@ from utils.glossary import (
     _glossary_label_key,
     _normalize_labelmap_glossary,
     _default_agent_glossary_for_labelmap,
+    _glossary_preview,
 )
 from utils.datasets import _iter_yolo_images
 from services.prepass_config import (
@@ -208,6 +223,8 @@ from services.prepass_recipes import (
     _import_agent_recipe_zip_bytes_impl as _import_agent_recipe_zip_bytes_impl,
     _list_prepass_recipes_impl as _list_prepass_recipes_impl,
     _collect_recipe_assets_impl as _collect_recipe_assets_impl,
+    _copy_tree_filtered_impl as _copy_tree_filtered_impl,
+    _sha256_path_impl as _sha256_path_impl,
     _import_prepass_recipe_from_zip_impl as _import_prepass_recipe_from_zip_impl,
     _export_prepass_recipe_impl as _export_prepass_recipe_impl,
     _save_prepass_recipe_impl as _save_prepass_recipe_impl,
@@ -354,6 +371,8 @@ from services.datasets import (
     _resolve_sam3_dataset_meta_impl as _resolve_sam3_dataset_meta_impl,
     _load_coco_index_impl as _load_coco_index_impl,
 )
+
+_resolve_sam3_or_qwen_dataset = _resolve_sam3_or_qwen_dataset_impl
 from services.prepass import (
     _agent_det_score,
     _agent_cluster_match,
@@ -390,6 +409,7 @@ from utils.coords import (
     _agent_clip_xyxy,
     _agent_expand_window_xyxy,
     _agent_xyxy_to_xywh,
+    _xywh_to_xyxy,
     _yolo_to_xyxy,
     _yolo_to_xyxy_int,
     _xyxy_to_yolo_norm,
@@ -474,6 +494,12 @@ from services.detector_params import (
     _clamp_max_det_value as _clamp_max_det_value_impl,
     _clamp_slice_params as _clamp_slice_params_impl,
 )
+
+# Legacy aliases used across handlers.
+_clamp_conf_value = _clamp_conf_value_impl
+_clamp_iou_value = _clamp_iou_value_impl
+_clamp_max_det_value = _clamp_max_det_value_impl
+_clamp_slice_params = _clamp_slice_params_impl
 from services.calibration_helpers import (
     _calibration_list_images as _calibration_list_images_impl,
     _calibration_sample_images as _calibration_sample_images_impl,
@@ -531,6 +557,9 @@ from services.qwen import (
     _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
     _sanitize_prompts_impl as _sanitize_prompts_impl,
 )
+
+_extract_balanced_json = _extract_balanced_json_impl
+_dir_size_bytes = _dir_size_bytes_impl
 from services.detectors import (
     _agent_tool_run_detector_impl as _agent_tool_run_detector_impl,
     _ensure_yolo_inference_runtime_impl as _ensure_yolo_inference_runtime_impl,
@@ -597,6 +626,7 @@ from segment_anything import sam_model_registry, SamPredictor
 import threading
 import queue
 import itertools
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 
@@ -607,7 +637,12 @@ SAM3_SRC_ROOT = (Path(__file__).resolve().parent / "sam3").resolve()
 if SAM3_SRC_ROOT.exists():
     sys.path.insert(0, str(SAM3_SRC_ROOT))
 
-from tools.clip_training import train_clip_from_yolo, TrainingError, TrainingArtifacts
+from tools.clip_training import (
+    train_clip_from_yolo,
+    TrainingError,
+    TrainingArtifacts,
+    _load_dinov3 as _clip_training_load_dinov3,
+)
 try:
     from tools.qwen_training import (
         QwenTrainingConfig,
@@ -921,6 +956,22 @@ def _unload_dinov3_backbone() -> None:
     dinov3_initialized = state["dinov3_initialized"]
 
 
+def _load_dinov3_backbone(
+    model_name: str,
+    target_device: str,
+    *,
+    raise_on_error: bool = False,
+) -> Tuple[Optional[Any], Optional[Any]]:
+    try:
+        model, processor = _clip_training_load_dinov3(model_name, target_device)
+        return model, processor
+    except Exception as exc:  # noqa: BLE001
+        if raise_on_error:
+            raise RuntimeError(str(exc)) from exc
+        logger.warning("Failed to load DINOv3 backbone '%s' on %s: %s", model_name, target_device, exc)
+        return None, None
+
+
 def _unload_detector_inference() -> None:
     """Release detector inference models (YOLO/RF-DETR) to free GPU memory."""
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
@@ -969,6 +1020,18 @@ def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict
     active_qwen_metadata = metadata or {}
     active_qwen_metadata.setdefault("id", model_id)
     _reset_qwen_runtime()
+
+
+def _list_qwen_model_entries() -> List[Dict[str, Any]]:
+    """Return registry entries for custom Qwen fine-tunes (if any)."""
+    return []
+
+
+def _get_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
+    for entry in _list_qwen_model_entries():
+        if str(entry.get("id")) == str(model_id):
+            return entry
+    return None
 
 
 def _prepare_for_qwen_training() -> None:
@@ -1687,6 +1750,8 @@ class PredictorManager:
                 "token": slot.token,
                 "variant": slot.variant,
                 "image_name": slot.image_name,
+                "width": None,
+                "height": None,
                 "last_loaded": slot.last_loaded,
                 "busy": slot.is_busy(),
                 "enabled": self.is_slot_enabled(name),
@@ -2581,15 +2646,21 @@ def _run_sam3_visual_inference(
                 masks_arr = mask_logits.detach().cpu().numpy()
         elif mask_logits is not None:
             masks_np = np.asarray(mask_logits)
-            if masks_np.dtype == bool or (
-                np.issubdtype(masks_np.dtype, np.floating)
-                and np.nanmin(masks_np) >= 0.0
-                and np.nanmax(masks_np) <= 1.0
-            ):
-                probs_np = masks_np
-            else:
-                probs_np = _sigmoid_np(masks_np)
-            masks_arr = probs_np > threshold_val
+            if masks_np.dtype == object:
+                try:
+                    masks_np = np.stack([np.asarray(m) for m in masks_np])
+                except Exception:
+                    masks_np = None
+            if masks_np is not None:
+                if masks_np.dtype == bool or (
+                    np.issubdtype(masks_np.dtype, np.floating)
+                    and np.nanmin(masks_np) >= 0.0
+                    and np.nanmax(masks_np) <= 1.0
+                ):
+                    probs_np = masks_np
+                else:
+                    probs_np = _sigmoid_np(masks_np)
+                masks_arr = probs_np > threshold_val
         # Normalize mask shape to (N, H, W) where possible
         if masks_arr is not None:
             masks_arr = np.asarray(masks_arr)
@@ -2668,7 +2739,7 @@ def _run_sam3_visual_inference(
             bbox = det.bbox or []
             if len(bbox) < 4:
                 continue
-            det_xyxy = _yolo_to_xyxy_int(bbox, pil_img.width, pil_img.height)
+            det_xyxy = _yolo_to_xyxy_int(pil_img.width, pil_img.height, bbox)
             if _iou(seed_xyxy, det_xyxy) > 0.9:
                 continue
             filtered_dets.append(det)
@@ -2714,22 +2785,34 @@ def _run_sam3_visual_inference_multi(
             normalized_limit = max(1, int(limit))
         except (TypeError, ValueError):
             normalized_limit = None
-    if not bboxes_xywh:
+    if not isinstance(bboxes_xywh, (list, tuple)) or not bboxes_xywh:
+        empty = ([], []) if return_masks else []
+        return empty
+    cleaned_boxes: List[Tuple[float, float, float, float]] = []
+    for bbox in bboxes_xywh:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        try:
+            x, y, w, h = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        except (TypeError, ValueError):
+            continue
+        cleaned_boxes.append((x, y, w, h))
+    if not cleaned_boxes:
         empty = ([], []) if return_masks else []
         return empty
     labels: List[bool]
     if bbox_labels is None:
-        labels = [True] * len(bboxes_xywh)
+        labels = [True] * len(cleaned_boxes)
     else:
         labels = list(bbox_labels)
-        if len(labels) < len(bboxes_xywh):
-            labels.extend([True] * (len(bboxes_xywh) - len(labels)))
-        elif len(labels) > len(bboxes_xywh):
-            labels = labels[: len(bboxes_xywh)]
+        if len(labels) < len(cleaned_boxes):
+            labels.extend([True] * (len(cleaned_boxes) - len(labels)))
+        elif len(labels) > len(cleaned_boxes):
+            labels = labels[: len(cleaned_boxes)]
     img_state = state if state is not None else processor.set_image(pil_img)
     img_w, img_h = float(pil_img.width), float(pil_img.height)
     output = None
-    for bbox_xywh, label in zip(bboxes_xywh, labels):
+    for bbox_xywh, label in zip(cleaned_boxes, labels):
         x, y, w, h = bbox_xywh
         cx = (x + w / 2.0) / img_w
         cy = (y + h / 2.0) / img_h
@@ -2872,7 +2955,7 @@ def _run_sam3_visual_inference_multi(
             bbox = det.bbox or []
             if len(bbox) < 4:
                 continue
-            det_xyxy = _yolo_to_xyxy_int(bbox, pil_img.width, pil_img.height)
+            det_xyxy = _yolo_to_xyxy_int(pil_img.width, pil_img.height, bbox)
             if any(_iou(seed_xyxy, det_xyxy) > 0.9 for seed_xyxy in seed_boxes_xyxy):
                 continue
             filtered_dets.append(det)
@@ -3037,6 +3120,42 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
         "qwen_device": qwen_device,
         "qwen_last_error": qwen_last_error,
     }
+    device_pref = QWEN_DEVICE_PREF
+    if device_pref == "auto":
+        try:
+            resolved_device = _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
+            device_pref = str(resolved_device)
+        except Exception:
+            device_pref = QWEN_DEVICE_PREF
+    # Captioning should never use multi-GPU sharding; force a concrete device id if possible.
+    if device_pref == "cuda":
+        device_pref = "cuda:0"
+    if device_pref != "auto" and state.get("qwen_caption_cache"):
+        for cache_key, cache_entry in list(state["qwen_caption_cache"].items()):
+            if not cache_entry:
+                continue
+            try:
+                cached_model, _ = cache_entry
+            except Exception:
+                continue
+            try:
+                hf_map = getattr(cached_model, "hf_device_map", None)
+                if hf_map:
+                    unique_devices = {str(dev) for dev in hf_map.values()}
+                    if len(unique_devices) > 1:
+                        _evict_qwen_caption_entry_impl(
+                            cache_key,
+                            cache_entry,
+                            torch_module=torch,
+                            gc_module=gc,
+                        )
+                        state["qwen_caption_cache"].pop(cache_key, None)
+                        try:
+                            state["qwen_caption_order"].remove(cache_key)
+                        except ValueError:
+                            pass
+            except Exception:
+                continue
     try:
         model, processor = _ensure_qwen_ready_for_caption_impl(
             model_id_override,
@@ -3048,8 +3167,8 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
             process_vision_info=process_vision_info,
             packaging_version=packaging_version,
             min_transformers=QWEN_MIN_TRANSFORMERS,
-            resolve_device_fn=lambda: _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch),
-            device_pref=QWEN_DEVICE_PREF,
+            resolve_device_fn=lambda: _resolve_qwen_device_impl(device_pref, torch_module=torch),
+            device_pref=device_pref,
             torch_module=torch,
             load_qwen_model_fn=_load_qwen_vl_model,
             hf_offline_enabled_fn=_hf_offline_enabled,
@@ -3239,8 +3358,41 @@ def _run_qwen_inference(
             max_length=max_input_len,
             return_tensors="pt",
         )
-    device = qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
-    inputs = inputs.to(device)
+    model_device = None
+    try:
+        emb = getattr(model, "get_input_embeddings", None)
+        if callable(emb):
+            emb_layer = emb()
+            if emb_layer is not None and hasattr(emb_layer, "weight"):
+                model_device = emb_layer.weight.device
+    except Exception:
+        model_device = None
+    if model_device is None:
+        try:
+            model_device = next(model.parameters()).device
+        except Exception:
+            model_device = None
+    device = model_device or qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
+    def _move_nested_to_device(val: Any, target_device: Any) -> Any:
+        if torch.is_tensor(val):
+            return val.to(target_device)
+        if isinstance(val, dict):
+            return {k: _move_nested_to_device(v, target_device) for k, v in val.items()}
+        if isinstance(val, (list, tuple)):
+            return type(val)(_move_nested_to_device(v, target_device) for v in val)
+        return val
+
+    try:
+        inputs = inputs.to(device)
+    except Exception:
+        pass
+    try:
+        if hasattr(inputs, "data") and isinstance(inputs.data, dict):
+            inputs.data = _move_nested_to_device(inputs.data, device)
+        else:
+            inputs = _move_nested_to_device(inputs, device)
+    except Exception:
+        inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
         "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
     }
@@ -3826,6 +3978,7 @@ PREPASS_TIGHT_DEFAULT_CLASSIFIER_MIN_PROB = 0.35
 PREPASS_TIGHT_DEFAULT_CLASSIFIER_MARGIN = 0.05
 PREPASS_TIGHT_DEFAULT_CLASSIFIER_BG_MARGIN = 0.05
 PREPASS_TIGHT_DEFAULT_SCORELESS_IOU = 0.3
+_DEFAULT_SAM3_SYNONYMS: Dict[str, List[str]] = {}
 PREPASS_CLASSIFIER_STRICT_MIN_PROB = 0.65
 PREPASS_CLASSIFIER_STRICT_MARGIN = 0.15
 PREPASS_CLASSIFIER_STRICT_BG_MARGIN = 0.15
@@ -4453,7 +4606,9 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
         dataset_id,
         active_label_list=active_label_list,
         resolve_dataset=_resolve_sam3_or_qwen_dataset,
-        discover_yolo_labelmap=_discover_yolo_labelmap_impl,
+        discover_yolo_labelmap=lambda dataset_root: _discover_yolo_labelmap_impl(
+            dataset_root, load_labelmap_file_fn=_load_labelmap_file
+        ),
         load_qwen_labelmap=_load_qwen_labelmap,
         load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
             dataset_dir,
@@ -4477,6 +4632,536 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
     )
 
 
+def _calibration_require_sam3(enable_text: bool, enable_similarity: bool) -> None:
+    _require_sam3_for_prepass_impl(
+        enable_text,
+        enable_similarity,
+        sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
+        build_sam3_image_model=build_sam3_image_model,
+        sam3_image_processor=Sam3ImageProcessor,
+    )
+
+
+def _calibration_unload_non_qwen() -> None:
+    _unload_non_qwen_runtimes_impl(
+        predictor_manager=predictor_manager,
+        unload_sam3_text_fn=_unload_sam3_text_runtime,
+        suspend_clip_fn=_suspend_clip_backbone,
+        unload_dinov3_fn=_unload_dinov3_backbone,
+        unload_detector_fn=_unload_detector_inference,
+        torch_module=torch,
+        logger=logger,
+    )
+
+
+def _calibration_unload_inference_runtimes() -> None:
+    _unload_inference_runtimes_impl(
+        unload_non_qwen_fn=_calibration_unload_non_qwen,
+        unload_qwen_fn=_unload_qwen_runtime,
+        torch_module=torch,
+    )
+
+
+def _calibration_prepare_for_training() -> None:
+    _prepare_for_training_impl(
+        unload_inference_runtimes_fn=_calibration_unload_inference_runtimes,
+    )
+
+
+def _calibration_load_yolo_active() -> dict:
+    return _load_yolo_active_impl(YOLO_ACTIVE_PATH)
+
+
+def _calibration_list_images(dataset_id: str) -> List[Path]:
+    return _calibration_list_images_impl(
+        dataset_id, resolve_dataset_fn=_resolve_sam3_or_qwen_dataset
+    )
+
+
+def _calibration_cache_image(pil_img: Image.Image, sam_variant: Optional[str]) -> Optional[str]:
+    return _calibration_cache_image_impl(
+        pil_img,
+        sam_variant,
+        store_preloaded_fn=_store_preloaded_image,
+        default_variant_fn=_default_variant,
+    )
+
+
+def _calibration_unload_inference() -> None:
+    _calibration_unload_inference_runtimes()
+
+
+def _calibration_run_job(job: CalibrationJob, request: CalibrationRequest) -> None:
+    _run_calibration_job_impl(
+        job,
+        request,
+        jobs=CALIBRATION_JOBS,
+        jobs_lock=CALIBRATION_JOBS_LOCK,
+        update_fn=_calibration_update,
+        require_sam3_fn=_calibration_require_sam3,
+        prepare_for_training_fn=_calibration_prepare_for_training,
+        load_yolo_active_fn=_calibration_load_yolo_active,
+        load_rfdetr_active_fn=_load_rfdetr_active,
+        load_labelmap_meta_fn=_agent_load_labelmap_meta,
+        list_images_fn=_calibration_list_images,
+        sample_images_fn=_calibration_sample_images_impl,
+        calibration_root=CALIBRATION_ROOT,
+        calibration_cache_root=CALIBRATION_CACHE_ROOT,
+        prepass_request_cls=QwenPrepassRequest,
+        active_classifier_head=active_classifier_head,
+        active_classifier_path=active_classifier_path,
+        default_classifier_for_dataset_fn=_agent_default_classifier_for_dataset,
+        calibration_features_version=CALIBRATION_FEATURES_VERSION,
+        write_record_fn=_calibration_write_record_atomic,
+        hash_payload_fn=_calibration_hash_payload_impl,
+        safe_link_fn=_calibration_safe_link_impl,
+        prepass_worker_fn=_calibration_prepass_worker,
+        unload_inference_runtimes_fn=_calibration_unload_inference,
+        resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
+        cache_image_fn=_calibration_cache_image,
+        run_prepass_fn=_agent_run_deep_prepass,
+        logger=logger,
+        http_exception_cls=HTTPException,
+        root_dir=Path(__file__).resolve().parent,
+    )
+
+
+def _encode_pil_batch_for_head(
+    images: Sequence[Image.Image],
+    *,
+    head: Dict[str, Any],
+    batch_size_override: Optional[int] = None,
+    device_override: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    if not images:
+        return None
+    encoder_type = str(head.get("encoder_type") or "clip").strip().lower()
+    batch_size = int(batch_size_override or 0) or len(images)
+    batch_size = max(1, min(batch_size, len(images)))
+    features: List[np.ndarray] = []
+    if encoder_type == "dinov3":
+        if dinov3_model is None or dinov3_processor is None:
+            return None
+        device_name = device_override or dinov3_model_device or device
+        for idx in range(0, len(images), batch_size):
+            batch = images[idx : idx + batch_size]
+            inputs = dinov3_processor(images=batch, return_tensors="pt")
+            inputs = {k: v.to(device_name) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = dinov3_model(**inputs)
+            if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                feats = outputs.pooler_output
+            elif hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+                feats = outputs.last_hidden_state.mean(dim=1)
+            else:
+                feats = outputs[0]
+            feats_np = feats.detach().float().cpu().numpy()
+            features.append(feats_np)
+    else:
+        if clip_model is None or clip_preprocess is None:
+            return None
+        device_name = device_override or device
+        for idx in range(0, len(images), batch_size):
+            batch = images[idx : idx + batch_size]
+            batch_tensor = torch.stack([clip_preprocess(img) for img in batch]).to(device_name)
+            with torch.no_grad():
+                feats = clip_model.encode_image(batch_tensor).float()
+            feats_np = feats.detach().cpu().numpy()
+            features.append(feats_np)
+    if not features:
+        return None
+    feats_np = np.concatenate(features, axis=0)
+    center_vals = head.get("embedding_center_values")
+    std_vals = head.get("embedding_std_values")
+    if center_vals is not None:
+        center_arr = np.asarray(center_vals, dtype=np.float32).reshape(1, -1)
+        if center_arr.shape[1] == feats_np.shape[1]:
+            feats_np = feats_np - center_arr
+    if std_vals is not None:
+        std_arr = np.asarray(std_vals, dtype=np.float32).reshape(1, -1)
+        if std_arr.shape[1] == feats_np.shape[1]:
+            std_arr = np.where(std_arr == 0, 1.0, std_arr)
+            feats_np = feats_np / std_arr
+    if head.get("normalize_embeddings"):
+        denom = np.linalg.norm(feats_np, axis=1, keepdims=True)
+        denom = np.where(denom == 0, 1.0, denom)
+        feats_np = feats_np / denom
+    return feats_np.astype(np.float32, copy=False)
+
+
+def _encode_pil_batch_for_active(images: Sequence[Image.Image]) -> Optional[np.ndarray]:
+    if isinstance(active_classifier_head, dict):
+        head = active_classifier_head
+    else:
+        head = {
+            "encoder_type": active_encoder_type or "clip",
+            "normalize_embeddings": active_head_normalize_embeddings,
+            "embedding_center_values": (active_classifier_meta or {}).get("embedding_center_values"),
+            "embedding_std_values": (active_classifier_meta or {}).get("embedding_std_values"),
+        }
+    return _encode_pil_batch_for_head(images, head=head)
+
+
+def _clip_head_predict_proba(
+    feats: Any,
+    head: Dict[str, Any],
+    *,
+    empty_cache_fn: Optional[Callable[[], None]] = None,
+) -> Optional[np.ndarray]:
+    if feats is None:
+        return None
+    feats_np = feats.detach().cpu().numpy() if isinstance(feats, torch.Tensor) else np.asarray(feats)
+    if feats_np.ndim != 2:
+        return None
+    classifier_type = str(head.get("classifier_type") or "").lower()
+    if classifier_type == "mlp":
+        layers = head.get("layers") or []
+        if not isinstance(layers, list) or not layers:
+            return None
+        x = feats_np.astype(np.float32, copy=False)
+        for layer in layers:
+            weight = np.asarray(layer.get("weight"), dtype=np.float32)
+            bias = np.asarray(layer.get("bias"), dtype=np.float32)
+            x = x @ weight.T + bias
+            ln_weight = layer.get("layer_norm_weight")
+            if ln_weight is not None:
+                ln_weight = np.asarray(ln_weight, dtype=np.float32)
+                ln_bias = np.asarray(layer.get("layer_norm_bias"), dtype=np.float32) if layer.get("layer_norm_bias") is not None else None
+                eps = float(layer.get("layer_norm_eps") or 1e-5)
+                mean = x.mean(axis=-1, keepdims=True)
+                var = x.var(axis=-1, keepdims=True)
+                x = (x - mean) / np.sqrt(var + eps)
+                x = x * ln_weight
+                if ln_bias is not None:
+                    x = x + ln_bias
+            activation = str(layer.get("activation") or "").lower()
+            if activation in {"relu"}:
+                x = np.maximum(0.0, x)
+        logits = x
+    else:
+        coef = np.asarray(head.get("coef"), dtype=np.float32)
+        intercept = np.asarray(head.get("intercept"), dtype=np.float32)
+        if coef.ndim != 2:
+            return None
+        if intercept.ndim == 1:
+            intercept = intercept.reshape(1, -1)
+        logits = feats_np @ coef.T + intercept
+    temp = head.get("temperature")
+    if temp:
+        try:
+            logits = logits / float(temp)
+        except Exception:
+            pass
+    if head.get("logit_adjustment_inference"):
+        adjust = head.get("logit_adjustment")
+        if adjust is not None:
+            adj = np.asarray(adjust, dtype=np.float32).reshape(1, -1)
+            if adj.shape[1] == logits.shape[1]:
+                logits = logits + adj
+    proba_mode = str(head.get("proba_mode") or "softmax").lower()
+    if proba_mode == "binary":
+        if logits.shape[1] != 1:
+            logits = logits[:, :1]
+        pos = 1.0 / (1.0 + np.exp(-logits))
+        probs = np.concatenate([1.0 - pos, pos], axis=1)
+    elif proba_mode == "ovr":
+        probs = 1.0 / (1.0 + np.exp(-logits))
+    else:
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        exp_logits = np.exp(logits)
+        probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+    if empty_cache_fn is not None and torch.cuda.is_available():
+        try:
+            empty_cache_fn()
+        except Exception:
+            pass
+    return probs.astype(np.float32, copy=False)
+
+
+def _clip_auto_predict_details(feats_np: Any, *, background_guard: bool = True) -> Dict[str, Any]:
+    if not isinstance(active_classifier_head, dict):
+        return {"error": "classifier_head_unavailable"}
+    head = active_classifier_head
+    proba_arr = _clip_head_predict_proba(feats_np, head)
+    if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] == 0:
+        return {"error": "classifier_failed"}
+    classes = [str(c) for c in list(head.get("classes") or [])]
+    if not classes:
+        return {"error": "classifier_no_classes"}
+    row = proba_arr[0]
+    order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
+    bg_indices = set(_clip_head_background_indices(classes))
+    best_idx = order[0] if order else None
+    if background_guard and best_idx is not None and best_idx in bg_indices:
+        for idx in order:
+            if idx not in bg_indices:
+                best_idx = idx
+                break
+    best_label = classes[best_idx] if best_idx is not None else None
+    best_prob = float(row[best_idx]) if best_idx is not None else None
+    second_idx = None
+    for idx in order[1:]:
+        if best_idx is None or idx != best_idx:
+            second_idx = idx
+            break
+    second_label = classes[second_idx] if second_idx is not None else None
+    second_prob = float(row[second_idx]) if second_idx is not None else None
+    margin = None
+    if best_prob is not None and second_prob is not None:
+        margin = float(best_prob - second_prob)
+    return {
+        "label": best_label,
+        "proba": best_prob,
+        "second_label": second_label,
+        "second_proba": second_prob,
+        "margin": margin,
+        "error": None,
+    }
+
+
+def _clip_head_keep_mask(
+    proba_arr: np.ndarray,
+    *,
+    target_index: int,
+    min_prob: float,
+    margin: float,
+    background_indices: Optional[Sequence[int]] = None,
+    background_guard: bool = True,
+    background_margin: float = 0.0,
+) -> Optional[np.ndarray]:
+    if proba_arr is None or proba_arr.ndim != 2:
+        return None
+    num_classes = proba_arr.shape[1]
+    if target_index < 0 or target_index >= num_classes:
+        return None
+    target = proba_arr[:, target_index]
+    if num_classes > 1:
+        mask = np.ones(num_classes, dtype=bool)
+        mask[target_index] = False
+        best_other = np.max(proba_arr[:, mask], axis=1)
+    else:
+        best_other = np.zeros_like(target)
+    keep = (target >= float(min_prob)) & ((target - best_other) >= float(margin))
+    if background_guard and background_indices:
+        bg = np.max(proba_arr[:, list(background_indices)], axis=1)
+        keep &= (target - bg) >= float(background_margin)
+    return keep
+
+
+def _save_clip_head_artifacts(
+    *,
+    recipe_dir: Path,
+    head: Dict[str, Any],
+    min_prob: float,
+    margin: float,
+) -> None:
+    clip_dir = recipe_dir / "clip_head"
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    head_path = clip_dir / "head.npz"
+    np.savez(head_path, head=np.array([head], dtype=object))
+    meta = {
+        "min_prob": float(min_prob),
+        "margin": float(margin),
+        "clip_model": head.get("clip_model"),
+        "encoder_type": head.get("encoder_type"),
+        "encoder_model": head.get("encoder_model"),
+        "proba_mode": head.get("proba_mode"),
+        "background_margin": head.get("background_margin"),
+    }
+    (clip_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=True))
+
+
+def _load_clip_head_artifacts(
+    *,
+    recipe_dir: Path,
+    fallback_meta: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    clip_dir = recipe_dir / "clip_head"
+    head_path = clip_dir / "head.npz"
+    if not head_path.exists():
+        return None
+    try:
+        data = np.load(head_path, allow_pickle=True)
+        head_arr = data.get("head")
+        head = head_arr.item() if head_arr is not None else None
+    except Exception:
+        head = None
+    if not isinstance(head, dict):
+        return None
+    meta_path = clip_dir / "meta.json"
+    meta: Dict[str, Any] = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            meta = {}
+    if fallback_meta and not meta:
+        meta = dict(fallback_meta)
+    head["min_prob"] = float(meta.get("min_prob") or head.get("min_prob") or 0.5)
+    head["margin"] = float(meta.get("margin") or head.get("margin") or 0.0)
+    if meta.get("background_margin") is not None:
+        head["background_margin"] = meta.get("background_margin")
+    if meta.get("clip_model"):
+        head["clip_model"] = meta.get("clip_model")
+    if meta.get("encoder_type"):
+        head["encoder_type"] = meta.get("encoder_type")
+    if meta.get("encoder_model"):
+        head["encoder_model"] = meta.get("encoder_model")
+    if meta.get("proba_mode"):
+        head["proba_mode"] = meta.get("proba_mode")
+    return head
+
+
+def _score_detections_with_clip_head(
+    detections: Sequence[Any],
+    *,
+    pil_img: Image.Image,
+    clip_head: Dict[str, Any],
+    score_mode: str,
+) -> Optional[Dict[int, float]]:
+    if not detections or pil_img is None or not isinstance(clip_head, dict):
+        return None
+    img_w, img_h = pil_img.size
+    crops: List[Image.Image] = []
+    det_refs: List[Any] = []
+    target_indices: List[Optional[int]] = []
+    classes = [str(c) for c in list(clip_head.get("classes") or [])]
+    for det in detections:
+        label = None
+        if isinstance(det, dict):
+            label = det.get("label") or det.get("class_name")
+        else:
+            label = getattr(det, "label", None) or getattr(det, "class_name", None)
+        target_idx = _find_clip_head_target_index(classes, label)
+        if target_idx is None:
+            target_indices.append(None)
+            continue
+        ann = det if isinstance(det, dict) else det.__dict__
+        xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=ann.get("window_bbox_2d"))
+        if xyxy is None:
+            target_indices.append(None)
+            continue
+        x1, y1, x2, y2 = xyxy
+        x1 = max(0.0, min(float(img_w), x1))
+        y1 = max(0.0, min(float(img_h), y1))
+        x2 = max(0.0, min(float(img_w), x2))
+        y2 = max(0.0, min(float(img_h), y2))
+        if x2 <= x1 or y2 <= y1:
+            target_indices.append(None)
+            continue
+        crops.append(pil_img.crop((x1, y1, x2, y2)))
+        det_refs.append(det)
+        target_indices.append(target_idx)
+    if not crops:
+        return None
+    feats = _encode_pil_batch_for_head(crops, head=clip_head)
+    if feats is None:
+        return None
+    proba = _clip_head_predict_proba(feats, clip_head)
+    if proba is None or proba.ndim != 2:
+        return None
+    scores: Dict[int, float] = {}
+    for idx, det in enumerate(det_refs):
+        target_idx = target_indices[idx]
+        if target_idx is None:
+            continue
+        row = proba[idx]
+        target_prob = float(row[target_idx])
+        if score_mode == "clip_head_margin":
+            if len(row) > 1:
+                best_other = float(np.max(np.delete(row, target_idx)))
+            else:
+                best_other = 0.0
+            score_val = target_prob - best_other
+        else:
+            score_val = target_prob
+        scores[id(det)] = score_val
+    return scores
+
+
+def _agent_classifier_review(
+    detections: List[Dict[str, Any]],
+    *,
+    pil_img: Optional[Image.Image],
+    classifier_head: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    counts = {"classifier_checked": 0, "classifier_rejected": 0}
+    if not detections or pil_img is None or not isinstance(classifier_head, dict):
+        return detections, counts
+    classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+    if not classes:
+        return detections, counts
+    img_w, img_h = pil_img.size
+    bg_indices = _clip_head_background_indices(classes)
+    min_prob = float(classifier_head.get("min_prob") or 0.5)
+    margin = float(classifier_head.get("margin") or 0.0)
+    background_margin = float(classifier_head.get("background_margin") or 0.0)
+    pending: List[Dict[str, Any]] = []
+    pending_crops: List[Image.Image] = []
+    reviewed: List[Dict[str, Any]] = []
+    for det in detections:
+        if not isinstance(det, dict):
+            continue
+        counts["classifier_checked"] += 1
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        target_idx = _find_clip_head_target_index(classes, label)
+        if target_idx is None:
+            det["classifier_accept"] = False
+            counts["classifier_rejected"] += 1
+            continue
+        xyxy = det.get("bbox_xyxy_px")
+        if not xyxy:
+            xyxy = _resolve_agent_bbox_xyxy(det, img_w, img_h, window_bbox_2d=det.get("window_bbox_2d"))
+        if not xyxy or len(xyxy) < 4:
+            det["classifier_accept"] = False
+            counts["classifier_rejected"] += 1
+            continue
+        x1, y1, x2, y2 = [float(v) for v in xyxy[:4]]
+        if x2 <= x1 or y2 <= y1:
+            det["classifier_accept"] = False
+            counts["classifier_rejected"] += 1
+            continue
+        pending.append({"entry": det, "target_idx": target_idx})
+        pending_crops.append(pil_img.crop((x1, y1, x2, y2)))
+    if not pending:
+        return reviewed, counts
+    empty_cache_fn = torch.cuda.empty_cache if torch.cuda.is_available() else None
+    proba_arr = _predict_proba_batched_impl(
+        pending_crops,
+        classifier_head,
+        batch_size=_resolve_classifier_batch(),
+        encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
+            items, head=head_obj, batch_size_override=bs
+        ),
+        predict_proba_fn=_clip_head_predict_proba,
+        empty_cache_fn=empty_cache_fn,
+    )
+    if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] != len(pending):
+        for pending_entry in pending:
+            pending_entry["entry"]["classifier_accept"] = False
+        counts["classifier_rejected"] += len(pending)
+        return reviewed, counts
+    for row, pending_entry in zip(proba_arr, pending):
+        entry = pending_entry["entry"]
+        target_idx = pending_entry["target_idx"]
+        keep_mask = _clip_head_keep_mask(
+            row.reshape(1, -1),
+            target_index=target_idx,
+            min_prob=min_prob,
+            margin=margin,
+            background_indices=bg_indices,
+            background_guard=True,
+            background_margin=background_margin,
+        )
+        accept = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
+        entry["classifier_accept"] = accept
+        if not accept:
+            counts["classifier_rejected"] += 1
+            continue
+        reviewed.append(entry)
+    return reviewed, counts
+
+
 def _agent_current_label_colors(labels: Sequence[str]) -> Dict[str, str]:
     global _AGENT_ACTIVE_LABEL_COLORS
     if _AGENT_ACTIVE_LABEL_COLORS:
@@ -4495,6 +5180,28 @@ def _agent_current_label_prefixes(labels: Sequence[str]) -> Dict[str, str]:
     label_prefixes = _agent_label_prefix_map(labels)
     _AGENT_ACTIVE_LABEL_PREFIXES = label_prefixes
     return label_prefixes
+
+
+def _compute_steps_seed_eval_threshold(payload: "AgentMiningRequest") -> float:
+    base = float(payload.seed_threshold)
+    floor = payload.steps_seed_eval_floor
+    if floor is None:
+        return base
+    try:
+        floor_val = float(floor)
+    except Exception:
+        return base
+    return min(base, floor_val)
+
+
+def _compute_steps_seed_eval_max_results(payload: "AgentMiningRequest") -> int:
+    override = payload.steps_seed_eval_max_results
+    if override is None:
+        return int(payload.max_results)
+    try:
+        return int(override)
+    except Exception:
+        return int(payload.max_results)
 
 
 def _agent_refresh_handle_index() -> None:
@@ -4893,6 +5600,31 @@ def _agent_sanitize_detection_items(
         source_list = ann.get("source_list")
         if isinstance(source_list, (list, tuple)):
             base_entry["source_list"] = [str(item) for item in source_list if item]
+        score_by_source = ann.get("score_by_source")
+        if isinstance(score_by_source, dict):
+            normalized_scores: Dict[str, float] = {}
+            for raw_source, raw_source_score in score_by_source.items():
+                source_key = str(raw_source or "").strip().lower()
+                if not source_key:
+                    continue
+                try:
+                    source_score_val = float(raw_source_score)
+                except (TypeError, ValueError):
+                    continue
+                prev_val = normalized_scores.get(source_key)
+                if prev_val is None or source_score_val > prev_val:
+                    normalized_scores[source_key] = source_score_val
+            if normalized_scores:
+                base_entry["score_by_source"] = normalized_scores
+        raw_atom_ids = ann.get("prepass_atom_ids")
+        if isinstance(raw_atom_ids, (list, tuple)):
+            atom_ids: List[str] = []
+            for raw_atom_id in raw_atom_ids:
+                atom_id = str(raw_atom_id or "").strip()
+                if atom_id and atom_id not in atom_ids:
+                    atom_ids.append(atom_id)
+            if atom_ids:
+                base_entry["prepass_atom_ids"] = atom_ids
 
         if pil_img is not None and isinstance(classifier_head, dict):
             classes = [str(c) for c in list(classifier_head.get("classes") or [])]
@@ -5035,6 +5767,8 @@ def _agent_tool_run_detector(
         normalize_window_fn=_normalize_window_xyxy,
         ensure_yolo_runtime_fn=_ensure_yolo_inference_runtime,
         ensure_rfdetr_runtime_fn=_ensure_rfdetr_inference_runtime,
+        ensure_yolo_runtime_by_id_fn=_ensure_yolo_inference_runtime_for_detector,
+        ensure_rfdetr_runtime_by_id_fn=_ensure_rfdetr_inference_runtime_for_detector,
         raise_labelmap_mismatch_fn=_raise_on_labelmap_mismatch,
         clamp_conf_fn=_clamp_conf_value,
         clamp_iou_fn=_clamp_iou_value,
@@ -5328,75 +6062,98 @@ def _agent_tool_sam3_similarity(
     grid_cell: Optional[str] = None,
     register: Optional[bool] = True,
 ) -> Dict[str, Any]:
-    pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
-    img_w, img_h = pil_img.size
     assigned_label = str(label).strip() if label is not None else ""
-    if not assigned_label:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_label_required")
-    window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
-    if window_xyxy is None and window_bbox_2d is not None:
-        window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
-    crop_img = pil_img
-    offset_x = 0.0
-    offset_y = 0.0
-    if window_xyxy:
-        x1, y1, x2, y2 = window_xyxy
-        crop_img = pil_img.crop((x1, y1, x2, y2))
-        offset_x, offset_y = x1, y1
-    exemplar_boxes = list(exemplar_boxes or [])
-    exemplar_ids: List[int] = []
-    if exemplar_cluster_ids:
-        exemplar_ids.extend([int(cid) for cid in exemplar_cluster_ids])
-    if exemplar_handles:
-        exemplar_ids.extend(_agent_cluster_ids_from_handles(exemplar_handles))
-    for cid in exemplar_ids:
-        cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
-        if not cluster:
-            continue
-        bbox = cluster.get("bbox_2d")
-        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-            exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
-    boxes_xywh: List[Tuple[float, float, float, float]] = []
-    for box in exemplar_boxes:
-        ann: Dict[str, Any] = {}
-        window_ref = window_bbox_2d
-        if isinstance(box, dict):
-            ann["bbox_space"] = box.get("bbox_space") or bbox_space or "full"
-            if "bbox_2d" in box:
-                ann["bbox_2d"] = box.get("bbox_2d")
-            if "bbox_xyxy_px" in box:
-                ann["bbox_xyxy_px"] = box.get("bbox_xyxy_px")
-            if box.get("window_bbox_2d") is not None:
-                window_ref = box.get("window_bbox_2d")
-        elif isinstance(box, (list, tuple)) and len(box) >= 4:
-            ann["bbox_xyxy_px"] = list(box[:4])
-            ann["bbox_space"] = bbox_space or "full"
-        xyxy_full = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_ref)
-        if xyxy_full is None:
-            continue
-        x1, y1, x2, y2 = xyxy_full
+    try:
+        pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
+        img_w, img_h = pil_img.size
+        if not assigned_label:
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_label_required")
+        window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
+        if window_xyxy is None and window_bbox_2d is not None:
+            window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
+        crop_img = pil_img
+        offset_x = 0.0
+        offset_y = 0.0
         if window_xyxy:
-            x1 -= offset_x
-            y1 -= offset_y
-            x2 -= offset_x
-            y2 -= offset_y
-        w = max(0.0, x2 - x1)
-        h = max(0.0, y2 - y1)
-        if w <= 0 or h <= 0:
-            continue
-        boxes_xywh.append((x1, y1, w, h))
-    if not boxes_xywh:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_exemplar_required")
-    threshold_val = float(score_thr) if score_thr is not None else 0.2
-    mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
-    detections = _run_sam3_visual_inference_multi(
-        crop_img,
-        boxes_xywh,
-        bbox_labels,
-        threshold_val,
-        mask_val,
-        max_results,
-    )
+            x1, y1, x2, y2 = window_xyxy
+            crop_img = pil_img.crop((x1, y1, x2, y2))
+            offset_x, offset_y = x1, y1
+        exemplar_boxes = list(exemplar_boxes or [])
+        exemplar_ids: List[int] = []
+        if exemplar_cluster_ids:
+            exemplar_ids.extend([int(cid) for cid in exemplar_cluster_ids])
+        if exemplar_handles:
+            exemplar_ids.extend(_agent_cluster_ids_from_handles(exemplar_handles))
+        for cid in exemplar_ids:
+            cluster = _AGENT_ACTIVE_CLUSTER_INDEX.get(int(cid))
+            if not cluster:
+                continue
+            bbox = cluster.get("bbox_2d")
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
+        boxes_xywh: List[Tuple[float, float, float, float]] = []
+        for box in exemplar_boxes:
+            ann: Dict[str, Any] = {}
+            window_ref = window_bbox_2d
+            if isinstance(box, dict):
+                ann["bbox_space"] = box.get("bbox_space") or bbox_space or "full"
+                if "bbox_2d" in box:
+                    ann["bbox_2d"] = box.get("bbox_2d")
+                if "bbox_xyxy_px" in box:
+                    ann["bbox_xyxy_px"] = box.get("bbox_xyxy_px")
+                if box.get("window_bbox_2d") is not None:
+                    window_ref = box.get("window_bbox_2d")
+            elif isinstance(box, (list, tuple)) and len(box) >= 4:
+                ann["bbox_xyxy_px"] = list(box[:4])
+                ann["bbox_space"] = bbox_space or "full"
+            xyxy_full = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_ref)
+            if xyxy_full is None:
+                continue
+            x1, y1, x2, y2 = xyxy_full
+            if window_xyxy:
+                x1 -= offset_x
+                y1 -= offset_y
+                x2 -= offset_x
+                y2 -= offset_y
+            w = max(0.0, x2 - x1)
+            h = max(0.0, y2 - y1)
+            if w <= 0 or h <= 0:
+                continue
+            boxes_xywh.append((x1, y1, w, h))
+        if not boxes_xywh:
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_exemplar_required")
+        threshold_val = float(score_thr) if score_thr is not None else 0.2
+        mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
+        detections = _run_sam3_visual_inference_multi(
+            crop_img,
+            boxes_xywh,
+            bbox_labels,
+            threshold_val,
+            mask_val,
+            max_results,
+        )
+    except TypeError as exc:
+        if "has no len" in str(exc):
+            return {
+                "detections": [],
+                "label": assigned_label,
+                "window": None,
+                "register_summary": None,
+                "__agent_view__": {
+                    "label": assigned_label,
+                    "grid_cell": grid_cell,
+                    "exemplar_handles": exemplar_handles or [],
+                    "new_clusters": 0,
+                    "new_handles": [],
+                    "updated_clusters": 0,
+                    "updated_handles": [],
+                    "new_items": [],
+                    "new_items_total": 0,
+                    "new_items_truncated": False,
+                    "label_counts": {},
+                },
+            }
+        raise
     assigned_label = assigned_label
     payloads: List[Dict[str, Any]] = []
     for det in detections:
@@ -5717,7 +6474,7 @@ def _agent_tool_classify_crop(
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
                 infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-                active_clip_model_name=active_clip_model_name,
+                active_clip_model_name=clip_model_name,
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
@@ -6271,7 +7028,7 @@ def _agent_tool_get_labelmap(
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
                 infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-                active_clip_model_name=active_clip_model_name,
+                active_clip_model_name=clip_model_name,
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
@@ -6467,7 +7224,7 @@ def _agent_tool_submit_annotations(
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
                 infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-                active_clip_model_name=active_clip_model_name,
+                active_clip_model_name=clip_model_name,
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
@@ -6530,11 +7287,27 @@ def _agent_tool_submit_annotations(
         labelmap=labelmap,
         background=background,
     )
+
+    def _unit_float(value: Optional[float], *, default: Optional[float]) -> Optional[float]:
+        if value is None:
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(parsed):
+            return default
+        return max(0.0, min(1.0, parsed))
+
+    iou_thr = _unit_float(iou, default=0.5)
+    cross_iou_thr = _unit_float(cross_iou, default=0.8) if cross_iou is not None else None
+    if cross_iou_thr is not None and cross_iou_thr <= 0.0:
+        cross_iou_thr = None
     merged = _agent_merge_detections(
         cleaned,
-        iou_thr=float(iou or 0.5),
+        iou_thr=float(iou_thr if iou_thr is not None else 0.5),
         max_det=max_det,
-        cross_iou=float(cross_iou) if cross_iou is not None else None,
+        cross_iou=cross_iou_thr,
     )
     _AGENT_LAST_SUBMIT_DETECTIONS = list(merged)
     submitted_handles = _agent_handles_from_cluster_ids(cluster_id_list)
@@ -6557,6 +7330,7 @@ def _agent_apply_ensemble_filter(
     image_name: Optional[str],
     classifier_id: Optional[str],
     job_id: Optional[str],
+    prepass_provenance: Optional[Dict[str, Any]] = None,
     trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
     trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
     trace_readable: Optional[Callable[[str], None]] = None,
@@ -6609,7 +7383,11 @@ def _agent_apply_ensemble_filter(
         with jsonl_path.open("w", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
-                    {"image": image_name, "detections": detections},
+                    {
+                        "image": image_name,
+                        "detections": detections,
+                        "provenance": prepass_provenance if isinstance(prepass_provenance, dict) else None,
+                    },
                     ensure_ascii=True,
                 )
                 + "\n"
@@ -6966,7 +7744,7 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
     _agent_run_deep_prepass,
     _agent_run_deep_prepass_caption,
 ) = _build_deep_prepass_runners_impl(
-    run_detector_fn=_agent_tool_run_detector,
+    run_detector_fn=lambda **kwargs: _agent_tool_run_detector(**kwargs),
     attach_provenance_fn=_agent_attach_provenance,
     generate_sam3_synonyms_fn=_agent_generate_sam3_synonyms,
     generate_text_fn=lambda prompt, max_new_tokens=128, use_system_prompt=True: _generate_qwen_text_impl(
@@ -7001,8 +7779,10 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
         http_exception_cls=HTTPException,
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
-        infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-        active_clip_model_name=active_clip_model_name,
+        infer_clip_model_fn=lambda embed_dim, active_name=None: _infer_clip_model_from_embedding_dim_impl(
+            embed_dim, active_name=active_name or clip_model_name or DEFAULT_CLIP_MODEL
+        ),
+        active_clip_model_name=clip_model_name,
         default_clip_model=DEFAULT_CLIP_MODEL,
         logger=logger,
     ),
@@ -7014,17 +7794,17 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
     run_similarity_global_fn=lambda *args, **kwargs: _agent_run_similarity_global(
         *args,
         **kwargs,
-        sam3_similarity_fn=_agent_tool_sam3_similarity,
+        sam3_similarity_fn=lambda **inner: _agent_tool_sam3_similarity(**inner),
     ),
     run_similarity_windowed_fn=lambda *args, **kwargs: _agent_run_similarity_expansion(
         *args,
         **kwargs,
-        sam3_similarity_fn=_agent_tool_sam3_similarity,
+        sam3_similarity_fn=lambda **inner: _agent_tool_sam3_similarity(**inner),
         grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
     ),
     finalize_provenance_fn=_agent_finalize_provenance,
     caption_request_cls=QwenCaptionRequest,
-    qwen_caption_fn=qwen_caption,
+    qwen_caption_fn=lambda payload: qwen_caption(payload),
     sanitize_caption_fn=_sanitize_qwen_caption_impl,
     label_counts_fn=_agent_label_counts_summary,
     qwen_bbox_to_xyxy_fn=_qwen_bbox_to_xyxy,
@@ -7032,7 +7812,7 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
     grid_cell_for_window_bbox_fn=_agent_grid_cell_for_window_bbox,
     readable_format_bbox_fn=_agent_readable_format_bbox,
     unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
-        predictor_manager,
+        predictor_manager=predictor_manager,
         unload_sam3_text_fn=_unload_sam3_text_runtime,
         suspend_clip_fn=_suspend_clip_backbone,
         unload_dinov3_fn=_unload_dinov3_backbone,
@@ -7052,10 +7832,27 @@ def _agent_select_similarity_exemplars(
     detections: List[Dict[str, Any]],
     trace_readable: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    min_score = float(payload.similarity_min_exemplar_score or 0.6)
+    raw_min_score = payload.similarity_min_exemplar_score
+    if raw_min_score is None:
+        min_score = 0.6
+    else:
+        try:
+            min_score = float(raw_min_score)
+        except (TypeError, ValueError):
+            min_score = 0.6
+    if not math.isfinite(min_score):
+        min_score = 0.6
+    min_score = max(0.0, min(1.0, min_score))
     return _agent_select_similarity_exemplars_impl(
         min_score,
         detections=detections,
+        max_per_label=payload.similarity_exemplar_count,
+        strategy=payload.similarity_exemplar_strategy,
+        seed=payload.similarity_exemplar_seed,
+        exemplar_fraction=payload.similarity_exemplar_fraction,
+        exemplar_min=payload.similarity_exemplar_min,
+        exemplar_max=payload.similarity_exemplar_max,
+        source_quota=payload.similarity_exemplar_source_quota,
         trace_readable=trace_readable,
     )
 
@@ -7268,7 +8065,7 @@ def _run_prepass_annotation_qwen(
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
                 infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-                active_clip_model_name=active_clip_model_name,
+                active_clip_model_name=clip_model_name,
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
@@ -7391,6 +8188,7 @@ def _run_prepass_annotation_qwen(
             image_name=payload.image_name,
             classifier_id=classifier_id_for_run,
             job_id=payload.ensemble_job_id,
+            prepass_provenance=deep_prepass.get("provenance"),
             trace_writer=_trace_write,
             trace_full_writer=_trace_write_full,
             trace_readable=_trace_write_readable,
@@ -7526,13 +8324,22 @@ def _run_prepass_annotation_qwen(
 
     final_detections = list(_AGENT_ACTIVE_CLUSTERS or [])
     if payload.prepass_finalize:
+        cross_iou = None
+        if bool(payload.cross_class_dedupe_enabled):
+            try:
+                cross_iou = float(
+                    payload.cross_class_dedupe_iou if payload.cross_class_dedupe_iou is not None else 0.8
+                )
+            except (TypeError, ValueError):
+                cross_iou = 0.8
+            cross_iou = max(0.0, min(1.0, cross_iou))
         submit_result = _agent_tool_submit_annotations(
             image_token=token,
             dataset_id=payload.dataset_id,
             classifier_id=payload.classifier_id,
             include_all=True,
             iou=payload.iou,
-            cross_iou=payload.cross_iou,
+            cross_iou=cross_iou,
             max_det=None,
         )
         if isinstance(submit_result, dict) and submit_result.get("detections") is not None:
@@ -7657,6 +8464,14 @@ DETECTOR_PREFS_ROOT = Path(os.environ.get("DETECTOR_PREFS_ROOT", "./uploads/dete
 DETECTOR_PREFS_ROOT.mkdir(parents=True, exist_ok=True)
 DETECTOR_DEFAULT_PATH = DETECTOR_PREFS_ROOT / "default.json"
 RFDETR_RUN_META_NAME = "run.json"
+
+
+def _load_rfdetr_active():
+    return _load_rfdetr_active_impl(
+        RFDETR_ACTIVE_PATH,
+        RFDETR_JOB_ROOT,
+        save_active_fn=lambda payload: _save_rfdetr_active_impl(payload, RFDETR_ACTIVE_PATH),
+    )
 RFDETR_KEEP_FILES = {
     "checkpoint_best_regular.pth",
     "checkpoint_best_ema.pth",
@@ -7784,6 +8599,21 @@ class QwenTrainingJob:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
+class QwenDatasetUploadJob:
+    job_id: str
+    root_dir: Path
+    run_name: Optional[str] = None
+    train_count: int = 0
+    val_count: int = 0
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+
+QWEN_DATASET_UPLOADS: Dict[str, QwenDatasetUploadJob] = {}
+QWEN_DATASET_UPLOADS_LOCK = threading.Lock()
 
 
 @dataclass
@@ -7920,9 +8750,11 @@ CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
 CALIBRATION_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
 UPLOAD_ROOT.mkdir(exist_ok=True)
+GLOSSARY_LIBRARY_ROOT = UPLOAD_ROOT / "glossaries"
+GLOSSARY_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
 PREPASS_RECIPE_ROOT = UPLOAD_ROOT / "prepass_recipes"
 PREPASS_RECIPE_ROOT.mkdir(parents=True, exist_ok=True)
-PREPASS_RECIPE_META = "recipe.json"
+PREPASS_RECIPE_META = "prepass.meta.json"
 PREPASS_RECIPE_ASSETS = "assets"
 PREPASS_RECIPE_SCHEMA_VERSION = 1
 PREPASS_RECIPE_TMP_ROOT = UPLOAD_ROOT / "tmp_prepass_recipes"
@@ -7953,7 +8785,7 @@ QWEN_PREPASS_READABLE_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
 QWEN_PREPASS_READABLE_TRACE_LATEST = QWEN_PREPASS_READABLE_TRACE_ROOT / "latest.log"
 CALIBRATION_ROOT = UPLOAD_ROOT / "calibration_jobs"
 CALIBRATION_CACHE_ROOT = UPLOAD_ROOT / "calibration_cache"
-CALIBRATION_FEATURES_VERSION = 3
+CALIBRATION_FEATURES_VERSION = 7
 CALIBRATION_ROOT.mkdir(parents=True, exist_ok=True)
 
 
@@ -8001,6 +8833,96 @@ AGENT_MINING_CASCADES_ROOT = AGENT_MINING_ROOT / "cascades"
 AGENT_MINING_CASCADES_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def _enforce_agent_mining_cache_limits(cache_root: Path, allow_when_running: bool = False) -> None:
+    """Prune agent mining cache by TTL and size caps."""
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+    if not allow_when_running:
+        with AGENT_MINING_JOBS_LOCK:
+            for job in AGENT_MINING_JOBS.values():
+                if getattr(job, "status", None) == "running":
+                    return
+
+    now = time.time()
+    ttl_seconds = AGENT_MINING_CACHE_TTL_HOURS * 3600 if AGENT_MINING_CACHE_TTL_HOURS > 0 else 0
+
+    def _iter_entries():
+        for entry in cache_root.iterdir():
+            try:
+                stat = entry.stat()
+            except Exception:
+                continue
+            yield entry, stat.st_mtime
+
+    # TTL purge
+    if ttl_seconds > 0:
+        for entry, mtime in list(_iter_entries()):
+            if now - mtime > ttl_seconds:
+                try:
+                    if entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=True)
+                    else:
+                        entry.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    # Size purge
+    max_bytes = AGENT_MINING_CACHE_MAX_BYTES
+    if max_bytes <= 0:
+        return
+    try:
+        total = _dir_size_bytes_impl(cache_root)
+    except Exception:
+        return
+    if total <= max_bytes:
+        return
+    entries = sorted(list(_iter_entries()), key=lambda pair: pair[1])
+    for entry, _ in entries:
+        if total <= max_bytes:
+            break
+        try:
+            if entry.is_dir():
+                size = _dir_size_bytes_impl(entry)
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                size = entry.stat().st_size
+                entry.unlink(missing_ok=True)
+            total = max(0, total - size)
+        except Exception:
+            continue
+
+
+def _purge_directory(root: Path) -> int:
+    """Delete all entries under a directory and return count removed."""
+    removed = 0
+    try:
+        if not root.exists():
+            return 0
+        for entry in root.iterdir():
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                removed += 1
+            except Exception:
+                continue
+    except Exception:
+        return removed
+    return removed
+
+
+def _agent_cache_running_jobs() -> bool:
+    """Return True if any agent mining job is currently running."""
+    with AGENT_MINING_JOBS_LOCK:
+        for job in AGENT_MINING_JOBS.values():
+            if getattr(job, "status", None) == "running":
+                return True
+    return False
+
+
 MAX_JOB_LOGS = 250
 MAX_QWEN_METRIC_POINTS: Optional[int] = None
 
@@ -8041,6 +8963,7 @@ _log_qwen_get_request = functools.partial(_log_qwen_get_request_impl, logger=log
 
 _list_all_datasets = functools.partial(
     _list_all_datasets_impl,
+    prefer_registry=True,
     dataset_registry_root=DATASET_REGISTRY_ROOT,
     sam3_dataset_root=SAM3_DATASET_ROOT,
     qwen_dataset_root=QWEN_DATASET_ROOT,
@@ -8080,19 +9003,616 @@ _list_all_datasets = functools.partial(
     ),
     yolo_labels_have_polygons_fn=_yolo_labels_have_polygons_impl,
     convert_qwen_dataset_to_coco_fn=_convert_qwen_dataset_to_coco_impl,
-    convert_coco_dataset_to_yolo_fn=_convert_coco_dataset_to_yolo_impl,
-    load_dataset_glossary_fn=_load_dataset_glossary,
+    convert_coco_dataset_to_yolo_fn=lambda dataset_root: _convert_coco_dataset_to_yolo_impl(
+        dataset_root,
+        load_sam3_meta_fn=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
+            dataset_dir,
+            meta_name=SAM3_DATASET_META_NAME,
+            load_json_metadata_fn=_load_json_metadata,
+            persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                dataset_dir_inner,
+                metadata,
+                meta_name=SAM3_DATASET_META_NAME,
+                logger=logger,
+            ),
+        ),
+        persist_meta_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+            dataset_dir_inner,
+            metadata,
+            meta_name=SAM3_DATASET_META_NAME,
+            logger=logger,
+        ),
+    ),
+    load_dataset_glossary_fn=lambda dataset_dir: _load_dataset_glossary(
+        dataset_dir,
+        load_sam3_meta=lambda dataset_root: _load_sam3_dataset_metadata_impl(
+            dataset_root,
+            meta_name=SAM3_DATASET_META_NAME,
+            load_json_metadata_fn=_load_json_metadata,
+            persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                dataset_dir_inner,
+                metadata,
+                meta_name=SAM3_DATASET_META_NAME,
+                logger=logger,
+            ),
+        ),
+        load_qwen_meta=lambda dataset_root: _load_qwen_dataset_metadata_impl(
+            dataset_root,
+            meta_name=QWEN_METADATA_FILENAME,
+            load_json_metadata_fn=_load_json_metadata,
+        ),
+    ),
     glossary_preview_fn=_glossary_preview,
     count_caption_labels_fn=_count_caption_labels_impl,
     count_dataset_images_fn=lambda path: _count_dataset_images_impl(path, iter_images_fn=_iter_yolo_images),
     logger=logger,
 )
 
+_resolve_sam3_or_qwen_dataset = functools.partial(
+    _resolve_sam3_or_qwen_dataset_impl,
+    list_all_datasets_fn=_list_all_datasets,
+    resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+        dataset_id,
+        qwen_root=QWEN_DATASET_ROOT,
+        sam3_root=SAM3_DATASET_ROOT,
+        registry_root=DATASET_REGISTRY_ROOT,
+        http_exception_cls=HTTPException,
+    ),
+)
+
+_load_labelmap_simple = functools.partial(_load_labelmap_simple_impl, load_labelmap_file_fn=_load_labelmap_file)
+
+
+def _unique_dataset_name(base: str, *, root: Path) -> str:
+    candidate = base
+    counter = 1
+    while (root / candidate).exists():
+        candidate = f"{base}_{counter}"
+        counter += 1
+    return candidate
+
+
+def _unwrap_single_root_dir(extract_root: Path) -> Path:
+    entries = [p for p in extract_root.iterdir() if p.name not in {"__MACOSX"}]
+    if len(entries) == 1 and entries[0].is_dir():
+        return entries[0]
+    return extract_root
+
+
+def list_datasets():
+    return _list_all_datasets()
+
+
+def _persist_dataset_meta(dataset_root: Path, meta: Dict[str, Any]) -> Dict[str, Any]:
+    _persist_dataset_metadata_impl(dataset_root, meta, meta_name=DATASET_META_NAME, logger=logger)
+    return meta
+
+
+def upload_dataset_zip(
+    file: UploadFile,
+    dataset_id: Optional[str],
+    dataset_type: Optional[str],
+    context: Optional[str],
+):
+    temp_dir = Path(tempfile.mkdtemp(prefix="dataset_upload_"))
+    try:
+        zip_path = temp_dir / "upload.zip"
+        with zip_path.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+        extract_root = temp_dir / "extract"
+        extract_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_root)
+        source_root = _unwrap_single_root_dir(extract_root)
+        base_id = dataset_id or Path(file.filename or "dataset").stem
+        base_id = _sanitize_yolo_run_id_impl(base_id) or "dataset"
+        dataset_id_final = _unique_dataset_name(base_id, root=DATASET_REGISTRY_ROOT)
+        target_root = DATASET_REGISTRY_ROOT / dataset_id_final
+        if target_root.exists():
+            shutil.rmtree(target_root)
+        shutil.copytree(source_root, target_root)
+
+        meta_path = target_root / DATASET_META_NAME
+        meta = _load_json_metadata(meta_path) or {}
+        meta["id"] = dataset_id_final
+        meta["label"] = meta.get("label") or dataset_id_final
+        if dataset_type:
+            meta["type"] = dataset_type
+        else:
+            meta.setdefault("type", "bbox")
+        if context is not None:
+            meta["context"] = context
+        meta.setdefault("created_at", time.time())
+        meta.setdefault("source", "registry")
+        labelmap_path = target_root / "labelmap.txt"
+        if labelmap_path.exists():
+            try:
+                labelmap = _load_labelmap_file(labelmap_path)
+            except Exception:
+                labelmap = []
+            if labelmap and not meta.get("classes"):
+                meta["classes"] = list(labelmap)
+        train_images = target_root / "train" / "images"
+        val_images = target_root / "val" / "images"
+        train_count = len(_iter_yolo_images(train_images)) if train_images.exists() else 0
+        val_count = len(_iter_yolo_images(val_images)) if val_images.exists() else 0
+        if train_count or val_count:
+            meta["train_count"] = train_count
+            meta["val_count"] = val_count
+            meta["image_count"] = train_count + val_count
+        else:
+            meta["image_count"] = _count_dataset_images_impl(target_root, iter_images_fn=_iter_yolo_images)
+        meta["signature"] = _compute_dir_signature_impl(target_root)
+        _persist_dataset_meta(target_root, meta)
+        return meta
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _resolve_dataset_entry(dataset_id: str) -> Dict[str, Any]:
+    entry = _resolve_dataset_entry_impl(dataset_id, list_all_datasets_fn=_list_all_datasets)
+    if not entry:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_not_found")
+    return entry
+
+
+def delete_dataset_entry(dataset_id: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = Path(entry.get("dataset_root") or "").resolve()
+    if not dataset_root.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    allowed_roots = [DATASET_REGISTRY_ROOT.resolve(), SAM3_DATASET_ROOT.resolve(), QWEN_DATASET_ROOT.resolve()]
+    if not any(_path_is_within_root_impl(dataset_root, root) for root in allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+    shutil.rmtree(dataset_root, ignore_errors=True)
+    return {"status": "deleted", "id": dataset_id}
+
+
+def download_dataset_entry(dataset_id: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = Path(entry.get("dataset_root") or "")
+    if not dataset_root.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="dataset_export_"))
+    try:
+        zip_path = tmp_dir / f"{dataset_id}.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in dataset_root.rglob("*"):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(dataset_root)
+                zf.write(path, arcname=str(Path(dataset_root.name) / rel))
+        return FileResponse(path=str(zip_path), media_type="application/zip", filename=f"{dataset_id}.zip")
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"dataset_export_failed:{exc}") from exc
+
+
+def _build_qwen_context(labelmap: Sequence[str], context: str) -> str:
+    items = ", ".join(labelmap)
+    ctx = (context or "").strip()
+    if ctx:
+        return f"{ctx}\nObjects of interest: {items}."
+    return f"Objects of interest: {items}."
+
+
+def _yolo_label_to_bbox(line: str, *, img_w: int, img_h: int) -> Optional[Tuple[int, int, int, int]]:
+    parts = line.strip().split()
+    if len(parts) < 5:
+        return None
+    try:
+        x = float(parts[1])
+        y = float(parts[2])
+        w = float(parts[3])
+        h = float(parts[4])
+    except Exception:
+        return None
+    x1 = int(round((x - w / 2) * img_w))
+    y1 = int(round((y - h / 2) * img_h))
+    x2 = int(round((x + w / 2) * img_w))
+    y2 = int(round((y + h / 2) * img_h))
+    x1 = max(0, min(img_w - 1, x1))
+    y1 = max(0, min(img_h - 1, y1))
+    x2 = max(0, min(img_w - 1, x2))
+    y2 = max(0, min(img_h - 1, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def build_qwen_dataset_from_yolo(dataset_id: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    if not entry.get("yolo_ready"):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_yolo_ready")
+    dataset_root = Path(entry["dataset_root"])
+    labelmap_path = Path(entry.get("yolo_labelmap_path") or dataset_root / "labelmap.txt")
+    if not labelmap_path.exists():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_missing")
+    labelmap = [line.strip() for line in labelmap_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    context = entry.get("context") or ""
+    glossary = _load_dataset_glossary(
+        dataset_root,
+        load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
+            dataset_dir,
+            meta_name=SAM3_DATASET_META_NAME,
+            load_json_metadata_fn=_load_json_metadata,
+            persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                dataset_dir_inner, metadata, meta_name=SAM3_DATASET_META_NAME, logger=logger
+            ),
+        ),
+        load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
+            dataset_dir, meta_name=QWEN_METADATA_FILENAME, load_json_metadata_fn=_load_json_metadata
+        ),
+    )
+    if not glossary:
+        for _path, meta in _load_dataset_meta_candidates(dataset_root):
+            raw = meta.get("labelmap_glossary")
+            if raw:
+                glossary = _normalize_labelmap_glossary(raw)
+                break
+    qwen_id = _unique_dataset_name(dataset_id, root=QWEN_DATASET_ROOT)
+    target_root = QWEN_DATASET_ROOT / qwen_id
+    target_root.mkdir(parents=True, exist_ok=True)
+    (target_root / "train").mkdir(parents=True, exist_ok=True)
+    (target_root / "val").mkdir(parents=True, exist_ok=True)
+    (target_root / "train").joinpath("annotations.jsonl").write_text("", encoding="utf-8")
+    (target_root / "val").joinpath("annotations.jsonl").write_text("", encoding="utf-8")
+
+    context_line = _build_qwen_context(labelmap, context)
+    counts = {"train": 0, "val": 0}
+
+    def _process_split(split: str):
+        images_dir = dataset_root / split / "images"
+        labels_dir = dataset_root / split / "labels"
+        if not images_dir.exists() or not labels_dir.exists():
+            return
+        ann_path = target_root / split / "annotations.jsonl"
+        with ann_path.open("a", encoding="utf-8") as ann_handle:
+            for label_path in labels_dir.rglob("*.txt"):
+                image_path = _image_path_for_label_impl(label_path, images_dir)
+                if image_path is None or not image_path.exists():
+                    continue
+                try:
+                    img = Image.open(image_path)
+                    img_w, img_h = img.size
+                    img.close()
+                except Exception:
+                    continue
+                detections = []
+                lines = label_path.read_text(encoding="utf-8").splitlines()
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        continue
+                    try:
+                        cls_idx = int(float(parts[0]))
+                    except Exception:
+                        continue
+                    if cls_idx < 0 or cls_idx >= len(labelmap):
+                        continue
+                    bbox = _yolo_label_to_bbox(line, img_w=img_w, img_h=img_h)
+                    if not bbox:
+                        continue
+                    x1, y1, x2, y2 = bbox
+                    detections.append(
+                        {
+                            "label": labelmap[cls_idx],
+                            "bbox": [x1, y1, x2, y2],
+                            "point": [int(round((x1 + x2) / 2)), int(round((y1 + y2) / 2))],
+                        }
+                    )
+                if not detections:
+                    continue
+                rel_name = image_path.name
+                target_image = target_root / split / rel_name
+                if not target_image.exists():
+                    shutil.copy2(image_path, target_image)
+                payload = {
+                    "image": rel_name,
+                    "context": context_line,
+                    "detections": detections,
+                }
+                ann_handle.write(json.dumps(payload) + "\n")
+                counts[split] += 1
+
+    _process_split("train")
+    _process_split("val")
+
+    (target_root / "labelmap.txt").write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+    metadata = {
+        "id": qwen_id,
+        "label": qwen_id,
+        "classes": labelmap,
+        "context": context,
+        "created_at": time.time(),
+        "train_count": counts["train"],
+        "val_count": counts["val"],
+        "image_count": counts["train"] + counts["val"],
+        "type": entry.get("type") or "bbox",
+        "signature": _compute_dir_signature_impl(target_root),
+    }
+    if glossary:
+        metadata["labelmap_glossary"] = glossary
+    (target_root / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    dataset_meta = {"context": context, "classes": labelmap, "created_at": int(time.time() * 1000)}
+    (target_root / "dataset_meta.json").write_text(json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return metadata
+
+
+def check_dataset(dataset_id: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    if entry.get("yolo_ready") and entry.get("yolo_images_dir") and entry.get("yolo_labels_dir"):
+        inputs = {
+            "images_dir": entry.get("yolo_images_dir"),
+            "labels_dir": entry.get("yolo_labels_dir"),
+            "labelmap_path": entry.get("yolo_labelmap_path"),
+        }
+        data = _validate_clip_dataset_impl(inputs, http_exception_cls=HTTPException, load_labelmap_simple_fn=_load_labelmap_simple)
+        return {"ok": True, "format": "yolo", "detail": data}
+    if entry.get("qwen_ready"):
+        return {"ok": True, "format": "qwen", "detail": {"train": entry.get("train_count"), "val": entry.get("val_count")}}
+    return {"ok": False, "format": entry.get("format") or "unknown", "detail": "dataset_format_unrecognized"}
+
+
+def _load_dataset_meta_candidates(dataset_root: Path) -> List[Tuple[Path, Dict[str, Any]]]:
+    metas: List[Tuple[Path, Dict[str, Any]]] = []
+    for name in (DATASET_META_NAME, QWEN_METADATA_FILENAME, SAM3_DATASET_META_NAME):
+        path = dataset_root / name
+        if not path.exists():
+            continue
+        meta = _load_json_metadata(path)
+        if meta is not None:
+            metas.append((path, meta))
+    return metas
+
+
+def get_dataset_glossary(dataset_id: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = Path(entry["dataset_root"])
+    glossary = _load_dataset_glossary(
+        dataset_root,
+        load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
+            dataset_dir,
+            meta_name=SAM3_DATASET_META_NAME,
+            load_json_metadata_fn=_load_json_metadata,
+            persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                dataset_dir_inner, metadata, meta_name=SAM3_DATASET_META_NAME, logger=logger
+            ),
+        ),
+        load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
+            dataset_dir, meta_name=QWEN_METADATA_FILENAME, load_json_metadata_fn=_load_json_metadata
+        ),
+    )
+    if not glossary:
+        for _path, meta in _load_dataset_meta_candidates(dataset_root):
+            raw = meta.get("labelmap_glossary")
+            if raw:
+                glossary = _normalize_labelmap_glossary(raw)
+                break
+    return {"dataset_id": dataset_id, "glossary": glossary or ""}
+
+
+def set_dataset_glossary(dataset_id: str, glossary: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = Path(entry["dataset_root"])
+    normalized = _normalize_labelmap_glossary(glossary or "")
+    updated = False
+    for path, meta in _load_dataset_meta_candidates(dataset_root):
+        meta["labelmap_glossary"] = normalized
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        updated = True
+    if not updated:
+        meta = {"id": dataset_id, "labelmap_glossary": normalized}
+        _persist_dataset_metadata_impl(dataset_root, meta, meta_name=DATASET_META_NAME, logger=logger)
+    return {"dataset_id": dataset_id, "glossary": normalized}
+
+
+def get_text_label(dataset_id: str, image_name: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = Path(entry["dataset_root"])
+    text_dir = dataset_root / "text_labels"
+    text_path = text_dir / f"{Path(image_name).stem}.txt"
+    if not text_path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="caption_not_found")
+    return {"caption": text_path.read_text(encoding="utf-8").strip()}
+
+
+def set_text_label(dataset_id: str, image_name: str, caption: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = Path(entry["dataset_root"])
+    text_dir = dataset_root / "text_labels"
+    text_dir.mkdir(parents=True, exist_ok=True)
+    text_path = text_dir / f"{Path(image_name).stem}.txt"
+    text_path.write_text(str(caption or "").strip(), encoding="utf-8")
+    return {"status": "saved", "caption": str(caption or "").strip()}
+
+
+def list_glossary_library():
+    entries = []
+    for path in sorted(GLOSSARY_LIBRARY_ROOT.glob("*.json")):
+        data = _load_json_metadata(path) or {}
+        name = data.get("name") or path.stem
+        glossary = data.get("glossary") or ""
+        entries.append(
+            {
+                "name": name,
+                "preview": _glossary_preview(str(glossary or ""), []),
+                "updated_at": path.stat().st_mtime,
+            }
+        )
+    return entries
+
+
+def get_glossary_entry(name: str):
+    safe = _sanitize_yolo_run_id_impl(name) or name
+    path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
+    if not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
+    data = _load_json_metadata(path) or {}
+    glossary = data.get("glossary") if isinstance(data, dict) else ""
+    return {"name": data.get("name") or safe, "glossary": glossary or ""}
+
+
+def save_glossary_entry(name: str, glossary: str):
+    safe = _sanitize_yolo_run_id_impl(name) or name
+    if not safe:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_name_required")
+    path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
+    payload = {"name": name, "glossary": glossary}
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return {"status": "saved", "name": name}
+
+
+def delete_glossary_entry(name: str):
+    safe = _sanitize_yolo_run_id_impl(name) or name
+    path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
+    if not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
+    path.unlink(missing_ok=True)
+    return {"status": "deleted", "name": name}
+
+
+def list_qwen_datasets():
+    return [entry for entry in _list_all_datasets() if entry.get("source") == "qwen"]
+
+
+def delete_qwen_dataset(dataset_id: str):
+    dataset_root = QWEN_DATASET_ROOT / dataset_id
+    if not dataset_root.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found")
+    if not _path_is_within_root_impl(dataset_root.resolve(), QWEN_DATASET_ROOT.resolve()):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden")
+    shutil.rmtree(dataset_root, ignore_errors=True)
+    return {"status": "deleted", "id": dataset_id}
+
+
+def init_qwen_dataset_upload(run_name: Optional[str]) -> Dict[str, Any]:
+    job_id = uuid.uuid4().hex
+    root_dir = DATASET_UPLOAD_ROOT / f"qwen_upload_{job_id}"
+    root_dir.mkdir(parents=True, exist_ok=True)
+    (root_dir / "train").mkdir(parents=True, exist_ok=True)
+    (root_dir / "val").mkdir(parents=True, exist_ok=True)
+    job = QwenDatasetUploadJob(job_id=job_id, root_dir=root_dir, run_name=run_name)
+    with QWEN_DATASET_UPLOADS_LOCK:
+        QWEN_DATASET_UPLOADS[job_id] = job
+    return {"job_id": job_id}
+
+
+def upload_qwen_dataset_chunk(job_id: str, split: str, image_name: str, annotation_line: str, file: UploadFile):
+    with QWEN_DATASET_UPLOADS_LOCK:
+        job = QWEN_DATASET_UPLOADS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
+    split = split.lower()
+    if split not in {"train", "val"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_split_invalid")
+    split_root = job.root_dir / split
+    split_root.mkdir(parents=True, exist_ok=True)
+    image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
+    image_path = split_root / image_name
+    with image_path.open("wb") as handle:
+        shutil.copyfileobj(file.file, handle)
+    ann_path = split_root / "annotations.jsonl"
+    with ann_path.open("a", encoding="utf-8") as handle:
+        handle.write(str(annotation_line).strip() + "\n")
+    if split == "train":
+        job.train_count += 1
+    else:
+        job.val_count += 1
+    job.updated_at = time.time()
+    return {"status": "ok", "job_id": job_id, "train_count": job.train_count, "val_count": job.val_count}
+
+
+def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name: Optional[str]):
+    with QWEN_DATASET_UPLOADS_LOCK:
+        job = QWEN_DATASET_UPLOADS.pop(job_id, None)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
+    base_id = run_name or metadata.get("id") or job.run_name or job_id
+    base_id = _sanitize_yolo_run_id_impl(str(base_id)) or str(job_id)
+    dataset_id_final = _unique_dataset_name(base_id, root=QWEN_DATASET_ROOT)
+    target_root = QWEN_DATASET_ROOT / dataset_id_final
+    if target_root.exists():
+        shutil.rmtree(target_root, ignore_errors=True)
+    shutil.move(str(job.root_dir), target_root)
+    classes = metadata.get("classes") or []
+    labelmap = [str(c).strip() for c in classes if str(c).strip()]
+    if labelmap:
+        (target_root / "labelmap.txt").write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+    meta = {
+        "id": dataset_id_final,
+        "label": dataset_id_final,
+        "classes": labelmap,
+        "context": metadata.get("context") or "",
+        "created_at": time.time(),
+        "train_count": job.train_count,
+        "val_count": job.val_count,
+        "image_count": job.train_count + job.val_count,
+        "signature": _compute_dir_signature_impl(target_root),
+        "type": "bbox",
+    }
+    (target_root / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    dataset_meta = {"context": meta["context"], "classes": labelmap, "created_at": int(time.time() * 1000)}
+    (target_root / "dataset_meta.json").write_text(json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta
+
+
+def cancel_qwen_dataset_upload(job_id: str):
+    with QWEN_DATASET_UPLOADS_LOCK:
+        job = QWEN_DATASET_UPLOADS.pop(job_id, None)
+    if not job:
+        return {"status": "missing", "job_id": job_id}
+    shutil.rmtree(job.root_dir, ignore_errors=True)
+    return {"status": "cancelled", "job_id": job_id}
+
+
+def list_sam3_datasets():
+    return _list_all_datasets()
+
+
+def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
+    dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
+    annotations_path = dataset_root / "train" / "annotations.jsonl"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    if annotations_path.exists():
+        meta = _convert_qwen_dataset_to_coco_impl(dataset_root)
+    elif train_images.exists() and train_labels.exists():
+        meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
+    else:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
+    meta["dataset_root"] = str(dataset_root)
+    return meta
+
+
+def convert_sam3_dataset(dataset_id: str):
+    meta = _resolve_sam3_dataset_meta(dataset_id)
+    return meta
+
+
+def list_sam3_dataset_classes(dataset_id: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    classes = entry.get("classes") or []
+    if classes:
+        return {"dataset_id": dataset_id, "classes": classes}
+    dataset_root = Path(entry["dataset_root"])
+    labelmap_path = dataset_root / "labelmap.txt"
+    if labelmap_path.exists():
+        classes = [line.strip() for line in labelmap_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return {"dataset_id": dataset_id, "classes": classes}
+
 
 ## NOTE: run dir/meta helpers use *_impl directly to avoid wrapper drift.
 
 
 _yolo_labels_have_polygons = _yolo_labels_have_polygons_impl
+_convert_coco_dataset_to_yolo = functools.partial(
+    _convert_coco_dataset_to_yolo_impl,
+    load_sam3_meta_fn=lambda dataset_dir: {},
+    persist_meta_fn=lambda dataset_dir_inner, metadata: None,
+)
 
 
 _resolve_yolo_training_dataset = functools.partial(
@@ -8477,30 +9997,38 @@ def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     )
 
 
+def _import_rfdetr_variants() -> Dict[str, Any]:
+    from rfdetr import (  # type: ignore
+        RFDETRBase,
+        RFDETRLarge,
+        RFDETRNano,
+        RFDETRSmall,
+        RFDETRMedium,
+        RFDETRSegPreview,
+    )
+
+    return {
+        "rfdetr-nano": RFDETRNano,
+        "rfdetr-small": RFDETRSmall,
+        "rfdetr-medium": RFDETRMedium,
+        "rfdetr-base": RFDETRBase,
+        "rfdetr-large": RFDETRLarge,
+        "rfdetr-seg-preview": RFDETRSegPreview,
+    }
+
+
+def _resolve_rfdetr_infer_device() -> str:
+    return os.environ.get(
+        "RFDETR_INFER_DEVICE",
+        "cuda:0" if torch.cuda.is_available() and torch.cuda.device_count() == 1 else "cpu",
+    )
+
+
 def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global rfdetr_infer_model, rfdetr_infer_path, rfdetr_infer_labelmap, rfdetr_infer_task, rfdetr_infer_variant
 
-    def _import_rfdetr() -> Dict[str, Any]:
-        from rfdetr import (  # type: ignore
-            RFDETRBase,
-            RFDETRLarge,
-            RFDETRNano,
-            RFDETRSmall,
-            RFDETRMedium,
-            RFDETRSegPreview,
-        )
-
-        return {
-            "rfdetr-nano": RFDETRNano,
-            "rfdetr-small": RFDETRSmall,
-            "rfdetr-medium": RFDETRMedium,
-            "rfdetr-base": RFDETRBase,
-            "rfdetr-large": RFDETRLarge,
-            "rfdetr-seg-preview": RFDETRSegPreview,
-        }
-
     return _ensure_rfdetr_inference_runtime_impl(
-        load_active_fn=lambda: _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
+        load_active_fn=_load_rfdetr_active,
         load_labelmap_fn=_yolo_load_labelmap_impl,
         variant_info_fn=lambda task, variant: _rfdetr_variant_info_impl(
             task,
@@ -8519,11 +10047,110 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
         set_state_fn=lambda model, path, labelmap, task, variant_id: _set_rfdetr_infer_state(
             model, path, labelmap, task, variant_id
         ),
-        import_rfdetr_fn=_import_rfdetr,
+        import_rfdetr_fn=_import_rfdetr_variants,
         http_exception_cls=HTTPException,
         torch_available=torch.cuda.is_available,
-        resolve_device_fn=lambda: "cuda" if torch.cuda.is_available() else "cpu",
+        resolve_device_fn=_resolve_rfdetr_infer_device,
     )
+
+
+def _ensure_yolo_inference_runtime_for_detector(detector_id: Optional[str]) -> Tuple[Any, List[str], Optional[str]]:
+    detector_run_id = str(detector_id or "").strip()
+    if not detector_run_id:
+        return _ensure_yolo_inference_runtime()
+    active = _load_yolo_active_impl(YOLO_ACTIVE_PATH)
+    active_run_id = str((active or {}).get("run_id") or "").strip()
+    if active_run_id and detector_run_id == active_run_id:
+        return _ensure_yolo_inference_runtime()
+    run_dir = _yolo_run_dir_impl(
+        detector_run_id,
+        create=False,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    best_path = run_dir / "best.pt"
+    if not best_path.exists():
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_best_missing")
+    run_meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
+    config = run_meta.get("config") or {}
+    dataset = config.get("dataset") or {}
+    labelmap_path = run_dir / "labelmap.txt"
+    labelmap = _yolo_load_labelmap_impl(labelmap_path) if labelmap_path.exists() else []
+    with YOLO_INFER_LOCK:
+        if yolo_infer_model is not None and yolo_infer_path == str(best_path):
+            return yolo_infer_model, yolo_infer_labelmap, yolo_infer_task
+        YOLO = __import__("ultralytics").YOLO  # type: ignore[attr-defined]
+        _patch_ultralytics_for_head_grafting()
+        model = YOLO(str(best_path))
+        task = config.get("task") or dataset.get("task") or getattr(model, "task", None)
+        _set_yolo_infer_state(model, str(best_path), labelmap, task)
+        return model, labelmap, task
+
+
+def _ensure_rfdetr_inference_runtime_for_detector(detector_id: Optional[str]) -> Tuple[Any, List[str], Optional[str]]:
+    detector_run_id = str(detector_id or "").strip()
+    if not detector_run_id:
+        return _ensure_rfdetr_inference_runtime()
+    active = _load_rfdetr_active()
+    active_run_id = str((active or {}).get("run_id") or "").strip()
+    if active_run_id and detector_run_id == active_run_id:
+        return _ensure_rfdetr_inference_runtime()
+    run_dir = _rfdetr_run_dir_impl(
+        detector_run_id,
+        create=False,
+        job_root=RFDETR_JOB_ROOT,
+        sanitize_fn=_sanitize_rfdetr_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
+    if not run_dir.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    best_path = _rfdetr_best_checkpoint_impl(run_dir)
+    if not best_path:
+        raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="rfdetr_best_missing")
+    run_meta = _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
+    config = run_meta.get("config") or {}
+    dataset = config.get("dataset") or {}
+    task = str(config.get("task") or dataset.get("task") or "detect")
+    variant = config.get("variant")
+    with RFDETR_INFER_LOCK:
+        if rfdetr_infer_model is not None and rfdetr_infer_path == str(best_path):
+            return rfdetr_infer_model, rfdetr_infer_labelmap, rfdetr_infer_task
+        import_map = _import_rfdetr_variants()
+        variant_info = _rfdetr_variant_info_impl(
+            task,
+            variant,
+            variants=RFDETR_VARIANTS,
+            http_exception_cls=HTTPException,
+        )
+        variant_id = variant_info.get("id")
+        model_cls = import_map.get(variant_id)
+        if not model_cls:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_variant_unknown")
+        device_str = _resolve_rfdetr_infer_device()
+        if isinstance(device_str, str) and device_str.startswith("cuda") and torch.cuda.is_available():
+            try:
+                torch.cuda.set_device(device_str)
+            except Exception:
+                pass
+        model_kwargs: Dict[str, Any] = {
+            "pretrain_weights": str(best_path),
+            "device": device_str,
+        }
+        if variant_id == "rfdetr-seg-preview" or task == "segment":
+            model_kwargs["segmentation_head"] = True
+        model = model_cls(**model_kwargs)
+        labelmap_path = run_dir / "labelmap.txt"
+        labelmap = _yolo_load_labelmap_impl(labelmap_path) if labelmap_path.exists() else []
+        if labelmap:
+            try:
+                model.model.class_names = labelmap
+            except Exception:
+                pass
+        _set_rfdetr_infer_state(model, str(best_path), labelmap, task, variant_id)
+        return model, labelmap, task
 
 
 def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
@@ -8614,7 +10241,7 @@ _persist_agent_recipe = functools.partial(
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
         infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-        active_clip_model_name=active_clip_model_name,
+        active_clip_model_name=clip_model_name,
         default_clip_model=DEFAULT_CLIP_MODEL,
         logger=logger,
     ),
@@ -8723,20 +10350,34 @@ def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
 
 _calibration_update = _calibration_update_impl
 _calibration_write_record_atomic = _calibration_write_record_atomic_impl
-_calibration_prepass_worker = functools.partial(
-    _calibration_prepass_worker_impl,
-    resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
-    prepass_request_cls=QwenPrepassRequest,
-    cache_image_fn=lambda pil_img, sam_variant: _calibration_cache_image_impl(
-        pil_img,
-        sam_variant,
-        store_preloaded_fn=_store_preloaded_image,
-        default_variant_fn=_default_variant,
-    ),
-    run_prepass_fn=_agent_run_deep_prepass,
-    write_record_fn=_calibration_write_record_atomic,
-    set_device_pref_fn=lambda idx: _set_sam3_device_pref(idx),
-)
+
+
+def _calibration_prepass_worker(
+    device_index: int,
+    tasks: List[Tuple[str, str]],
+    dataset_id: str,
+    labelmap: List[str],
+    glossary: str,
+    prepass_payload_dict: Dict[str, Any],
+    cancel_event: Optional[Any],
+    progress_queue: Optional[Any],
+) -> None:
+    _calibration_prepass_worker_impl(
+        device_index,
+        tasks,
+        dataset_id,
+        labelmap,
+        glossary,
+        prepass_payload_dict,
+        cancel_event=cancel_event,
+        progress_queue=progress_queue,
+        resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
+        prepass_request_cls=QwenPrepassRequest,
+        cache_image_fn=_calibration_cache_image,
+        run_prepass_fn=_agent_run_deep_prepass,
+        write_record_fn=_calibration_write_record_atomic,
+        set_device_pref_fn=_set_sam3_device_pref,
+    )
 
 
 ## NOTE: calibration job runner uses *_impl directly to avoid wrapper drift.
@@ -9049,6 +10690,591 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
         job.updated_at = time.time()
 
 
+def _stable_sample_ids(ids: Sequence[int], cap: int, seed: int, salt: str = "") -> List[int]:
+    pool = list(ids)
+    if not pool or cap <= 0:
+        return []
+    rng = random.Random(f"{seed}:{salt}")
+    rng.shuffle(pool)
+    return pool[: min(len(pool), cap)]
+
+
+def _sample_images_for_category(class_id: int, img_ids: Sequence[int], sample_size: int, seed: int) -> List[int]:
+    return _stable_sample_ids(img_ids, cap=sample_size, seed=seed, salt=f"pos:{class_id}")
+
+
+def _sample_negative_images(
+    class_id: int,
+    all_img_ids: Sequence[int],
+    cat_to_images: Dict[int, set[int]],
+    sample_size: int,
+    seed: int,
+) -> List[int]:
+    positives = set(cat_to_images.get(class_id, set()))
+    candidates = [img_id for img_id in all_img_ids if img_id not in positives]
+    return _stable_sample_ids(candidates, cap=sample_size, seed=seed, salt=f"neg:{class_id}")
+
+
+def _build_seed_threshold_sweep_grid(
+    *, base_seed_threshold: float, observed_scores: Sequence[float], limit: int = 64
+) -> List[float]:
+    values = {0.0, float(max(0.0, min(1.0, base_seed_threshold)))}
+    for score in observed_scores or []:
+        try:
+            values.add(float(max(0.0, min(1.0, score))))
+        except Exception:
+            continue
+    ordered = sorted(values)
+    if limit and len(ordered) > limit:
+        step = max(1, int(len(ordered) / max(1, limit)))
+        sampled = ordered[::step]
+        if 0.0 not in sampled:
+            sampled.insert(0, 0.0)
+        if base_seed_threshold not in sampled:
+            sampled.append(float(base_seed_threshold))
+        ordered = sorted(set(sampled))[:limit]
+    return ordered
+
+
+def _compute_seed_threshold_curve(
+    *,
+    gt_best_scores: Dict[Any, float],
+    fp_scores: Sequence[float],
+    thresholds: Sequence[float],
+) -> List[Dict[str, Any]]:
+    curve = []
+    total_gt = len(gt_best_scores)
+    for thr in sorted(thresholds):
+        matches = sum(1 for v in gt_best_scores.values() if float(v) >= float(thr))
+        fps = sum(1 for v in fp_scores if float(v) >= float(thr))
+        precision = matches / (matches + fps) if (matches + fps) else 1.0
+        recall = matches / total_gt if total_gt else 0.0
+        curve.append(
+            {
+                "threshold": float(thr),
+                "matches": int(matches),
+                "fps": int(fps),
+                "precision": float(precision),
+                "recall": float(recall),
+            }
+        )
+    return curve
+
+
+def _select_seed_threshold_operating_point(
+    curve: Sequence[Dict[str, Any]],
+    *,
+    min_precision: Optional[float] = None,
+    max_fps: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    if not curve:
+        return None
+    candidates = []
+    for point in curve:
+        if min_precision is not None and float(point.get("precision", 0.0)) < float(min_precision):
+            continue
+        if max_fps is not None and int(point.get("fps", 0)) > int(max_fps):
+            continue
+        candidates.append(point)
+    if candidates:
+        candidates.sort(
+            key=lambda p: (
+                int(p.get("matches", 0)),
+                float(p.get("precision", 0.0)),
+                -float(p.get("threshold", 0.0)),
+            ),
+            reverse=True,
+        )
+        return candidates[0]
+    # fallback: pick highest precision, then matches, then lowest threshold
+    fallback = list(curve)
+    fallback.sort(
+        key=lambda p: (
+            float(p.get("precision", 0.0)),
+            int(p.get("matches", 0)),
+            -float(p.get("threshold", 0.0)),
+        ),
+        reverse=True,
+    )
+    return fallback[0] if fallback else None
+
+
+def _summarize_seed_threshold_curve_for_prompt(
+    *,
+    gt_best_scores: Dict[Any, float],
+    fp_scores: Sequence[float],
+    base_seed_threshold: float,
+    curve_limit: int = 12,
+) -> Dict[str, Any]:
+    thresholds = _build_seed_threshold_sweep_grid(
+        base_seed_threshold=base_seed_threshold,
+        observed_scores=list(gt_best_scores.values()) + list(fp_scores),
+        limit=curve_limit,
+    )
+    curve = _compute_seed_threshold_curve(
+        gt_best_scores=gt_best_scores,
+        fp_scores=fp_scores,
+        thresholds=thresholds,
+    )
+    recommended = _select_seed_threshold_operating_point(curve, min_precision=None)
+    rec_thr = float(recommended.get("threshold")) if recommended else float(base_seed_threshold)
+    return {
+        "seed_threshold_curve": curve[:curve_limit],
+        "seed_threshold_base": float(base_seed_threshold),
+        "seed_threshold_recommended": float(rec_thr),
+    }
+
+
+def _build_steps_recipe_step_list_from_selected_stats(
+    selected: Sequence[Dict[str, Any]],
+    *,
+    prompts_fallback: Optional[Sequence[str]],
+    payload: AgentMiningRequest,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    steps: List[Dict[str, Any]] = []
+    prompts: List[str] = []
+    if not selected and prompts_fallback:
+        for prompt in prompts_fallback:
+            prompts.append(str(prompt))
+            steps.append(
+                {
+                    "prompt": str(prompt),
+                    "seed_threshold": float(getattr(payload, "seed_threshold", 0.0)),
+                }
+            )
+        return prompts, steps
+    for entry in selected:
+        prompt = str(entry.get("prompt") or "")
+        if not prompt:
+            continue
+        seed_thr = entry.get("selected_seed_threshold")
+        if seed_thr is None:
+            seed_thr = entry.get("seed_threshold")
+        if seed_thr is None:
+            seed_thr = getattr(payload, "seed_threshold", 0.0)
+        prompts.append(prompt)
+        steps.append({"prompt": prompt, "seed_threshold": float(seed_thr)})
+    return prompts, steps
+
+
+def _normalize_steps_for_head_tuning(
+    steps: Sequence[Dict[str, Any]], *, payload: AgentMiningRequest
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for step in steps or []:
+        if not step.get("enabled", True):
+            continue
+        prompt = step.get("prompt")
+        if not prompt:
+            continue
+        normalized.append(
+            {
+                "prompt": prompt,
+                "seed_threshold": float(step.get("seed_threshold", payload.seed_threshold)),
+                "expand_threshold": float(step.get("expand_threshold", payload.expand_threshold)),
+                "max_visual_seeds": int(
+                    step.get("max_visual_seeds", payload.steps_max_visual_seeds_per_step)
+                ),
+                "seed_dedupe_iou": float(step.get("seed_dedupe_iou", payload.seed_dedupe_iou)),
+                "dedupe_iou": float(step.get("dedupe_iou", payload.dedupe_iou)),
+                "max_results": int(step.get("max_results", payload.max_results)),
+            }
+        )
+    return normalized
+
+
+def _build_steps_tier2_candidate_grid(
+    *, base_seed_dedupe_iou: float, base_dedupe_iou: float, max_trials: int
+) -> List[Dict[str, Any]]:
+    offsets = [-0.1, 0.0, 0.1]
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+    for off_seed in offsets:
+        for off_det in offsets:
+            seed_val = max(0.0, min(1.0, float(base_seed_dedupe_iou) + off_seed))
+            det_val = max(0.0, min(1.0, float(base_dedupe_iou) + off_det))
+            key = (round(seed_val, 4), round(det_val, 4))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({"seed_dedupe_iou": seed_val, "dedupe_iou": det_val})
+    if max_trials:
+        candidates = candidates[: max(1, int(max_trials))]
+    return candidates
+
+
+def _select_steps_from_seed_prompt_stats(
+    prompt_stats: Sequence[Dict[str, Any]],
+    *,
+    max_steps: int,
+    target_precision: float,
+    max_candidates_per_prompt: int = 4,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    for entry in prompt_stats:
+        curve = entry.get("seed_threshold_curve") or []
+        curve = list(curve)[: max_candidates_per_prompt]
+        candidates = [
+            c for c in curve if float(c.get("precision", 0.0)) >= float(target_precision)
+        ]
+        if candidates:
+            candidates.sort(
+                key=lambda c: (
+                    int(c.get("matches", 0)),
+                    float(c.get("precision", 0.0)),
+                    -float(c.get("threshold", 0.0)),
+                ),
+                reverse=True,
+            )
+            best = candidates[0]
+        elif curve:
+            curve.sort(
+                key=lambda c: (
+                    float(c.get("precision", 0.0)),
+                    int(c.get("matches", 0)),
+                    -float(c.get("threshold", 0.0)),
+                ),
+                reverse=True,
+            )
+            best = curve[0]
+        else:
+            best = {"threshold": entry.get("seed_threshold", 0.0)}
+        threshold = float(best.get("threshold", 0.0))
+        gt_scores = entry.get("gt_best_scores") or {}
+        matched_keys = {
+            key for key, score in gt_scores.items() if float(score) >= float(threshold)
+        }
+        selected.append(
+            {
+                **entry,
+                "selected_seed_threshold": threshold,
+                "matched_keys": matched_keys,
+            }
+        )
+    selected.sort(
+        key=lambda e: (len(e.get("matched_keys") or []), float(e.get("precision", 0.0))),
+        reverse=True,
+    )
+    coverage: set = set()
+    chosen: List[Dict[str, Any]] = []
+    for entry in selected:
+        if len(chosen) >= int(max_steps):
+            break
+        matched_keys = set(entry.get("matched_keys") or [])
+        if matched_keys and matched_keys.issubset(coverage):
+            continue
+        coverage |= matched_keys
+        chosen.append(entry)
+    return chosen, {"target_precision": float(target_precision)}
+
+
+def _generate_steps_global_mutations(
+    *,
+    base_candidate: Dict[str, Any],
+    seed_stats: Sequence[Dict[str, Any]],
+    payload: AgentMiningRequest,
+    max_mutations: int,
+    target_precision: float,
+    enable_max_results: bool,
+    enable_ordering: bool,
+) -> List[Dict[str, Any]]:
+    base_steps = _normalize_steps_for_head_tuning(base_candidate.get("steps") or [], payload=payload)
+    stats_by_prompt = {
+        str(s.get("prompt") or ""): s for s in seed_stats if str(s.get("prompt") or "")
+    }
+    mutations: List[Dict[str, Any]] = []
+    for prompt in sorted(stats_by_prompt.keys()):
+        stat = stats_by_prompt[prompt]
+        thr = stat.get("seed_threshold_recommended")
+        if thr is None:
+            curve = stat.get("seed_threshold_curve") or []
+            if curve:
+                thr = curve[0].get("threshold")
+        if thr is None:
+            thr = payload.seed_threshold
+        steps = []
+        seen = set()
+        for step in base_steps:
+            if step["prompt"] == prompt:
+                step = {**step, "seed_threshold": float(thr)}
+            if step["prompt"] in seen:
+                continue
+            seen.add(step["prompt"])
+            steps.append(step)
+        if prompt not in seen:
+            steps.append(
+                {
+                    "prompt": prompt,
+                    "seed_threshold": float(thr),
+                    "expand_threshold": float(payload.expand_threshold),
+                    "max_visual_seeds": int(payload.steps_max_visual_seeds_per_step),
+                    "seed_dedupe_iou": float(payload.seed_dedupe_iou),
+                    "dedupe_iou": float(payload.dedupe_iou),
+                    "max_results": int(payload.max_results if enable_max_results else payload.max_results),
+                }
+            )
+        if enable_ordering:
+            steps = sorted(steps, key=lambda s: str(s.get("prompt") or ""))
+        mutations.append({"steps": steps, "sig": f"{prompt}:{float(thr):.6f}"})
+        if max_mutations and len(mutations) >= max_mutations:
+            break
+    return mutations
+
+
+def _successive_halving_search(
+    *,
+    candidates: Sequence[Any],
+    budgets: Sequence[int],
+    evaluator: Any,
+    keep_ratio: float,
+) -> Tuple[Any, List[Dict[str, Any]]]:
+    if not budgets or sorted(budgets) != list(budgets):
+        raise ValueError("budgets must be increasing")
+    history = []
+    current = list(candidates)
+    for budget in budgets:
+        scored = []
+        for cand in current:
+            score, meta = evaluator(cand, budget)
+            scored.append((score, cand, meta))
+        scored.sort(key=lambda row: row[0], reverse=True)
+        keep = max(1, int(len(scored) * keep_ratio))
+        history.append({"budget": budget, "candidates": [row[1] for row in scored], "scores": [row[0] for row in scored]})
+        current = [row[1] for row in scored[:keep]]
+    best = current[0] if current else None
+    return best, history
+
+
+def _run_steps_global_successive_halving_rounds(
+    *,
+    base_candidate: Dict[str, Any],
+    budgets: Sequence[int],
+    keep_ratio: float,
+    rounds: int,
+    max_trials: int,
+    mutate: Any,
+    evaluator: Any,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    best = dict(base_candidate)
+    history: List[Dict[str, Any]] = []
+    for round_idx in range(int(rounds)):
+        candidates = mutate(best, round_idx) or []
+        candidates = list(candidates)[: max_trials]
+        best_candidate, stage_history = _successive_halving_search(
+            candidates=candidates, budgets=budgets, evaluator=evaluator, keep_ratio=keep_ratio
+        )
+        if best_candidate is not None:
+            best = best_candidate
+        history.append({"round": round_idx, "history": stage_history, "best": best})
+    return best, history
+
+
+def _refine_steps_prompt_subset_seed_stage(
+    prompt_stats: Sequence[Dict[str, Any]],
+    selected: Sequence[Dict[str, Any]],
+    *,
+    max_steps: int,
+    target_precision: float,
+    max_iters: int,
+    top_k: int,
+    base_seed_threshold: float,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    info: Dict[str, Any] = {"enabled": True, "history": []}
+    refined = [dict(s) for s in selected]
+    # Drop redundant prompts.
+    coverage_map = {}
+    for entry in refined:
+        matched_raw = entry.get("matched_keys")
+        if matched_raw:
+            matched = set(matched_raw)
+            entry["matched_keys"] = matched
+            coverage_map[entry.get("prompt")] = matched
+            continue
+        threshold = float(entry.get("selected_seed_threshold") or base_seed_threshold)
+        gt_scores = entry.get("gt_best_scores") or {}
+        matched = {k for k, v in gt_scores.items() if float(v) >= threshold}
+        entry["matched_keys"] = matched
+        coverage_map[entry.get("prompt")] = matched
+    changed = True
+    while changed:
+        changed = False
+        for entry in list(refined):
+            prompt = entry.get("prompt")
+            matched = set(entry.get("matched_keys") or [])
+            others = set()
+            for other in refined:
+                if other is entry:
+                    continue
+                others |= set(other.get("matched_keys") or [])
+            if matched and matched.issubset(others):
+                refined.remove(entry)
+                info["history"].append({"op": "drop_redundant", "dropped": prompt})
+                changed = True
+                break
+    # Swap in a better prompt if it adds coverage.
+    if max_iters and prompt_stats:
+        current_coverage = set()
+        for entry in refined:
+            current_coverage |= set(entry.get("matched_keys") or [])
+        for candidate in prompt_stats[:top_k]:
+            prompt = candidate.get("prompt")
+            if not prompt:
+                continue
+            threshold = float(candidate.get("seed_threshold_recommended") or base_seed_threshold)
+            gt_scores = candidate.get("gt_best_scores") or {}
+            cand_keys = {k for k, v in gt_scores.items() if float(v) >= threshold}
+            if not cand_keys:
+                continue
+            if not cand_keys.issubset(current_coverage):
+                # replace weakest prompt
+                if refined:
+                    refined.sort(key=lambda e: len(e.get("matched_keys") or []))
+                    dropped = refined.pop(0)
+                    info["history"].append({"op": "swap", "dropped": dropped.get("prompt"), "added": prompt})
+                refined.append(
+                    {
+                        **candidate,
+                        "selected_seed_threshold": threshold,
+                        "matched_keys": cand_keys,
+                    }
+                )
+                current_coverage |= cand_keys
+                if len(refined) >= max_steps:
+                    break
+    return refined[:max_steps], info
+
+
+def _agent_compact_tool_response(result: AgentToolResult) -> Dict[str, Any]:
+    payload = {"tool": result.name, "result": result.result}
+    if result.error:
+        payload["error"] = result.error
+    return payload
+
+
+def _parse_tool_call_json(raw_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not raw_text:
+        return None, "empty"
+    snippet = raw_text
+    if "<tool_call>" in raw_text and "</tool_call>" in raw_text:
+        try:
+            snippet = raw_text.split("<tool_call>", 1)[1].split("</tool_call>", 1)[0]
+        except Exception:
+            snippet = raw_text
+    snippet = snippet.strip()
+    try:
+        payload = json.loads(snippet)
+        return payload, None
+    except Exception as exc:  # noqa: BLE001
+        return None, f"parse_error:{exc}"
+
+
+def _infer_clip_model_from_embedding_dim(embed_dim: int, active_name: Optional[str] = None) -> Optional[str]:
+    return _infer_clip_model_from_embedding_dim_impl(
+        embed_dim, active_name=active_name or clip_model_name or DEFAULT_CLIP_MODEL
+    )
+
+
+def _load_clip_head_from_classifier(path: Path) -> Optional[Dict[str, Any]]:
+    return _load_clip_head_from_classifier_impl(
+        path,
+        joblib_load_fn=joblib.load,
+        http_exception_cls=HTTPException,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+        infer_clip_model_fn=_infer_clip_model_from_embedding_dim,
+        active_clip_model_name=clip_model_name,
+        default_clip_model=DEFAULT_CLIP_MODEL,
+        logger=logger,
+    )
+
+
+def _build_prompt_recipe(
+    candidates: List[Dict[str, Any]],
+    all_gt_keys: set[str],
+    per_image_gt: Dict[int, int],
+    images: Dict[int, Dict[str, Any]],
+    image_ids: List[int],
+    gt_index: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    return _build_prompt_recipe_impl(candidates, all_gt_keys, per_image_gt, images, image_ids, gt_index)
+
+
+def _build_qwen_caption_prompt(*args: Any, **kwargs: Any) -> Any:
+    return _build_qwen_caption_prompt_impl(*args, **kwargs)
+
+
+def _normalize_agent_recipe_execution_plan(recipe_obj: Dict[str, Any]) -> Dict[str, Any]:
+    mode = _classify_agent_recipe_mode_impl(recipe_obj)
+    if mode == "sam3_steps":
+        return {
+            "schema_version": int(recipe_obj.get("schema_version") or 2),
+            "mode": "sam3_steps",
+            "steps": recipe_obj.get("steps") or [],
+        }
+    if mode == "sam3_greedy":
+        return {
+            "schema_version": int(recipe_obj.get("schema_version") or 1),
+            "mode": "sam3_greedy",
+            "text_prompts": recipe_obj.get("text_prompts") or [],
+            "params": recipe_obj.get("params") or {},
+        }
+    return recipe_obj
+
+
+_classify_agent_recipe_mode = _classify_agent_recipe_mode_impl
+_validate_agent_recipe_structure = _validate_agent_recipe_structure_impl
+
+
+def _update_best_clip_head_sweep_summary(
+    *,
+    best_summary: Optional[Dict[str, Any]],
+    best_key: Optional[Tuple[float, float]],
+    total_gt: int,
+    total_images: int,
+    matched: int,
+    fps: int,
+    duplicates: int,
+    preds: int,
+    det_images: int,
+    min_prob: float,
+    margin: float,
+    target_precision: float,
+) -> Tuple[Dict[str, Any], Tuple[float, float]]:
+    precision = matched / preds if preds else 0.0
+    meets = precision >= float(target_precision)
+    key = (float(min_prob), float(margin))
+    summary = {
+        "clip_head_min_prob": float(min_prob),
+        "clip_head_margin": float(margin),
+        "clip_head_meets_target_precision": bool(meets),
+        "matched": int(matched),
+        "fps": int(fps),
+        "duplicates": int(duplicates),
+        "preds": int(preds),
+        "det_images": int(det_images),
+        "precision": float(precision),
+        "total_gt": int(total_gt),
+        "total_images": int(total_images),
+    }
+    if best_summary is None:
+        return summary, key
+    best_meets = bool(best_summary.get("clip_head_meets_target_precision"))
+    if meets and not best_meets:
+        return summary, key
+    if meets == best_meets:
+        if meets:
+            # prefer higher matched, then higher precision
+            if (int(matched), float(precision)) > (
+                int(best_summary.get("matched", 0)),
+                float(best_summary.get("precision", 0.0)),
+            ):
+                return summary, key
+        else:
+            if float(precision) > float(best_summary.get("precision", 0.0)):
+                return summary, key
+    return best_summary, best_key or key
+
+
 def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -9341,7 +11567,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             clip_head_background_indices_fn=_clip_head_background_indices,
             resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
             infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-            active_clip_model_name=active_clip_model_name,
+            active_clip_model_name=clip_model_name,
             default_clip_model=DEFAULT_CLIP_MODEL,
             logger=logger,
         )
@@ -10132,7 +12358,7 @@ def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
         infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-        active_clip_model_name=active_clip_model_name,
+        active_clip_model_name=clip_model_name,
         default_clip_model=DEFAULT_CLIP_MODEL,
         logger=logger,
     )
@@ -10523,7 +12749,7 @@ def agent_mining_save_recipe(payload: AgentRecipeExportRequest):
 
 
 def agent_mining_list_recipes(dataset_id: Optional[str] = None):
-    return _list_agent_recipes(dataset_id)
+    return _list_agent_recipes(dataset_id=dataset_id)
 
 
 def agent_mining_export_recipe(recipe_id: str):
@@ -11120,7 +13346,7 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
     def worker() -> None:
         try:
             _seg_job_update(job, status="running", progress=0.02, message="Preparing segmentation build…", error=None)
-            source_meta = _resolve_sam3_dataset_meta_impl(request.source_dataset_id)
+            source_meta = _resolve_sam3_dataset_meta(request.source_dataset_id)
             classes = source_meta.get("classes") or []
             if not classes:
                 # Try to load from labelmap.txt directly.
@@ -12280,18 +14506,19 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             return
         try:
             _prepare_for_training_impl(
-                _unload_inference_runtimes_impl,
-                unload_runtime_fn=_unload_runtime,
-                unload_detector_fn=_unload_detector_inference,
-                unload_sam3_text_fn=_unload_sam3_text_runtime,
-                unload_sam3_similarity_fn=_unload_sam3_similarity_runtime,
-                unload_qwen_caption_fn=_unload_qwen_caption_runtime,
-                unload_qwen_term_fn=_unload_qwen_term_runtime,
-                unload_clip_fn=_unload_clip_backbone,
-                unload_classifier_fn=_unload_classifier_backbone,
-                unload_dinov3_fn=_unload_dinov3_backbone,
-                unload_segmentation_fn=_unload_segmentation_inference,
-                torch_module=torch,
+                unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+                    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                        predictor_manager=predictor_manager,
+                        unload_sam3_text_fn=_unload_sam3_text_runtime,
+                        suspend_clip_fn=_suspend_clip_backbone,
+                        unload_dinov3_fn=_unload_dinov3_backbone,
+                        unload_detector_fn=_unload_detector_inference,
+                        torch_module=torch,
+                        logger=logger,
+                    ),
+                    unload_qwen_fn=_unload_qwen_runtime,
+                    torch_module=torch,
+                )
             )
             from rfdetr import (
                 RFDETRBase,
@@ -12565,6 +14792,14 @@ def _get_rfdetr_job(job_id: str) -> RfDetrTrainingJob:
         job = RFDETR_TRAINING_JOBS.get(job_id)
         if not job:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_job_not_found")
+        return job
+
+
+def _get_qwen_job(job_id: str) -> QwenTrainingJob:
+    with QWEN_TRAINING_JOBS_LOCK:
+        job = QWEN_TRAINING_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_job_not_found")
         return job
 
 
@@ -13113,18 +15348,19 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
     def worker() -> None:
         try:
             _prepare_for_training_impl(
-                _unload_inference_runtimes_impl,
-                unload_runtime_fn=_unload_runtime,
-                unload_detector_fn=_unload_detector_inference,
-                unload_sam3_text_fn=_unload_sam3_text_runtime,
-                unload_sam3_similarity_fn=_unload_sam3_similarity_runtime,
-                unload_qwen_caption_fn=_unload_qwen_caption_runtime,
-                unload_qwen_term_fn=_unload_qwen_term_runtime,
-                unload_clip_fn=_unload_clip_backbone,
-                unload_classifier_fn=_unload_classifier_backbone,
-                unload_dinov3_fn=_unload_dinov3_backbone,
-                unload_segmentation_fn=_unload_segmentation_inference,
-                torch_module=torch,
+                unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
+                    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
+                        predictor_manager=predictor_manager,
+                        unload_sam3_text_fn=_unload_sam3_text_runtime,
+                        suspend_clip_fn=_suspend_clip_backbone,
+                        unload_dinov3_fn=_unload_dinov3_backbone,
+                        unload_detector_fn=_unload_detector_inference,
+                        torch_module=torch,
+                        logger=logger,
+                    ),
+                    unload_qwen_fn=_unload_qwen_runtime,
+                    torch_module=torch,
+                )
             )
             with TRAINING_JOBS_LOCK:
                 if cancel_event.is_set():
@@ -13862,7 +16098,7 @@ def _build_sam3_config(
 
 
 def create_sam3_training_job(payload: Sam3TrainRequest):
-    meta = _resolve_sam3_dataset_meta_impl(payload.dataset_id)
+    meta = _resolve_sam3_dataset_meta(payload.dataset_id)
     job_id = uuid.uuid4().hex
     prep_logs: List[str] = []
     cfg, num_gpus = _build_sam3_config(payload, meta, job_id, prep_logs)
@@ -14673,8 +16909,41 @@ def yolo_predict_full(payload: YoloFullRequest):
     iou = _clamp_iou_value_impl(float(payload.iou) if payload.iou is not None else 0.45, warnings)
     max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
-    with YOLO_INFER_LOCK:
-        results = model.predict(pil_img, conf=conf, iou=iou, max_det=max_det, verbose=False)
+    def _predict_with_fallback(device: Optional[str] = None):
+        kwargs = {"conf": conf, "iou": iou, "max_det": max_det, "verbose": False}
+        if device is not None:
+            kwargs["device"] = device
+        return model.predict(pil_img, **kwargs)
+
+    try:
+        with YOLO_INFER_LOCK:
+            results = _predict_with_fallback()
+    except RuntimeError as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "CUDA" in msg or "device-side assert" in msg:
+            warnings.append("yolo_cuda_error")
+            _unload_detector_inference()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+            # Retry on CPU to keep baseline functional.
+            try:
+                model, labelmap, task = _ensure_yolo_inference_runtime()
+                if hasattr(model, "to"):
+                    try:
+                        model.to("cpu")
+                    except Exception:
+                        pass
+                with YOLO_INFER_LOCK:
+                    results = _predict_with_fallback(device="cpu")
+                warnings.append("yolo_cuda_fallback_cpu")
+            except Exception:
+                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error") from exc
+        else:
+            raise
     raw = _yolo_extract_detections(results, labelmap, 0.0, 0.0, img_w, img_h)
     detections = [YoloRegionDetection(**item) for item in raw]
     return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
@@ -14710,12 +16979,46 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
     merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
     slice_size, overlap, merge_iou = _clamp_slice_params_impl(slice_size, overlap, merge_iou, img_w, img_h, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
-    slices, starts = _slice_image_sahi_impl(pil_img, slice_size, overlap)
+    slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
+    fallback_device: Optional[str] = None
+
+    def _predict_with_fallback(crop_img: Image.Image) -> Any:
+        kwargs = {"conf": conf, "iou": iou, "max_det": max_det, "verbose": False}
+        if fallback_device is not None:
+            kwargs["device"] = fallback_device
+        return model.predict(crop_img, **kwargs)
+
     for tile, start in zip(slices, starts):
         offset_x, offset_y = float(start[0]), float(start[1])
         crop = Image.fromarray(tile)
-        results = model.predict(crop, conf=conf, iou=iou, max_det=max_det, verbose=False)
+        try:
+            results = _predict_with_fallback(crop)
+        except RuntimeError as exc:  # noqa: BLE001
+            msg = str(exc)
+            if "CUDA" in msg or "device-side assert" in msg:
+                warnings.append("yolo_cuda_error")
+                _unload_detector_inference()
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                    except Exception:
+                        pass
+                try:
+                    model, labelmap, task = _ensure_yolo_inference_runtime()
+                    if hasattr(model, "to"):
+                        try:
+                            model.to("cpu")
+                        except Exception:
+                            pass
+                    fallback_device = "cpu"
+                    results = _predict_with_fallback(crop)
+                    warnings.append("yolo_cuda_fallback_cpu")
+                except Exception:
+                    raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error") from exc
+            else:
+                raise
         raw_detections.extend(_yolo_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h))
     merged = _merge_detections_nms(raw_detections, merge_iou, max_det)
     detections = [YoloRegionDetection(**item) for item in merged]
@@ -14789,7 +17092,7 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
     merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
     slice_size, overlap, merge_iou = _clamp_slice_params_impl(slice_size, overlap, merge_iou, img_w, img_h, warnings)
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
-    slices, starts = _slice_image_sahi_impl(pil_img, slice_size, overlap)
+    slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
     labelmap_shifted = False
     for tile, start in zip(slices, starts):
@@ -14815,7 +17118,7 @@ app.include_router(
         list_variants_fn=list_rfdetr_variants,
         list_runs_fn=lambda: _list_rfdetr_runs_impl(
             job_root=RFDETR_JOB_ROOT,
-            active_payload=_load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
+            active_payload=_load_rfdetr_active(),
             load_meta_fn=lambda run_dir: _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME),
             collect_artifacts_fn=lambda run_dir: _collect_rfdetr_artifacts_impl(
                 run_dir,
@@ -14823,7 +17126,7 @@ app.include_router(
             ),
             meta_name=RFDETR_RUN_META_NAME,
         ),
-        get_active_fn=lambda: _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
+        get_active_fn=_load_rfdetr_active,
         set_active_fn=set_rfdetr_active,
         download_run_fn=download_rfdetr_run,
         summary_fn=rfdetr_run_summary,
@@ -15450,7 +17753,7 @@ def set_active_model(payload: ActiveModelRequest):
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
                 infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-                active_clip_model_name=active_clip_model_name,
+                active_clip_model_name=clip_model_name,
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
@@ -15682,7 +17985,7 @@ def _system_health_summary() -> Dict[str, Any]:
         "errors": [],
     }
     try:
-        datasets = _list_all_datasets(prefer_registry=True)
+        datasets = _list_all_datasets()
         summary["datasets"] = {"count": len(datasets)}
     except Exception as exc:  # noqa: BLE001
         summary["datasets"] = {"count": None}
@@ -15798,7 +18101,7 @@ app.include_router(
     build_runtime_router(
         unload_all_fn=lambda: _unload_inference_runtimes_impl(
             unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
-                predictor_manager,
+                predictor_manager=predictor_manager,
                 unload_sam3_text_fn=_unload_sam3_text_runtime,
                 suspend_clip_fn=_suspend_clip_backbone,
                 unload_dinov3_fn=_unload_dinov3_backbone,
@@ -15934,9 +18237,15 @@ def qwen_caption(payload: QwenCaptionRequest):
     active_model_id: Optional[str] = None
     active_runtime: Optional[Tuple[Any, Any]] = None
     request_model_cache: Dict[str, Tuple[Any, Any]] = {}
+    default_caption_model_id: Optional[str] = None
 
     def get_runtime(model_id: Optional[str]) -> Tuple[Any, Any]:
         nonlocal active_model_id, active_runtime
+        resolved_default = (
+            default_caption_model_id
+            or (active_qwen_metadata or {}).get("model_id")
+            or QWEN_MODEL_NAME
+        )
         if multi_model_cache:
             key = model_id or "__active__"
             cached = request_model_cache.get(key)
@@ -15945,7 +18254,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             if model_id:
                 runtime = _ensure_qwen_ready_for_caption(model_id)
             else:
-                runtime = _ensure_qwen_ready()
+                runtime = _ensure_qwen_ready_for_caption(resolved_default)
             request_model_cache[key] = runtime
             return runtime
         if active_runtime is not None and active_model_id != model_id:
@@ -15962,14 +18271,14 @@ def qwen_caption(payload: QwenCaptionRequest):
                 active_runtime = _ensure_qwen_ready_for_caption(model_id)
                 active_model_id = model_id
             else:
-                active_runtime = _ensure_qwen_ready()
+                active_runtime = _ensure_qwen_ready_for_caption(resolved_default)
                 active_model_id = None
         return active_runtime
 
     try:
         if payload.unload_others and not fast_mode:
             _unload_non_qwen_runtimes_impl(
-                predictor_manager,
+                predictor_manager=predictor_manager,
                 unload_sam3_text_fn=_unload_sam3_text_runtime,
                 suspend_clip_fn=_suspend_clip_backbone,
                 unload_dinov3_fn=_unload_dinov3_backbone,
@@ -16022,6 +18331,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             prompt_text = f"{prompt_text}\n{glossary_line}"
         base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+        default_caption_model_id = base_model_id
         variant = payload.model_variant or "auto"
         model_id_override = payload.model_id or ""
         if model_id_override:
@@ -16099,19 +18409,19 @@ def qwen_caption(payload: QwenCaptionRequest):
             draft: str,
             windows: Sequence[Tuple[int, int, int, str]],
             *,
-            img: Image.Image,
-            base_id: str,
+            pil_img: Image.Image,
+            base_model_id: str,
             runtime_resolver: Callable[[str], Tuple[Any, Any]],
-            tokens: int,
+            max_new_tokens: int,
             glossary_line: Optional[str] = None,
         ) -> str:
             return _run_qwen_caption_merge_impl(
                 draft,
                 windows,
-                pil_img=img,
-                base_model_id=base_id,
+                pil_img=pil_img,
+                base_model_id=base_model_id,
                 runtime_resolver=runtime_resolver,
-                max_new_tokens=tokens,
+                max_new_tokens=max_new_tokens,
                 glossary_line=glossary_line,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
@@ -16611,75 +18921,7 @@ def start_calibration_job(payload: CalibrationRequest = Body(...)):
         job_cls=CalibrationJob,
         jobs=CALIBRATION_JOBS,
         jobs_lock=CALIBRATION_JOBS_LOCK,
-        run_job_fn=lambda job, request: _run_calibration_job_impl(
-            job,
-            request,
-            jobs=CALIBRATION_JOBS,
-            jobs_lock=CALIBRATION_JOBS_LOCK,
-            update_fn=_calibration_update,
-            require_sam3_fn=lambda enable_text, enable_similarity: _require_sam3_for_prepass_impl(
-                enable_text,
-                enable_similarity,
-                sam3_import_error=SAM3_NATIVE_IMAGE_IMPORT_ERROR,
-                build_sam3_image_model=build_sam3_image_model,
-                sam3_image_processor=Sam3ImageProcessor,
-            ),
-            prepare_for_training_fn=lambda: _prepare_for_training_impl(
-                unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
-                    unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
-                        predictor_manager,
-                        unload_sam3_text_fn=_unload_sam3_text_runtime,
-                        suspend_clip_fn=_suspend_clip_backbone,
-                        unload_dinov3_fn=_unload_dinov3_backbone,
-                        unload_detector_fn=_unload_detector_inference,
-                        torch_module=torch,
-                        logger=logger,
-                    ),
-                    unload_qwen_fn=_unload_qwen_runtime,
-                    torch_module=torch,
-                )
-            ),
-            load_yolo_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH),
-            load_rfdetr_active_fn=lambda: _load_rfdetr_active_impl(RFDETR_ACTIVE_PATH),
-            load_labelmap_meta_fn=_agent_load_labelmap_meta,
-            list_images_fn=lambda dataset_id: _calibration_list_images_impl(
-                dataset_id, resolve_dataset_fn=_resolve_sam3_or_qwen_dataset
-            ),
-            sample_images_fn=_calibration_sample_images_impl,
-            calibration_root=CALIBRATION_ROOT,
-            calibration_cache_root=CALIBRATION_CACHE_ROOT,
-            prepass_request_cls=QwenPrepassRequest,
-            active_classifier_head=active_classifier_head,
-            calibration_features_version=CALIBRATION_FEATURES_VERSION,
-            write_record_fn=_calibration_write_record_atomic,
-            hash_payload_fn=_calibration_hash_payload_impl,
-            safe_link_fn=_calibration_safe_link_impl,
-            prepass_worker_fn=_calibration_prepass_worker,
-            unload_inference_runtimes_fn=lambda: _unload_inference_runtimes_impl(
-                unload_non_qwen_fn=lambda: _unload_non_qwen_runtimes_impl(
-                    predictor_manager,
-                    unload_sam3_text_fn=_unload_sam3_text_runtime,
-                    suspend_clip_fn=_suspend_clip_backbone,
-                    unload_dinov3_fn=_unload_dinov3_backbone,
-                    unload_detector_fn=_unload_detector_inference,
-                    torch_module=torch,
-                    logger=logger,
-                ),
-                unload_qwen_fn=_unload_qwen_runtime,
-                torch_module=torch,
-            ),
-            resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
-            cache_image_fn=lambda pil_img, sam_variant: _calibration_cache_image_impl(
-                pil_img,
-                sam_variant,
-                store_preloaded_fn=_store_preloaded_image,
-                default_variant_fn=_default_variant,
-            ),
-            run_prepass_fn=_agent_run_deep_prepass,
-            logger=logger,
-            http_exception_cls=HTTPException,
-            root_dir=Path(__file__).resolve().parent,
-        ),
+        run_job_fn=_calibration_run_job,
     )
     return _serialize_calibration_job_impl(job)
 
@@ -16772,8 +19014,8 @@ def export_prepass_recipe(recipe_id: str):
             load_labelmap_meta_fn=_agent_load_labelmap_meta,
             active_labelmap_path=active_labelmap_path,
             sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
-            copy_tree_filtered_fn=_copy_tree_filtered,
-            sha256_fn=_sha256_path,
+            copy_tree_filtered_fn=_copy_tree_filtered_impl,
+            sha256_fn=_sha256_path_impl,
             get_qwen_model_entry_fn=_get_qwen_model_entry,
             resolve_classifier_path_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
                 path_str,
@@ -16796,6 +19038,55 @@ def export_prepass_recipe(recipe_id: str):
         media_type="application/zip",
         filename=f"prepass_recipe_{recipe_id}.zip",
     )
+
+
+def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Path) -> None:
+    if not isinstance(manifest, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+    schema = manifest.get("schema_version")
+    if schema != PREPASS_RECIPE_SCHEMA_VERSION:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_schema_mismatch")
+    assets = manifest.get("assets")
+    if not assets:
+        return
+    if isinstance(assets, dict):
+        assets = list(assets.values())
+    if not isinstance(assets, list):
+        return
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        rel = item.get("path")
+        if not rel:
+            continue
+        target = (extract_dir / rel).resolve()
+        if not str(target).startswith(str(extract_dir.resolve())):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_path")
+        if not target.exists():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing")
+
+
+def _unique_prepass_recipe_name(name: str) -> tuple[str, Optional[str]]:
+    base = (name or "").strip() or "prepass_recipe"
+    existing = set()
+    for entry in PREPASS_RECIPE_ROOT.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            meta = _load_prepass_recipe_meta(entry)
+        except HTTPException:
+            continue
+        existing_name = (meta.get("name") or "").strip()
+        if existing_name:
+            existing.add(existing_name)
+    if base not in existing:
+        return base, None
+    suffix = 1
+    while True:
+        candidate = f"{base} ({suffix})"
+        if candidate not in existing:
+            return candidate, base
+        suffix += 1
 
 
 def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
@@ -16861,6 +19152,49 @@ app.include_router(
         import_raw_fn=import_prepass_recipe_raw,
         response_cls=PrepassRecipeResponse,
         request_cls=PrepassRecipeRequest,
+    )
+)
+
+app.include_router(
+    build_datasets_router(
+        list_fn=list_datasets,
+        upload_fn=upload_dataset_zip,
+        delete_fn=delete_dataset_entry,
+        download_fn=download_dataset_entry,
+        build_qwen_fn=build_qwen_dataset_from_yolo,
+        check_fn=check_dataset,
+        get_glossary_fn=get_dataset_glossary,
+        set_glossary_fn=set_dataset_glossary,
+        get_text_label_fn=get_text_label,
+        set_text_label_fn=set_text_label,
+    )
+)
+
+app.include_router(
+    build_glossaries_router(
+        list_fn=list_glossary_library,
+        get_fn=get_glossary_entry,
+        save_fn=save_glossary_entry,
+        delete_fn=delete_glossary_entry,
+    )
+)
+
+app.include_router(
+    build_qwen_datasets_router(
+        list_fn=list_qwen_datasets,
+        delete_fn=delete_qwen_dataset,
+        init_fn=init_qwen_dataset_upload,
+        chunk_fn=upload_qwen_dataset_chunk,
+        finalize_fn=finalize_qwen_dataset_upload,
+        cancel_fn=cancel_qwen_dataset_upload,
+    )
+)
+
+app.include_router(
+    build_sam3_datasets_router(
+        list_fn=list_sam3_datasets,
+        convert_fn=convert_sam3_dataset,
+        classes_fn=list_sam3_dataset_classes,
     )
 )
 
@@ -17100,7 +19434,7 @@ def sam_point(prompt: PointPrompt):
 
 def sam_bbox_auto(prompt: BboxPrompt):
     if not _active_encoder_ready():
-        return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
+        return SamPointAutoResponse(prediction=str(ERROR_MESSAGE), bbox=[], uuid=prompt.uuid)
 
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -17170,7 +19504,7 @@ def sam_bbox_auto(prompt: BboxPrompt):
 
 def sam_point_auto(prompt: PointPrompt):
     if not _active_encoder_ready():
-        return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
+        return SamPointAutoResponse(prediction=str(ERROR_MESSAGE), bbox=[], uuid=prompt.uuid)
 
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -17277,7 +19611,7 @@ def sam_point_multi(prompt: MultiPointPrompt):
 
 def sam_point_multi_auto(prompt: MultiPointPrompt):
     if not _active_encoder_ready():
-        return SamPointAutoResponse(prediction=ERROR_MESSAGE, bbox=[], uuid=prompt.uuid)
+        return SamPointAutoResponse(prediction=str(ERROR_MESSAGE), bbox=[], uuid=prompt.uuid)
 
     positive = prompt.positive_points or []
     negative = prompt.negative_points or []

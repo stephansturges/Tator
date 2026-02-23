@@ -298,3 +298,30 @@ def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
     if not mapped:
         return ""
     return json.dumps(mapped, indent=2, ensure_ascii=True)
+
+
+def _glossary_preview(
+    glossary: str,
+    labelmap: Sequence[str],
+    *,
+    max_labels: int = 4,
+    max_terms: int = 3,
+) -> str:
+    text = str(glossary or "").strip()
+    if not text:
+        return ""
+    mapping = _parse_glossary_mapping(text, labelmap)
+    if not mapping:
+        return ""
+    pieces: List[str] = []
+    for label in labelmap:
+        if len(pieces) >= max_labels:
+            break
+        terms = mapping.get(label) or []
+        if not terms:
+            continue
+        snippet = ", ".join([str(term) for term in terms[:max_terms] if str(term).strip()])
+        if not snippet:
+            continue
+        pieces.append(f"{label}: {snippet}")
+    return " | ".join(pieces)

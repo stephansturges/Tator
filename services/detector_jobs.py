@@ -6,8 +6,21 @@ import logging
 import time
 import ctypes
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+
+def _json_sanitize(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_sanitize(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_sanitize(item) for item in value]
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return value
+    return value
 
 
 def _serialize_yolo_job_impl(job) -> Dict[str, Any]:
@@ -16,11 +29,11 @@ def _serialize_yolo_job_impl(job) -> Dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "config": job.config,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "result": job.result,
-        "error": job.error,
+        "config": _json_sanitize(job.config),
+        "logs": _json_sanitize(job.logs),
+        "metrics": _json_sanitize(job.metrics),
+        "result": _json_sanitize(job.result),
+        "error": _json_sanitize(job.error),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -32,10 +45,10 @@ def _serialize_yolo_head_graft_job_impl(job) -> Dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "config": job.config,
-        "logs": job.logs,
-        "result": job.result,
-        "error": job.error,
+        "config": _json_sanitize(job.config),
+        "logs": _json_sanitize(job.logs),
+        "result": _json_sanitize(job.result),
+        "error": _json_sanitize(job.error),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -47,11 +60,11 @@ def _serialize_rfdetr_job_impl(job) -> Dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "config": job.config,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "result": job.result,
-        "error": job.error,
+        "config": _json_sanitize(job.config),
+        "logs": _json_sanitize(job.logs),
+        "metrics": _json_sanitize(job.metrics),
+        "result": _json_sanitize(job.result),
+        "error": _json_sanitize(job.error),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }

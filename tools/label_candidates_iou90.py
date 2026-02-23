@@ -42,11 +42,11 @@ def _iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Label candidates using IoU>=0.9.")
+    parser = argparse.ArgumentParser(description="Label candidates using IoU>=0.5.")
     parser.add_argument("--input", required=True, help="Input .npz with X and meta.")
     parser.add_argument("--dataset", required=True, help="Dataset id.")
     parser.add_argument("--output", required=True, help="Output .npz path.")
-    parser.add_argument("--iou", type=float, default=0.9, help="IoU threshold for accept label.")
+    parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for accept label.")
     args = parser.parse_args()
 
     labelmap = _load_labelmap(args.dataset)

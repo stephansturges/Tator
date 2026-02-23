@@ -1,6 +1,5 @@
 """APIRouter for CLIP active model endpoints."""
 
-from __future__ import annotations
 
 from typing import Any, Callable, Type
 

@@ -11,3 +11,7 @@ def _stable_hash_impl(entries: Sequence[str]) -> str:
     for item in entries:
         digest.update(item.encode("utf-8"))
     return digest.hexdigest()
+
+
+def _stable_hash(entries: Sequence[str]) -> str:
+    return _stable_hash_impl(entries)

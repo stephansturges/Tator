@@ -15,7 +15,7 @@ from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERRO
 from PIL import Image
 
 from utils.glossary import _normalize_labelmap_glossary
-from utils.io import _compute_dir_signature
+from utils.io import _compute_dir_signature, _load_json_metadata
 from utils.labels import _load_labelmap_file
 from utils.coco import (
     _coco_has_invalid_image_refs_impl,
@@ -30,6 +30,9 @@ from utils.image import (
 )
 
 logger = logging.getLogger(__name__)
+
+QWEN_METADATA_FILENAME = "metadata.json"
+SAM3_DATASET_META_NAME = "sam3_dataset.json"
 
 
 def _load_qwen_labelmap(dataset_root: Path, *, load_qwen_meta, collect_labels) -> list[str]:
@@ -130,8 +133,8 @@ def _coerce_dataset_metadata_impl(
 def _load_qwen_dataset_metadata_impl(
     dataset_dir: Path,
     *,
-    meta_name: str,
-    load_json_metadata_fn,
+    meta_name: str = QWEN_METADATA_FILENAME,
+    load_json_metadata_fn=_load_json_metadata,
 ) -> Optional[Dict[str, Any]]:
     return load_json_metadata_fn(dataset_dir / meta_name)
 
@@ -140,18 +143,21 @@ def _persist_qwen_dataset_metadata_impl(
     dataset_dir: Path,
     metadata: Dict[str, Any],
     *,
-    meta_name: str,
-    write_qwen_metadata_fn,
+    meta_name: str = QWEN_METADATA_FILENAME,
+    write_qwen_metadata_fn=None,
 ) -> None:
-    write_qwen_metadata_fn(dataset_dir / meta_name, metadata)
+    if write_qwen_metadata_fn is not None:
+        write_qwen_metadata_fn(dataset_dir / meta_name, metadata)
+        return
+    _persist_dataset_metadata_impl(dataset_dir, metadata, meta_name=meta_name, logger=logger)
 
 
 def _load_sam3_dataset_metadata_impl(
     dataset_dir: Path,
     *,
-    meta_name: str,
-    load_json_metadata_fn,
-    persist_metadata_fn,
+    meta_name: str = SAM3_DATASET_META_NAME,
+    load_json_metadata_fn=_load_json_metadata,
+    persist_metadata_fn=None,
 ) -> Optional[Dict[str, Any]]:
     meta_path = dataset_dir / meta_name
     data = load_json_metadata_fn(meta_path)
@@ -165,7 +171,8 @@ def _load_sam3_dataset_metadata_impl(
         data["type"] = "bbox"
         updated = True
     if updated:
-        persist_metadata_fn(dataset_dir, data)
+        if persist_metadata_fn is not None:
+            persist_metadata_fn(dataset_dir, data)
     return data
 
 
@@ -173,7 +180,7 @@ def _persist_sam3_dataset_metadata_impl(
     dataset_dir: Path,
     metadata: Dict[str, Any],
     *,
-    meta_name: str,
+    meta_name: str = SAM3_DATASET_META_NAME,
     logger=None,
 ) -> None:
     meta_path = dataset_dir / meta_name
@@ -510,7 +517,7 @@ def _collect_labels_from_qwen_jsonl_impl(
 def _discover_yolo_labelmap_impl(
     dataset_root: Path,
     *,
-    load_labelmap_file_fn,
+    load_labelmap_file_fn=_load_labelmap_file,
 ) -> List[str]:
     for name in ("labelmap.txt", "classes.txt", "labels.txt"):
         candidate = dataset_root / name
@@ -1279,7 +1286,12 @@ def _find_coco_split_impl(dataset_root: Path) -> Tuple[Path, Path]:
     return ann_path, images_dir
 
 
-def _convert_coco_dataset_to_yolo_impl(dataset_root: Path) -> Dict[str, Any]:
+def _convert_coco_dataset_to_yolo_impl(
+    dataset_root: Path,
+    *,
+    load_sam3_meta_fn=None,
+    persist_meta_fn=None,
+) -> Dict[str, Any]:
     dataset_root = dataset_root.resolve()
     ann_paths: List[Tuple[str, Path, Path]] = []
     for split in ("train", "val"):
@@ -1411,7 +1423,9 @@ def _convert_coco_dataset_to_yolo_impl(dataset_root: Path) -> Dict[str, Any]:
             if lines:
                 label_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    meta = _load_sam3_dataset_metadata_impl(dataset_root) or {}
+    meta = load_sam3_meta_fn(dataset_root) if load_sam3_meta_fn else {}
+    if meta is None:
+        meta = {}
     meta.setdefault("id", dataset_root.name)
     meta.setdefault("label", dataset_root.name)
     meta.setdefault("source", meta.get("source") or "coco")
@@ -1420,12 +1434,17 @@ def _convert_coco_dataset_to_yolo_impl(dataset_root: Path) -> Dict[str, Any]:
     meta["dataset_root"] = str(dataset_root)
     meta["signature"] = _compute_dir_signature(dataset_root)
     meta["yolo_converted_at"] = time.time()
-    _persist_sam3_dataset_metadata_impl(dataset_root, meta)
+    if persist_meta_fn is not None:
+        persist_meta_fn(dataset_root, meta)
     return meta
 
 
 def _resolve_sam3_dataset_meta_impl(dataset_id: str) -> Dict[str, Any]:
-    dataset_root = _resolve_sam3_or_qwen_dataset_impl(dataset_id)
+    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+        dataset_id,
+        list_all_datasets_fn=_list_all_datasets_impl,
+        resolve_dataset_legacy_fn=_resolve_dataset_legacy_impl,
+    )
     annotations_path = dataset_root / "train" / "annotations.jsonl"
     train_images = dataset_root / "train" / "images"
     train_labels = dataset_root / "train" / "labels"

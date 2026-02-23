@@ -1404,11 +1404,14 @@
 
     const automationElements = {
         banner: null,
+        labelingGpuNotice: null,
     };
 
 const automationLockState = {
     active: false,
     jobs: [],
+    calibrationActive: false,
+    prepassEncodingActive: false,
 };
 
 let automationLockPollHandle = null;
@@ -1548,6 +1551,13 @@ const AUTOMATION_LOCKED_TABS = new Set([
         agentEnableSam3Similarity: null,
         agentSimilarityScoreThr: null,
         agentSimilarityMinScore: null,
+        agentSimilarityExemplarStrategy: null,
+        agentSimilarityExemplarCount: null,
+        agentSimilarityExemplarSeed: null,
+        agentSimilarityExemplarFraction: null,
+        agentSimilarityExemplarMin: null,
+        agentSimilarityExemplarMax: null,
+        agentSimilaritySourceQuota: null,
         agentSimilarityWindowMode: null,
         agentSimilarityWindowSize: null,
         agentSimilarityWindowOverlap: null,
@@ -1562,6 +1572,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         agentReviewClasses: null,
         agentReviewPasses: null,
         calibrationStatus: null,
+        calibrationProgressWrap: null,
+        calibrationProgressFill: null,
+        calibrationProgressText: null,
         calibrationDataset: null,
         calibrationDatasetRefresh: null,
         calibrationImageCount: null,
@@ -1582,9 +1595,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
         calibrationCancel: null,
         agentEnsembleJob: null,
         agentEnsembleRefresh: null,
-        agentMaxDetections: null,
+        agentFusionMode: null,
         agentIou: null,
-        agentCrossIou: null,
+        agentCrossClassDedupeEnabled: null,
+        agentCrossClassDedupeIou: null,
         agentCaptionProfile: null,
         agentCaptionModel: null,
         agentCaptionVariant: null,
@@ -1724,6 +1738,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         overlay: null,
         timerId: null,
     };
+    const calibrationProgressCallbacks = new Set();
     const CAPTION_PRESETS = [
         { id: "concise", label: "Concise scene caption", text: "Write a short caption (1-2 sentences) describing the scene and main objects." },
         { id: "context", label: "Context + setting", text: "Describe the scene, setting, and activity in one concise paragraph." },
@@ -4846,10 +4861,15 @@ function formatAutomationJobLabel(job, label) {
     const jobId = job?.job_id || job?.id || job?.jobId || job?.job || "";
     const status = job?.status ? String(job.status).toLowerCase() : "";
     const phase = job?.phase || job?.message || "";
+    const progress = Number(job?.progress);
+    const processed = Number(job?.processed);
+    const total = Number(job?.total);
     const bits = [];
     if (jobId) bits.push(jobId);
     if (status) bits.push(status);
     if (phase) bits.push(phase);
+    if (Number.isFinite(progress)) bits.push(`${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`);
+    if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) bits.push(`${processed}/${total}`);
     const suffix = bits.length ? ` (${bits.join(", ")})` : "";
     return `${label}${suffix}`;
 }
@@ -4877,9 +4897,18 @@ async function refreshAutomationLockStatus() {
         fetchAutomationJobs(`${API_ROOT}/calibration/jobs`),
     ]);
     const active = [];
+    let calibrationActive = false;
+    let prepassEncodingActive = false;
     const pushActive = (jobs, label) => {
         jobs.forEach((job) => {
             if (isAutomationJobActive(job?.status)) {
+                if (label === "Calibration") {
+                    calibrationActive = true;
+                    const phase = String(job?.phase || "").toLowerCase();
+                    if (phase === "prepass" || phase === "select_images") {
+                        prepassEncodingActive = true;
+                    }
+                }
                 active.push(formatAutomationJobLabel(job, label));
             }
         });
@@ -4892,7 +4921,33 @@ async function refreshAutomationLockStatus() {
     pushActive(calibrationJobs, "Calibration");
     automationLockState.active = active.length > 0;
     automationLockState.jobs = active;
+    automationLockState.calibrationActive = calibrationActive;
+    automationLockState.prepassEncodingActive = prepassEncodingActive;
     updateAutomationLockBanner();
+}
+
+function updateLabelingGpuLockNotice() {
+    if (!automationElements.labelingGpuNotice) {
+        return;
+    }
+    if (!automationLockState.active) {
+        automationElements.labelingGpuNotice.style.display = "none";
+        return;
+    }
+    const message = automationLockState.prepassEncodingActive
+        ? "Prepass encoding is running. GPU-heavy labeling actions are locked until encoding/calibration completes."
+        : "Training/calibration is running. GPU-heavy labeling actions are locked until backend jobs finish.";
+    automationElements.labelingGpuNotice.textContent = message;
+    automationElements.labelingGpuNotice.style.display = "block";
+}
+
+function refreshAutomationSensitiveControls() {
+    updateQwenRunButton();
+    updateQwenCaptionButton();
+    updateQwenAgentButtons();
+    updateCalibrationButtons();
+    updateSam3TextButtons();
+    updateDetectorBatchButtons();
 }
 
 function updateAutomationLockBanner() {
@@ -4902,14 +4957,21 @@ function updateAutomationLockBanner() {
     if (!automationLockState.active) {
         automationElements.banner.style.display = "none";
         updateAutomationLockTabs();
+        updateLabelingGpuLockNotice();
+        refreshAutomationSensitiveControls();
         return;
     }
     const preview = automationLockState.jobs.slice(0, 3).join("; ");
     const extraCount = Math.max(0, automationLockState.jobs.length - 3);
     const extraSuffix = extraCount ? ` (+${extraCount} more)` : "";
-    automationElements.banner.textContent = `Automation is paused while training/calibration is running: ${preview}${extraSuffix}. Finish or cancel the job to unlock batch tabs.`;
+    const modeText = automationLockState.prepassEncodingActive
+        ? "Prepass encoding is running (heavy GPU)."
+        : "Training/calibration jobs are running (heavy GPU).";
+    automationElements.banner.textContent = `${modeText} GPU-heavy tabs and labeling actions are paused: ${preview}${extraSuffix}.`;
     automationElements.banner.style.display = "block";
     updateAutomationLockTabs();
+    updateLabelingGpuLockNotice();
+    refreshAutomationSensitiveControls();
 }
 
 function startAutomationLockPolling() {
@@ -4919,7 +4981,7 @@ function startAutomationLockPolling() {
     refreshAutomationLockStatus().catch(() => {});
     automationLockPollHandle = setInterval(() => {
         refreshAutomationLockStatus().catch(() => {});
-    }, 10000);
+    }, 3000);
 }
 
 function updateAutomationLockTabs() {
@@ -4930,7 +4992,7 @@ function updateAutomationLockTabs() {
         if (shouldLock) {
             button.classList.add("tab-button--locked");
             button.disabled = true;
-            button.title = "Unavailable while training or calibration is running.";
+            button.title = "Unavailable while training, prepass encoding, or calibration is running.";
         } else {
             button.classList.remove("tab-button--locked");
             button.disabled = false;
@@ -4948,7 +5010,7 @@ function updateAutomationLockTabs() {
             if (!banner) {
                 banner = document.createElement("div");
                 banner.className = "automation-lock-panel";
-                banner.textContent = "This tab is locked while training or calibration runs. Finish or cancel the active job to unlock.";
+                banner.textContent = "This tab is locked while training/prepass/calibration runs. Finish or cancel the active job to unlock.";
                 panel.prepend(banner);
             }
             banner.style.display = "block";
@@ -4962,7 +5024,9 @@ function ensureAutomationAvailable(actionLabel) {
     if (!automationLockState.active) {
         return true;
     }
-    const extra = actionLabel ? `${actionLabel} is unavailable while training runs.` : "Automation is unavailable while training runs.";
+    const extra = actionLabel
+        ? `${actionLabel} is unavailable while training/prepass/calibration runs.`
+        : "Automation is unavailable while training/prepass/calibration runs.";
     setSamStatus(extra, { variant: "warn", duration: 4000 });
     enqueueTaskNotice(extra, { durationMs: 5000 });
     return false;
@@ -14872,6 +14936,13 @@ function initQwenTrainingTab() {
         qwenElements.agentEnableSam3Similarity = document.getElementById("qwenAgentEnableSam3Similarity");
         qwenElements.agentSimilarityScoreThr = document.getElementById("qwenAgentSimilarityScoreThr");
         qwenElements.agentSimilarityMinScore = document.getElementById("qwenAgentSimilarityMinScore");
+        qwenElements.agentSimilarityExemplarStrategy = document.getElementById("qwenAgentSimilarityExemplarStrategy");
+        qwenElements.agentSimilarityExemplarCount = document.getElementById("qwenAgentSimilarityExemplarCount");
+        qwenElements.agentSimilarityExemplarSeed = document.getElementById("qwenAgentSimilarityExemplarSeed");
+        qwenElements.agentSimilarityExemplarFraction = document.getElementById("qwenAgentSimilarityExemplarFraction");
+        qwenElements.agentSimilarityExemplarMin = document.getElementById("qwenAgentSimilarityExemplarMin");
+        qwenElements.agentSimilarityExemplarMax = document.getElementById("qwenAgentSimilarityExemplarMax");
+        qwenElements.agentSimilaritySourceQuota = document.getElementById("qwenAgentSimilaritySourceQuota");
         qwenElements.agentSimilarityWindowMode = document.getElementById("qwenAgentSimilarityWindowMode");
         qwenElements.agentSimilarityWindowSize = document.getElementById("qwenAgentSimilarityWindowSize");
         qwenElements.agentSimilarityWindowOverlap = document.getElementById("qwenAgentSimilarityWindowOverlap");
@@ -14886,6 +14957,9 @@ function initQwenTrainingTab() {
         qwenElements.agentReviewClasses = null;
         qwenElements.agentReviewPasses = null;
         qwenElements.calibrationStatus = document.getElementById("qwenCalibrationStatus");
+        qwenElements.calibrationProgressWrap = document.getElementById("qwenCalibrationProgressWrap");
+        qwenElements.calibrationProgressFill = document.getElementById("qwenCalibrationProgressFill");
+        qwenElements.calibrationProgressText = document.getElementById("qwenCalibrationProgressText");
         qwenElements.calibrationDataset = document.getElementById("qwenCalibrationDataset");
         qwenElements.calibrationDatasetRefresh = document.getElementById("qwenCalibrationDatasetRefresh");
         qwenElements.calibrationImageCount = document.getElementById("qwenCalibrationImageCount");
@@ -14904,15 +14978,20 @@ function initQwenTrainingTab() {
         qwenElements.calibrationSupportIou = document.getElementById("qwenCalibrationSupportIou");
         qwenElements.calibrationRun = document.getElementById("qwenCalibrationRun");
         qwenElements.calibrationCancel = document.getElementById("qwenCalibrationCancel");
+        onCalibrationProgress((job) => {
+            updateCalibrationProgressUi(job);
+        });
+        updateCalibrationProgressUi(null);
         qwenElements.agentEnsembleJob = document.getElementById("qwenAgentEnsembleJob");
         qwenElements.agentEnsembleRefresh = document.getElementById("qwenAgentEnsembleRefresh");
         qwenElements.agentDetectorRefresh = document.getElementById("qwenAgentDetectorRefresh");
         qwenElements.agentClassifierId = document.getElementById("qwenAgentClassifierId");
         qwenElements.agentClassifierRefresh = document.getElementById("qwenAgentClassifierRefresh");
         qwenElements.agentSamVariant = document.getElementById("qwenAgentSamVariant");
-        qwenElements.agentMaxDetections = document.getElementById("qwenAgentMaxDetections");
+        qwenElements.agentFusionMode = document.getElementById("qwenAgentFusionMode");
         qwenElements.agentIou = document.getElementById("qwenAgentIou");
-        qwenElements.agentCrossIou = document.getElementById("qwenAgentCrossIou");
+        qwenElements.agentCrossClassDedupeEnabled = document.getElementById("qwenAgentCrossClassDedupeEnabled");
+        qwenElements.agentCrossClassDedupeIou = document.getElementById("qwenAgentCrossClassDedupeIou");
         qwenElements.agentCaptionProfile = document.getElementById("qwenAgentCaptionProfile");
         qwenElements.agentCaptionModel = document.getElementById("qwenAgentCaptionModel");
         qwenElements.agentCaptionVariant = document.getElementById("qwenAgentCaptionVariant");
@@ -14971,6 +15050,43 @@ function initQwenTrainingTab() {
             };
             qwenElements.agentSam3ExpandGlossary.addEventListener("change", updateSam3GlossaryControls);
             updateSam3GlossaryControls();
+        }
+        if (qwenElements.agentSimilarityExemplarStrategy) {
+            const updateSimilarityExemplarControls = () => {
+                const strategy = String(qwenElements.agentSimilarityExemplarStrategy?.value || "top")
+                    .trim()
+                    .toLowerCase();
+                const useRandom = strategy === "random";
+                const useDiverse = strategy === "diverse";
+                if (qwenElements.agentSimilarityExemplarSeed) {
+                    qwenElements.agentSimilarityExemplarSeed.disabled = !(useRandom || useDiverse);
+                }
+                if (qwenElements.agentSimilarityExemplarCount) {
+                    qwenElements.agentSimilarityExemplarCount.disabled = useDiverse;
+                }
+                [
+                    qwenElements.agentSimilarityExemplarFraction,
+                    qwenElements.agentSimilarityExemplarMin,
+                    qwenElements.agentSimilarityExemplarMax,
+                    qwenElements.agentSimilaritySourceQuota,
+                ].forEach((el) => {
+                    if (el) {
+                        el.disabled = !useDiverse;
+                    }
+                });
+            };
+            qwenElements.agentSimilarityExemplarStrategy.addEventListener("change", updateSimilarityExemplarControls);
+            updateSimilarityExemplarControls();
+        }
+        if (qwenElements.agentCrossClassDedupeEnabled) {
+            const updateCrossClassDedupeControls = () => {
+                const enabled = !!qwenElements.agentCrossClassDedupeEnabled?.checked;
+                if (qwenElements.agentCrossClassDedupeIou) {
+                    qwenElements.agentCrossClassDedupeIou.disabled = !enabled;
+                }
+            };
+            qwenElements.agentCrossClassDedupeEnabled.addEventListener("change", updateCrossClassDedupeControls);
+            updateCrossClassDedupeControls();
         }
         if (qwenElements.agentRecipeSave) {
             qwenElements.agentRecipeSave.addEventListener("click", () => {
@@ -16796,35 +16912,43 @@ function initQwenTrainingTab() {
 
     function updateSam3TextButtons() {
         refreshSam3SimilarityVisibility();
+        const locked = isGpuHeavyLockActive();
+        const lockMessage = "GPU-heavy labeling is locked while prepass/calibration or training is active.";
         const busy = sam3TextRequestActive
             || sam3SimilarityRequestActive
             || sam3TextBatchActive
             || sam3TextCascadeActive;
-        setButtonDisabled(sam3TextElements.runButton, busy);
-        setButtonDisabled(sam3TextElements.similarityButton, busy);
-        setButtonDisabled(sam3TextElements.cascadeToggleButton, busy);
-        setButtonDisabled(sam3TextElements.cascadeAddButton, busy);
-        setButtonDisabled(sam3TextElements.cascadeRunButton, busy);
-        setButtonDisabled(sam3TextElements.cascadeClearButton, busy);
+        const blocked = busy || locked;
+        setButtonDisabled(sam3TextElements.runButton, blocked);
+        setButtonDisabled(sam3TextElements.similarityButton, blocked);
+        setButtonDisabled(sam3TextElements.cascadeToggleButton, blocked);
+        setButtonDisabled(sam3TextElements.cascadeAddButton, blocked);
+        setButtonDisabled(sam3TextElements.cascadeRunButton, blocked);
+        setButtonDisabled(sam3TextElements.cascadeClearButton, blocked);
         setButtonDisabled(sam3TextElements.cascadeStopButton, !sam3TextCascadeActive);
-        setButtonDisabled(sam3TextElements.batchRunButton, busy);
-        setButtonDisabled(sam3TextElements.batchCountInput, busy);
-        setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, busy);
+        setButtonDisabled(sam3TextElements.batchRunButton, blocked);
+        setButtonDisabled(sam3TextElements.batchCountInput, blocked);
+        setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, blocked);
         setButtonDisabled(sam3TextElements.batchStopButton, !sam3TextBatchActive);
         if (sam3TextElements.runButton) {
-            sam3TextElements.runButton.textContent = busy ? "Running…" : "Run SAM3";
+            sam3TextElements.runButton.textContent = busy ? "Running…" : (locked ? "Run SAM3 (GPU locked)" : "Run SAM3");
         }
         if (sam3TextElements.similarityButton) {
-            sam3TextElements.similarityButton.textContent = busy ? "Running…" : "SAM3 similarity prompt (use selected box(es))";
+            sam3TextElements.similarityButton.textContent = busy
+                ? "Running…"
+                : (locked ? "SAM3 similarity (GPU locked)" : "SAM3 similarity prompt (use selected box(es))");
         }
         if (sam3TextElements.batchRunButton) {
-            sam3TextElements.batchRunButton.textContent = sam3TextBatchActive ? "Running batch…" : "Run batch";
+            sam3TextElements.batchRunButton.textContent = sam3TextBatchActive ? "Running batch…" : (locked ? "Run batch (GPU locked)" : "Run batch");
         }
         if (sam3TextElements.cascadeRunButton) {
-            sam3TextElements.cascadeRunButton.textContent = sam3TextCascadeActive ? "Running cascade…" : "Run cascade";
+            sam3TextElements.cascadeRunButton.textContent = sam3TextCascadeActive ? "Running cascade…" : (locked ? "Run cascade (GPU locked)" : "Run cascade");
         }
-        if (!busy && !(sam3TextElements.status && sam3TextElements.status.textContent)) {
+        const statusText = sam3TextElements.status?.textContent || "";
+        if (!busy && !locked && (!statusText || statusText === lockMessage)) {
             setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
+        } else if (locked && !busy) {
+            setSam3TextStatus(lockMessage, "warn");
         }
     }
 
@@ -16974,7 +17098,7 @@ function initQwenTrainingTab() {
         if (!qwenElements.runButton) {
             return;
         }
-        qwenElements.runButton.disabled = !qwenAvailable || qwenRequestActive;
+        qwenElements.runButton.disabled = isGpuHeavyLockActive() || !qwenAvailable || qwenRequestActive;
         qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Use Qwen";
     }
 
@@ -16982,14 +17106,15 @@ function initQwenTrainingTab() {
         if (!qwenElements.captionRunButton) {
             return;
         }
+        const locked = isGpuHeavyLockActive();
         const busy = qwenCaptionActive || qwenCaptionBatchActive;
-        qwenElements.captionRunButton.disabled = !qwenAvailable || busy;
+        qwenElements.captionRunButton.disabled = locked || !qwenAvailable || busy;
         qwenElements.captionRunButton.textContent = qwenCaptionActive ? "Captioning…" : "Caption image";
         if (qwenElements.captionBatchRun) {
-            qwenElements.captionBatchRun.disabled = !qwenAvailable || busy;
+            qwenElements.captionBatchRun.disabled = locked || !qwenAvailable || busy;
         }
         if (qwenElements.captionBatchRunAll) {
-            qwenElements.captionBatchRunAll.disabled = !qwenAvailable || busy;
+            qwenElements.captionBatchRunAll.disabled = locked || !qwenAvailable || busy;
         }
         if (qwenElements.captionBatchCancel) {
             qwenElements.captionBatchCancel.disabled = !busy;
@@ -18382,15 +18507,66 @@ function initQwenTrainingTab() {
         qwenElements.calibrationStatus.textContent = message || "";
     }
 
+    function isGpuHeavyLockActive() {
+        return !!automationLockState.active;
+    }
+
+    function onCalibrationProgress(callback) {
+        if (typeof callback !== "function") {
+            return () => {};
+        }
+        calibrationProgressCallbacks.add(callback);
+        return () => {
+            calibrationProgressCallbacks.delete(callback);
+        };
+    }
+
+    function emitCalibrationProgress(job) {
+        calibrationProgressCallbacks.forEach((callback) => {
+            try {
+                callback(job);
+            } catch (error) {
+                console.warn("Calibration progress callback failed", error);
+            }
+        });
+    }
+
+    function updateCalibrationProgressUi(job) {
+        if (!qwenElements.calibrationProgressWrap || !qwenElements.calibrationProgressFill || !qwenElements.calibrationProgressText) {
+            return;
+        }
+        if (!job) {
+            qwenElements.calibrationProgressWrap.hidden = true;
+            qwenElements.calibrationProgressFill.style.width = "0%";
+            qwenElements.calibrationProgressText.textContent = "Waiting to start…";
+            return;
+        }
+        const progress = Number.isFinite(job.progress) ? Math.max(0, Math.min(1, Number(job.progress))) : 0;
+        const percent = Math.round(progress * 100);
+        const phase = String(job.phase || job.status || "running");
+        const message = String(job.message || phase);
+        const processed = Number.isFinite(job.processed) ? Number(job.processed) : 0;
+        const total = Number.isFinite(job.total) ? Number(job.total) : 0;
+        qwenElements.calibrationProgressWrap.hidden = false;
+        qwenElements.calibrationProgressFill.style.width = `${percent}%`;
+        qwenElements.calibrationProgressText.textContent = total > 0
+            ? `${phase}: ${message} • ${percent}% (${processed}/${total})`
+            : `${phase}: ${message} • ${percent}%`;
+    }
+
     function updateQwenAgentButtons() {
+        const locked = isGpuHeavyLockActive();
         if (qwenElements.agentRunButton) {
-            qwenElements.agentRunButton.disabled = !qwenAvailable || qwenAgentActive || !currentImage;
+            qwenElements.agentRunButton.disabled = locked || !qwenAvailable || qwenAgentActive || !currentImage;
         }
         if (qwenElements.agentStopButton) {
             qwenElements.agentStopButton.disabled = !qwenAgentActive;
         }
         if (qwenElements.prepassRunButton) {
-            qwenElements.prepassRunButton.disabled = !qwenAvailable || qwenAgentActive || !currentImage;
+            qwenElements.prepassRunButton.disabled = locked || !qwenAvailable || qwenAgentActive || !currentImage;
+        }
+        if (qwenElements.prepassBatchRun) {
+            qwenElements.prepassBatchRun.disabled = locked || !qwenAvailable || qwenAgentActive;
         }
         if (qwenElements.prepassStopButton) {
             qwenElements.prepassStopButton.disabled = !qwenAgentActive;
@@ -18400,7 +18576,7 @@ function initQwenTrainingTab() {
     function updateCalibrationButtons() {
         const running = !!qwenCalibrationState.jobId;
         if (qwenElements.calibrationRun) {
-            qwenElements.calibrationRun.disabled = running || !qwenAvailable;
+            qwenElements.calibrationRun.disabled = running || !qwenAvailable || isGpuHeavyLockActive();
         }
         if (qwenElements.calibrationCancel) {
             qwenElements.calibrationCancel.disabled = !running;
@@ -18446,6 +18622,68 @@ function initQwenTrainingTab() {
         return pick;
     }
 
+    function normalizeSimilarityExemplarStrategy(rawStrategy) {
+        const strategy = String(rawStrategy || "top").trim().toLowerCase();
+        if (strategy === "top" || strategy === "random" || strategy === "diverse") {
+            return strategy;
+        }
+        return "top";
+    }
+
+    function canonicalizeSimilarityExemplarConfig({
+        strategy,
+        count,
+        seed,
+        fraction,
+        minCount,
+        maxCount,
+        sourceQuota,
+    }) {
+        const strategyNorm = normalizeSimilarityExemplarStrategy(strategy);
+        const useDiverse = strategyNorm === "diverse";
+        const useRandom = strategyNorm === "random";
+        return {
+            strategy: strategyNorm,
+            count: !useDiverse && Number.isFinite(count) ? count : null,
+            seed: (useRandom || useDiverse) && Number.isFinite(seed) ? seed : null,
+            fraction: useDiverse && Number.isFinite(fraction) ? fraction : null,
+            minCount: useDiverse && Number.isFinite(minCount) ? minCount : null,
+            maxCount: useDiverse && Number.isFinite(maxCount) ? maxCount : null,
+            sourceQuota: useDiverse && Number.isFinite(sourceQuota) ? sourceQuota : null,
+        };
+    }
+
+    function canonicalizeCrossClassDedupeConfig(enabled, iou) {
+        const dedupeEnabled = !!enabled;
+        let dedupeIou = null;
+        if (dedupeEnabled) {
+            dedupeIou = Number.isFinite(iou) ? iou : 0.8;
+            dedupeIou = Math.max(0, Math.min(1, dedupeIou));
+            if (dedupeIou <= 0) {
+                return {
+                    enabled: false,
+                    iou: null,
+                };
+            }
+        }
+        return {
+            enabled: dedupeEnabled,
+            iou: dedupeIou,
+        };
+    }
+
+    function assertSupportedPrepassRecipeConfig(config) {
+        if (!config || typeof config !== "object") {
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(config, "cross_iou")) {
+            throw new Error(
+                "This recipe uses deprecated field 'cross_iou' and is no longer supported. "
+                + "Create a new recipe with current prepass controls.",
+            );
+        }
+    }
+
     async function buildQwenAgentPayload(imageName) {
         const imageRecord = images[imageName];
         if (!imageRecord) {
@@ -18475,6 +18713,22 @@ function initQwenTrainingTab() {
         const enableSam3Similarity = !!qwenElements.agentEnableSam3Similarity?.checked;
         const similarityScoreThr = parseFloat(qwenElements.agentSimilarityScoreThr?.value || "");
         const similarityMinScore = parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
+        const similarityExemplarStrategy = (qwenElements.agentSimilarityExemplarStrategy?.value || "top").trim();
+        const similarityExemplarCount = parseInt(qwenElements.agentSimilarityExemplarCount?.value || "", 10);
+        const similarityExemplarSeed = parseInt(qwenElements.agentSimilarityExemplarSeed?.value || "", 10);
+        const similarityExemplarFraction = parseFloat(qwenElements.agentSimilarityExemplarFraction?.value || "");
+        const similarityExemplarMin = parseInt(qwenElements.agentSimilarityExemplarMin?.value || "", 10);
+        const similarityExemplarMax = parseInt(qwenElements.agentSimilarityExemplarMax?.value || "", 10);
+        const similaritySourceQuota = parseInt(qwenElements.agentSimilaritySourceQuota?.value || "", 10);
+        const similarityExemplarConfig = canonicalizeSimilarityExemplarConfig({
+            strategy: similarityExemplarStrategy,
+            count: similarityExemplarCount,
+            seed: similarityExemplarSeed,
+            fraction: similarityExemplarFraction,
+            minCount: similarityExemplarMin,
+            maxCount: similarityExemplarMax,
+            sourceQuota: similaritySourceQuota,
+        });
         const similarityWindowMode = (qwenElements.agentSimilarityWindowMode?.value || "grid").trim();
         const similarityWindowSize = parseInt(qwenElements.agentSimilarityWindowSize?.value || "", 10);
         const similarityWindowOverlap = parseFloat(qwenElements.agentSimilarityWindowOverlap?.value || "");
@@ -18485,9 +18739,14 @@ function initQwenTrainingTab() {
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
         const ensembleJobId = (qwenElements.agentEnsembleJob?.value || "").trim();
         const samVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
-        const maxDetections = parseInt(qwenElements.agentMaxDetections?.value || "800", 10);
+        const fusionMode = (qwenElements.agentFusionMode?.value || "primary").trim();
         const iou = parseFloat(qwenElements.agentIou?.value || "0.75");
-        const crossIouRaw = (qwenElements.agentCrossIou?.value || "").trim();
+        const crossClassDedupeEnabled = !!qwenElements.agentCrossClassDedupeEnabled?.checked;
+        const crossClassDedupeIou = parseFloat(qwenElements.agentCrossClassDedupeIou?.value || "");
+        const crossClassConfig = canonicalizeCrossClassDedupeConfig(
+            crossClassDedupeEnabled,
+            crossClassDedupeIou,
+        );
         const captionProfile = (qwenElements.agentCaptionProfile?.value || "light").trim();
         const captionVariant = (qwenElements.agentCaptionVariant?.value || "").trim();
         const captionMaxTokens = parseInt(qwenElements.agentCaptionMaxTokens?.value || "", 10);
@@ -18533,6 +18792,13 @@ function initQwenTrainingTab() {
                 : (Number.isFinite(sam3ScoreThr) ? sam3ScoreThr : null),
             prepass_similarity_score: Number.isFinite(similarityScoreThr) ? similarityScoreThr : null,
             similarity_min_exemplar_score: Number.isFinite(similarityMinScore) ? similarityMinScore : null,
+            similarity_exemplar_strategy: similarityExemplarConfig.strategy,
+            similarity_exemplar_count: similarityExemplarConfig.count,
+            similarity_exemplar_seed: similarityExemplarConfig.seed,
+            similarity_exemplar_fraction: similarityExemplarConfig.fraction,
+            similarity_exemplar_min: similarityExemplarConfig.minCount,
+            similarity_exemplar_max: similarityExemplarConfig.maxCount,
+            similarity_exemplar_source_quota: similarityExemplarConfig.sourceQuota,
             similarity_window_mode: similarityWindowMode || "grid",
             similarity_window_size: Number.isFinite(similarityWindowSize) ? similarityWindowSize : null,
             similarity_window_overlap: Number.isFinite(similarityWindowOverlap) ? similarityWindowOverlap : null,
@@ -18540,9 +18806,10 @@ function initQwenTrainingTab() {
             grid_cols: Number.isFinite(gridCols) ? gridCols : null,
             grid_rows: Number.isFinite(gridRows) ? gridRows : null,
             grid_overlap_ratio: Number.isFinite(gridOverlap) ? gridOverlap : null,
-            max_detections: Number.isFinite(maxDetections) ? maxDetections : 800,
-            iou: Number.isFinite(iou) ? iou : 0.5,
-            cross_iou: crossIouRaw ? parseFloat(crossIouRaw) : null,
+            fusion_mode: fusionMode || "primary",
+            iou: Number.isFinite(iou) ? iou : 0.75,
+            cross_class_dedupe_enabled: crossClassConfig.enabled,
+            cross_class_dedupe_iou: crossClassConfig.iou,
             prepass_caption_profile: captionProfile || null,
             prepass_caption_variant: captionVariant || null,
             prepass_caption_model_id: resolveCaptionModelId(),
@@ -18576,6 +18843,22 @@ function initQwenTrainingTab() {
         const enableSam3Similarity = !!qwenElements.agentEnableSam3Similarity?.checked;
         const similarityScoreThr = parseFloat(qwenElements.agentSimilarityScoreThr?.value || "");
         const similarityMinScore = parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
+        const similarityExemplarStrategy = (qwenElements.agentSimilarityExemplarStrategy?.value || "top").trim();
+        const similarityExemplarCount = parseInt(qwenElements.agentSimilarityExemplarCount?.value || "", 10);
+        const similarityExemplarSeed = parseInt(qwenElements.agentSimilarityExemplarSeed?.value || "", 10);
+        const similarityExemplarFraction = parseFloat(qwenElements.agentSimilarityExemplarFraction?.value || "");
+        const similarityExemplarMin = parseInt(qwenElements.agentSimilarityExemplarMin?.value || "", 10);
+        const similarityExemplarMax = parseInt(qwenElements.agentSimilarityExemplarMax?.value || "", 10);
+        const similaritySourceQuota = parseInt(qwenElements.agentSimilaritySourceQuota?.value || "", 10);
+        const similarityExemplarConfig = canonicalizeSimilarityExemplarConfig({
+            strategy: similarityExemplarStrategy,
+            count: similarityExemplarCount,
+            seed: similarityExemplarSeed,
+            fraction: similarityExemplarFraction,
+            minCount: similarityExemplarMin,
+            maxCount: similarityExemplarMax,
+            sourceQuota: similaritySourceQuota,
+        });
         const similarityWindowMode = (qwenElements.agentSimilarityWindowMode?.value || "grid").trim();
         const similarityWindowSize = parseInt(qwenElements.agentSimilarityWindowSize?.value || "", 10);
         const similarityWindowOverlap = parseFloat(qwenElements.agentSimilarityWindowOverlap?.value || "");
@@ -18586,15 +18869,21 @@ function initQwenTrainingTab() {
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
         const ensembleJobId = (qwenElements.agentEnsembleJob?.value || "").trim();
         const samVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
-        const maxDetections = parseInt(qwenElements.agentMaxDetections?.value || "800", 10);
+        const fusionMode = (qwenElements.agentFusionMode?.value || "primary").trim();
         const iou = parseFloat(qwenElements.agentIou?.value || "0.75");
-        const crossIouRaw = (qwenElements.agentCrossIou?.value || "").trim();
+        const crossClassDedupeEnabled = !!qwenElements.agentCrossClassDedupeEnabled?.checked;
+        const crossClassDedupeIou = parseFloat(qwenElements.agentCrossClassDedupeIou?.value || "");
+        const crossClassConfig = canonicalizeCrossClassDedupeConfig(
+            crossClassDedupeEnabled,
+            crossClassDedupeIou,
+        );
         const captionProfile = (qwenElements.agentCaptionProfile?.value || "light").trim();
         const captionVariant = (qwenElements.agentCaptionVariant?.value || "").trim();
         const captionMaxTokens = parseInt(qwenElements.agentCaptionMaxTokens?.value || "", 10);
         const tightenFp = !!qwenElements.agentTightenFp?.checked;
         const detectorConf = parseFloat(qwenElements.agentDetectorConf?.value || "");
         const sam3ScoreThr = parseFloat(qwenElements.agentSam3ScoreThr?.value || "");
+        const sam3TextScoreThr = parseFloat(qwenElements.agentSam3TextScoreThr?.value || "");
         const sam3MaskThr = parseFloat(qwenElements.agentSam3MaskThr?.value || "");
         const classifierMinProb = parseFloat(qwenElements.agentClassifierMinProb?.value || "");
         const classifierMargin = parseFloat(qwenElements.agentClassifierMargin?.value || "");
@@ -18630,6 +18919,13 @@ function initQwenTrainingTab() {
                 : (Number.isFinite(sam3ScoreThr) ? sam3ScoreThr : null),
             prepass_similarity_score: Number.isFinite(similarityScoreThr) ? similarityScoreThr : null,
             similarity_min_exemplar_score: Number.isFinite(similarityMinScore) ? similarityMinScore : null,
+            similarity_exemplar_strategy: similarityExemplarConfig.strategy,
+            similarity_exemplar_count: similarityExemplarConfig.count,
+            similarity_exemplar_seed: similarityExemplarConfig.seed,
+            similarity_exemplar_fraction: similarityExemplarConfig.fraction,
+            similarity_exemplar_min: similarityExemplarConfig.minCount,
+            similarity_exemplar_max: similarityExemplarConfig.maxCount,
+            similarity_exemplar_source_quota: similarityExemplarConfig.sourceQuota,
             similarity_window_mode: similarityWindowMode || "grid",
             similarity_window_size: Number.isFinite(similarityWindowSize) ? similarityWindowSize : null,
             similarity_window_overlap: Number.isFinite(similarityWindowOverlap) ? similarityWindowOverlap : null,
@@ -18637,9 +18933,10 @@ function initQwenTrainingTab() {
             grid_cols: Number.isFinite(gridCols) ? gridCols : null,
             grid_rows: Number.isFinite(gridRows) ? gridRows : null,
             grid_overlap_ratio: Number.isFinite(gridOverlap) ? gridOverlap : null,
-            max_detections: Number.isFinite(maxDetections) ? maxDetections : 800,
-            iou: Number.isFinite(iou) ? iou : 0.5,
-            cross_iou: crossIouRaw ? parseFloat(crossIouRaw) : null,
+            fusion_mode: fusionMode || "primary",
+            iou: Number.isFinite(iou) ? iou : 0.75,
+            cross_class_dedupe_enabled: crossClassConfig.enabled,
+            cross_class_dedupe_iou: crossClassConfig.iou,
             prepass_caption_profile: captionProfile || null,
             prepass_caption_variant: captionVariant || null,
             prepass_caption_model_id: resolveCaptionModelId(),
@@ -18686,11 +18983,37 @@ function initQwenTrainingTab() {
         const sam3TextWindowOverlap = parseFloat(qwenElements.agentSam3TextWindowOverlap?.value || "");
         const simScore = parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
         const simScoreThr = parseFloat(qwenElements.agentSimilarityScoreThr?.value || "");
+        const similarityExemplarStrategy = (qwenElements.agentSimilarityExemplarStrategy?.value || "top").trim();
+        const similarityExemplarCount = parseInt(qwenElements.agentSimilarityExemplarCount?.value || "", 10);
+        const similarityExemplarSeed = parseInt(qwenElements.agentSimilarityExemplarSeed?.value || "", 10);
+        const similarityExemplarFraction = parseFloat(qwenElements.agentSimilarityExemplarFraction?.value || "");
+        const similarityExemplarMin = parseInt(qwenElements.agentSimilarityExemplarMin?.value || "", 10);
+        const similarityExemplarMax = parseInt(qwenElements.agentSimilarityExemplarMax?.value || "", 10);
+        const similaritySourceQuota = parseInt(qwenElements.agentSimilaritySourceQuota?.value || "", 10);
+        const similarityExemplarConfig = canonicalizeSimilarityExemplarConfig({
+            strategy: similarityExemplarStrategy,
+            count: similarityExemplarCount,
+            seed: similarityExemplarSeed,
+            fraction: similarityExemplarFraction,
+            minCount: similarityExemplarMin,
+            maxCount: similarityExemplarMax,
+            sourceQuota: similaritySourceQuota,
+        });
+        const similarityWindowMode = (qwenElements.agentSimilarityWindowMode?.value || "grid").trim();
+        const similarityWindowSize = parseInt(qwenElements.agentSimilarityWindowSize?.value || "", 10);
+        const similarityWindowOverlap = parseFloat(qwenElements.agentSimilarityWindowOverlap?.value || "");
         const sahiWindow = parseInt(qwenElements.agentSahiWindow?.value || "", 10);
         const sahiOverlap = parseFloat(qwenElements.agentSahiOverlap?.value || "");
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
+        const fusionMode = (qwenElements.agentFusionMode?.value || "primary").trim();
         const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
         const similarityWindowExtension = !!qwenElements.agentSimilarityWindowExtension?.checked;
+        const crossClassDedupeEnabled = !!qwenElements.agentCrossClassDedupeEnabled?.checked;
+        const crossClassDedupeIou = parseFloat(qwenElements.agentCrossClassDedupeIou?.value || "");
+        const crossClassConfig = canonicalizeCrossClassDedupeConfig(
+            crossClassDedupeEnabled,
+            crossClassDedupeIou,
+        );
         return {
             dataset_id: datasetId,
             max_images: Number.isFinite(imageCount) ? imageCount : 2000,
@@ -18713,14 +19036,27 @@ function initQwenTrainingTab() {
                 : (Number.isFinite(sam3Score) ? sam3Score : null),
             prepass_similarity_score: Number.isFinite(simScoreThr) ? simScoreThr : null,
             similarity_min_exemplar_score: Number.isFinite(simScore) ? simScore : null,
+            similarity_exemplar_strategy: similarityExemplarConfig.strategy,
+            similarity_exemplar_count: similarityExemplarConfig.count,
+            similarity_exemplar_seed: similarityExemplarConfig.seed,
+            similarity_exemplar_fraction: similarityExemplarConfig.fraction,
+            similarity_exemplar_min: similarityExemplarConfig.minCount,
+            similarity_exemplar_max: similarityExemplarConfig.maxCount,
+            similarity_exemplar_source_quota: similarityExemplarConfig.sourceQuota,
             similarity_window_extension: similarityWindowExtension,
+            similarity_window_mode: similarityWindowMode || "grid",
+            similarity_window_size: Number.isFinite(similarityWindowSize) ? similarityWindowSize : null,
+            similarity_window_overlap: Number.isFinite(similarityWindowOverlap) ? similarityWindowOverlap : null,
             sahi_window_size: Number.isFinite(sahiWindow) ? sahiWindow : null,
             sahi_overlap_ratio: Number.isFinite(sahiOverlap) ? sahiOverlap : null,
             classifier_id: classifierId,
             label_iou: Number.isFinite(labelIou) ? labelIou : null,
             eval_iou: Number.isFinite(evalIou) ? evalIou : null,
             eval_iou_grid: evalIouGrid || null,
+            fusion_mode: fusionMode || "primary",
             dedupe_iou: Number.isFinite(dedupeIou) ? dedupeIou : null,
+            cross_class_dedupe_enabled: crossClassConfig.enabled,
+            cross_class_dedupe_iou: crossClassConfig.iou,
             dedupe_iou_grid: dedupeIouGrid || null,
             support_iou: Number.isFinite(supportIou) ? supportIou : null,
         };
@@ -18728,6 +19064,10 @@ function initQwenTrainingTab() {
 
     async function startCalibrationJob() {
         if (qwenCalibrationState.jobId) {
+            return;
+        }
+        if (isGpuHeavyLockActive()) {
+            setSamStatus("Calibration is locked while another heavy backend job is active.", { variant: "warn", duration: 3500 });
             return;
         }
         if (!qwenAvailable) {
@@ -18742,6 +19082,13 @@ function initQwenTrainingTab() {
             return;
         }
         setCalibrationStatus("Starting…");
+        updateCalibrationProgressUi({
+            progress: 0,
+            phase: "queue",
+            message: "Submitting calibration job",
+            processed: 0,
+            total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
+        });
         updateCalibrationButtons();
         try {
             const resp = await fetch(`${API_ROOT}/calibration/jobs`, {
@@ -18756,11 +19103,20 @@ function initQwenTrainingTab() {
             const job = await resp.json();
             qwenCalibrationState.jobId = job.job_id;
             qwenCalibrationState.overlay = showProgressModal("Calibration starting…");
+            refreshAutomationLockStatus().catch(() => {});
+            emitCalibrationProgress({
+                progress: 0,
+                phase: "queue",
+                message: "Calibration job queued",
+                processed: 0,
+                total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
+            });
             setCalibrationStatus("Running");
             updateCalibrationButtons();
             pollCalibrationJob();
         } catch (error) {
             setCalibrationStatus("Error");
+            emitCalibrationProgress(null);
             updateCalibrationButtons();
             setSamStatus(`Calibration error: ${error.message || error}`, { variant: "error", duration: 5000 });
         }
@@ -18829,6 +19185,33 @@ function initQwenTrainingTab() {
         setValue(qwenElements.agentSam3SynBudget, config.sam3_text_synonym_budget ?? "");
         setValue(qwenElements.agentSimilarityScoreThr, config.prepass_similarity_score ?? "");
         setValue(qwenElements.agentSimilarityMinScore, config.similarity_min_exemplar_score ?? "");
+        setValue(qwenElements.agentSimilarityExemplarStrategy, config.similarity_exemplar_strategy ?? "top");
+        setValue(qwenElements.agentSimilarityExemplarCount, config.similarity_exemplar_count ?? 3);
+        setValue(qwenElements.agentSimilarityExemplarSeed, config.similarity_exemplar_seed ?? 0);
+        setValue(qwenElements.agentSimilarityExemplarFraction, config.similarity_exemplar_fraction ?? 0.2);
+        setValue(qwenElements.agentSimilarityExemplarMin, config.similarity_exemplar_min ?? 3);
+        setValue(qwenElements.agentSimilarityExemplarMax, config.similarity_exemplar_max ?? 12);
+        setValue(qwenElements.agentSimilaritySourceQuota, config.similarity_exemplar_source_quota ?? 1);
+        if (qwenElements.agentSimilarityExemplarStrategy && qwenElements.agentSimilarityExemplarSeed) {
+            const strategy = String(qwenElements.agentSimilarityExemplarStrategy.value || "top")
+                .trim()
+                .toLowerCase();
+            const useDiverse = strategy === "diverse";
+            qwenElements.agentSimilarityExemplarSeed.disabled = !(strategy === "random" || useDiverse);
+            if (qwenElements.agentSimilarityExemplarCount) {
+                qwenElements.agentSimilarityExemplarCount.disabled = useDiverse;
+            }
+            [
+                qwenElements.agentSimilarityExemplarFraction,
+                qwenElements.agentSimilarityExemplarMin,
+                qwenElements.agentSimilarityExemplarMax,
+                qwenElements.agentSimilaritySourceQuota,
+            ].forEach((el) => {
+                if (el) {
+                    el.disabled = !useDiverse;
+                }
+            });
+        }
         setValue(qwenElements.agentSimilarityWindowMode, config.similarity_window_mode ?? "grid");
         setValue(qwenElements.agentSimilarityWindowSize, config.similarity_window_size ?? "");
         setValue(qwenElements.agentSimilarityWindowOverlap, config.similarity_window_overlap ?? "");
@@ -18839,9 +19222,20 @@ function initQwenTrainingTab() {
         setValue(qwenElements.agentClassifierId, config.classifier_id ?? "");
         setValue(qwenElements.agentEnsembleJob, config.ensemble_job_id ?? "");
         setValue(qwenElements.agentSamVariant, config.sam_variant ?? "sam3");
-        setValue(qwenElements.agentMaxDetections, config.max_detections ?? 800);
+        setValue(qwenElements.agentFusionMode, config.fusion_mode ?? "primary");
         setValue(qwenElements.agentIou, config.iou ?? 0.75);
-        setValue(qwenElements.agentCrossIou, config.cross_iou ?? "");
+        setChecked(
+            qwenElements.agentCrossClassDedupeEnabled,
+            !!config.cross_class_dedupe_enabled,
+        );
+        setValue(
+            qwenElements.agentCrossClassDedupeIou,
+            config.cross_class_dedupe_iou ?? 0.8,
+        );
+        if (qwenElements.agentCrossClassDedupeEnabled && qwenElements.agentCrossClassDedupeIou) {
+            qwenElements.agentCrossClassDedupeIou.disabled =
+                !qwenElements.agentCrossClassDedupeEnabled.checked;
+        }
         setValue(qwenElements.agentCaptionProfile, config.prepass_caption_profile ?? "light");
         setValue(qwenElements.agentCaptionVariant, config.prepass_caption_variant ?? "auto");
         setValue(qwenElements.agentCaptionMaxTokens, config.prepass_caption_max_tokens ?? "");
@@ -18904,6 +19298,7 @@ function initQwenTrainingTab() {
         }
         try {
             const data = await fetchPrepassRecipe(recipeId);
+            assertSupportedPrepassRecipeConfig(data.config);
             qwenElements.agentRecipeName.value = data.name || "";
             qwenElements.agentRecipeDescription.value = data.description || "";
             applyPrepassRecipeConfig(data.config || {}, data.glossary || "");
@@ -18921,6 +19316,7 @@ function initQwenTrainingTab() {
         }
         try {
             const data = await fetchPrepassRecipe(recipeId);
+            assertSupportedPrepassRecipeConfig(data.config);
             if (qwenElements.agentRecipeSelect) {
                 qwenElements.agentRecipeSelect.value = recipeId;
             }
@@ -19001,15 +19397,16 @@ function initQwenTrainingTab() {
                     throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
                 }
                 const job = await resp.json();
-                const percent = Math.round((job.progress || 0) * 100);
                 const processed = Number.isFinite(job.processed) ? job.processed : 0;
                 const total = Number.isFinite(job.total) ? job.total : 0;
                 const phase = job.phase || job.status || "running";
                 const message = job.message || phase;
+                emitCalibrationProgress(job);
                 if (qwenCalibrationState.overlay) {
-                    qwenCalibrationState.overlay.update(
-                        `Calibration ${message} — ${percent}% (${processed}/${total})`
-                    );
+                    const detail = total > 0
+                        ? `Calibration ${phase}: ${message} (${processed}/${total})`
+                        : `Calibration ${phase}: ${message}`;
+                    qwenCalibrationState.overlay.update(detail, (Number.isFinite(job.progress) ? job.progress : 0));
                 }
                 if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
                     if (qwenCalibrationState.overlay) {
@@ -19020,6 +19417,8 @@ function initQwenTrainingTab() {
                         qwenCalibrationState.timerId = null;
                     }
                     qwenCalibrationState.jobId = null;
+                    emitCalibrationProgress(null);
+                    refreshAutomationLockStatus().catch(() => {});
                     setCalibrationStatus(job.status === "completed" ? "Done" : job.status);
                     updateCalibrationButtons();
                     if (job.status === "completed") {
@@ -19029,8 +19428,15 @@ function initQwenTrainingTab() {
                     }
                 }
             } catch (error) {
+                emitCalibrationProgress({
+                    progress: 0,
+                    phase: "error",
+                    message: `Calibration status error: ${error.message || error}`,
+                    processed: 0,
+                    total: 0,
+                });
                 if (qwenCalibrationState.overlay) {
-                    qwenCalibrationState.overlay.update(`Calibration status error: ${error.message || error}`);
+                    qwenCalibrationState.overlay.update(`Calibration status error: ${error.message || error}`, 0);
                 }
             }
         }, 3000);
@@ -19043,6 +19449,7 @@ function initQwenTrainingTab() {
         try {
             await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(qwenCalibrationState.jobId)}/cancel`, { method: "POST" });
             setCalibrationStatus("Cancel requested");
+            refreshAutomationLockStatus().catch(() => {});
         } catch (error) {
             setSamStatus(`Cancel failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         }
@@ -23955,6 +24362,7 @@ function initQwenTrainingTab() {
         polygonSimplifyInput = document.getElementById("polygonSimplifyEpsilon");
         polygonSimplifyField = document.getElementById("polygonSimplifyField");
         automationElements.banner = document.getElementById("automationLockBanner");
+        automationElements.labelingGpuNotice = document.getElementById("labelingGpuLockNotice");
         imagesSelectButton = document.getElementById("imagesSelect");
         classesSelectButton = document.getElementById("classesSelect");
         bboxesSelectButton = document.getElementById("bboxesSelect");
@@ -24583,23 +24991,24 @@ function initQwenTrainingTab() {
     }
 
     function updateDetectorBatchButtons() {
+        const locked = isGpuHeavyLockActive();
         if (detectorRunButton) {
-            detectorRunButton.disabled = detectorBatchActive;
+            detectorRunButton.disabled = detectorBatchActive || locked;
         }
         if (detectorBatchRunButton) {
-            detectorBatchRunButton.disabled = detectorBatchActive;
+            detectorBatchRunButton.disabled = detectorBatchActive || locked;
         }
         if (detectorBatchAllButton) {
-            detectorBatchAllButton.disabled = detectorBatchActive;
+            detectorBatchAllButton.disabled = detectorBatchActive || locked;
         }
         if (detectorBatchStopButton) {
             detectorBatchStopButton.disabled = !detectorBatchActive;
         }
         if (detectorBatchCountInput) {
-            detectorBatchCountInput.disabled = detectorBatchActive;
+            detectorBatchCountInput.disabled = detectorBatchActive || locked;
         }
         if (detectorBatchIncludeCurrentToggle) {
-            detectorBatchIncludeCurrentToggle.disabled = detectorBatchActive;
+            detectorBatchIncludeCurrentToggle.disabled = detectorBatchActive || locked;
         }
     }
 
@@ -28507,7 +28916,7 @@ function initQwenTrainingTab() {
         return result;
     }
 
-    // Enhanced showProgressModal that can update text
+    // Enhanced progress modal with status text + determinate bar.
     function showProgressModal(initialText = "") {
         const overlay = document.createElement("div");
         overlay.style.position = "fixed";
@@ -28522,21 +28931,81 @@ function initQwenTrainingTab() {
         overlay.style.justifyContent = "center";
         overlay.style.flexDirection = "column";
 
+        const card = document.createElement("div");
+        card.style.minWidth = "420px";
+        card.style.maxWidth = "min(92vw, 720px)";
+        card.style.background = "#111827";
+        card.style.border = "1px solid rgba(148, 163, 184, 0.35)";
+        card.style.borderRadius = "12px";
+        card.style.padding = "16px";
+        card.style.boxShadow = "0 16px 40px rgba(2, 6, 23, 0.5)";
+
         const textDiv = document.createElement("div");
-        textDiv.style.color = "#fff";
-        textDiv.style.fontSize = "20px";
+        textDiv.style.color = "#f8fafc";
+        textDiv.style.fontSize = "16px";
+        textDiv.style.fontWeight = "600";
         textDiv.style.marginBottom = "10px";
         textDiv.textContent = initialText;
 
-        overlay.appendChild(textDiv);
+        const progressWrap = document.createElement("div");
+        progressWrap.style.width = "100%";
+        progressWrap.style.height = "10px";
+        progressWrap.style.borderRadius = "999px";
+        progressWrap.style.background = "rgba(59, 130, 246, 0.25)";
+        progressWrap.style.overflow = "hidden";
+        progressWrap.style.marginBottom = "8px";
+
+        const progressFill = document.createElement("div");
+        progressFill.style.width = "0%";
+        progressFill.style.height = "100%";
+        progressFill.style.borderRadius = "999px";
+        progressFill.style.background = "linear-gradient(90deg, #3b82f6 0%, #38bdf8 100%)";
+        progressFill.style.transition = "width 0.25s ease";
+        progressWrap.appendChild(progressFill);
+
+        const percentDiv = document.createElement("div");
+        percentDiv.style.color = "#93c5fd";
+        percentDiv.style.fontSize = "12px";
+        percentDiv.textContent = "0%";
+
+        card.appendChild(textDiv);
+        card.appendChild(progressWrap);
+        card.appendChild(percentDiv);
+        overlay.appendChild(card);
         document.body.appendChild(overlay);
 
+        const setProgress = (value) => {
+            const clamped = Number.isFinite(value) ? Math.max(0, Math.min(1, Number(value))) : 0;
+            const pct = Math.round(clamped * 100);
+            progressFill.style.width = `${pct}%`;
+            percentDiv.textContent = `${pct}%`;
+        };
+
+        setProgress(0);
+
         return {
-            update(msg) {
-                textDiv.textContent = msg;
+            update(msg, progress = null) {
+                if (msg && typeof msg === "object") {
+                    const payload = msg;
+                    if (typeof payload.message === "string") {
+                        textDiv.textContent = payload.message;
+                    }
+                    if (Number.isFinite(payload.progress)) {
+                        setProgress(payload.progress);
+                    }
+                    return;
+                }
+                if (msg !== undefined && msg !== null) {
+                    textDiv.textContent = String(msg);
+                }
+                if (Number.isFinite(progress)) {
+                    setProgress(progress);
+                }
             },
             close() {
-                document.body.removeChild(overlay);
+                if (overlay.parentNode) {
+                    overlay.parentNode.removeChild(overlay);
+                }
             }
         };
     }

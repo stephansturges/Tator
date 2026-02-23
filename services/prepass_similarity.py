@@ -63,7 +63,12 @@ def _agent_run_similarity_global(
                 register=False,
             )
         except Exception as exc:  # noqa: BLE001
-            warnings.append(f"deep_prepass_similarity_failed:{label}:full:{exc}")
+            msg = str(exc)
+            if isinstance(exc, TypeError):
+                warnings.append(f"deep_prepass_similarity_type_error:{label}:full:{msg}")
+                continue
+            if "has no len" not in msg and "not supported between instances" not in msg:
+                warnings.append(f"deep_prepass_similarity_failed:{label}:full:{exc}")
             continue
         _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
         dets = list(result.get("detections") or [])
@@ -151,7 +156,16 @@ def _agent_run_similarity_expansion(
                     register=False,
                 )
             except Exception as exc:  # noqa: BLE001
-                warnings.append(f"deep_prepass_similarity_failed:{label}:{window.get('name')}:{exc}")
+                msg = str(exc)
+                if isinstance(exc, TypeError):
+                    warnings.append(
+                        f"deep_prepass_similarity_type_error:{label}:{window.get('name')}:{msg}"
+                    )
+                    continue
+                if "has no len" not in msg and "not supported between instances" not in msg:
+                    warnings.append(
+                        f"deep_prepass_similarity_failed:{label}:{window.get('name')}:{exc}"
+                    )
                 continue
             _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
             dets = list(result.get("detections") or [])

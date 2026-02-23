@@ -23,7 +23,7 @@ def _xyxy_to_qwen_bbox(width: int, height: int, x1: float, y1: float, x2: float,
 
 
 def _qwen_bbox_to_xyxy(width: int, height: int, bbox_2d: Sequence[float]) -> Tuple[float, float, float, float]:
-    if len(bbox_2d) < 4 or width <= 0 or height <= 0:
+    if not isinstance(bbox_2d, (list, tuple)) or len(bbox_2d) < 4 or width <= 0 or height <= 0:
         return 0.0, 0.0, 0.0, 0.0
     qx1, qy1, qx2, qy2 = map(float, bbox_2d[:4])
     qx1 = max(0.0, min(1000.0, qx1))
@@ -287,6 +287,18 @@ def _agent_xyxy_to_xywh(x1: float, y1: float, x2: float, y2: float) -> List[floa
     return [float(x1), float(y1), float(max(0.0, x2 - x1)), float(max(0.0, y2 - y1))]
 
 
+def _xywh_to_xyxy(bbox_xywh: Sequence[float]) -> Tuple[float, float, float, float]:
+    if len(bbox_xywh) < 4:
+        return 0.0, 0.0, 0.0, 0.0
+    try:
+        x, y, w, h = (float(bbox_xywh[0]), float(bbox_xywh[1]), float(bbox_xywh[2]), float(bbox_xywh[3]))
+    except (TypeError, ValueError):
+        return 0.0, 0.0, 0.0, 0.0
+    w = max(0.0, w)
+    h = max(0.0, h)
+    return x, y, x + w, y + h
+
+
 def _xyxy_to_yolo_norm(
     width: int,
     height: int,
@@ -353,7 +365,7 @@ def _agent_det_payload(
 
 
 def _yolo_to_xyxy(width: int, height: int, bbox: Sequence[float]) -> Tuple[float, float, float, float]:
-    if len(bbox) < 4:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
         return 0.0, 0.0, 0.0, 0.0
     cx, cy, bw, bh = map(float, bbox[:4])
     x1 = (cx - bw / 2.0) * float(width)

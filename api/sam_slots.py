@@ -1,6 +1,5 @@
 """APIRouter for SAM slot status/activation endpoints."""
 
-from __future__ import annotations
 
 from typing import Any, Callable, Type
 

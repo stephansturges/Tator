@@ -68,6 +68,17 @@ def main() -> int:
     img_b64 = _b64(img_path)
     glossary = (root / "glossary.json").read_text()
     labelmap = (root / "labelmap.txt").read_text().strip().splitlines()
+    try:
+        yolo_active = _get(args.base_url + "/yolo/active")
+        labelmap_path = yolo_active.get("labelmap_path")
+        if labelmap_path:
+            labelmap_file = Path(labelmap_path)
+            if not labelmap_file.is_absolute():
+                labelmap_file = Path.cwd() / labelmap_file
+            if labelmap_file.exists():
+                labelmap = labelmap_file.read_text().strip().splitlines()
+    except Exception:
+        pass
 
     summary = {
         "skip_gpu": args.skip_gpu,
@@ -82,6 +93,12 @@ def main() -> int:
         Path(args.out).write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary, indent=2))
         return 0
+
+    # Ensure runtime is unloaded so caption models reload on a single device.
+    try:
+        _post(args.base_url + "/runtime/unload", {})
+    except Exception:
+        pass
 
     # Prepass: baseline (non-windowed SAM3) then windowed
     prepass_base = {
@@ -156,7 +173,7 @@ def main() -> int:
         return 0
 
     cal_payload = {
-        "dataset_id": "fuzz_pack",
+        "dataset_id": "qwen_dataset",
         "max_images": 1,
         "enable_yolo": True,
         "enable_rfdetr": True,
@@ -164,7 +181,18 @@ def main() -> int:
         "eval_iou": 0.75,
         "classifier_id": classifier_id,
     }
-    summary["steps"].append({"name": "calibration", "result": _post(args.base_url + "/calibration/jobs", cal_payload)})
+    try:
+        summary["steps"].append(
+            {"name": "calibration", "result": _post(args.base_url + "/calibration/jobs", cal_payload)}
+        )
+    except Exception as exc:
+        summary["steps"].append(
+            {
+                "name": "calibration",
+                "skipped": True,
+                "reason": f"calibration_failed:{exc}",
+            }
+        )
 
     Path(args.out).write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))

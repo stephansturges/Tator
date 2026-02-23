@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Sequence
 
 from PIL import Image
@@ -9,6 +10,38 @@ from PIL import Image
 from services.prepass_grid import _agent_grid_cell_xyxy, _agent_grid_cells, _agent_grid_spec_for_payload
 from utils.coords import _resolve_agent_bbox_xyxy, _xyxy_to_qwen_bbox
 from utils.image import _slice_image_sahi
+
+
+def _window_size(value: Any, *, default: int = 640) -> int:
+    try:
+        size = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        size = default
+    if size <= 0:
+        size = default
+    return size
+
+
+def _window_overlap(value: Any, *, default: float = 0.2) -> float:
+    try:
+        overlap = float(value) if value is not None else default
+    except (TypeError, ValueError):
+        overlap = default
+    if not math.isfinite(overlap) or overlap <= 0.0 or overlap >= 1.0:
+        overlap = default
+    return overlap
+
+
+def _grid_overlap(value: Any, *, default: float) -> float:
+    if value is None:
+        return float(default)
+    try:
+        overlap = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(overlap):
+        return float(default)
+    return max(0.0, overlap)
 
 
 def _agent_similarity_windows(
@@ -21,8 +54,14 @@ def _agent_similarity_windows(
     mode = (getattr(payload, "similarity_window_mode", None) or "grid").strip().lower()
     windows: List[Dict[str, Any]] = []
     if mode == "sahi":
-        slice_size = int(getattr(payload, "similarity_window_size", None) or getattr(payload, "sahi_window_size", None) or 640)
-        overlap = float(getattr(payload, "similarity_window_overlap", None) or getattr(payload, "sahi_overlap_ratio", None) or 0.2)
+        raw_size = getattr(payload, "similarity_window_size", None)
+        if raw_size is None:
+            raw_size = getattr(payload, "sahi_window_size", None)
+        slice_size = _window_size(raw_size, default=640)
+        raw_overlap = getattr(payload, "similarity_window_overlap", None)
+        if raw_overlap is None:
+            raw_overlap = getattr(payload, "sahi_overlap_ratio", None)
+        overlap = _window_overlap(raw_overlap, default=0.2)
         _, starts = _slice_image_sahi(pil_img, slice_size, overlap)
         for idx, start in enumerate(starts):
             x1 = float(start[0])
@@ -38,7 +77,10 @@ def _agent_similarity_windows(
             )
         return windows
     grid_spec = _agent_grid_spec_for_payload(payload, img_w, img_h)
-    overlap_ratio = getattr(payload, "grid_overlap_ratio", None) or grid_overlap_ratio_default
+    overlap_ratio = _grid_overlap(
+        getattr(payload, "grid_overlap_ratio", None),
+        default=grid_overlap_ratio_default,
+    )
     for cell in _agent_grid_cells(grid_spec):
         xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=overlap_ratio)
         if not xyxy:
@@ -65,8 +107,14 @@ def _agent_sam3_text_windows(
     mode = (getattr(payload, "sam3_text_window_mode", None) or "grid").strip().lower()
     windows: List[Dict[str, Any]] = []
     if mode == "sahi":
-        slice_size = int(getattr(payload, "sam3_text_window_size", None) or getattr(payload, "sahi_window_size", None) or 640)
-        overlap = float(getattr(payload, "sam3_text_window_overlap", None) or getattr(payload, "sahi_overlap_ratio", None) or 0.2)
+        raw_size = getattr(payload, "sam3_text_window_size", None)
+        if raw_size is None:
+            raw_size = getattr(payload, "sahi_window_size", None)
+        slice_size = _window_size(raw_size, default=640)
+        raw_overlap = getattr(payload, "sam3_text_window_overlap", None)
+        if raw_overlap is None:
+            raw_overlap = getattr(payload, "sahi_overlap_ratio", None)
+        overlap = _window_overlap(raw_overlap, default=0.2)
         _, starts = _slice_image_sahi(pil_img, slice_size, overlap)
         for idx, start in enumerate(starts):
             x1 = float(start[0])
@@ -82,7 +130,10 @@ def _agent_sam3_text_windows(
             )
         return windows
     grid_spec = _agent_grid_spec_for_payload(payload, img_w, img_h)
-    overlap_ratio = getattr(payload, "grid_overlap_ratio", None) or grid_overlap_ratio_default
+    overlap_ratio = _grid_overlap(
+        getattr(payload, "grid_overlap_ratio", None),
+        default=grid_overlap_ratio_default,
+    )
     for cell in _agent_grid_cells(grid_spec):
         xyxy = _agent_grid_cell_xyxy(grid_spec, cell, overlap_ratio=overlap_ratio)
         if not xyxy:

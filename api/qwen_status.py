@@ -1,6 +1,5 @@
 """APIRouter for Qwen status and settings endpoints."""
 
-from __future__ import annotations
 
 from typing import Any, Callable, Type
 

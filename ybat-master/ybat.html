@@ -61,7 +61,7 @@
     <div id="taskQueue" class="task-queue" aria-live="polite" aria-atomic="true"></div>
     <div id="classScrollIndicator" class="class-scroll-indicator" aria-live="polite" aria-atomic="true"></div>
     <div id="automationLockBanner" class="training-help" style="display:none; margin:8px 16px 12px; padding:10px 12px; border:1px solid #f59e0b; border-radius:10px; background:#fff7ed; color:#9a3412;">
-        Automation is paused while training or calibration is running. Finish or cancel the job to unlock batch tabs.
+        Heavy backend jobs are running (training/prepass/calibration). GPU-heavy actions are paused until they finish or are cancelled.
     </div>
     <div class="tab-shell">
 	        <div class="tab-bar" role="tablist">
@@ -98,6 +98,9 @@
                             <select name="imageList" id="imageList" size="10" multiple></select>
                             <div id="imageInformation"></div>
                             <div id="datasetTypeBadge" class="training-help"></div>
+                            <div id="labelingGpuLockNotice" class="automation-lock-panel" style="display:none; margin:8px 0 10px;">
+                                GPU-heavy labeling actions are locked while prepass encoding/calibration or training is running.
+                            </div>
                             <div class="training-actions">
                                 <button type="button" id="polygonDrawToggle" class="training-button secondary" aria-pressed="true">
                                     Polygon draw: On (P)
@@ -576,11 +579,39 @@
                                     </div>
 <div class="training-help">Runs a prepass (detectors + SAM3 + dedupe + optional calibration). Uses the current labelmap or a selected dataset.</div>
                                     <details class="training-help" style="margin-bottom: 10px;">
-                                        <summary><strong>Prepass flow + defaults</strong></summary>
+                                        <summary><strong>Full Prepass Logic + Knob Map</strong></summary>
                                         <div style="margin-top: 6px;">
-                                            <div><strong>Flow:</strong> Detectors (full-frame + SAHI) → SAM3 text → Dedupe A → SAM3 similarity (global, optional windowed) → Dedupe B → Calibration (XGBoost) → Final output.</div>
-                                            <div style="margin-top: 6px;"><strong>Defaults:</strong> detector conf 0.45, SAM3 text 0.20, similarity 0.30, exemplar min 0.60, SAM3 runtime 0.20/0.20, dedupe IoU 0.75, eval IoU 0.50, scoreless IoU 0.00.</div>
-                                            <div style="margin-top: 6px;"><strong>Tip:</strong> Prepass runs deterministically; any optional review has been removed.</div>
+                                            <div><strong>Deterministic execution order</strong></div>
+                                            <ol style="margin: 6px 0 0 18px;">
+                                                <li><strong>Context setup:</strong> load dataset labelmap + glossary, selected model overrides, selected detector runs, and recipe config.</li>
+                                                <li><strong>Detector seeding:</strong> each enabled detector runs twice (full frame + SAHI windows).</li>
+                                                <li><strong>SAM3 text expansion:</strong> class prompts run on full image, plus optional windowed text pass.</li>
+                                                <li><strong>Dedupe A:</strong> same-class IoU merge + optional scoreless cleanup.</li>
+                                                <li><strong>SAM3 similarity expansion:</strong> pick exemplars per class, run global similarity, then optional windowed similarity pass.</li>
+                                                <li><strong>Dedupe B:</strong> re-merge after similarity and re-apply cleanup.</li>
+                                                <li><strong>Optional precision tightening:</strong> classifier-based rejection (if enabled).</li>
+                                                <li><strong>Optional calibration filter:</strong> apply selected XGBoost calibration job.</li>
+                                                <li><strong>Finalize/export:</strong> emit detections, provenance, and traces.</li>
+                                            </ol>
+                                            <div style="margin-top: 8px;"><strong>What clustering preserves</strong></div>
+                                            <div>Cluster winners retain full provenance: <code>source_list</code>, <code>score_by_source</code>, and atom IDs. Calibration features and metric tiers consume this evidence directly.</div>
+                                            <div style="margin-top: 8px;"><strong>Similarity exemplar policy</strong></div>
+                                            <div>Per class: candidates must pass <em>Min exemplar score</em>. Strategy controls seed selection: <code>Top score</code>, <code>Random sample</code> (seeded), or <code>Diverse</code> (score + source stratification + spatial spread with fraction/min/max/source-quota knobs).</div>
+                                            <div style="margin-top: 8px;"><strong>Prepass knobs (this panel)</strong></div>
+                                            <div><strong>Dataset + glossary:</strong> Dataset, Glossary source, Named glossary, Glossary text, Extend glossary with Qwen, Max new terms per class.</div>
+                                            <div><strong>Detectors:</strong> Enable YOLO, Enable RF-DETR, YOLO run override, RF-DETR run override, SAHI window size, SAHI overlap.</div>
+                                            <div><strong>SAM runtime:</strong> SAM model, SAM3 runtime score threshold, SAM3 mask threshold.</div>
+                                            <div><strong>SAM3 text:</strong> Enable SAM3 text, SAM3 text score threshold, Windowed SAM3 text, SAM3 text window mode, SAM3 text window size, SAM3 text window overlap.</div>
+                                            <div><strong>SAM3 similarity:</strong> Enable similarity, Similarity score threshold, Min exemplar score, Exemplar strategy, Exemplars per class (top/random), Seed (random/diverse), Diverse fraction/min/max/source quota, Windowed similarity extension, Similarity window mode, Similarity window size, Similarity window overlap.</div>
+                                            <div><strong>Dedupe + cleanup:</strong> Fusion mode, Dedupe IoU, Cross-class dedupe enabled + IoU (default off / 0.80), Scoreless min IoU.</div>
+                                            <div><strong>Precision controls:</strong> Tighten false positives, Detector confidence, Classifier min prob, Classifier margin, Classifier background margin, optional classifier and optional calibration model selector.</div>
+                                            <div><strong>Grid/overlay:</strong> Grid columns, Grid rows, Grid overlap.</div>
+                                            <div><strong>Caption metadata knobs:</strong> Caption profile, caption model, caption variant, caption max tokens (for trace/caption outputs).</div>
+                                            <div style="margin-top: 8px;"><strong>Calibration knobs (same tab, section below)</strong></div>
+                                            <div>Images to sample, Max SAM3 terms/class, base + relaxed FP/TP caps, recall floor, per-class thresholds, threshold steps, optimize metric, Label IoU, Eval IoU, Eval IoU grid, Calibration dedupe IoU, Dedupe IoU grid, Support IoU, fusion mode, cross-class dedupe controls.</div>
+                                            <div style="margin-top: 8px;"><strong>Metric tiers</strong>: raw detector replay, post-prepass, post-cluster, post-XGB (all compared at IoU 0.50 by default).</div>
+                                            <div style="margin-top: 8px;"><strong>Heavy-job behavior</strong>: prepass/calibration are GPU-heavy backend tasks. While active, automation locks disable competing GPU tabs/actions until the job completes or is cancelled.</div>
+                                            <div style="margin-top: 8px;"><strong>Default baseline</strong>: detector conf 0.45, SAM3 text 0.20, similarity 0.30, exemplar min 0.60, SAM3 runtime 0.20/0.20, dedupe IoU 0.75, cross-class dedupe off, eval IoU 0.50, scoreless IoU 0.00.</div>
                                         </div>
                                     </details>
                                     <label for="qwenAgentDataset">Dataset (labelmap)</label>
@@ -647,16 +678,23 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentMaxDetections">Max detections<span class="help-icon" title="Hard cap on total detections returned by the prepass. Higher keeps more boxes (better recall) but increases memory, export size, and calibration time.">?</span></label>
-                                            <input type="number" id="qwenAgentMaxDetections" min="50" max="2000" value="800" />
+                                            <label for="qwenAgentFusionMode">Fusion mode<span class="help-icon" title="How merged clusters choose final geometry. Primary keeps the highest-score box. WBF blends overlapping boxes by score-weighted averaging.">?</span></label>
+                                            <select id="qwenAgentFusionMode">
+                                                <option value="primary" selected>Primary winner</option>
+                                                <option value="wbf">Weighted box fusion (WBF)</option>
+                                            </select>
                                         </div>
                                         <div>
                                             <label for="qwenAgentIou">Dedupe IoU<span class="help-icon" title="IoU threshold used to merge overlapping detections within the same class. Higher merges more aggressively; lower preserves more overlaps.">?</span></label>
                                             <input type="number" id="qwenAgentIou" min="0" max="1" step="0.05" value="0.75" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentCrossIou">Cross-class IoU<span class="help-icon" title="Optional IoU threshold to merge near-identical overlaps across different classes. Use only if duplicate labels are common; can suppress legitimate multi-labels (e.g., person+bike).">?</span></label>
-                                            <input type="number" id="qwenAgentCrossIou" min="0" max="1" step="0.05" placeholder="optional" />
+                                            <label for="qwenAgentCrossClassDedupeEnabled">Cross-class dedupe<span class="help-icon" title="When enabled, near-identical overlaps across different classes can be merged. Keep off by default unless cross-class duplicates are common.">?</span></label>
+                                            <input type="checkbox" id="qwenAgentCrossClassDedupeEnabled" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentCrossClassDedupeIou">Cross-class dedupe IoU<span class="help-icon" title="IoU threshold used only when Cross-class dedupe is enabled. Higher values are safer; default 0.80.">?</span></label>
+                                            <input type="number" id="qwenAgentCrossClassDedupeIou" min="0" max="1" step="0.05" value="0.8" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentCaptionProfile">Caption profile</label>
@@ -803,6 +841,38 @@
                                             <input type="number" id="qwenAgentSimilarityMinScore" min="0" max="1" step="0.05" value="0.6" />
                                         </div>
                                         <div>
+                                            <label for="qwenAgentSimilarityExemplarStrategy">Exemplar selection strategy<span class="help-icon" title="How similarity exemplars are chosen per class after applying min exemplar score. Top uses highest scores. Random samples eligible detections. Diverse favors score + source spread + spatial coverage.">?</span></label>
+                                            <select id="qwenAgentSimilarityExemplarStrategy">
+                                                <option value="top" selected>Top score</option>
+                                                <option value="random">Random sample</option>
+                                                <option value="diverse">Diverse (score + source + spatial)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityExemplarCount">Exemplars per class<span class="help-icon" title="Maximum number of exemplar detections per class used to seed similarity. Higher can improve recall but increases runtime.">?</span></label>
+                                            <input type="number" id="qwenAgentSimilarityExemplarCount" min="1" max="100" step="1" value="3" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityExemplarSeed">Exemplar random seed<span class="help-icon" title="Seed used by Random and Diverse strategies. Same seed gives deterministic exemplar picks per class.">?</span></label>
+                                            <input type="number" id="qwenAgentSimilarityExemplarSeed" min="0" step="1" placeholder="0" value="0" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityExemplarFraction">Diverse exemplar fraction<span class="help-icon" title="For strategy=Diverse: target exemplars per class is ceil(eligible * fraction), then clamped by diverse min/max.">?</span></label>
+                                            <input type="number" id="qwenAgentSimilarityExemplarFraction" min="0.01" max="1" step="0.01" value="0.2" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityExemplarMin">Diverse exemplar min<span class="help-icon" title="For strategy=Diverse: minimum exemplars per class after score filtering.">?</span></label>
+                                            <input type="number" id="qwenAgentSimilarityExemplarMin" min="1" max="100" step="1" value="3" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilarityExemplarMax">Diverse exemplar max<span class="help-icon" title="For strategy=Diverse: maximum exemplars per class after score filtering.">?</span></label>
+                                            <input type="number" id="qwenAgentSimilarityExemplarMax" min="1" max="200" step="1" value="12" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenAgentSimilaritySourceQuota">Diverse source quota<span class="help-icon" title="For strategy=Diverse: first pass takes up to this many exemplars per source before diversity fill.">?</span></label>
+                                            <input type="number" id="qwenAgentSimilaritySourceQuota" min="0" max="20" step="1" value="1" />
+                                        </div>
+                                        <div>
                                             <label for="qwenAgentSimilarityWindowMode">Similarity window mode<span class="help-icon" title="If windowed similarity is enabled, choose how the image is sliced: grid (fixed tiles) or SAHI (detector windows).">?</span></label>
                                             <select id="qwenAgentSimilarityWindowMode">
                                                 <option value="grid" selected>Grid</option>
@@ -845,6 +915,12 @@
                                     <div class="qwen-caption__header">
                                         <strong>Calibration (Prepass + XGBoost)</strong>
                                         <span id="qwenCalibrationStatus" class="qwen-caption-status"></span>
+                                    </div>
+                                    <div id="qwenCalibrationProgressWrap" class="qwen-calibration-progress" hidden>
+                                        <div class="qwen-calibration-progress__bar">
+                                            <div id="qwenCalibrationProgressFill" class="qwen-calibration-progress__fill"></div>
+                                        </div>
+                                        <div id="qwenCalibrationProgressText" class="training-help">Waiting to start…</div>
                                     </div>
                                     <div class="training-help">Build a calibration dataset, train the XGBoost calibrator, and relax thresholds to your FP/TP cap. This blocks the UI while running.</div>
                                     <div class="qwen-caption-row">

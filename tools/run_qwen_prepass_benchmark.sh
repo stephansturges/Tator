@@ -26,7 +26,6 @@ parser.add_argument("--output", default=None, help="Output JSONL path.")
 parser.add_argument("--api-root", default="http://127.0.0.1:8000", help="API root.")
 parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for matching.")
 parser.add_argument("--prepass-iou", type=float, default=None, help="Override prepass dedupe IoU.")
-parser.add_argument("--max-detections", type=int, default=2000, help="Agent max detections.")
 parser.add_argument("--max-new-tokens", type=int, default=8192, help="Agent max new tokens.")
 parser.add_argument("--thinking-effort", type=float, default=None, help="Thinking effort scaling (lower = less thinking).")
 parser.add_argument("--thinking-scale-factor", type=float, default=None, help="Scale factor for thinking-effort logits.")
@@ -48,10 +47,6 @@ parser.add_argument("--prepass-sam3-text-thr", type=float, default=None, help="O
 parser.add_argument("--prepass-similarity-score", type=float, default=None, help="Override prepass SAM3 similarity score threshold.")
 parser.add_argument("--sam3-syn-budget", type=int, default=None, help="Override SAM3 text synonym budget.")
 parser.add_argument("--similarity-min-exemplar-score", type=float, default=None, help="Override similarity exemplar min score.")
-parser.add_argument("--similarity-mid-conf-low", type=float, default=None, help="Override similarity mid-conf low bound.")
-parser.add_argument("--similarity-mid-conf-high", type=float, default=None, help="Override similarity mid-conf high bound.")
-parser.add_argument("--similarity-mid-conf-class-count", type=int, default=None, help="Override similarity mid-conf class count.")
-parser.add_argument("--prepass-similarity-per-class", type=int, default=None, help="Override prepass similarity per-class cap.")
 parser.add_argument("--classifier-min-prob", type=float, default=None, help="Override classifier min prob.")
 parser.add_argument("--classifier-margin", type=float, default=None, help="Override classifier margin.")
 parser.add_argument("--classifier-bg-margin", type=float, default=None, help="Override classifier bg margin.")
@@ -607,7 +602,6 @@ for idx, info in enumerate(selected, 1):
         "image_name": img_name,
         "model_id": args.model_id,
         "model_variant": args.variant,
-        "max_detections": args.max_detections,
         "max_new_tokens": args.max_new_tokens,
     }
     if args.prepass_only or args.prepass_finalize:
@@ -664,14 +658,6 @@ for idx, info in enumerate(selected, 1):
         payload["sam3_text_synonym_budget"] = args.sam3_syn_budget
     if args.similarity_min_exemplar_score is not None:
         payload["similarity_min_exemplar_score"] = args.similarity_min_exemplar_score
-    if args.similarity_mid_conf_low is not None:
-        payload["similarity_mid_conf_low"] = args.similarity_mid_conf_low
-    if args.similarity_mid_conf_high is not None:
-        payload["similarity_mid_conf_high"] = args.similarity_mid_conf_high
-    if args.similarity_mid_conf_class_count is not None:
-        payload["similarity_mid_conf_class_count"] = args.similarity_mid_conf_class_count
-    if args.prepass_similarity_per_class is not None:
-        payload["prepass_similarity_per_class"] = args.prepass_similarity_per_class
     if args.classifier_min_prob is not None:
         payload["classifier_min_prob"] = args.classifier_min_prob
     if args.classifier_margin is not None:

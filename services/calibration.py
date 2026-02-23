@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 import json
 import multiprocessing
@@ -15,11 +16,25 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from PIL import Image
 
+DEFAULT_EMBED_PROJ_DIM = 1024
+
 
 def _serialize_calibration_job(job: Any) -> Dict[str, Any]:
+    serialized_result = job.result
+    if isinstance(serialized_result, dict):
+        eval_path = serialized_result.get("eval")
+        if eval_path:
+            try:
+                eval_metrics = json.loads(Path(eval_path).read_text())
+                if isinstance(eval_metrics, dict):
+                    serialized_result = dict(serialized_result)
+                    serialized_result["metrics"] = eval_metrics
+            except Exception:
+                pass
     return {
         "job_id": job.job_id,
         "status": job.status,
@@ -31,7 +46,7 @@ def _serialize_calibration_job(job: Any) -> Dict[str, Any]:
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "request": job.request,
-        "result": job.result,
+        "result": serialized_result,
         "error": job.error,
     }
 
@@ -51,6 +66,206 @@ class CalibrationJob:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     cancel_event: Any = field(default_factory=__import__("threading").Event)
+
+
+def _normalize_similarity_strategy(value: Any) -> str:
+    strategy = str(value or "top").strip().lower()
+    if strategy not in {"top", "random", "diverse"}:
+        strategy = "top"
+    return strategy
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _float_with_default(value: Any, default: float) -> float:
+    parsed = _coerce_float(value)
+    if parsed is None:
+        return float(default)
+    return parsed
+
+
+def _first_float_with_default(*values: Any, default: float) -> float:
+    for value in values:
+        if value is None:
+            continue
+        parsed = _coerce_float(value)
+        if parsed is not None:
+            return parsed
+    return float(default)
+
+
+def _validate_classifier_feature_matrix(path: Path) -> None:
+    with np.load(path, allow_pickle=True) as data:
+        feature_names = [str(name) for name in data.get("feature_names", [])]
+        classifier_classes = [str(name) for name in data.get("classifier_classes", [])]
+        try:
+            embed_proj_dim = int(data.get("embed_proj_dim", 0))
+        except Exception:
+            embed_proj_dim = 0
+        X = np.asarray(data.get("X"), dtype=np.float32)
+
+    if not classifier_classes:
+        raise RuntimeError("classifier_classes_empty")
+    if embed_proj_dim <= 0:
+        raise RuntimeError("embed_proj_dim_zero")
+
+    embed_idx = [
+        idx
+        for idx, name in enumerate(feature_names)
+        if name.startswith("clf_emb_rp::") or name.startswith("embed_proj_")
+    ]
+    if not embed_idx:
+        raise RuntimeError("embed_features_missing")
+    clf_prob_idx = [idx for idx, name in enumerate(feature_names) if name.startswith("clf_prob::")]
+    if not clf_prob_idx:
+        raise RuntimeError("classifier_prob_features_missing")
+    if X.ndim != 2:
+        raise RuntimeError("feature_matrix_invalid_shape")
+    if X.shape[1] != len(feature_names):
+        raise RuntimeError("feature_dim_mismatch")
+    if X.shape[0] > 0:
+        if np.allclose(X[:, embed_idx], 0.0):
+            raise RuntimeError("embed_features_all_zero")
+        if np.allclose(X[:, clf_prob_idx], 0.0):
+            raise RuntimeError("classifier_prob_features_all_zero")
+
+
+def _canonical_similarity_settings(payload: Any) -> Dict[str, Any]:
+    strategy = _normalize_similarity_strategy(getattr(payload, "similarity_exemplar_strategy", None))
+    raw_count = getattr(payload, "similarity_exemplar_count", None)
+    count = int(raw_count or 3)
+    if count < 1:
+        count = 1
+    raw_seed = getattr(payload, "similarity_exemplar_seed", None)
+    if strategy in {"random", "diverse"}:
+        seed = int(raw_seed or 0)
+    else:
+        seed = None
+    raw_fraction = getattr(payload, "similarity_exemplar_fraction", None)
+    try:
+        fraction = float(raw_fraction if raw_fraction is not None else 0.2)
+    except (TypeError, ValueError):
+        fraction = 0.2
+    if not math.isfinite(fraction) or fraction <= 0:
+        fraction = 0.2
+    raw_min = getattr(payload, "similarity_exemplar_min", None)
+    min_count = int(raw_min or 3)
+    if min_count < 1:
+        min_count = 1
+    raw_max = getattr(payload, "similarity_exemplar_max", None)
+    max_count = int(raw_max or 12)
+    if max_count < min_count:
+        max_count = min_count
+    raw_quota = getattr(payload, "similarity_exemplar_source_quota", None)
+    try:
+        source_quota = int(raw_quota) if raw_quota is not None else 1
+    except (TypeError, ValueError):
+        source_quota = 1
+    if source_quota < 0:
+        source_quota = 0
+    return {
+        "strategy": strategy,
+        "count": count if strategy in {"top", "random"} else None,
+        "seed": seed,
+        "fraction": fraction if strategy == "diverse" else None,
+        "min": min_count if strategy == "diverse" else None,
+        "max": max_count if strategy == "diverse" else None,
+        "source_quota": source_quota if strategy == "diverse" else None,
+    }
+
+
+def _canonical_cross_class_dedupe_settings(payload: Any) -> Dict[str, Any]:
+    enabled = bool(getattr(payload, "cross_class_dedupe_enabled", False))
+    if not enabled:
+        return {"enabled": False, "iou": None}
+    raw_iou = getattr(payload, "cross_class_dedupe_iou", None)
+    try:
+        iou = float(raw_iou if raw_iou is not None else 0.8)
+    except (TypeError, ValueError):
+        iou = 0.8
+    iou = max(0.0, min(1.0, iou))
+    if iou <= 0.0:
+        return {"enabled": False, "iou": None}
+    return {"enabled": True, "iou": iou}
+
+
+def _normalize_window_mode(value: Any) -> str:
+    mode = str(value or "grid").strip().lower()
+    if mode not in {"grid", "sahi"}:
+        mode = "grid"
+    return mode
+
+
+def _canonical_sam3_text_window_settings(payload: Any) -> Dict[str, Any]:
+    enabled = getattr(payload, "sam3_text_window_extension", None) is not False
+    if not enabled:
+        return {"enabled": False, "mode": None, "size": None, "overlap": None}
+    mode = _normalize_window_mode(getattr(payload, "sam3_text_window_mode", None))
+    if mode != "sahi":
+        return {"enabled": True, "mode": mode, "size": None, "overlap": None}
+    try:
+        size = int(getattr(payload, "sam3_text_window_size", None) or 640)
+    except (TypeError, ValueError):
+        size = 640
+    if size <= 0:
+        size = 640
+    overlap = _float_with_default(getattr(payload, "sam3_text_window_overlap", None), 0.2)
+    if overlap <= 0.0 or overlap >= 1.0:
+        overlap = 0.2
+    return {
+        "enabled": True,
+        "mode": mode,
+        "size": size,
+        "overlap": overlap,
+    }
+
+
+def _canonical_similarity_window_settings(payload: Any) -> Dict[str, Any]:
+    enabled = bool(getattr(payload, "similarity_window_extension", False))
+    if not enabled:
+        return {"enabled": False, "mode": None, "size": None, "overlap": None}
+    mode = _normalize_window_mode(getattr(payload, "similarity_window_mode", None))
+    if mode != "sahi":
+        return {"enabled": True, "mode": mode, "size": None, "overlap": None}
+    try:
+        size = int(getattr(payload, "similarity_window_size", None) or 640)
+    except (TypeError, ValueError):
+        size = 640
+    if size <= 0:
+        size = 640
+    overlap = _float_with_default(getattr(payload, "similarity_window_overlap", None), 0.2)
+    if overlap <= 0.0 or overlap >= 1.0:
+        overlap = 0.2
+    return {
+        "enabled": True,
+        "mode": mode,
+        "size": size,
+        "overlap": overlap,
+    }
+
+
+def _canonical_sahi_settings(payload: Any) -> Dict[str, float | int]:
+    raw_size = getattr(payload, "sahi_window_size", None)
+    try:
+        size = int(raw_size) if raw_size is not None else 640
+    except (TypeError, ValueError):
+        size = 640
+    if size <= 0:
+        size = 640
+
+    raw_overlap = getattr(payload, "sahi_overlap_ratio", None)
+    overlap = _float_with_default(raw_overlap, 0.2)
+    if overlap <= 0.0 or overlap >= 1.0:
+        overlap = 0.2
+    return {"size": size, "overlap": overlap}
 
 
 def _start_calibration_job(
@@ -110,6 +325,8 @@ def _run_calibration_job(
     calibration_cache_root: Path,
     prepass_request_cls: Any,
     active_classifier_head: Any,
+    active_classifier_path: Optional[str],
+    default_classifier_for_dataset_fn: Optional[Callable[[Optional[str]], Optional[str]]],
     calibration_features_version: int,
     write_record_fn: Callable[[Path, Dict[str, Any]], None],
     hash_payload_fn: Callable[[Dict[str, Any]], str],
@@ -131,6 +348,8 @@ def _run_calibration_job(
     try:
         require_sam3_fn(True, True)
         prepare_for_training_fn()
+        yolo_active: Dict[str, Any] = {}
+        rfdetr_active: Dict[str, Any] = {}
         if payload.enable_yolo is not False:
             yolo_active = load_yolo_active_fn()
             yolo_best = str(yolo_active.get("best_path") or "")
@@ -155,12 +374,48 @@ def _run_calibration_job(
 
         prepass_path = output_dir / "prepass.jsonl"
         calibration_cache_root.mkdir(parents=True, exist_ok=True)
-        if not payload.classifier_id and not isinstance(active_classifier_head, dict):
+        classifier_id_resolved = str(payload.classifier_id or "").strip()
+        if not classifier_id_resolved and callable(default_classifier_for_dataset_fn):
+            try:
+                classifier_id_resolved = str(default_classifier_for_dataset_fn(payload.dataset_id) or "").strip()
+            except Exception:
+                classifier_id_resolved = ""
+        if not classifier_id_resolved:
+            classifier_id_resolved = str(active_classifier_path or "").strip()
+        if not classifier_id_resolved and isinstance(active_classifier_head, dict):
+            raise http_exception_cls(status_code=412, detail="calibration_classifier_id_required")
+        if not classifier_id_resolved:
             raise http_exception_cls(status_code=412, detail="calibration_classifier_required")
+        if not (payload.classifier_id or "").strip():
+            try:
+                req = dict(job.request or {})
+                req["classifier_id_resolved"] = classifier_id_resolved
+                job.request = req
+            except Exception:
+                pass
+        use_yolo = payload.enable_yolo is not False
+        use_rfdetr = payload.enable_rfdetr is not False
+        similarity_cfg = _canonical_similarity_settings(payload)
+        cross_class_cfg = _canonical_cross_class_dedupe_settings(payload)
+        sam3_text_window_cfg = _canonical_sam3_text_window_settings(payload)
+        similarity_window_cfg = _canonical_similarity_window_settings(payload)
+        sahi_cfg = _canonical_sahi_settings(payload)
+        prepass_sam3_text_thr = _float_with_default(payload.prepass_sam3_text_thr, 0.2)
+        prepass_similarity_score = _float_with_default(payload.prepass_similarity_score, 0.3)
+        similarity_min_exemplar_score = _float_with_default(payload.similarity_min_exemplar_score, 0.6)
+        sam3_score_thr = _float_with_default(payload.sam3_score_thr, 0.2)
+        sam3_mask_threshold = _float_with_default(payload.sam3_mask_threshold, 0.2)
+        detector_conf = _float_with_default(payload.detector_conf, 0.45)
+        scoreless_iou = _float_with_default(payload.scoreless_iou, 0.0)
+        dedupe_iou = _float_with_default(payload.dedupe_iou, 0.75)
+        yolo_run_id = str(yolo_active.get("run_id") or "").strip() or None if use_yolo else None
+        rfdetr_run_id = str(rfdetr_active.get("run_id") or "").strip() or None if use_rfdetr else None
         prepass_payload = prepass_request_cls(
             dataset_id=payload.dataset_id,
-            enable_yolo=True,
-            enable_rfdetr=True,
+            enable_yolo=use_yolo,
+            enable_rfdetr=use_rfdetr,
+            yolo_id=yolo_run_id,
+            rfdetr_id=rfdetr_run_id,
             sam_variant="sam3",
             enable_sam3_text=True,
             enable_sam3_similarity=True,
@@ -171,49 +426,107 @@ def _run_calibration_job(
             sam3_text_synonym_budget=None
             if payload.sam3_text_synonym_budget is None
             else int(payload.sam3_text_synonym_budget),
-            sam3_text_window_extension=bool(payload.sam3_text_window_extension)
-            if payload.sam3_text_window_extension is not None
-            else True,
-            sam3_text_window_mode=payload.sam3_text_window_mode or "grid",
-            sam3_text_window_size=payload.sam3_text_window_size,
-            sam3_text_window_overlap=payload.sam3_text_window_overlap,
-            prepass_sam3_text_thr=float(payload.prepass_sam3_text_thr or 0.2),
-            prepass_similarity_score=float(payload.prepass_similarity_score or 0.3),
-            similarity_min_exemplar_score=float(payload.similarity_min_exemplar_score or 0.6),
-            similarity_window_extension=bool(payload.similarity_window_extension),
-            sam3_score_thr=float(payload.sam3_score_thr or 0.2),
-            sam3_mask_threshold=float(payload.sam3_mask_threshold or 0.2),
-            detector_conf=float(payload.detector_conf or 0.45),
-            sahi_window_size=payload.sahi_window_size,
-            sahi_overlap_ratio=payload.sahi_overlap_ratio,
-            classifier_id=payload.classifier_id,
-            scoreless_iou=float(payload.scoreless_iou or 0.0),
-            iou=float(payload.dedupe_iou or 0.75),
+            sam3_text_window_extension=sam3_text_window_cfg["enabled"],
+            sam3_text_window_mode=sam3_text_window_cfg["mode"],
+            sam3_text_window_size=sam3_text_window_cfg["size"],
+            sam3_text_window_overlap=sam3_text_window_cfg["overlap"],
+            prepass_sam3_text_thr=prepass_sam3_text_thr,
+            prepass_similarity_score=prepass_similarity_score,
+            similarity_min_exemplar_score=similarity_min_exemplar_score,
+            similarity_exemplar_count=similarity_cfg["count"],
+            similarity_exemplar_strategy=similarity_cfg["strategy"],
+            similarity_exemplar_seed=similarity_cfg["seed"],
+            similarity_exemplar_fraction=similarity_cfg["fraction"],
+            similarity_exemplar_min=similarity_cfg["min"],
+            similarity_exemplar_max=similarity_cfg["max"],
+            similarity_exemplar_source_quota=similarity_cfg["source_quota"],
+            similarity_window_extension=similarity_window_cfg["enabled"],
+            similarity_window_mode=similarity_window_cfg["mode"],
+            similarity_window_size=similarity_window_cfg["size"],
+            similarity_window_overlap=similarity_window_cfg["overlap"],
+            sam3_score_thr=sam3_score_thr,
+            sam3_mask_threshold=sam3_mask_threshold,
+            detector_conf=detector_conf,
+            sahi_window_size=sahi_cfg["size"],
+            sahi_overlap_ratio=sahi_cfg["overlap"],
+            classifier_id=classifier_id_resolved,
+            scoreless_iou=scoreless_iou,
+            iou=dedupe_iou,
+            fusion_mode=(payload.fusion_mode or "primary"),
+            cross_class_dedupe_enabled=cross_class_cfg["enabled"],
+            cross_class_dedupe_iou=cross_class_cfg["iou"],
         )
 
         labelmap_hash = hashlib.sha1(",".join(labelmap).encode("utf-8")).hexdigest()
         prepass_glossary_text = glossary or ""
         glossary_hash = hashlib.sha1(prepass_glossary_text.encode("utf-8")).hexdigest()
         selected_hash = hashlib.sha1(json.dumps(selected, sort_keys=True).encode("utf-8")).hexdigest()
+
+        def _detector_fingerprint(active: Dict[str, Any]) -> Dict[str, Any]:
+            run_id = str(active.get("run_id") or "").strip() or None
+            best_path = str(active.get("best_path") or "").strip() or None
+            labelmap_path = str(active.get("labelmap_path") or "").strip() or None
+            stat_size = None
+            stat_mtime_ns = None
+            if best_path:
+                try:
+                    stat = Path(best_path).stat()
+                    stat_size = int(stat.st_size)
+                    stat_mtime_ns = int(stat.st_mtime_ns)
+                except Exception:
+                    stat_size = None
+                    stat_mtime_ns = None
+            return {
+                "run_id": run_id,
+                "best_path": best_path,
+                "best_size": stat_size,
+                "best_mtime_ns": stat_mtime_ns,
+                "labelmap_path": labelmap_path,
+            }
+
+        yolo_fingerprint = _detector_fingerprint(yolo_active) if payload.enable_yolo is not False else None
+        rfdetr_fingerprint = _detector_fingerprint(rfdetr_active) if payload.enable_rfdetr is not False else None
+        yolo_run_id = (yolo_fingerprint or {}).get("run_id")
+        rfdetr_run_id = (rfdetr_fingerprint or {}).get("run_id")
+
         prepass_config = {
             "sam3_text_synonym_budget": None
             if payload.sam3_text_synonym_budget is None
             else int(payload.sam3_text_synonym_budget),
-            "sam3_text_window_extension": payload.sam3_text_window_extension,
-            "sam3_text_window_mode": payload.sam3_text_window_mode,
-            "sam3_text_window_size": payload.sam3_text_window_size,
-            "sam3_text_window_overlap": payload.sam3_text_window_overlap,
-            "prepass_sam3_text_thr": float(payload.prepass_sam3_text_thr or 0.2),
-            "prepass_similarity_score": float(payload.prepass_similarity_score or 0.3),
-            "similarity_min_exemplar_score": float(payload.similarity_min_exemplar_score or 0.6),
-            "similarity_window_extension": bool(payload.similarity_window_extension),
-            "sam3_score_thr": float(payload.sam3_score_thr or 0.2),
-            "sam3_mask_threshold": float(payload.sam3_mask_threshold or 0.2),
-            "detector_conf": float(payload.detector_conf or 0.45),
-            "sahi_window_size": payload.sahi_window_size,
-            "sahi_overlap_ratio": payload.sahi_overlap_ratio,
-            "scoreless_iou": float(payload.scoreless_iou or 0.0),
-            "dedupe_iou": float(payload.dedupe_iou or 0.75),
+            "sam3_text_window_extension": sam3_text_window_cfg["enabled"],
+            "sam3_text_window_mode": sam3_text_window_cfg["mode"],
+            "sam3_text_window_size": sam3_text_window_cfg["size"],
+            "sam3_text_window_overlap": sam3_text_window_cfg["overlap"],
+            "prepass_sam3_text_thr": prepass_sam3_text_thr,
+            "prepass_similarity_score": prepass_similarity_score,
+            "similarity_min_exemplar_score": similarity_min_exemplar_score,
+            "similarity_exemplar_count": similarity_cfg["count"],
+            "similarity_exemplar_strategy": similarity_cfg["strategy"],
+            "similarity_exemplar_seed": similarity_cfg["seed"],
+            "similarity_exemplar_fraction": similarity_cfg["fraction"],
+            "similarity_exemplar_min": similarity_cfg["min"],
+            "similarity_exemplar_max": similarity_cfg["max"],
+            "similarity_exemplar_source_quota": similarity_cfg["source_quota"],
+            "similarity_window_extension": similarity_window_cfg["enabled"],
+            "similarity_window_mode": similarity_window_cfg["mode"],
+            "similarity_window_size": similarity_window_cfg["size"],
+            "similarity_window_overlap": similarity_window_cfg["overlap"],
+            "sam3_score_thr": sam3_score_thr,
+            "sam3_mask_threshold": sam3_mask_threshold,
+            "detector_conf": detector_conf,
+            "enable_yolo": use_yolo,
+            "enable_rfdetr": use_rfdetr,
+            "sahi_window_size": sahi_cfg["size"],
+            "sahi_overlap_ratio": sahi_cfg["overlap"],
+            "scoreless_iou": scoreless_iou,
+            "dedupe_iou": dedupe_iou,
+            "fusion_mode": str(payload.fusion_mode or "primary"),
+            "cross_class_dedupe_enabled": cross_class_cfg["enabled"],
+            "cross_class_dedupe_iou": cross_class_cfg["iou"],
+            "yolo_run_id": yolo_run_id,
+            "rfdetr_run_id": rfdetr_run_id,
+            "yolo_fingerprint": yolo_fingerprint,
+            "rfdetr_fingerprint": rfdetr_fingerprint,
         }
         prepass_config_key = hash_payload_fn(
             {
@@ -424,24 +737,32 @@ def _run_calibration_job(
                     )
                     detections = list(result.get("detections") or [])
                     warnings = list(result.get("warnings") or [])
+                    provenance = result.get("provenance")
                     record = {
                         "image": image_name,
                         "dataset_id": payload.dataset_id,
                         "detections": detections,
                         "warnings": warnings,
                     }
+                    if isinstance(provenance, dict):
+                        record["provenance"] = provenance
                     _write_cached_record(image_name, record)
                     cached_records[image_name] = record
                     processed += 1
                     progress = processed / total if total else 1.0
                     update_fn(job, processed=processed, progress=progress)
 
+        missing_records: List[str] = []
         with prepass_path.open("w", encoding="utf-8") as handle:
             for image_name in selected:
                 record = cached_records.get(image_name) or _load_cached_record(image_name)
                 if not record:
+                    missing_records.append(image_name)
                     continue
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if missing_records:
+            sample = ",".join(missing_records[:5])
+            raise RuntimeError(f"prepass_cache_incomplete:{len(missing_records)}:{sample}")
 
         prepass_cache_meta.write_text(
             json.dumps(
@@ -462,8 +783,24 @@ def _run_calibration_job(
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
 
+        label_iou = _float_with_default(payload.label_iou, 0.5)
+        support_iou = _float_with_default(payload.support_iou, 0.5)
+        context_radius = _float_with_default(payload.context_radius, 0.075)
+        embed_proj_dim = DEFAULT_EMBED_PROJ_DIM
+        embed_proj_seed = 42
+        embed_l2_normalize = True
+        base_fp_ratio = _float_with_default(payload.base_fp_ratio, 0.1)
+        relax_fp_ratio = _float_with_default(payload.relax_fp_ratio, 0.2)
+        target_fp_ratio = _first_float_with_default(
+            payload.relax_fp_ratio,
+            payload.base_fp_ratio,
+            default=0.2,
+        )
+        recall_floor = _float_with_default(payload.recall_floor, 0.6)
+        eval_iou = _float_with_default(payload.eval_iou, 0.5)
+
         features_path = output_dir / "ensemble_features.npz"
-        labeled_path = output_dir / f"ensemble_features_iou{float(payload.label_iou or 0.9):.2f}.npz"
+        labeled_path = output_dir / f"ensemble_features_iou{label_iou:.2f}.npz"
         calibration_model = (payload.calibration_model or "xgb").strip().lower()
         if calibration_model not in {"mlp", "xgb"}:
             calibration_model = "xgb"
@@ -477,14 +814,17 @@ def _run_calibration_job(
                 raise RuntimeError("cancelled")
             subprocess.run(args, check=True)
 
-        classifier_id = payload.classifier_id or ""
+        classifier_id = classifier_id_resolved
         features_key = hash_payload_fn(
             {
                 "prepass_key": prepass_key,
                 "classifier_id": classifier_id or "",
-                "support_iou": float(payload.support_iou or 0.5),
+                "support_iou": support_iou,
                 "min_crop_size": 4,
-                "context_radius": float(payload.context_radius or 0.075),
+                "context_radius": context_radius,
+                "embed_proj_dim": embed_proj_dim,
+                "embed_proj_seed": embed_proj_seed,
+                "embed_l2_normalize": embed_l2_normalize,
                 "features_version": calibration_features_version,
             }
         )
@@ -493,6 +833,20 @@ def _run_calibration_job(
         features_cache_path = features_cache_dir / "ensemble_features.npz"
         features_cache_meta = features_cache_dir / "features.meta.json"
         cached_features = features_cache_path.exists()
+        if cached_features:
+            try:
+                _validate_classifier_feature_matrix(features_cache_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Invalid cached classifier features for key=%s (%s); rebuilding.",
+                    features_key,
+                    exc,
+                )
+                try:
+                    features_cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                cached_features = False
 
         if cached_features:
             update_fn(job, phase="features", message="Using cached features…", progress=1.0)
@@ -511,22 +865,38 @@ def _run_calibration_job(
                     "--output",
                     str(features_cache_path),
                     "--support-iou",
-                    str(float(payload.support_iou or 0.5)),
+                    str(support_iou),
                     "--min-crop-size",
                     "4",
                     "--context-radius",
-                    str(float(payload.context_radius or 0.075)),
+                    str(context_radius),
+                    "--embed-proj-dim",
+                    str(int(embed_proj_dim)),
+                    "--embed-proj-seed",
+                    str(int(embed_proj_seed)),
                     "--device",
                     "cuda",
+                    "--require-classifier",
                 ]
+                + ([] if embed_l2_normalize else ["--embed-no-l2-normalize"])
                 + (["--classifier-id", classifier_id] if classifier_id else []),
             )
+            try:
+                _validate_classifier_feature_matrix(features_cache_path)
+            except Exception as exc:  # noqa: BLE001
+                raise http_exception_cls(
+                    status_code=412,
+                    detail=f"calibration_classifier_features_invalid:{exc}",
+                ) from exc
             features_cache_meta.write_text(
                 json.dumps(
                     {
                         "prepass_key": prepass_key,
                         "features_key": features_key,
                         "features_version": calibration_features_version,
+                        "embed_proj_dim": int(embed_proj_dim),
+                        "embed_proj_seed": int(embed_proj_seed),
+                        "embed_l2_normalize": bool(embed_l2_normalize),
                     },
                     indent=2,
                 )
@@ -536,12 +906,12 @@ def _run_calibration_job(
         labeled_key = hash_payload_fn(
             {
                 "features_key": features_key,
-                "label_iou": float(payload.label_iou or 0.9),
+                "label_iou": label_iou,
             }
         )
         labeled_cache_dir = calibration_cache_root / "labeled" / labeled_key
         labeled_cache_dir.mkdir(parents=True, exist_ok=True)
-        labeled_cache_path = labeled_cache_dir / f"ensemble_features_iou{float(payload.label_iou or 0.9):.2f}.npz"
+        labeled_cache_path = labeled_cache_dir / f"ensemble_features_iou{label_iou:.2f}.npz"
         labeled_cache_meta = labeled_cache_dir / "labeled.meta.json"
         cached_labeled = labeled_cache_path.exists()
 
@@ -562,7 +932,7 @@ def _run_calibration_job(
                     "--output",
                     str(labeled_cache_path),
                     "--iou",
-                    str(float(payload.label_iou or 0.9)),
+                    str(label_iou),
                 ],
             )
             labeled_cache_meta.write_text(
@@ -570,13 +940,29 @@ def _run_calibration_job(
                     {
                         "features_key": features_key,
                         "labeled_key": labeled_key,
-                        "label_iou": float(payload.label_iou or 0.9),
+                        "label_iou": label_iou,
                     },
                     indent=2,
                 )
             )
             safe_link_fn(labeled_cache_path, labeled_path)
         if calibration_model == "xgb":
+            optimize_metric = (payload.optimize_metric or "f1").strip().lower()
+            if optimize_metric not in {"f1", "recall", "tp"}:
+                optimize_metric = "f1"
+            steps_val = int(payload.threshold_steps or 200)
+            steps_val = max(20, min(400, steps_val))
+            split_head_by_support = bool(getattr(payload, "split_head_by_support", True))
+            train_sam3_text_quality = bool(getattr(payload, "train_sam3_text_quality", True))
+            sam3_text_quality_alpha = _float_with_default(
+                getattr(payload, "sam3_text_quality_alpha", None), 0.35
+            )
+            target_fp_ratio_by_label_json = str(
+                getattr(payload, "target_fp_ratio_by_label_json", "") or ""
+            ).strip()
+            min_recall_by_label_json = str(
+                getattr(payload, "min_recall_by_label_json", "") or ""
+            ).strip()
             train_cmd = [
                 sys.executable,
                 str(root_dir / "tools" / "train_ensemble_xgb.py"),
@@ -587,14 +973,24 @@ def _run_calibration_job(
                 "--seed",
                 str(int(payload.model_seed or 42)),
                 "--target-fp-ratio",
-                str(float(payload.base_fp_ratio or 0.1)),
+                str(base_fp_ratio),
                 "--min-recall",
-                str(float(payload.recall_floor or 0.6)),
+                str(recall_floor),
                 "--threshold-steps",
-                str(int(payload.threshold_steps or 200)),
+                str(steps_val),
+                "--optimize",
+                optimize_metric,
             ]
             if payload.per_class_thresholds is not False:
                 train_cmd.append("--per-class")
+            if split_head_by_support:
+                train_cmd.append("--split-head-by-support")
+            if train_sam3_text_quality:
+                train_cmd += [
+                    "--train-sam3-text-quality",
+                    "--sam3-text-quality-alpha",
+                    str(sam3_text_quality_alpha),
+                ]
             if payload.xgb_max_depth is not None:
                 train_cmd += ["--max-depth", str(int(payload.xgb_max_depth))]
             if payload.xgb_n_estimators is not None:
@@ -639,9 +1035,47 @@ def _run_calibration_job(
                     "--meta",
                     str(meta_path),
                     "--fp-ratio-cap",
-                    str(float(payload.relax_fp_ratio or 0.2)),
+                    str(relax_fp_ratio),
                 ],
             )
+            tune_cmd = [
+                sys.executable,
+                str(root_dir / "tools" / "tune_ensemble_thresholds_xgb.py"),
+                "--model",
+                str(Path(str(model_prefix) + ".json")),
+                "--meta",
+                str(meta_path),
+                "--data",
+                str(labeled_path),
+                "--dataset",
+                payload.dataset_id,
+                "--optimize",
+                optimize_metric,
+                "--target-fp-ratio",
+                str(target_fp_ratio),
+                "--min-recall",
+                str(recall_floor),
+                "--steps",
+                str(steps_val),
+                "--eval-iou",
+                str(eval_iou),
+                "--dedupe-iou",
+                str(dedupe_iou),
+                "--scoreless-iou",
+                str(scoreless_iou),
+                "--use-val-split",
+            ]
+            if target_fp_ratio_by_label_json:
+                tune_cmd += [
+                    "--target-fp-ratio-by-label-json",
+                    target_fp_ratio_by_label_json,
+                ]
+            if min_recall_by_label_json:
+                tune_cmd += [
+                    "--min-recall-by-label-json",
+                    min_recall_by_label_json,
+                ]
+            _run_step("objective", "Tuning object-level thresholds…", tune_cmd)
         else:
             _run_step(
                 "train",
@@ -656,13 +1090,13 @@ def _run_calibration_job(
                     "--hidden",
                     str(payload.model_hidden or "256,128"),
                     "--dropout",
-                    str(float(payload.model_dropout or 0.1)),
+                    str(_float_with_default(payload.model_dropout, 0.1)),
                     "--epochs",
                     str(int(payload.model_epochs or 20)),
                     "--lr",
-                    str(float(payload.model_lr or 1e-3)),
+                    str(_float_with_default(payload.model_lr, 1e-3)),
                     "--weight-decay",
-                    str(float(payload.model_weight_decay or 1e-4)),
+                    str(_float_with_default(payload.model_weight_decay, 1e-4)),
                     "--seed",
                     str(int(payload.model_seed or 42)),
                     "--device",
@@ -684,9 +1118,9 @@ def _run_calibration_job(
                 "--meta",
                 str(meta_path),
                 "--target-fp-ratio",
-                str(float(payload.base_fp_ratio or 0.1)),
+                str(base_fp_ratio),
                 "--min-recall",
-                str(float(payload.recall_floor or 0.6)),
+                str(recall_floor),
                 "--steps",
                 str(steps_val),
                 "--optimize",
@@ -708,7 +1142,7 @@ def _run_calibration_job(
                     "--meta",
                     str(meta_path),
                     "--fp-ratio-cap",
-                    str(float(payload.relax_fp_ratio or 0.2)),
+                    str(relax_fp_ratio),
                 ],
             )
         update_fn(job, phase="eval", message="Evaluating model…")
@@ -732,17 +1166,19 @@ def _run_calibration_job(
             "--dataset",
             payload.dataset_id,
             "--eval-iou",
-            str(float(payload.eval_iou or 0.5)),
+            str(eval_iou),
             "--eval-iou-grid",
             iou_grid,
             "--dedupe-iou",
-            str(float(payload.dedupe_iou or 0.1)),
+            str(dedupe_iou),
             "--dedupe-iou-grid",
             dedupe_grid,
             "--scoreless-iou",
-            str(float(payload.scoreless_iou or 0.0)),
+            str(scoreless_iou),
             "--use-val-split",
         ]
+        if calibration_model == "xgb":
+            eval_cmd += ["--prepass-jsonl", str(prepass_path)]
         eval_run = subprocess.run(eval_cmd, check=True, capture_output=True, text=True)
         eval_text = eval_run.stdout.strip()
         if eval_text:

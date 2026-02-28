@@ -42,7 +42,7 @@ def _match_openapi_path(ui_path: str, openapi_paths: set[str]) -> bool:
         if len(ui_parts) != len(cand_parts):
             continue
         ok = True
-        for u, c in zip(ui_parts, cand_parts):
+        for u, c in zip(ui_parts, cand_parts, strict=False):
             if c.startswith("{") and c.endswith("}"):
                 continue
             if u.startswith("{") and u.endswith("}"):

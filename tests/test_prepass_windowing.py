@@ -3,7 +3,11 @@ from types import SimpleNamespace
 from PIL import Image
 
 from services.prepass_grid import _agent_grid_cell_xyxy
-from services.prepass_windows import _agent_sam3_text_windows, _agent_similarity_windows
+from services.prepass_windows import (
+    _agent_exemplars_for_window,
+    _agent_sam3_text_windows,
+    _agent_similarity_windows,
+)
 
 
 def _grid_payload(**overrides):
@@ -100,3 +104,18 @@ def test_sam3_text_sahi_windows_sanitize_invalid_slice_and_overlap(monkeypatch):
     windows = _agent_sam3_text_windows(payload, pil_img=img, grid_overlap_ratio_default=0.2)
     assert captured == {"slice_size": 640, "overlap": 0.2}
     assert windows
+
+
+def test_exemplars_for_window_uses_bbox_overlap_not_center():
+    exemplars = [
+        {"bbox_xyxy_px": [45.0, 45.0, 90.0, 90.0], "label": "object_a"},
+        {"bbox_xyxy_px": [51.0, 51.0, 90.0, 90.0], "label": "object_b"},
+    ]
+    filtered = _agent_exemplars_for_window(
+        exemplars,
+        img_w=100,
+        img_h=100,
+        window_xyxy=[0.0, 0.0, 50.0, 50.0],
+    )
+    labels = [item.get("label") for item in filtered]
+    assert labels == ["object_a"]

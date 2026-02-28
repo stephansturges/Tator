@@ -354,7 +354,7 @@ def _resolve_active_head_normalize_embeddings_impl(
 
 
 def _infer_clip_model_from_embedding_dim_impl(
-    embedding_dim: Optional[int], *, active_name: Optional[str] = None
+    embedding_dim: Optional[int], active_name: Optional[str] = None
 ) -> Optional[str]:
     try:
         emb = int(embedding_dim or 0)

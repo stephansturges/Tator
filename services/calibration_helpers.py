@@ -32,6 +32,7 @@ def _calibration_list_images(
 ) -> List[str]:
     dataset_root = resolve_dataset_fn(dataset_id)
     images: List[str] = []
+    seen: set[str] = set()
     for split in ("val", "train"):
         split_root = dataset_root / split
         if not split_root.exists():
@@ -45,6 +46,11 @@ def _calibration_list_images(
                 ".tif",
                 ".tiff",
             }:
+                # Cache keys and downstream lookups are name-based; avoid duplicate names
+                # across splits colliding onto a single cache record.
+                if entry.name in seen:
+                    continue
+                seen.add(entry.name)
                 images.append(entry.name)
     return images
 
@@ -126,8 +132,8 @@ def _calibration_prepass_worker(
             pass
     try:
         prepass_payload = prepass_request_cls(**prepass_payload_dict)
-    except Exception:
-        return
+    except Exception as exc:
+        raise RuntimeError(f"deep_prepass_payload_invalid:{exc}") from exc
     dataset_root = resolve_dataset_fn(dataset_id)
     for image_name, cache_path in tasks:
         if cancel_event is not None and cancel_event.is_set():

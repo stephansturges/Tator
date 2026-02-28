@@ -80,6 +80,14 @@ def _safe_allow(label, fn, ok_statuses=None):
         return {"ok": False, "error": str(exc)}
 
 
+def _backend_reachable(base: str, timeout: int = 20) -> bool:
+    try:
+        _get(base.rstrip("/") + "/system/health_summary", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def _load_fuzz_image() -> tuple[str, int, int, str]:
     root = Path("tests/fixtures/fuzz_pack")
     manifest = json.loads((root / "manifest.json").read_text())
@@ -100,6 +108,19 @@ def _load_fuzz_image() -> tuple[str, int, int, str]:
 
 def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+    # Health probes can be slow when GPU telemetry collection stalls.
+    if not _backend_reachable(base, timeout=20):
+        payload = {
+            "summary": {"ok": 0, "fail": 1},
+            "results": {
+                "__bootstrap__": {
+                    "ok": False,
+                    "error": f"Backend not reachable at {base}. Start uvicorn before running contract tests.",
+                }
+            },
+        }
+        print(json.dumps(payload, indent=2))
+        return 2
     results = {}
 
     # Basic GETs (install-check parity)

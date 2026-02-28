@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional, Sequence, Tuple, List
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -44,9 +44,49 @@ def _qwen_bbox_to_xyxy(width: int, height: int, bbox_2d: Sequence[float]) -> Tup
 def _normalize_window_xyxy(window: Optional[Any], img_w: int, img_h: int) -> Optional[Tuple[float, float, float, float]]:
     if not window:
         return None
+    if isinstance(window, str):
+        try:
+            window = json.loads(window)
+        except json.JSONDecodeError:
+            return None
+    x1: Optional[float] = None
+    y1: Optional[float] = None
+    x2: Optional[float] = None
+    y2: Optional[float] = None
     if isinstance(window, (list, tuple)) and len(window) >= 4:
-        x1, y1, x2, y2 = map(float, window[:4])
-        return max(0.0, x1), max(0.0, y1), min(float(img_w), x2), min(float(img_h), y2)
+        try:
+            x1, y1, x2, y2 = map(float, window[:4])
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(window, dict):
+        if "bbox_2d" in window:
+            qbbox = window.get("bbox_2d") or []
+            x1, y1, x2, y2 = _qwen_bbox_to_xyxy(img_w, img_h, qbbox)
+        elif all(k in window for k in ("x1", "y1", "x2", "y2")):
+            try:
+                x1 = float(window.get("x1"))
+                y1 = float(window.get("y1"))
+                x2 = float(window.get("x2"))
+                y2 = float(window.get("y2"))
+            except (TypeError, ValueError):
+                return None
+        else:
+            return None
+    else:
+        return None
+    if x1 is None or y1 is None or x2 is None or y2 is None:
+        return None
+    if x1 > x2:
+        x1, x2 = x2, x1
+    if y1 > y2:
+        y1, y2 = y2, y1
+    x1 = max(0.0, min(float(img_w), x1))
+    y1 = max(0.0, min(float(img_h), y1))
+    x2 = max(0.0, min(float(img_w), x2))
+    y2 = max(0.0, min(float(img_h), y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
 
 
 def _extract_numeric_sequence(value: Any, *, length: int) -> Optional[List[float]]:
@@ -108,17 +148,6 @@ def _scale_point_to_image(
     x = float(min(max(x, 0.0), float(full_w)))
     y = float(min(max(y, 0.0), float(full_h)))
     return x, y
-    if isinstance(window, dict):
-        if "bbox_2d" in window:
-            x1, y1, x2, y2 = _qwen_bbox_to_xyxy(img_w, img_h, window.get("bbox_2d") or [])
-            return max(0.0, x1), max(0.0, y1), min(float(img_w), x2), min(float(img_h), y2)
-        if all(k in window for k in ("x1", "y1", "x2", "y2")):
-            x1 = float(window.get("x1"))
-            y1 = float(window.get("y1"))
-            x2 = float(window.get("x2"))
-            y2 = float(window.get("y2"))
-            return max(0.0, x1), max(0.0, y1), min(float(img_w), x2), min(float(img_h), y2)
-    return None
 
 
 def _window_bbox_2d_to_full_xyxy(

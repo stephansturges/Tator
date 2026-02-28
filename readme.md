@@ -120,12 +120,10 @@ Notes:
 
 ### Comparison policy and acceptance gate
 - Primary comparison IoU is `0.50`.
-- Report at least these baselines for every run:
-  - raw YOLO-only
-  - raw RF-DETR-only
-  - raw YOLO+RF-DETR union
-  - post-XGB ensemble
-- Acceptance gate: the post-XGB ensemble must beat raw detector union on the agreed target metric (typically F1, plus precision/recall breakdown).
+- Report two baseline groups for every run:
+  - **Primary comparator (same tier):** `post_cluster.source_attributed.yolo_rfdetr_union`
+  - **Diagnostics only:** `raw_detector` replay (`yolo`, `rfdetr`, `yolo_rfdetr_union`)
+- Acceptance gate: the `post_xgb.accepted_all` ensemble must beat `post_cluster.source_attributed.yolo_rfdetr_union` on the agreed target metric (typically F1, with precision/recall shown).
 
 ### Apples-to-apples benchmark snapshot (2026-02-20)
 The metrics below replace earlier apples-to-oranges summaries. These runs use:
@@ -141,15 +139,14 @@ Artifacts:
 - Projection sweep: `tmp/emb1024_calibration_20260219_161507/projection_sweep/projection_sweep_report.json`
 - Hybrid follow-up: `tmp/emb1024_calibration_20260219_161507/hybrid_after_sweep_jl_d512/selected_projection_hybrid_summary.json`
 
-Raw detector baselines (`metric_tiers.raw_detector.*.post_cluster`) are identical between windowed/non-windowed variants because detector atoms are shared:
+Primary apples-to-apples comparator (same split, IoU=0.50, same candidate tier):
 
-| Baseline | Precision | Recall | F1 |
-|---|---:|---:|---:|
-| YOLO-only | 0.8037 | 0.8302 | 0.8167 |
-| RF-DETR-only | 0.7482 | 0.8994 | 0.8169 |
-| YOLO+RF-DETR union | 0.6701 | 0.9165 | 0.7742 |
+| Variant | Baseline (`post_cluster.source_attributed.yolo_rfdetr_union`) | Ensemble (`post_xgb.accepted_all`) | Delta F1 |
+|---|---|---|---:|
+| nonwindow_20c8 | P=0.6643 R=0.9164 F1=0.7702 | P=0.9278 R=0.7048 F1=0.8011 | +0.0308 |
+| window_ceab | P=0.6480 R=0.9164 F1=0.7591 | P=0.9094 R=0.6908 F1=0.7852 | +0.0260 |
 
-Calibrator comparison (same split, IoU=0.50):
+Model comparison within the post-XGB tier (same split, IoU=0.50):
 
 | Variant | Method | Precision | Recall | F1 |
 |---|---|---:|---:|---:|
@@ -161,6 +158,8 @@ Calibrator comparison (same split, IoU=0.50):
 | window_ceab | XGB (JL 512 projection) | 0.9149 | 0.6877 | 0.7852 |
 | window_ceab | LR_dense + XGB_struct + blender | 0.8824 | 0.6734 | 0.7639 |
 | window_ceab | MLP_dense + XGB_struct + blender | 0.8835 | 0.6768 | 0.7665 |
+
+Raw detector replay metrics are retained in eval artifacts as diagnostics (`metric_tiers.raw_detector.*`), but are not used as the primary acceptance comparator.
 
 Projection sweep note:
 

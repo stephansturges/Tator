@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math
+import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math, stat
 from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
 import yaml
-from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable, Set
+from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable, Set, Iterator
 from collections import deque
 import torch, clip, joblib
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
+logger = logging.getLogger("localinferenceapi")
 from api.detectors_default import build_detectors_default_router
 from api.datasets import build_datasets_router
 from api.glossaries import build_glossaries_router
@@ -48,6 +49,7 @@ from api.rfdetr import build_rfdetr_router
 from api.yolo import build_yolo_router
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.background import BackgroundTask
 from models.schemas import (
     Base64Payload,
     PredictResponse,
@@ -136,10 +138,10 @@ except Exception:  # noqa: BLE001
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_412_PRECONDITION_FAILED,
-    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    HTTP_413_CONTENT_TOO_LARGE,
     HTTP_415_UNSUPPORTED_MEDIA_TYPE,
     HTTP_404_NOT_FOUND,
-    HTTP_422_UNPROCESSABLE_ENTITY,
+    HTTP_422_UNPROCESSABLE_CONTENT,
     HTTP_428_PRECONDITION_REQUIRED,
     HTTP_409_CONFLICT,
     HTTP_500_INTERNAL_SERVER_ERROR,
@@ -221,6 +223,7 @@ from services.prepass_recipes import (
     _load_agent_recipe_json_only_impl as _load_agent_recipe_json_only_impl,
     _ensure_recipe_zip_impl as _ensure_recipe_zip_impl,
     _import_agent_recipe_zip_bytes_impl as _import_agent_recipe_zip_bytes_impl,
+    _import_agent_recipe_zip_file_impl as _import_agent_recipe_zip_file_impl,
     _list_prepass_recipes_impl as _list_prepass_recipes_impl,
     _collect_recipe_assets_impl as _collect_recipe_assets_impl,
     _copy_tree_filtered_impl as _copy_tree_filtered_impl,
@@ -237,7 +240,7 @@ from services.agent_cascades import (
     _list_agent_cascades_impl as _list_agent_cascades_impl,
     _delete_agent_cascade_impl as _delete_agent_cascade_impl,
     _ensure_cascade_zip_impl as _ensure_cascade_zip_impl,
-    _import_agent_cascade_zip_bytes_impl as _import_agent_cascade_zip_bytes_impl,
+    _import_agent_cascade_zip_file_impl as _import_agent_cascade_zip_file_impl,
 )
 from services.prompt_helper_presets import (
     _list_prompt_helper_presets_impl as _list_prompt_helper_presets_impl,
@@ -786,6 +789,10 @@ AGENT_RECIPE_MAX_JSON_BYTES = _env_int("AGENT_RECIPE_MAX_JSON_BYTES", 10 * 1024 
 AGENT_RECIPE_MAX_BYTES = _env_int("AGENT_RECIPE_MAX_BYTES", 2 * 1024 * 1024 * 1024)
 AGENT_CASCADE_MAX_JSON_BYTES = _env_int("AGENT_CASCADE_MAX_JSON_BYTES", 10 * 1024 * 1024)
 AGENT_CASCADE_MAX_BYTES = _env_int("AGENT_CASCADE_MAX_BYTES", 8 * 1024 * 1024 * 1024)
+PREPASS_RECIPE_UPLOAD_MAX_BYTES = _env_int(
+    "PREPASS_RECIPE_UPLOAD_MAX_BYTES",
+    2 * 1024 * 1024 * 1024,
+)
 CLIP_TRAIN_UPLOAD_MAX_BYTES = _env_int("CLIP_TRAIN_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 CLIP_TRAIN_UPLOAD_QUOTA_BYTES = _env_int("CLIP_TRAIN_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 
@@ -1024,7 +1031,70 @@ def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict
 
 def _list_qwen_model_entries() -> List[Dict[str, Any]]:
     """Return registry entries for custom Qwen fine-tunes (if any)."""
-    return []
+    runs_root = (QWEN_JOB_ROOT / "runs").resolve()
+    if not runs_root.exists():
+        return []
+    candidates: List[Dict[str, Any]] = []
+    run_dirs = sorted(
+        [path for path in runs_root.iterdir() if path.is_dir()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        meta_path = run_dir / QWEN_METADATA_FILENAME
+        metadata: Dict[str, Any] = {}
+        if meta_path.exists():
+            try:
+                loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    metadata = loaded
+            except Exception:
+                metadata = {}
+        model_id = str(metadata.get("id") or run_dir.name)
+        latest = metadata.get("latest_checkpoint")
+        latest_path = Path(str(latest)).resolve() if latest else (run_dir / "latest").resolve()
+        if not latest_path.exists():
+            checkpoints = metadata.get("checkpoints") or []
+            for candidate in checkpoints:
+                try:
+                    candidate_path = Path(str(candidate)).resolve()
+                except Exception:
+                    continue
+                if candidate_path.exists():
+                    latest_path = candidate_path
+                    break
+        if not latest_path.exists():
+            # Skip incomplete/corrupt runs that don't expose a usable checkpoint.
+            continue
+        created_at = metadata.get("created_at")
+        if not isinstance(created_at, (int, float)):
+            try:
+                created_at = float(run_dir.stat().st_mtime)
+            except Exception:
+                created_at = None
+        candidates.append(
+            {
+            "id": model_id,
+            "label": str(metadata.get("label") or run_dir.name),
+            "type": "finetune",
+            "metadata": metadata,
+            "path": str(latest_path),
+            "created_at": created_at,
+            }
+        )
+    candidates.sort(
+        key=lambda item: float(item.get("created_at")) if isinstance(item.get("created_at"), (int, float)) else 0.0,
+        reverse=True,
+    )
+    entries: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for candidate in candidates:
+        cid = str(candidate.get("id") or "")
+        if not cid or cid in seen_ids:
+            continue
+        seen_ids.add(cid)
+        entries.append(candidate)
+    return entries
 
 
 def _get_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
@@ -2176,7 +2246,7 @@ class SamPreloadManager:
 def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     snippet, detections = _extract_qwen_json_block_impl(text)
     if not detections:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="qwen_parse_error:no_json_block_found")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="qwen_parse_error:no_json_block_found")
     return snippet, detections
 
 
@@ -2812,7 +2882,7 @@ def _run_sam3_visual_inference_multi(
     img_state = state if state is not None else processor.set_image(pil_img)
     img_w, img_h = float(pil_img.width), float(pil_img.height)
     output = None
-    for bbox_xywh, label in zip(cleaned_boxes, labels):
+    for bbox_xywh, label in zip(cleaned_boxes, labels, strict=False):
         x, y, w, h = bbox_xywh
         cx = (x + w / 2.0) / img_w
         cy = (y + h / 2.0) / img_h
@@ -3449,7 +3519,7 @@ def _run_qwen_inference(
             else:
                 raise
     generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=False)
     ]
     output_text = processor.batch_decode(
         generated_ids_trimmed,
@@ -3624,7 +3694,7 @@ def _run_qwen_chat(
     _qwen_append_logits_processor(gen_kwargs, immediate_processor)
     with torch.inference_mode():
         output_ids = model.generate(**inputs, **gen_kwargs)
-    output_ids = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, output_ids)]
+    output_ids = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, output_ids, strict=False)]
     output_text = processor.batch_decode(
         output_ids,
         skip_special_tokens=True,
@@ -5141,7 +5211,7 @@ def _agent_classifier_review(
             pending_entry["entry"]["classifier_accept"] = False
         counts["classifier_rejected"] += len(pending)
         return reviewed, counts
-    for row, pending_entry in zip(proba_arr, pending):
+    for row, pending_entry in zip(proba_arr, pending, strict=False):
         entry = pending_entry["entry"]
         target_idx = pending_entry["target_idx"]
         keep_mask = _clip_head_keep_mask(
@@ -5681,7 +5751,7 @@ def _agent_sanitize_detection_items(
             return cleaned, rejected
         classes = [str(c) for c in list(classifier_head.get("classes") or [])]
         bg_indices = _clip_head_background_indices(classes)
-        for row, pending_entry in zip(proba_arr, pending):
+        for row, pending_entry in zip(proba_arr, pending, strict=False):
             entry = pending_entry["entry"]
             target_idx = pending_entry["target_idx"]
             min_prob = pending_entry["min_prob"]
@@ -5716,7 +5786,7 @@ def _agent_resolve_image(
     sam_variant: Optional[str] = None,
 ) -> Tuple[Image.Image, np.ndarray, str]:
     if not image_base64 and not image_token:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="image_payload_missing")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="image_payload_missing")
     if image_token:
         variant = _default_variant(sam_variant)
         cached = _fetch_preloaded_image(image_token, variant)
@@ -5792,6 +5862,68 @@ def _agent_tool_run_detector(
     )
 
 
+def _iou(box_a: Sequence[float], box_b: Sequence[float]) -> float:
+    try:
+        ax1, ay1, ax2, ay2 = [float(v) for v in box_a[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in box_b[:4]]
+    except Exception:
+        return 0.0
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    if union <= 0.0:
+        return 0.0
+    return float(inter / union)
+
+
+def _dedupe_qwen_detections_iou(
+    detections: Sequence[QwenDetection],
+    *,
+    img_w: int,
+    img_h: int,
+    iou_thresh: float,
+) -> List[QwenDetection]:
+    if not detections:
+        return []
+    threshold = max(0.0, min(float(iou_thresh), 1.0))
+    ordered = sorted(
+        list(detections),
+        key=lambda det: float(getattr(det, "score", None) or 0.0),
+        reverse=True,
+    )
+    kept: List[QwenDetection] = []
+    kept_boxes: List[Tuple[float, float, float, float]] = []
+    for det in ordered:
+        if isinstance(det, QwenDetection):
+            ann: Dict[str, Any] = {"bbox_2d": list(det.bbox)}
+        else:
+            ann = det.model_dump() if hasattr(det, "model_dump") else dict(det) if isinstance(det, dict) else {}
+            if "bbox_2d" not in ann and isinstance(ann.get("bbox"), (list, tuple)):
+                ann["bbox_2d"] = list(ann.get("bbox") or [])
+        xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h)
+        if xyxy is None:
+            continue
+        overlap = False
+        for existing in kept_boxes:
+            if _iou(xyxy, existing) >= threshold:
+                overlap = True
+                break
+        if overlap:
+            continue
+        kept.append(det)
+        kept_boxes.append(tuple(float(v) for v in xyxy))
+    return kept
+
+
 @_register_agent_tool("zoom_and_detect")
 def _agent_tool_zoom_and_detect(
     image_base64: Optional[str] = None,
@@ -5806,16 +5938,17 @@ def _agent_tool_zoom_and_detect(
     grid_cell: Optional[str] = None,
     confirm_label: Optional[str] = None,
     confirm_topk: Optional[int] = None,
+    register: bool = True,
     max_det: Optional[int] = None,
     iou: Optional[float] = None,
     merge_iou: Optional[float] = None,
 ) -> Dict[str, Any]:
     if window_bbox_2d is None and bbox_2d is not None:
         if bbox_space and str(bbox_space).lower() == "window":
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="window_bbox_required")
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="window_bbox_required")
         window_bbox_2d = bbox_2d
     if window_bbox_2d is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="window_bbox_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="window_bbox_required")
     if conf is None and _AGENT_ACTIVE_DETECTOR_CONF is not None:
         conf = _AGENT_ACTIVE_DETECTOR_CONF
     mode_norm = (mode or "yolo").strip().lower()
@@ -5889,8 +6022,16 @@ def _agent_tool_zoom_and_detect(
     if confirmation is not None:
         result["confirmation"] = confirmation
     register_summary = result.get("register_summary") if isinstance(result, dict) else register_summary
-    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
-    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_cluster_ids_raw = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    updated_cluster_ids_raw = (
+        register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    )
+    new_cluster_ids = list(new_cluster_ids_raw) if isinstance(new_cluster_ids_raw, (list, tuple, set)) else []
+    updated_cluster_ids = (
+        list(updated_cluster_ids_raw)
+        if isinstance(updated_cluster_ids_raw, (list, tuple, set))
+        else []
+    )
     new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
     new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
     updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
@@ -6067,7 +6208,7 @@ def _agent_tool_sam3_similarity(
         pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
         img_w, img_h = pil_img.size
         if not assigned_label:
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_label_required")
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="sam3_similarity_label_required")
         window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
         if window_xyxy is None and window_bbox_2d is not None:
             window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
@@ -6121,7 +6262,7 @@ def _agent_tool_sam3_similarity(
                 continue
             boxes_xywh.append((x1, y1, w, h))
         if not boxes_xywh:
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="sam3_similarity_exemplar_required")
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="sam3_similarity_exemplar_required")
         threshold_val = float(score_thr) if score_thr is not None else 0.2
         mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
         detections = _run_sam3_visual_inference_multi(
@@ -6258,7 +6399,7 @@ def _agent_tool_qwen_infer(
             item_list = ", ".join([str(item).strip() for item in items if str(item).strip()])
         item_list = (item_list or "").strip()
         if not item_list:
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="agent_qwen_items_required")
+            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="agent_qwen_items_required")
     manual_prompt = _render_qwen_prompt_impl(
         prompt_type,
         items=item_list,
@@ -6266,7 +6407,7 @@ def _agent_tool_qwen_infer(
         extra_context=(extra_context or "").strip() or None,
         get_config_fn=lambda: _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock),
         http_exception_cls=HTTPException,
-        http_422=HTTP_422_UNPROCESSABLE_ENTITY,
+        http_422=HTTP_422_UNPROCESSABLE_CONTENT,
     )
     try:
         qwen_text, proc_w, proc_h = _run_qwen_inference(manual_prompt, crop_img, max_new_tokens=max_new_tokens)
@@ -6448,14 +6589,14 @@ def _agent_tool_classify_crop(
         ann["bbox_2d"] = list(bbox_2d[:4])
     xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox_2d)
     if xyxy is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="bbox_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="bbox_required")
     x1, y1, x2, y2 = xyxy
     x1 = max(0.0, min(float(img_w), x1))
     y1 = max(0.0, min(float(img_h), y1))
     x2 = max(0.0, min(float(img_w), x2))
     y2 = max(0.0, min(float(img_h), y2))
     if x2 <= x1 or y2 <= y1:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_bbox")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_bbox")
     crop = pil_img.crop((x1, y1, x2, y2))
     head: Optional[Dict[str, Any]] = None
     if classifier_id:
@@ -6481,12 +6622,13 @@ def _agent_tool_classify_crop(
     elif isinstance(active_classifier_head, dict):
         head = active_classifier_head
     if _AGENT_TRACE_FULL_WRITER is not None:
-        _trace_write_full(
+        _AGENT_TRACE_FULL_WRITER(
             {
                 "type": "classifier_head",
                 "present": bool(head),
                 "classifier_id": classifier_id,
                 "head_type": type(head).__name__ if head is not None else None,
+                "ts": time.time(),
             }
         )
     if not isinstance(head, dict):
@@ -6580,14 +6722,14 @@ def _agent_tool_image_zoom_in(
         ann["bbox_2d"] = list(bbox_2d[:4])
     xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_bbox_2d)
     if xyxy is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="bbox_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="bbox_required")
     x1, y1, x2, y2 = xyxy
     x1 = max(0.0, min(float(img_w), x1))
     y1 = max(0.0, min(float(img_h), y1))
     x2 = max(0.0, min(float(img_w), x2))
     y2 = max(0.0, min(float(img_h), y2))
     if x2 <= x1 or y2 <= y1:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid_bbox")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_bbox")
     orig_xyxy = (x1, y1, x2, y2)
     expanded = False
     if not grid_cell:
@@ -6637,7 +6779,7 @@ def _agent_tool_view_cell_raw(
     grid_cell: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not grid_cell:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="grid_cell_required")
     if not _AGENT_ACTIVE_GRID:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
     cell_xyxy = _agent_grid_cell_xyxy(
@@ -6646,7 +6788,7 @@ def _agent_tool_view_cell_raw(
         overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
     )
     if not cell_xyxy:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_invalid")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="grid_cell_invalid")
     base_img = _AGENT_ACTIVE_GRID_IMAGE
     if base_img is None:
         base_img, _, _ = _agent_resolve_image(image_base64, image_token)
@@ -6666,7 +6808,7 @@ def _agent_tool_view_cell_overlay(
     grid_cell: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not grid_cell:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="grid_cell_required")
     if not _AGENT_ACTIVE_GRID:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
     cell_xyxy = _agent_grid_cell_xyxy(
@@ -6675,7 +6817,7 @@ def _agent_tool_view_cell_overlay(
         overlap_ratio=PREPASS_GRID_OVERLAP_RATIO,
     )
     if not cell_xyxy:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_invalid")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="grid_cell_invalid")
     base_img = _AGENT_ACTIVE_GRID_IMAGE
     if base_img is None:
         base_img, _, _ = _agent_resolve_image(image_base64, image_token)
@@ -6744,7 +6886,7 @@ def _agent_tool_get_tile_context(
 ) -> Dict[str, Any]:
     cell = (grid_cell or tile_id or "").strip()
     if not cell:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="grid_cell_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="grid_cell_required")
     if not _AGENT_ACTIVE_GRID:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="grid_unavailable")
     payload, public_payload = _build_tile_context_payloads_impl(
@@ -6809,9 +6951,9 @@ def _agent_tool_get_tile_context_chunk(
     chunk_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not context_handle:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_handle_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_handle_required")
     if chunk_index is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_chunk_index_required")
     payload = _agent_context_chunk_impl(
         context_handle,
         chunk_index=int(chunk_index),
@@ -6877,9 +7019,9 @@ def _agent_tool_get_global_context_chunk(
     chunk_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not context_handle:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_handle_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_handle_required")
     if chunk_index is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_chunk_index_required")
     payload = _agent_context_chunk_impl(
         context_handle,
         chunk_index=int(chunk_index),
@@ -8400,7 +8542,7 @@ DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
     ),
 )
 
-qwen_prompt_config = DEFAULT_QWEN_PROMPT_CONFIG.copy(deep=True)
+qwen_prompt_config = DEFAULT_QWEN_PROMPT_CONFIG.model_copy(deep=True)
 
 
 @dataclass
@@ -9079,6 +9221,85 @@ def _unwrap_single_root_dir(extract_root: Path) -> Path:
     return extract_root
 
 
+def _normalise_relative_path(raw_path: Optional[str]) -> Path:
+    raw = str(raw_path or "").replace("\\", "/").strip()
+    if not raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+    while raw.startswith("/"):
+        raw = raw[1:]
+    path = Path(raw)
+    if path.is_absolute() or ".." in path.parts:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+    parts = [part for part in path.parts if part not in {"", "."}]
+    if not parts:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+    return Path(*parts)
+
+
+def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> None:
+    src_resolved = src.resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink():
+        if not overwrite:
+            return
+        if dest.is_dir():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+        dest.unlink(missing_ok=True)
+    if src_resolved == dest.resolve() if dest.exists() else False:
+        return
+    try:
+        os.link(src_resolved, dest)
+        return
+    except Exception:
+        pass
+    try:
+        os.symlink(str(src_resolved), dest)
+        return
+    except Exception:
+        pass
+    shutil.copy2(src_resolved, dest)
+
+
+def _extract_zip_safely_impl(
+    zf: zipfile.ZipFile,
+    extract_root: Path,
+    *,
+    max_entry_bytes: Optional[int],
+    max_total_uncompressed_bytes: Optional[int],
+    traversal_detail: str,
+    symlink_detail: str,
+    entry_too_large_detail: str,
+    total_too_large_detail: str,
+) -> None:
+    root = extract_root.resolve()
+    total_uncompressed = 0
+    for info in zf.infolist():
+        member_name = info.filename or ""
+        resolved_member = (extract_root / member_name).resolve()
+        if (
+            member_name.startswith("/")
+            or member_name.startswith("\\")
+            or (resolved_member != root and root not in resolved_member.parents)
+        ):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=traversal_detail)
+        mode = (info.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(mode):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=symlink_detail)
+        file_size = max(int(info.file_size or 0), 0)
+        if max_entry_bytes and file_size > max_entry_bytes:
+            raise HTTPException(
+                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                detail=entry_too_large_detail,
+            )
+        total_uncompressed += file_size
+        if max_total_uncompressed_bytes and total_uncompressed > max_total_uncompressed_bytes:
+            raise HTTPException(
+                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                detail=total_too_large_detail,
+            )
+    zf.extractall(extract_root)
+
+
 def list_datasets():
     return _list_all_datasets()
 
@@ -9097,12 +9318,32 @@ def upload_dataset_zip(
     temp_dir = Path(tempfile.mkdtemp(prefix="dataset_upload_"))
     try:
         zip_path = temp_dir / "upload.zip"
+        written = 0
         with zip_path.open("wb") as handle:
-            shutil.copyfileobj(file.file, handle)
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if DATASET_ZIP_MAX_BYTES and written > DATASET_ZIP_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE,
+                        detail="dataset_zip_too_large",
+                    )
+                handle.write(chunk)
         extract_root = temp_dir / "extract"
         extract_root.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_root)
+            _extract_zip_safely_impl(
+                zf,
+                extract_root,
+                max_entry_bytes=DATASET_ZIP_ENTRY_MAX_BYTES,
+                max_total_uncompressed_bytes=DATASET_ZIP_MAX_BYTES,
+                traversal_detail="dataset_zip_path_traversal",
+                symlink_detail="dataset_zip_symlink_unsupported",
+                entry_too_large_detail="dataset_zip_entry_too_large",
+                total_too_large_detail="dataset_zip_uncompressed_too_large",
+            )
         source_root = _unwrap_single_root_dir(extract_root)
         base_id = dataset_id or Path(file.filename or "dataset").stem
         base_id = _sanitize_yolo_run_id_impl(base_id) or "dataset"
@@ -9182,7 +9423,13 @@ def download_dataset_entry(dataset_id: str):
                     continue
                 rel = path.relative_to(dataset_root)
                 zf.write(path, arcname=str(Path(dataset_root.name) / rel))
-        return FileResponse(path=str(zip_path), media_type="application/zip", filename=f"{dataset_id}.zip")
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=f"{dataset_id}.zip",
+            # Dataset export archives are transient and should not accumulate on disk.
+            background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
+        )
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"dataset_export_failed:{exc}") from exc
@@ -9508,15 +9755,46 @@ def upload_qwen_dataset_chunk(job_id: str, split: str, image_name: str, annotati
     split = split.lower()
     if split not in {"train", "val"}:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_split_invalid")
+    annotation_text = str(annotation_line or "").strip()
+    if "\n" in annotation_text or "\r" in annotation_text:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid")
     split_root = job.root_dir / split
     split_root.mkdir(parents=True, exist_ok=True)
-    image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
-    image_path = split_root / image_name
-    with image_path.open("wb") as handle:
-        shutil.copyfileobj(file.file, handle)
+    raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
+    image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
+    image_path = (split_root / image_name_safe).resolve()
+    if not _path_is_within_root_impl(image_path, split_root.resolve()):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid")
+    if image_path.exists():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
+    written = 0
+    try:
+        with image_path.open("wb") as handle:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if QWEN_DATASET_CHUNK_MAX_BYTES and written > QWEN_DATASET_CHUNK_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE,
+                        detail="qwen_dataset_chunk_too_large",
+                    )
+                handle.write(chunk)
+    except Exception:
+        try:
+            image_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
     ann_path = split_root / "annotations.jsonl"
     with ann_path.open("a", encoding="utf-8") as handle:
-        handle.write(str(annotation_line).strip() + "\n")
+        handle.write(annotation_text + "\n")
     if split == "train":
         job.train_count += 1
     else:
@@ -9684,7 +9962,7 @@ class ConcatHead(torch.nn.Module):
             preds1 = x[0][0]
             preds2 = x[1][0]
         elif isinstance(x[0], list):
-            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1])]
+            return [torch.cat((x0, x1), dim=1) for x0, x1 in zip(x[0], x[1], strict=False)]
         else:
             preds1 = x[0]
             preds2 = x[1]
@@ -9954,10 +10232,17 @@ def _patch_ultralytics_for_head_grafting() -> None:
                 s = 256
                 m.inplace = self.inplace
 
-                def _forward(x):
+                def _forward(x, detect_layer=m):
                     if self.end2end:
                         return self.forward(x)["one2many"]
-                    return self.forward(x)[0] if isinstance(m, (yolo_tasks.Segment, yolo_tasks.YOLOESegment, yolo_tasks.Pose, yolo_tasks.OBB)) else self.forward(x)
+                    return (
+                        self.forward(x)[0]
+                        if isinstance(
+                            detect_layer,
+                            (yolo_tasks.Segment, yolo_tasks.YOLOESegment, yolo_tasks.Pose, yolo_tasks.OBB),
+                        )
+                        else self.forward(x)
+                    )
 
                 self.model.eval()
                 m.training = True
@@ -10276,6 +10561,18 @@ _import_agent_recipe_zip_bytes = functools.partial(
     max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
     max_crops=AGENT_RECIPE_MAX_CROPS,
     max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
+    max_entry_bytes=AGENT_RECIPE_MAX_BYTES,
+    persist_recipe_fn=_persist_agent_recipe,
+)
+
+_import_agent_recipe_zip_file = functools.partial(
+    _import_agent_recipe_zip_file_impl,
+    recipes_root=AGENT_MINING_RECIPES_ROOT,
+    max_json_bytes=AGENT_RECIPE_MAX_JSON_BYTES,
+    max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
+    max_crops=AGENT_RECIPE_MAX_CROPS,
+    max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
+    max_entry_bytes=AGENT_RECIPE_MAX_BYTES,
     persist_recipe_fn=_persist_agent_recipe,
 )
 
@@ -10321,14 +10618,17 @@ _ensure_cascade_zip = functools.partial(
 )
 
 
-_import_agent_cascade_zip_bytes = functools.partial(
-    _import_agent_cascade_zip_bytes_impl,
+_import_agent_cascade_zip_file = functools.partial(
+    _import_agent_cascade_zip_file_impl,
     cascades_root=AGENT_MINING_CASCADES_ROOT,
     classifiers_root=(UPLOAD_ROOT / "classifiers"),
     max_json_bytes=AGENT_CASCADE_MAX_JSON_BYTES,
+    max_entry_bytes=AGENT_CASCADE_MAX_BYTES,
+    max_recipe_zip_bytes=AGENT_RECIPE_MAX_BYTES,
     classifier_allowed_exts=CLASSIFIER_ALLOWED_EXTS,
     path_is_within_root_fn=_path_is_within_root_impl,
     import_recipe_fn=_import_agent_recipe_zip_bytes,
+    import_recipe_file_fn=_import_agent_recipe_zip_file,
     persist_cascade_fn=_persist_agent_cascade,
 )
 
@@ -10715,6 +11015,1005 @@ def _sample_negative_images(
     return _stable_sample_ids(candidates, cap=sample_size, seed=seed, salt=f"neg:{class_id}")
 
 
+_PROMPT_VARIANT_FALLBACKS: Dict[str, List[str]] = {
+    "car": ["vehicle", "automobile", "sedan"],
+    "person": ["human", "pedestrian", "individual"],
+    "truck": ["lorry", "cargo truck", "pickup truck"],
+    "bus": ["coach", "city bus", "transit bus"],
+    "motorcycle": ["motorbike", "bike rider", "two wheeler"],
+    "bicycle": ["bike", "cyclist", "two wheeler"],
+}
+
+
+def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_qwen: bool) -> List[str]:
+    base = _sanitize_prompts_impl([str(class_name or "").replace("_", " ").strip()]) or [str(class_name or "").strip()]
+    if max_synonyms <= 0:
+        return base
+    extras: List[str] = []
+    key = base[0].lower().strip() if base else str(class_name or "").lower().strip()
+    extras.extend(_PROMPT_VARIANT_FALLBACKS.get(key, []))
+    if key.endswith("s") and len(key) > 3:
+        extras.append(key[:-1])
+    if " " in key:
+        parts = [p.strip() for p in key.split(" ") if p.strip()]
+        if parts:
+            extras.append(parts[-1])
+    if use_qwen:
+        extras.extend(
+            _expand_prompts_with_prompt_llm(
+                class_name=base[0] if base else class_name,
+                base_prompts=base,
+                max_new=max_synonyms,
+                max_new_tokens=96,
+            )
+        )
+    merged = _sanitize_prompts_impl([*base, *extras])
+    return merged[: max(1, 1 + int(max_synonyms))]
+
+
+def _evaluate_prompt_for_class(
+    prompt: str,
+    *,
+    cat_id: int,
+    image_ids: Sequence[int],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    images: Dict[int, Dict[str, Any]],
+    score_threshold: float,
+    max_dets: int,
+    iou_threshold: float,
+    image_cache: Dict[int, Image.Image],
+) -> Dict[str, Any]:
+    total_gt = 0
+    total_preds = 0
+    total_matches = 0
+    total_fps = 0
+    total_duplicates = 0
+    images_with_preds = 0
+    images_with_match = 0
+    gt_best_scores: Dict[Any, float] = {}
+    fp_scores: List[float] = []
+    for image_id in image_ids:
+        img_entry = images.get(int(image_id)) or {}
+        image_path = img_entry.get("path")
+        if not image_path:
+            continue
+        try:
+            path_obj = Path(str(image_path))
+        except Exception:
+            continue
+        if not path_obj.exists():
+            continue
+        cached = image_cache.get(int(image_id))
+        if cached is None:
+            try:
+                with Image.open(path_obj) as opened:
+                    cached = opened.convert("RGB")
+            except Exception:
+                continue
+            image_cache[int(image_id)] = cached
+        pil_img = cached
+        gt_boxes = list((gt_by_image_cat.get(int(image_id)) or {}).get(int(cat_id)) or [])
+        total_gt += len(gt_boxes)
+        try:
+            detections = _run_sam3_text_inference(
+                pil_img,
+                str(prompt),
+                threshold=float(score_threshold),
+                mask_threshold=0.5,
+                limit=int(max_dets),
+                min_size=0.0,
+                simplify_epsilon=0.0,
+            )
+        except Exception:
+            detections = []
+        preds: List[Tuple[float, Tuple[float, float, float, float]]] = []
+        for det in detections or []:
+            if not isinstance(det, QwenDetection):
+                continue
+            score = float(det.score or 0.0)
+            if score < float(score_threshold):
+                continue
+            bbox = det.bbox or []
+            if len(bbox) < 4:
+                continue
+            x1, y1, x2, y2 = _yolo_to_xyxy(pil_img.width, pil_img.height, bbox[:4])
+            if x2 <= x1 or y2 <= y1:
+                continue
+            preds.append((score, (float(x1), float(y1), float(x2), float(y2))))
+        preds.sort(key=lambda item: item[0], reverse=True)
+        if max_dets > 0:
+            preds = preds[: max_dets]
+        total_preds += len(preds)
+        if preds:
+            images_with_preds += 1
+        matched_gt: set[int] = set()
+        matched_this_image = False
+        for score, pred_xyxy in preds:
+            best_iou = 0.0
+            best_gt_idx = -1
+            for gt_idx, gt_xyxy in enumerate(gt_boxes):
+                overlap = _iou(pred_xyxy, gt_xyxy)
+                if overlap > best_iou:
+                    best_iou = overlap
+                    best_gt_idx = gt_idx
+            if best_gt_idx >= 0 and best_iou >= float(iou_threshold):
+                gt_key = (int(image_id), int(best_gt_idx))
+                if best_gt_idx in matched_gt:
+                    total_duplicates += 1
+                    total_fps += 1
+                    fp_scores.append(float(score))
+                else:
+                    matched_gt.add(best_gt_idx)
+                    matched_this_image = True
+                    total_matches += 1
+                    prev = gt_best_scores.get(gt_key)
+                    gt_best_scores[gt_key] = float(score) if prev is None else max(float(prev), float(score))
+            else:
+                total_fps += 1
+                fp_scores.append(float(score))
+        if matched_this_image:
+            images_with_match += 1
+    precision = float(total_matches / total_preds) if total_preds > 0 else 0.0
+    recall = float(total_matches / total_gt) if total_gt > 0 else 0.0
+    f1 = float((2.0 * precision * recall) / (precision + recall)) if (precision + recall) > 0 else 0.0
+    image_count = max(1, len(image_ids))
+    det_rate = float(images_with_preds / image_count)
+    coverage_rate = float(images_with_match / image_count)
+    curve_info = _summarize_seed_threshold_curve_for_prompt(
+        gt_best_scores=gt_best_scores,
+        fp_scores=fp_scores,
+        base_seed_threshold=float(score_threshold),
+        curve_limit=12,
+    )
+    return {
+        "prompt": str(prompt),
+        "gts": int(total_gt),
+        "matches": int(total_matches),
+        "fps": int(total_fps),
+        "duplicates": int(total_duplicates),
+        "preds": int(total_preds),
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "score": f1,
+        "coverage_rate": coverage_rate,
+        "det_rate": det_rate,
+        "gt_best_scores": gt_best_scores,
+        "fp_scores": fp_scores,
+        **curve_info,
+    }
+
+
+def _ensure_agent_mining_sample(
+    dataset_id: str,
+    dataset_root: Path,
+    *,
+    sample_size: int,
+    seed: int,
+) -> Dict[str, Any]:
+    cache_dir = AGENT_MINING_DET_CACHE_ROOT / "samples"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    dataset_signature = _compute_dir_signature_impl(dataset_root)
+    cache_key = f"{str(dataset_id).strip()}__{dataset_signature}__{int(sample_size)}__{int(seed)}"
+    cache_path = cache_dir / f"{hashlib.sha256(cache_key.encode('utf-8')).hexdigest()[:16]}.json"
+    if cache_path.exists():
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("sample_ids"), list):
+                payload["_cached"] = True
+                return payload
+        except Exception:
+            pass
+    coco, _, images = _load_coco_index_impl(dataset_root)
+    image_ids = []
+    for img in coco.get("images", []) or []:
+        try:
+            image_ids.append(int(img.get("id")))
+        except Exception:
+            continue
+    if not image_ids:
+        image_ids = sorted(int(i) for i in images.keys())
+    image_ids = sorted(set(image_ids))
+    sampled = _stable_sample_ids(image_ids, cap=max(1, int(sample_size)), seed=int(seed), salt=f"agent:{dataset_id}")
+    result = {
+        "sample_ids": sampled,
+        "total_available": len(image_ids),
+        "dataset_signature": dataset_signature,
+        "_cached": False,
+    }
+    try:
+        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return result
+
+
+def _estimate_steps_speed_factor(payload: AgentMiningRequest, *, allow_prefilter: bool) -> float:
+    factor = 1.0
+    try:
+        seeds = int(getattr(payload, "steps_max_visual_seeds_per_step", 0) or 0)
+    except Exception:
+        seeds = 0
+    if seeds > 0:
+        factor += min(3.0, float(seeds) * 0.06)
+    if bool(getattr(payload, "steps_optimize_global", False)):
+        factor *= 1.25
+    if allow_prefilter and bool(getattr(payload, "steps_prompt_prefilter", False)):
+        factor *= 0.85
+    return float(max(0.5, min(factor, 5.0)))
+
+
+def _estimate_agent_global_optimizer_image_evals(
+    *,
+    val_images: int,
+    eval_caps: Sequence[int],
+    keep_ratio: float,
+    rounds: int,
+    max_trials: int,
+    mutations_per_round: int,
+) -> Tuple[int, List[int], bool]:
+    budgets: List[int] = []
+    for cap in eval_caps or []:
+        try:
+            val = int(cap)
+        except Exception:
+            continue
+        if val > 0:
+            budgets.append(val)
+    budgets = sorted(set(budgets))
+    if not budgets:
+        return 0, [], True
+    max_images = max(1, int(val_images))
+    budgets = [min(max_images, b) for b in budgets]
+    keep = float(max(0.1, min(0.9, keep_ratio)))
+    total = 0
+    stage_trials = max(1, min(int(max_trials), int(mutations_per_round)))
+    for _ in range(max(1, int(rounds))):
+        active = float(stage_trials)
+        for budget in budgets:
+            total += int(max(1, round(active)) * int(budget))
+            active = max(1.0, active * keep)
+    return int(total), budgets, False
+
+
+def _resolve_steps_prompt_prefilter_config(payload: AgentMiningRequest, *, allow_prefilter: bool) -> Dict[str, Any]:
+    requested = bool(getattr(payload, "steps_prompt_prefilter", False))
+    mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower()
+    table = {
+        "conservative": {"sample_size": 20, "keep_ratio": 0.8},
+        "balanced": {"sample_size": 40, "keep_ratio": 0.6},
+        "aggressive": {"sample_size": 80, "keep_ratio": 0.4},
+    }
+    cfg = table.get(mode, table["balanced"])
+    enabled = bool(requested and allow_prefilter)
+    return {
+        "requested": requested,
+        "enabled": enabled,
+        "mode": mode if mode in table else "balanced",
+        "sample_size": int(cfg["sample_size"]),
+        "keep_ratio": float(cfg["keep_ratio"]),
+        "disabled_reason": None if enabled or not requested else "unsupported_encoder",
+    }
+
+
+def _resolve_steps_prompt_bg_drop_config(payload: AgentMiningRequest, *, allow_drop: bool) -> Dict[str, Any]:
+    requested = bool(getattr(payload, "steps_prompt_bg_drop", False))
+    mode = str(getattr(payload, "steps_prompt_bg_drop_mode", "balanced") or "balanced").lower()
+    table = {
+        "conservative": {"min_checked": 3, "drop_rate": 0.15},
+        "balanced": {"min_checked": 3, "drop_rate": 0.3},
+        "aggressive": {"min_checked": 2, "drop_rate": 0.5},
+    }
+    cfg = table.get(mode, table["balanced"])
+    enabled = bool(requested and allow_drop)
+    disabled_reason = None
+    if requested and not allow_drop:
+        disabled_reason = "no_background_classes"
+    return {
+        "requested": requested,
+        "enabled": enabled,
+        "mode": mode if mode in table else "balanced",
+        "min_checked": int(cfg["min_checked"]),
+        "drop_rate": float(cfg["drop_rate"]),
+        "disabled_reason": disabled_reason,
+    }
+
+
+def _expand_prompts_with_prompt_llm(
+    class_name: str,
+    base_prompts: Sequence[str],
+    max_new: int,
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+    max_new_tokens: int = 160,
+) -> List[str]:
+    if max_new <= 0:
+        return []
+    base = [str(p).strip() for p in base_prompts if isinstance(p, str) and str(p).strip()]
+    if not base:
+        base = [str(class_name).strip()]
+    # Keep fallback deterministic and cheap even when Qwen LLM expansion is unavailable.
+    candidates: List[str] = []
+    for prompt in base:
+        candidates.extend(
+            [
+                prompt,
+                prompt.replace("_", " "),
+                f"{prompt} object",
+                f"single {prompt}",
+                f"group of {prompt}",
+            ]
+        )
+    generated = _sanitize_prompts_impl(candidates)
+    extras = [p for p in generated if p.lower() not in {b.lower() for b in base}]
+    extras = extras[: int(max_new)]
+    if callable(log_fn) and extras:
+        try:
+            log_fn(f"[prompt-llm] fallback expansion for '{class_name}': {', '.join(extras)}")
+        except Exception:
+            pass
+    return extras
+
+
+def _prefilter_prompts_with_clip(
+    prompts: Sequence[str],
+    *,
+    keep_prompts: Sequence[str],
+    cat_id: int,
+    class_name: str,
+    eval_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    clip_model_name: Optional[str],
+    sample_size: int,
+    keep_ratio: float,
+    seed: int,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> List[str]:
+    sanitized = _sanitize_prompts_impl([str(p) for p in prompts if isinstance(p, str)])
+    sticky = _sanitize_prompts_impl([str(p) for p in keep_prompts if isinstance(p, str)])
+    if not sanitized:
+        return sticky
+    keep_target = max(len(sticky), max(1, int(round(len(sanitized) * max(0.1, min(1.0, keep_ratio))))))
+    eval_subset = _stable_sample_ids(eval_ids, cap=max(1, int(sample_size)), seed=seed, salt=f"prefilter:{cat_id}")
+    cache: Dict[int, Image.Image] = {}
+    scored: List[Tuple[float, str]] = []
+    for prompt in sanitized:
+        if prompt.lower() in {p.lower() for p in sticky}:
+            continue
+        metrics = _evaluate_prompt_for_class(
+            prompt,
+            cat_id=int(cat_id),
+            image_ids=eval_subset,
+            gt_by_image_cat=gt_by_image_cat,
+            images=images,
+            score_threshold=0.2,
+            max_dets=100,
+            iou_threshold=0.5,
+            image_cache=cache,
+        )
+        score = float(metrics.get("score", 0.0))
+        scored.append((score, prompt))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    merged: List[str] = []
+    seen = set()
+    for prompt in sticky:
+        key = prompt.lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(prompt)
+    for _score, prompt in scored:
+        key = prompt.lower().strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(prompt)
+        if len(merged) >= keep_target:
+            break
+    if callable(log_fn):
+        try:
+            model_note = clip_model_name or "fallback"
+            log_fn(
+                f"[steps] Prompt prefilter ({model_note}) {class_name}: kept {len(merged)}/{len(sanitized)} prompts"
+            )
+        except Exception:
+            pass
+    return merged or sticky or sanitized[:1]
+
+
+class _Sam3GreedyEvalWorker:
+    def close(self) -> None:
+        return
+
+
+def _build_sam3_greedy_eval_workers(payload: AgentMiningRequest, *, log_fn: Optional[Callable[[str], None]] = None) -> List[_Sam3GreedyEvalWorker]:
+    workers = max(1, int(getattr(payload, "max_workers", 1) or 1))
+    result = [_Sam3GreedyEvalWorker() for _ in range(workers)]
+    if callable(log_fn):
+        try:
+            log_fn(f"[steps] Prepared {len(result)} eval worker(s)")
+        except Exception:
+            pass
+    return result
+
+
+def _mine_seed_prompt_stats_image_first(
+    *,
+    cat_id: int,
+    prompts: Sequence[str],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: AgentMiningRequest,
+    clip_head: Optional[Dict[str, Any]],
+    clip_head_target_index: Optional[int],
+    clip_head_bg_indices: Sequence[int],
+    prompt_bg_drop_cfg: Dict[str, Any],
+    workers: Optional[Sequence[_Sam3GreedyEvalWorker]],
+    log_every: int,
+    log_fn: Optional[Callable[[str], None]],
+    cancel_event: Optional[threading.Event],
+    progress_callback: Optional[Callable[[int, int], None]],
+) -> List[Dict[str, Any]]:
+    cache: Dict[int, Image.Image] = {}
+    stats: List[Dict[str, Any]] = []
+    total = max(1, len(prompts))
+    for idx, prompt in enumerate(prompts, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        metrics = _evaluate_prompt_for_class(
+            str(prompt),
+            cat_id=int(cat_id),
+            image_ids=val_ids,
+            gt_by_image_cat=gt_by_image_cat,
+            images=images,
+            score_threshold=float(payload.seed_threshold),
+            max_dets=int(payload.steps_seed_eval_max_results or payload.max_results),
+            iou_threshold=float(payload.iou_threshold),
+            image_cache=cache,
+        )
+        stats.append(
+            {
+                **metrics,
+                "prompt": str(prompt),
+                "seed_threshold": float(payload.seed_threshold),
+                "bg_drop": False,
+                "clip_head_used": bool(clip_head is not None and clip_head_target_index is not None),
+                "clip_head_bg_enabled": bool(prompt_bg_drop_cfg.get("enabled")),
+                "clip_head_bg_classes": list(clip_head_bg_indices or []),
+            }
+        )
+        if callable(progress_callback):
+            try:
+                progress_callback(idx, total)
+            except Exception:
+                pass
+        if callable(log_fn) and (idx == total or idx % max(1, int(log_every or 1)) == 0):
+            try:
+                log_fn(f"[steps] Seed eval {idx}/{total} prompt='{prompt}'")
+            except Exception:
+                pass
+    stats.sort(
+        key=lambda entry: (
+            int(entry.get("matches", 0)),
+            float(entry.get("precision", 0.0)),
+            float(entry.get("recall", 0.0)),
+        ),
+        reverse=True,
+    )
+    return stats
+
+
+def _resolve_steps_early_stop_config(payload: AgentMiningRequest, *, target_precision: Optional[float]) -> Dict[str, Any]:
+    requested = bool(getattr(payload, "steps_early_stop", False))
+    mode = str(getattr(payload, "steps_early_stop_mode", "balanced") or "balanced").lower()
+    table = {
+        "conservative": {"min_steps": 3, "window": 3, "min_increment": 0.01, "precision_margin": 0.03},
+        "balanced": {"min_steps": 2, "window": 2, "min_increment": 0.005, "precision_margin": 0.05},
+        "aggressive": {"min_steps": 1, "window": 2, "min_increment": 0.0, "precision_margin": 0.08},
+    }
+    cfg = table.get(mode, table["balanced"])
+    return {
+        "requested": requested,
+        "enabled": requested,
+        "mode": mode if mode in table else "balanced",
+        "min_steps": int(cfg["min_steps"]),
+        "window": int(cfg["window"]),
+        "min_increment": float(cfg["min_increment"]),
+        "precision_margin": float(cfg["precision_margin"]),
+        "target_precision": float(target_precision) if target_precision is not None else None,
+    }
+
+
+def _tune_steps_global_optimizer_image_first(
+    *,
+    cat_id: int,
+    steps: Sequence[Dict[str, Any]],
+    seed_stats: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: AgentMiningRequest,
+    clip_head: Dict[str, Any],
+    clip_head_target_index: int,
+    workers: Optional[Sequence[_Sam3GreedyEvalWorker]],
+    log_fn: Optional[Callable[[str], None]],
+    cancel_event: Optional[threading.Event],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if callable(log_fn):
+        try:
+            log_fn("[steps] Global optimization fallback active (passthrough)")
+        except Exception:
+            pass
+    return list(steps or []), {"enabled": True, "strategy": "passthrough"}
+
+
+def _tune_steps_tier1_knobs_image_first(
+    *,
+    cat_id: int,
+    steps: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: AgentMiningRequest,
+    clip_head: Dict[str, Any],
+    clip_head_target_index: int,
+    workers: Optional[Sequence[_Sam3GreedyEvalWorker]],
+    log_fn: Optional[Callable[[str], None]],
+    cancel_event: Optional[threading.Event],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if callable(log_fn):
+        try:
+            log_fn("[steps] Tier-1 tuning fallback active (passthrough)")
+        except Exception:
+            pass
+    return list(steps or []), {"enabled": True, "strategy": "passthrough"}
+
+
+def _tune_steps_tier2_knobs_image_first(
+    *,
+    cat_id: int,
+    steps: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: AgentMiningRequest,
+    clip_head: Dict[str, Any],
+    clip_head_target_index: int,
+    workers: Optional[Sequence[_Sam3GreedyEvalWorker]],
+    log_fn: Optional[Callable[[str], None]],
+    cancel_event: Optional[threading.Event],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if callable(log_fn):
+        try:
+            log_fn("[steps] Tier-2 tuning fallback active (passthrough)")
+        except Exception:
+            pass
+    return list(steps or []), {"enabled": True, "strategy": "passthrough"}
+
+
+def _tune_clip_head_for_selected_steps_image_first(
+    *,
+    cat_id: int,
+    class_name: str,
+    steps: Sequence[Dict[str, Any]],
+    val_ids: Sequence[int],
+    images: Dict[int, Dict[str, Any]],
+    gt_by_image_cat: Dict[int, Dict[int, List[List[float]]]],
+    payload: AgentMiningRequest,
+    clip_head: Dict[str, Any],
+    clip_head_target_index: int,
+    workers: Optional[Sequence[_Sam3GreedyEvalWorker]],
+    log_every: int,
+    log_fn: Optional[Callable[[str], None]],
+    cancel_event: Optional[threading.Event],
+    progress_callback: Optional[Callable[[int, int], None]],
+    export_hard_negatives: bool,
+) -> Dict[str, Any]:
+    all_gt_scores: Dict[Any, float] = {}
+    fp_scores: List[float] = []
+    total_preds = 0
+    total_gt = 0
+    for idx, step in enumerate(steps or [], start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        prompt = str(step.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        metrics = _evaluate_prompt_for_class(
+            prompt,
+            cat_id=int(cat_id),
+            image_ids=val_ids,
+            gt_by_image_cat=gt_by_image_cat,
+            images=images,
+            score_threshold=float(step.get("seed_threshold", payload.seed_threshold)),
+            max_dets=int(step.get("max_results", payload.max_results)),
+            iou_threshold=float(payload.iou_threshold),
+            image_cache={},
+        )
+        total_preds += int(metrics.get("preds", 0))
+        total_gt = max(total_gt, int(metrics.get("gts", 0)))
+        fp_scores.extend(float(v) for v in (metrics.get("fp_scores") or []))
+        for key, score in (metrics.get("gt_best_scores") or {}).items():
+            prev = all_gt_scores.get(key)
+            all_gt_scores[key] = float(score) if prev is None else max(float(prev), float(score))
+        if callable(progress_callback):
+            try:
+                progress_callback(idx, max(1, len(steps)))
+            except Exception:
+                pass
+    matches = len(all_gt_scores)
+    fps = len(fp_scores)
+    precision = float(matches / (matches + fps)) if (matches + fps) else 0.0
+    recall = float(matches / total_gt) if total_gt > 0 else 0.0
+    return {
+        "gts": int(total_gt),
+        "matches": int(matches),
+        "fps": int(fps),
+        "duplicates": 0,
+        "preds": int(total_preds),
+        "precision": float(precision),
+        "recall": float(recall),
+        "coverage_rate": float(recall),
+        "det_rate": float(total_preds / max(1, len(val_ids))),
+        "clip_head_min_prob": float(getattr(payload, "clip_head_min_prob", 0.0)),
+        "clip_head_margin": float(getattr(payload, "clip_head_margin", 0.0)),
+        "clip_head_background_margin": float(getattr(payload, "clip_head_background_margin", 0.0)),
+    }
+
+
+def _apply_agent_recipe_to_image(
+    recipe_obj: Dict[str, Any],
+    *,
+    image: Dict[str, Any],
+    dataset_id: str,
+    images: Dict[int, Dict[str, Any]],
+    mask_threshold: float,
+    min_size: float,
+    simplify_epsilon: float,
+    max_results: int,
+    class_id: Optional[int],
+    class_name: Optional[str],
+    clip_head_min_prob_override: Optional[float],
+    clip_head_margin_override: Optional[float],
+    extra_clip_classifier_path: Optional[str],
+    extra_clip_min_prob: Optional[float],
+    extra_clip_margin: Optional[float],
+    warnings: List[str],
+) -> List[QwenDetection]:
+    image_path = Path(str(image.get("path") or "")).expanduser()
+    if not image_path.exists():
+        warnings.append("agent_recipe_image_missing")
+        return []
+    try:
+        with Image.open(image_path) as opened:
+            pil_img = opened.convert("RGB")
+    except Exception:
+        warnings.append("agent_recipe_image_open_failed")
+        return []
+    mode = _classify_agent_recipe_mode_impl(recipe_obj)
+    prompts: List[Tuple[str, float, int]] = []
+    if mode == "steps":
+        steps = recipe_obj.get("steps") or []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if step.get("enabled") is False:
+                continue
+            prompt = str(step.get("prompt") or "").strip()
+            if not prompt:
+                continue
+            try:
+                seed_threshold = float(step.get("seed_threshold", recipe_obj.get("seed_threshold", 0.0)))
+            except Exception:
+                seed_threshold = 0.0
+            try:
+                step_max_results = int(step.get("max_results", max_results))
+            except Exception:
+                step_max_results = int(max_results)
+            prompts.append((prompt, seed_threshold, max(1, step_max_results)))
+    else:
+        for prompt in recipe_obj.get("text_prompts") or []:
+            cleaned = str(prompt).strip()
+            if cleaned:
+                prompts.append((cleaned, float(recipe_obj.get("seed_threshold", 0.0) or 0.0), int(max_results)))
+    if not prompts:
+        fallback = str(class_name or recipe_obj.get("class_name") or "").strip()
+        if fallback:
+            prompts = [(fallback, 0.0, int(max_results))]
+        else:
+            warnings.append("agent_recipe_no_prompts")
+            return []
+    detections: List[QwenDetection] = []
+    for prompt, seed_thr, step_max in prompts:
+        try:
+            step_dets = _run_sam3_text_inference(
+                pil_img,
+                prompt,
+                threshold=float(max(0.0, min(1.0, seed_thr))),
+                mask_threshold=float(mask_threshold),
+                limit=max(1, int(step_max)),
+                min_size=float(min_size),
+                simplify_epsilon=float(simplify_epsilon),
+            )
+        except Exception:
+            warnings.append(f"agent_recipe_prompt_failed:{prompt}")
+            continue
+        for det in step_dets or []:
+            if class_id is not None:
+                det.class_id = int(class_id)
+            if class_name:
+                det.class_name = str(class_name)
+            detections.append(det)
+    if not detections:
+        return []
+    dedupe_iou = float(recipe_obj.get("dedupe_iou") or 0.5)
+    deduped = _dedupe_qwen_detections_iou(
+        detections,
+        img_w=pil_img.width,
+        img_h=pil_img.height,
+        iou_thresh=dedupe_iou,
+    )
+    return deduped[: max(1, int(max_results))]
+
+
+def _suggest_prompts_for_dataset(payload: PromptHelperSuggestRequest) -> Dict[str, Any]:
+    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+        payload.dataset_id,
+        list_all_datasets_fn=_list_all_datasets,
+        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+            dataset_id,
+            qwen_root=QWEN_DATASET_ROOT,
+            sam3_root=SAM3_DATASET_ROOT,
+            registry_root=DATASET_REGISTRY_ROOT,
+            http_exception_cls=HTTPException,
+        ),
+    )
+    coco, _, _ = _load_coco_index_impl(dataset_root)
+    classes: List[Dict[str, Any]] = []
+    for idx, cat in enumerate(coco.get("categories") or []):
+        try:
+            cat_id = int(cat.get("id", idx))
+        except Exception:
+            cat_id = idx
+        class_name = str(cat.get("name", f"class_{cat_id}"))
+        prompts = _generate_prompt_variants_for_class(class_name, int(payload.max_synonyms), bool(payload.use_qwen))
+        classes.append(
+            {
+                "class_id": cat_id,
+                "class_name": class_name,
+                "default_prompts": prompts,
+            }
+        )
+    return {
+        "dataset_id": payload.dataset_id,
+        "classes": classes,
+        "config": {"max_synonyms": int(payload.max_synonyms), "use_qwen": bool(payload.use_qwen)},
+    }
+
+
+class _Sam1SegWorker:
+    def __init__(self, device: torch.device):
+        self.device = device
+
+    def process_image(
+        self,
+        *,
+        image_id: int,
+        pil_img: Image.Image,
+        tasks: Sequence[Dict[str, Any]],
+        min_threshold: float,
+        mask_threshold: float,
+        max_results: int,
+        min_size: float,
+        simplify: float,
+        return_masks: bool,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        np_img = np.asarray(pil_img.convert("RGB"))
+        outputs: Dict[str, List[Dict[str, Any]]] = {}
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            bbox = task.get("bbox") or []
+            if not task_id or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            x, y, w, h = [float(v) for v in bbox[:4]]
+            box_xyxy = np.array([x, y, x + w, y + h], dtype=np.float32)
+            try:
+                masks, scores, _ = _predict_with_cache(
+                    np_img,
+                    token=None,
+                    variant="sam1",
+                    image_name=f"seg_builder_{image_id}",
+                    box=box_xyxy,
+                    multimask_output=True,
+                )
+            except Exception:
+                outputs[task_id] = []
+                continue
+            dets: List[Dict[str, Any]] = []
+            masks_arr = np.asarray(masks) if masks is not None else np.zeros((0, pil_img.height, pil_img.width), dtype=np.uint8)
+            scores_arr = np.asarray(scores).reshape(-1) if scores is not None else np.zeros((len(masks_arr),), dtype=np.float32)
+            order = list(range(len(masks_arr)))
+            order.sort(key=lambda i: float(scores_arr[i]) if i < len(scores_arr) else 0.0, reverse=True)
+            for idx in order[: max(1, int(max_results))]:
+                score = float(scores_arr[idx]) if idx < len(scores_arr) else 0.0
+                if score < float(min_threshold):
+                    continue
+                mask = np.asarray(masks_arr[idx]).astype(np.uint8)
+                if min_size > 0 and float(np.count_nonzero(mask)) < float(min_size):
+                    continue
+                dets.append({"score": score, "mask_array": mask})
+            outputs[task_id] = dets
+        return outputs
+
+    def close(self) -> None:
+        return
+
+
+class _Sam3SegWorker:
+    def __init__(self, device: torch.device):
+        self.device = device
+
+    def process_image(
+        self,
+        *,
+        image_id: int,
+        pil_img: Image.Image,
+        tasks: Sequence[Dict[str, Any]],
+        min_threshold: float,
+        mask_threshold: float,
+        max_results: int,
+        min_size: float,
+        simplify: float,
+        return_masks: bool,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        outputs: Dict[str, List[Dict[str, Any]]] = {}
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            bbox = task.get("bbox") or []
+            if not task_id or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            try:
+                dets, masks = _run_sam3_visual_inference(
+                    pil_img,
+                    (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
+                    threshold=float(min_threshold),
+                    mask_threshold=float(mask_threshold),
+                    limit=max(1, int(max_results)),
+                    return_masks=True,
+                    min_size=float(min_size),
+                    simplify_epsilon=float(simplify),
+                )
+            except Exception:
+                outputs[task_id] = []
+                continue
+            entries: List[Dict[str, Any]] = []
+            for idx, det in enumerate(dets or []):
+                score = float(det.score or 0.0)
+                mask_arr = None
+                if isinstance(masks, list) and idx < len(masks):
+                    mask_arr = masks[idx]
+                entries.append({"score": score, "mask_array": mask_arr})
+            outputs[task_id] = entries
+        return outputs
+
+    def close(self) -> None:
+        return
+
+
+class _Sam3MiningPool:
+    def __init__(self, devices: Sequence[torch.device]):
+        self.workers = [_Sam3SegWorker(dev) for dev in (devices or [torch.device("cpu")])]
+
+    def close(self) -> None:
+        for worker in self.workers:
+            try:
+                worker.close()
+            except Exception:
+                continue
+
+
+def _persist_qwen_run_metadata(
+    result_path: Path,
+    config: QwenTrainingConfig,
+    result: QwenTrainingResult,
+) -> Dict[str, Any]:
+    model_id = _safe_run_name(getattr(config, "run_name", None), result_path.name)
+    checkpoints = [str(p) for p in (getattr(result, "checkpoints", None) or [])]
+    metadata = {
+        "id": model_id,
+        "label": getattr(config, "run_name", None) or result_path.name,
+        "model_id": getattr(config, "model_id", None),
+        "path": str(result_path),
+        "latest_checkpoint": getattr(result, "latest_checkpoint", None),
+        "checkpoints": checkpoints,
+        "epochs_ran": int(getattr(result, "epochs_ran", 0) or 0),
+        "created_at": time.time(),
+        "training_mode": getattr(config, "training_mode", None),
+        "dataset_root": getattr(config, "dataset_root", None),
+    }
+    try:
+        result_path.mkdir(parents=True, exist_ok=True)
+        (result_path / QWEN_METADATA_FILENAME).write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return metadata
+
+
+def _build_qwen_config(payload: QwenTrainRequest, job_id: str, prep_logs: Optional[List[str]] = None) -> QwenTrainingConfig:
+    if QwenTrainingConfig is None:
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"qwen_training_unavailable:{QWEN_TRAINING_IMPORT_ERROR}",
+        )
+    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+        payload.dataset_id,
+        list_all_datasets_fn=_list_all_datasets,
+        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+            dataset_id,
+            qwen_root=QWEN_DATASET_ROOT,
+            sam3_root=SAM3_DATASET_ROOT,
+            registry_root=DATASET_REGISTRY_ROOT,
+            http_exception_cls=HTTPException,
+        ),
+    )
+    train_jsonl = dataset_root / "train" / "annotations.jsonl"
+    val_jsonl = dataset_root / "val" / "annotations.jsonl"
+    if not train_jsonl.exists():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_train_split_missing")
+    if not val_jsonl.exists():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_val_split_missing")
+    run_name = _safe_run_name(payload.run_name, f"qwen_{payload.dataset_id}_{job_id[:8]}")
+    result_path = (QWEN_JOB_ROOT / "runs" / run_name).resolve()
+    if prep_logs is not None:
+        prep_logs.append(f"Dataset: {dataset_root}")
+        prep_logs.append(f"Output: {result_path}")
+        if bool(payload.random_split):
+            prep_logs.append("random_split requested but current trainer uses existing dataset splits")
+    kwargs = {
+        "dataset_root": str(dataset_root),
+        "result_path": str(result_path),
+        "model_id": payload.model_id or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+        "training_mode": payload.training_mode or "official_lora",
+        "system_prompt": payload.system_prompt or DEFAULT_SYSTEM_PROMPT,
+        "run_name": run_name,
+        "devices": payload.devices,
+        "batch_size": int(payload.batch_size) if payload.batch_size is not None else 1,
+        "max_epochs": int(payload.max_epochs) if payload.max_epochs is not None else 3,
+        "lr": float(payload.lr) if payload.lr is not None else 2e-4,
+        "accumulate_grad_batches": int(payload.accumulate_grad_batches) if payload.accumulate_grad_batches is not None else 8,
+        "warmup_steps": int(payload.warmup_steps) if payload.warmup_steps is not None else 50,
+        "num_workers": int(payload.num_workers) if payload.num_workers is not None else 0,
+        "lora_rank": int(payload.lora_rank) if payload.lora_rank is not None else 8,
+        "lora_alpha": int(payload.lora_alpha) if payload.lora_alpha is not None else 16,
+        "lora_dropout": float(payload.lora_dropout) if payload.lora_dropout is not None else 0.05,
+        "lora_target_modules": payload.lora_target_modules
+        if payload.lora_target_modules
+        else ["q_proj", "k_proj", "v_proj", "o_proj"],
+        "seed": int(payload.seed) if payload.seed is not None else 1337,
+        "log_every_n_steps": int(payload.log_every_n_steps) if payload.log_every_n_steps is not None else 10,
+        "max_pixels": int(payload.max_pixels) if payload.max_pixels is not None else 28 * 28 * 576,
+        "min_pixels": int(payload.min_pixels) if payload.min_pixels is not None else 28 * 28 * 16,
+        "max_length": int(payload.max_length) if payload.max_length is not None else None,
+        "train_limit": int(payload.train_limit) if payload.train_limit is not None and payload.train_limit > 0 else None,
+        "val_limit": int(payload.val_limit) if payload.val_limit is not None and payload.val_limit > 0 else None,
+    }
+    return QwenTrainingConfig(**kwargs)
+
+
+def _coord_roundtrip_smoke() -> None:
+    width, height = 1920, 1080
+    sample = (123.5, 234.25, 789.75, 902.0)
+    bbox_2d = _xyxy_to_qwen_bbox(width, height, *sample)
+    rt = _qwen_bbox_to_xyxy(width, height, bbox_2d)
+    err = max(abs(float(a) - float(b)) for a, b in zip(sample, rt, strict=False))
+    if err > 5.0:
+        raise RuntimeError(f"coord_roundtrip_failed:max_err={err:.4f}")
+
+
 def _build_seed_threshold_sweep_grid(
     *, base_seed_threshold: float, observed_scores: Sequence[float], limit: int = 64
 ) -> List[float]:
@@ -10907,15 +12206,18 @@ def _select_steps_from_seed_prompt_stats(
     prompt_stats: Sequence[Dict[str, Any]],
     *,
     max_steps: int,
-    target_precision: float,
+    target_precision: Optional[float],
+    early_stop: Optional[Dict[str, Any]] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
     max_candidates_per_prompt: int = 4,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    target_precision_value = float(target_precision) if target_precision is not None else 0.0
     selected: List[Dict[str, Any]] = []
     for entry in prompt_stats:
         curve = entry.get("seed_threshold_curve") or []
         curve = list(curve)[: max_candidates_per_prompt]
         candidates = [
-            c for c in curve if float(c.get("precision", 0.0)) >= float(target_precision)
+            c for c in curve if float(c.get("precision", 0.0)) >= target_precision_value
         ]
         if candidates:
             candidates.sort(
@@ -10965,7 +12267,39 @@ def _select_steps_from_seed_prompt_stats(
             continue
         coverage |= matched_keys
         chosen.append(entry)
-    return chosen, {"target_precision": float(target_precision)}
+    info: Dict[str, Any] = {"target_precision": float(target_precision_value)}
+    early_cfg = dict(early_stop or {})
+    if early_cfg.get("enabled"):
+        min_steps = max(1, int(early_cfg.get("min_steps") or 1))
+        capped = chosen[: max(min_steps, min(int(max_steps), len(chosen)))]
+        if len(capped) < len(chosen):
+            info["early_stop"] = {
+                "enabled": True,
+                "selected_steps": len(capped),
+                "max_steps": int(max_steps),
+                "mode": str(early_cfg.get("mode") or "balanced"),
+                "reason": "min_steps_cap",
+            }
+            chosen = capped
+            if callable(log_fn):
+                try:
+                    log_fn(
+                        f"[steps] Early-stop applied: selected {len(chosen)}/{int(max_steps)} steps "
+                        f"(mode={early_cfg.get('mode') or 'balanced'})"
+                    )
+                except Exception:
+                    pass
+        else:
+            info["early_stop"] = {
+                "enabled": True,
+                "selected_steps": len(chosen),
+                "max_steps": int(max_steps),
+                "mode": str(early_cfg.get("mode") or "balanced"),
+                "reason": "not_triggered",
+            }
+    else:
+        info["early_stop"] = {"enabled": False, "selected_steps": len(chosen), "max_steps": int(max_steps)}
+    return chosen, info
 
 
 def _generate_steps_global_mutations(
@@ -11851,13 +13185,13 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     seed_span = class_span * 0.45
                     tune_span = class_span * 0.55
 
-                    def _mk_phase_cb(base: float, span: float, label: str) -> Callable[[int, int], None]:
+                    def _mk_phase_cb(base: float, span: float, label: str, class_name: str) -> Callable[[int, int], None]:
                         def _cb(done: int, total: int) -> None:
                             if total <= 0:
                                 return
                             frac = max(0.0, min(1.0, float(done) / float(total)))
                             job.progress = max(job.progress, base + span * frac)
-                            job.message = f"{label} {done}/{total} ({name})"
+                            job.message = f"{label} {done}/{total} ({class_name})"
                             job.updated_at = time.time()
 
                         return _cb
@@ -11879,7 +13213,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         log_every=eval_log_every,
                         log_fn=_log,
                         cancel_event=job.cancel_event,
-                        progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Candidate eval"),
+                        progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Candidate eval", name),
                     )
                     prompt_bg_drop_summary: Optional[Dict[str, Any]] = None
                     if isinstance(prompt_bg_drop_cfg, dict) and (prompt_bg_drop_cfg.get("enabled") or prompt_bg_drop_cfg.get("requested")):
@@ -12012,7 +13346,12 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             log_every=eval_log_every,
                             log_fn=_log,
                             cancel_event=job.cancel_event,
-                            progress_callback=_mk_phase_cb(class_base + seed_span, tune_span, "[steps] Final tune"),
+                            progress_callback=_mk_phase_cb(
+                                class_base + seed_span,
+                                tune_span,
+                                "[steps] Final tune",
+                                name,
+                            ),
                             export_hard_negatives=True,
                         )
                         if tier1_info and isinstance(summary, dict):
@@ -12759,13 +14098,13 @@ def agent_mining_export_recipe(recipe_id: str):
         path_is_within_root_fn=_path_is_within_root_impl,
     )
     zip_path = _ensure_recipe_zip(recipe)
-    filename = f"{recipe_id}.zip"
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    try:
-        stream = zip_path.open("rb")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_export_failed:{exc}") from exc
-    return StreamingResponse(stream, media_type="application/zip", headers=headers)
+    if not zip_path.exists():
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="agent_recipe_export_failed:zip_missing")
+    return FileResponse(
+        path=str(zip_path),
+        media_type="application/zip",
+        filename=f"{recipe_id}.zip",
+    )
 
 
 async def agent_mining_import_recipe(file: UploadFile = File(...)):
@@ -12780,8 +14119,7 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
             quota_limit=AGENT_RECIPE_MAX_BYTES,
             allow_overwrite=True,
         )
-        payload_bytes = zip_path.read_bytes()
-        _, persisted = _import_agent_recipe_zip_bytes(payload_bytes)
+        _, persisted = _import_agent_recipe_zip_file(zip_path)
         return persisted
     except HTTPException:
         raise
@@ -12820,13 +14158,13 @@ def agent_mining_export_cascade(cascade_id: str):
         path_is_within_root_fn=_path_is_within_root_impl,
     )
     zip_path = _ensure_cascade_zip(cascade)
-    filename = f"{cascade_id}.zip"
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    try:
-        stream = zip_path.open("rb")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_export_failed:{exc}") from exc
-    return StreamingResponse(stream, media_type="application/zip", headers=headers)
+    if not zip_path.exists():
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="agent_cascade_export_failed:zip_missing")
+    return FileResponse(
+        path=str(zip_path),
+        media_type="application/zip",
+        filename=f"{cascade_id}.zip",
+    )
 
 
 async def agent_mining_import_cascade(file: UploadFile = File(...)):
@@ -12841,8 +14179,7 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
             quota_limit=AGENT_CASCADE_MAX_BYTES,
             allow_overwrite=True,
         )
-        payload_bytes = zip_path.read_bytes()
-        return _import_agent_cascade_zip_bytes(payload_bytes)
+        return _import_agent_cascade_zip_file(zip_path)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -13178,9 +14515,12 @@ def _prepare_sam3_training_split(
         shutil.rmtree(split_root, ignore_errors=True)
     (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)
     (split_root / "val" / "images").mkdir(parents=True, exist_ok=True)
+    dataset_root_resolved = dataset_root.resolve()
 
     def _find_image_source(file_name: str) -> Optional[Path]:
         rel_path = Path(file_name)
+        if rel_path.is_absolute():
+            return None
         candidates = [
             dataset_root / rel_path,
             dataset_root / "train" / rel_path,
@@ -13189,10 +14529,14 @@ def _prepare_sam3_training_split(
             dataset_root / "val" / "images" / rel_path,
         ]
         for cand in candidates:
-            if cand.exists():
-                return cand
-        if rel_path.is_absolute() and rel_path.exists():
-            return rel_path
+            try:
+                resolved = cand.resolve()
+            except Exception:
+                continue
+            if not _path_is_within_root_impl(resolved, dataset_root_resolved):
+                continue
+            if resolved.exists():
+                return resolved
         return None
 
     def _write_split(target_ids: List[int], split_name: str) -> Tuple[str, int]:
@@ -13208,9 +14552,10 @@ def _prepare_sam3_training_split(
             src_path = _find_image_source(file_name)
             if src_path is None:
                 continue
-            rel_name = _normalise_relative_path(file_name)
-            if rel_name.is_absolute():
-                rel_name = Path(rel_name.name)
+            try:
+                rel_name = _normalise_relative_path(file_name)
+            except HTTPException:
+                continue
             dst_path = split_root / split_name / rel_name
             _link_or_copy_file(src_path, dst_path)
             info_out = dict(info)
@@ -14835,7 +16180,7 @@ def _validate_upload_size(upload: UploadFile, *, max_bytes: int = BASE64_IMAGE_M
     except Exception:
         size = None
     if size is not None and size > max_bytes:
-        raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="upload_too_large")
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_too_large")
 
 
 def _validate_upload_extension(filename: str, allowed_exts: set[str], detail: str) -> None:
@@ -14897,14 +16242,14 @@ async def _write_upload_file(
                     dest.unlink()
                 except Exception:
                     pass
-                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="upload_too_large")
+                raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_too_large")
             if quota_root and quota_limit and existing + written > quota_limit:
                 handle.close()
                 try:
                     dest.unlink()
                 except Exception:
                     pass
-                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="upload_quota_exceeded")
+                raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_quota_exceeded")
             handle.write(chunk)
     await upload.close()
 
@@ -15045,9 +16390,11 @@ def download_clip_classifier(rel_path: str = Query(...)):
     )
     if classifier_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
-    stream = classifier_path.open("rb")
-    headers = {"Content-Disposition": f'attachment; filename="{classifier_path.name}"'}
-    return StreamingResponse(stream, media_type="application/octet-stream", headers=headers)
+    return FileResponse(
+        path=str(classifier_path),
+        media_type="application/octet-stream",
+        filename=classifier_path.name,
+    )
 
 
 def download_clip_classifier_zip(rel_path: str = Query(...)):
@@ -15100,10 +16447,10 @@ def delete_clip_classifier(rel_path: str = Query(...)):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
     try:
         classifier_path.unlink()
-    except FileNotFoundError:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found") from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
     try:
         if meta_path.exists():
@@ -15165,10 +16512,10 @@ def rename_clip_classifier(
 
     try:
         classifier_path.rename(target_path)
-    except FileNotFoundError:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found") from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
     old_meta = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
     new_meta = Path(os.path.splitext(str(target_path))[0] + ".meta.pkl")
@@ -15210,9 +16557,11 @@ def download_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Que
     )
     if labelmap_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
-    stream = labelmap_path.open("rb")
-    headers = {"Content-Disposition": f'attachment; filename="{labelmap_path.name}"'}
-    return StreamingResponse(stream, media_type="application/octet-stream", headers=headers)
+    return FileResponse(
+        path=str(labelmap_path),
+        media_type="application/octet-stream",
+        filename=labelmap_path.name,
+    )
 
 
 def delete_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query(None)):
@@ -15227,10 +16576,10 @@ def delete_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
     try:
         labelmap_path.unlink()
-    except FileNotFoundError:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found") from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     return {"status": "deleted", "rel_path": rel_path}
 
 
@@ -16638,7 +17987,7 @@ def delete_rfdetr_run(run_id: str):
     try:
         shutil.rmtree(run_dir)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     return {"status": "deleted", "run_id": run_id}
 
 
@@ -16989,7 +18338,7 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
             kwargs["device"] = fallback_device
         return model.predict(crop_img, **kwargs)
 
-    for tile, start in zip(slices, starts):
+    for tile, start in zip(slices, starts, strict=False):
         offset_x, offset_y = float(start[0]), float(start[1])
         crop = Image.fromarray(tile)
         try:
@@ -17095,7 +18444,7 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
     slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
     labelmap_shifted = False
-    for tile, start in zip(slices, starts):
+    for tile, start in zip(slices, starts, strict=False):
         offset_x, offset_y = float(start[0]), float(start[1])
         crop = Image.fromarray(tile)
         try:
@@ -17213,7 +18562,7 @@ def delete_yolo_run(run_id: str):
     try:
         shutil.rmtree(run_dir)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     return {"status": "deleted", "run_id": run_id}
 
 
@@ -18148,7 +19497,7 @@ def qwen_infer(payload: QwenInferenceRequest):
             extra_context=(payload.extra_context or "").strip() or None,
             get_config_fn=lambda: _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock),
             http_exception_cls=HTTPException,
-            http_422=HTTP_422_UNPROCESSABLE_ENTITY,
+            http_422=HTTP_422_UNPROCESSABLE_CONTENT,
         )
     try:
         qwen_text, proc_w, proc_h = _run_qwen_inference(final_prompt, pil_img)
@@ -19109,6 +20458,8 @@ def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
         normalize_glossary_fn=_normalize_labelmap_glossary,
         write_meta_fn=_write_prepass_recipe_meta,
         sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
+        max_zip_bytes=PREPASS_RECIPE_UPLOAD_MAX_BYTES,
+        max_extract_bytes=PREPASS_RECIPE_UPLOAD_MAX_BYTES,
     )
     return PrepassRecipeResponse(**data)
 
@@ -19117,8 +20468,19 @@ def import_prepass_recipe(file: UploadFile = File(...)):  # noqa: B008
     temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_"))
     try:
         zip_path = temp_dir / "upload.zip"
+        written = 0
         with zip_path.open("wb") as f:
-            shutil.copyfileobj(file.file, f)
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if PREPASS_RECIPE_UPLOAD_MAX_BYTES and written > PREPASS_RECIPE_UPLOAD_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE,
+                        detail="prepass_recipe_upload_too_large",
+                    )
+                f.write(chunk)
         return _import_prepass_recipe_from_zip(zip_path)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -19130,8 +20492,15 @@ async def import_prepass_recipe_raw(request: Request):
     temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_raw_"))
     try:
         zip_path = temp_dir / "upload.zip"
+        written = 0
         with zip_path.open("wb") as f:
             async for chunk in request.stream():
+                written += len(chunk)
+                if PREPASS_RECIPE_UPLOAD_MAX_BYTES and written > PREPASS_RECIPE_UPLOAD_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE,
+                        detail="prepass_recipe_upload_too_large",
+                    )
                 f.write(chunk)
         return _import_prepass_recipe_from_zip(zip_path)
     finally:
@@ -19575,7 +20944,7 @@ def sam_point_multi(prompt: MultiPointPrompt):
     positive = prompt.positive_points or []
     negative = prompt.negative_points or []
     if len(positive) == 0:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="positive_points_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="positive_points_required")
 
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -19616,7 +20985,7 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
     positive = prompt.positive_points or []
     negative = prompt.negative_points or []
     if len(positive) == 0:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="positive_points_required")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="positive_points_required")
 
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -19755,51 +21124,64 @@ def crop_zip_chunk(request: CropZipRequest, jobId: str = Query(...)):
     job_store[jobId].extend(request.images)
     return {"status": "ok", "count": len(request.images)}
 
+
+def _safe_crop_zip_component(value: Optional[str], fallback: str) -> str:
+    raw = Path(str(value or fallback)).name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")
+    return cleaned or fallback
+
+
 def crop_zip_finalize(jobId: str):
     if jobId not in job_store:
         raise HTTPException(status_code=400, detail="Invalid jobId")
     all_images = job_store[jobId]
-    if len(all_images) == 0:
-        empty_buffer = io.BytesIO()
-        with zipfile.ZipFile(empty_buffer, mode="w") as zf:
-            pass
-        empty_buffer.seek(0)
-        del job_store[jobId]
+    try:
+        if len(all_images) == 0:
+            empty_buffer = io.BytesIO()
+            with zipfile.ZipFile(empty_buffer, mode="w") as zf:
+                pass
+            empty_buffer.seek(0)
+            return StreamingResponse(
+                empty_buffer,
+                media_type="application/x-zip-compressed",
+                headers={"Content-Disposition": "attachment; filename=crops.zip"}
+            )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for img_index, cropImage in enumerate(all_images):
+                pil_img, _ = _decode_image_base64_impl(
+                    cropImage.image_base64,
+                    max_bytes=BASE64_IMAGE_MAX_BYTES,
+                    max_dim=BASE64_IMAGE_MAX_DIM,
+                    allow_downscale=True,
+                )
+                stem = _safe_crop_zip_component(Path(cropImage.originalName or "").stem, f"image_{img_index}")
+                for bindex, bbox in enumerate(cropImage.bboxes):
+                    left = bbox.x
+                    top = bbox.y
+                    right = left + bbox.width
+                    bottom = top + bbox.height
+                    left = max(0, min(left, pil_img.width))
+                    right = max(0, min(right, pil_img.width))
+                    top = max(0, min(top, pil_img.height))
+                    bottom = max(0, min(bottom, pil_img.height))
+                    if right <= left or bottom <= top:
+                        continue
+                    sub_img = pil_img.crop((left, top, right, bottom))
+                    class_name = _safe_crop_zip_component(bbox.className, "class")
+                    out_name = f"{stem}-{class_name}-{bindex}.jpg"
+                    crop_buffer = io.BytesIO()
+                    sub_img.save(crop_buffer, format="JPEG")
+                    crop_buffer.seek(0)
+                    zf.writestr(out_name, crop_buffer.read())
+        zip_buffer.seek(0)
         return StreamingResponse(
-            empty_buffer,
+            zip_buffer,
             media_type="application/x-zip-compressed",
             headers={"Content-Disposition": "attachment; filename=crops.zip"}
         )
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i, cropImage in enumerate(all_images):
-            img_data = base64.b64decode(cropImage.image_base64)
-            pil_img = Image.open(io.BytesIO(img_data)).convert("RGB")
-            for bindex, bbox in enumerate(cropImage.bboxes):
-                left = bbox.x
-                top = bbox.y
-                right = left + bbox.width
-                bottom = top + bbox.height
-                left = max(0, min(left, pil_img.width))
-                right = max(0, min(right, pil_img.width))
-                top = max(0, min(top, pil_img.height))
-                bottom = max(0, min(bottom, pil_img.height))
-                if right <= left or bottom <= top:
-                    continue
-                sub_img = pil_img.crop((left, top, right, bottom))
-                stem = cropImage.originalName.rsplit(".",1)[0]
-                out_name = f"{stem}-{bbox.className}-{bindex}.jpg"
-                crop_buffer = io.BytesIO()
-                sub_img.save(crop_buffer, format="JPEG")
-                crop_buffer.seek(0)
-                zf.writestr(out_name, crop_buffer.read())
-    zip_buffer.seek(0)
-    del job_store[jobId]
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/x-zip-compressed",
-        headers={"Content-Disposition": "attachment; filename=crops.zip"}
-    )
+    finally:
+        job_store.pop(jobId, None)
 
 
 app.include_router(

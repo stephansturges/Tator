@@ -13,7 +13,7 @@ import numpy as np
 from fastapi import HTTPException
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
-    HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    HTTP_413_CONTENT_TOO_LARGE,
     HTTP_428_PRECONDITION_REQUIRED,
     HTTP_500_INTERNAL_SERVER_ERROR,
     HTTP_503_SERVICE_UNAVAILABLE,
@@ -65,13 +65,13 @@ def _decode_image_base64_impl(
     if max_bytes:
         est_bytes = (len(raw) * 3) // 4
         if est_bytes > max_bytes * 2:
-            raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="image_base64_too_large")
+            raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="image_base64_too_large")
     try:
         data = base64.b64decode(raw)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_base64:{exc}") from exc
     if max_bytes and len(data) > max_bytes:
-        raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="image_bytes_too_large")
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="image_bytes_too_large")
     try:
         pil_img = Image.open(BytesIO(data)).convert("RGB")
     except Exception as exc:  # noqa: BLE001
@@ -80,7 +80,7 @@ def _decode_image_base64_impl(
         width, height = pil_img.size
         if width > max_dim or height > max_dim:
             if not allow_downscale:
-                raise HTTPException(status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="image_too_large_dim")
+                raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="image_too_large_dim")
             try:
                 resample = getattr(Image, "Resampling", Image).LANCZOS  # Pillow 10 compat
             except Exception:

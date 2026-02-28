@@ -193,7 +193,7 @@ class Sam3VisualPrompt(BaseModel):
                 try:
                     values[key] = float(raw)
                 except (TypeError, ValueError):
-                    raise ValueError(f"invalid_{key}")
+                    raise ValueError(f"invalid_{key}") from None
             if values["bbox_width"] <= 0 or values["bbox_height"] <= 0:
                 raise ValueError("invalid_bbox_dims")
         raw_labels = values.get("bbox_labels")
@@ -1061,7 +1061,7 @@ class QwenPrepassRequest(BaseModel):
     sam_variant: Optional[str] = "sam3"
     enable_sam3_text: Optional[bool] = True
     sam3_text_synonym_budget: Optional[int] = 10
-    sam3_text_window_extension: Optional[bool] = True
+    sam3_text_window_extension: Optional[bool] = False
     sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     sam3_text_window_size: Optional[int] = None
     sam3_text_window_overlap: Optional[float] = None
@@ -1135,7 +1135,7 @@ class CalibrationRequest(BaseModel):
     target_fp_ratio_by_label_json: Optional[str] = None
     min_recall_by_label_json: Optional[str] = None
     sam3_text_synonym_budget: Optional[int] = 10
-    sam3_text_window_extension: Optional[bool] = True
+    sam3_text_window_extension: Optional[bool] = False
     sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     sam3_text_window_size: Optional[int] = None
     sam3_text_window_overlap: Optional[float] = None
@@ -1192,6 +1192,8 @@ class CalibrationRequest(BaseModel):
     xgb_early_stopping_rounds: Optional[int] = None
     xgb_log1p_counts: Optional[bool] = None
     xgb_standardize: Optional[bool] = None
+    apply_default_ensemble_policy: Optional[bool] = True
+    ensemble_policy_json: Optional[str] = None
     split_head_by_support: Optional[bool] = True
     train_sam3_text_quality: Optional[bool] = True
     sam3_text_quality_alpha: Optional[float] = 0.35

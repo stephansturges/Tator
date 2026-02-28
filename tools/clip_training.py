@@ -1663,7 +1663,7 @@ def train_clip_from_yolo(
                         self.hidden_linears,
                         self.hidden_norms,
                         self.hidden_activations,
-                        self.hidden_dropouts,
+                        self.hidden_dropouts, strict=False,
                     ):
                         out = linear(out)
                         out = norm(out)

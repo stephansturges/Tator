@@ -83,7 +83,7 @@ def main() -> None:
     except Exception as e:
         raise SystemExit(
             "SciPy is required. Please install with `pip install scipy`. Error: %s" % e
-        )
+        ) from e
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Loading CLIP model...")

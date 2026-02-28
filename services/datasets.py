@@ -1238,7 +1238,10 @@ def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                         annotation_id += 1
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to convert %s to COCO: %s", jsonl_path, exc)
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_conversion_failed:{split}")
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"sam3_coco_conversion_failed:{split}",
+            ) from exc
         output_path = dataset_root / split / "_annotations.coco.json"
         try:
             _write_coco_annotations_impl(

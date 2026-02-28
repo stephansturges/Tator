@@ -620,8 +620,9 @@ def main() -> None:
         job_id = uuid.uuid4().hex
         phase_timings = artifacts.get("phase_timings") if isinstance(artifacts, dict) else artifacts.phase_timings
         phase_timings = phase_timings if isinstance(phase_timings, dict) else {}
-        def _phase(name: str) -> Optional[float]:
-            val = phase_timings.get(name)
+        # Bind timing snapshot per experiment row to avoid accidental late binding.
+        def _phase(name: str, timings: Dict[str, Any] = phase_timings) -> Optional[float]:
+            val = timings.get(name)
             return float(val) if isinstance(val, (int, float)) else None
         row = {
             "label": label,
